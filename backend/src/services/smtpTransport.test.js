@@ -137,10 +137,16 @@ describe('EHLO name', () => {
     expect(createTransport.mock.calls.map(([o]) => o.name)).toEqual(['corp.example', 'corp.example']);
   });
 
-  it('says "localhost" to verify(), which has no sender', async () => {
+  it('says "localhost" to verify() without a sender', async () => {
     const { createTransport, transport } = transportWith();
     await transport.verify();
     expect(createTransport.mock.calls[0][0].name).toBe('localhost');
+  });
+
+  it('greets as the real send does when verify() is given the sending address', async () => {
+    const { createTransport, transport } = transportWith();
+    await transport.verify('System <noreply@corp.example>');
+    expect(createTransport.mock.calls[0][0].name).toBe('corp.example');
   });
 
   it('sets it on account transports too (send and rule forwards)', async () => {

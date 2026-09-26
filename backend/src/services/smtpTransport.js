@@ -18,7 +18,8 @@ const SMTP_FAILOVER_BUDGET_MS = 45_000;
 // the mail). The panel does not name itself either: not its hostname, not its product name. It
 // introduces itself with the domain of the address the letter is sent from, which the receiving
 // side already sees in MAIL FROM and the From header, so it tells nobody anything new. With no
-// usable sender domain (verify(), a malformed or IP-literal address) it says "localhost".
+// usable sender domain (verify() without an address, a malformed or IP-literal address) it says
+// "localhost".
 export const NEUTRAL_EHLO_NAME = 'localhost';
 
 function senderAddress(from) {
@@ -92,9 +93,11 @@ export function createSmtpTransport(resolved, transportOptions, createTransport 
       operation: transport => transport.sendMail(mailOptions),
       createTransport,
     }),
-    verify: () => runWithAddressFallback({
+    // `from`: the address the transport will send from, so a connection test greets the server
+    // with the same name as the real send. Without it, "localhost".
+    verify: (from) => runWithAddressFallback({
       resolved,
-      transportOptions: { ...transportOptions, name: NEUTRAL_EHLO_NAME },
+      transportOptions: { ...transportOptions, name: smtpClientName(from) },
       operation: transport => transport.verify(),
       createTransport,
     }),
@@ -136,7 +139,7 @@ function createOAuthSmtpTransport(account, resolved, transportOptions) {
   };
   return {
     sendMail: mailOptions => run(transport => transport.sendMail(mailOptions)),
-    verify: () => run(transport => transport.verify()),
+    verify: (from) => run(transport => transport.verify(from)),
   };
 }
 

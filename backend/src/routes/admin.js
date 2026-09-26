@@ -719,7 +719,9 @@ router.post('/system-email/test', async (req, res) => {
       auth: { user: cfg.user, pass },
       tls: testTls,
     });
-    await transport.verify();
+    // Greet the server as the real send does (services/mailer.js sends from this address), so
+    // the test checks the same EHLO name the mail will use.
+    await transport.verify(cfg.fromEmail || cfg.user);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
