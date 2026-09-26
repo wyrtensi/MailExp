@@ -3,6 +3,16 @@
 // from "delete forever from Trash": the request says which (deleteIntent in mail.js). A second
 // move to Trash of a letter already there, or on its way there, is a no-op success and never an
 // expunge. The upstream fix for the same defect (maathimself/mailflow 22f29a0a) rotated the id.
+//
+// What these tests do and do not show about concurrency. PGlite has ONE connection: statements run
+// one at a time, and a transaction queues every other statement until it ends. So nothing here
+// exercises PostgreSQL row locks, lock waits, READ COMMITTED re-checks or deadlocks. The races are
+// tested through state instead: a permanent delete claims its rows (services/expungeClaims.js), and
+// the tests put a request between the route's read and its claim (hooks.afterRead) or hold the
+// server delete open (gateExpunge) while other requests run and see the claim. NOT tested against a
+// real PostgreSQL: two statements hitting the same row at the same instant on two connections (two
+// claims, or a claim and moveQueue.enqueue's SELECT ... FOR UPDATE). That rests on PostgreSQL
+// re-checking the WHERE clause (expunge_claim IS NULL, folder, uid) on a row it waited for.
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRealSchemaDb } from '../services/testing/realSchema.js';
 
@@ -35,7 +45,7 @@ vi.mock('../index.js', () => ({ get imapManager() { return mgrState.mgr; } }));
 
 const USER = '50000000-0000-4000-8000-0000000000aa';
 const { MoveQueue, placeholderUid } = await import('../services/moveQueue.js');
-const { EXPUNGE_CLAIM_LEASE_MS, releaseStaleExpungeClaims } = await import('../services/expungeClaims.js');
+const { EXPUNGE_CLAIM_LEASE_MS, releaseStaleExpungeClaims, claimForExpunge, releaseExpungeClaim, finishExpunge } = await import('../services/expungeClaims.js');
 const { ImapManager } = await import('../services/imapManager.js');
 const { adjustFolderCounts } = await import('../utils/mailUtils.js');
 const express = (await import('express')).default;
@@ -471,6 +481,29 @@ describe('bulk delete with a mix of letters', () => {
     const res = await bulkDelete([A, T], { [A]: 'Trash', [T]: 'Trash' });
     expect(res).toEqual({ status: 200, body: { ok: true, deleted: [T], code: 'move_pending' } });
     expect(expunged()).toEqual([['Trash', 21]]);
+  });
+});
+
+describe('claim states, one statement at a time (services/expungeClaims.js)', () => {
+  it('a row claimed once is not claimed again, nor at a folder or uid it no longer has', async () => {
+    const first = await claimForExpunge('Trash', [{ id: T, uid: 21 }, { id: U, uid: 22 }]);
+    expect([...first.claimed.keys()].sort()).toEqual([T, U].sort());
+    const second = await claimForExpunge('Trash', [{ id: T, uid: 21 }]);
+    expect(second.claimed.size).toBe(0);
+    await releaseExpungeClaim(first.token, [T, U]);
+    expect((await claimForExpunge('Trash', [{ id: T, uid: 99 }])).claimed.size).toBe(0);
+    expect((await claimForExpunge('INBOX', [{ id: T, uid: 21 }])).claimed.size).toBe(0);
+  });
+
+  it('only the token holding a claim releases it or removes the row', async () => {
+    const mine = await claimForExpunge('Trash', [{ id: T, uid: 21 }]);
+    const other = '00000000-0000-4000-8000-00000000abcd';
+    await releaseExpungeClaim(other, [T]);
+    expect((await claimOf(T)).claimed).toBe(true);
+    expect((await finishExpunge(other, 'Trash', [{ id: T, uid: 21 }])).size).toBe(0);
+    expect(await row(T)).toEqual({ uid: 21, folder: 'Trash' });
+    expect([...(await finishExpunge(mine.token, 'Trash', [{ id: T, uid: 21 }])).keys()]).toEqual([T]);
+    expect(await row(T)).toBeNull();
   });
 });
 
