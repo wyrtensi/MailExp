@@ -120,3 +120,12 @@ test('the flush sends one keepalive request per chunk', async () => {
   assert.ok(calls.every(c => c.keepalive && c.method === 'POST'));
   assert.deepEqual(calls.map(c => c.body.seen.Trash.length), [500, 200]);
 });
+
+test('a DELETE answered 404 counts as done: the letter is gone, no row is put back', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => ({ ok: false, status: 404, json: async () => ({ error: 'Message not found' }) });
+  assert.deepEqual(await api.deleteMessage('a', 'Trash'), { ok: true, alreadyGone: true });
+  globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: 'Failed to delete message' }) });
+  await assert.rejects(api.deleteMessage('a', 'Trash'), (err) => err.status === 500 && err.message === 'Failed to delete message');
+});

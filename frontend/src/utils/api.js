@@ -40,6 +40,7 @@ async function request(method, path, body, extraHeaders) {
     // reason: not_gmail/index_invalid/ids_missing) and, for ids_missing, the row count.
     if (err.reason) e.reason = err.reason;
     if (err.count != null) e.count = err.count;
+    e.status = res.status;
     throw e;
   }
   return res.json();
@@ -400,7 +401,13 @@ export const api = {
   markAllRead: (accountId, folder) => request('POST', '/mail/mark-all-read', { accountId, folder }),
   // folder / folders: where the user saw the letters (utils/deleteIntent.js). Without them the
   // server only moves to Trash and never deletes forever.
-  deleteMessage: (id, folder) => request('DELETE', `/mail/messages/${id}`, folder ? { folder } : undefined),
+  // 404: the letter is gone already (another tab, a colleague, an earlier try that got through).
+  // That is what the delete asked for, so it counts as done and the row is not put back.
+  deleteMessage: (id, folder) => request('DELETE', `/mail/messages/${id}`, folder ? { folder } : undefined)
+    .catch((err) => {
+      if (err.status === 404) return { ok: true, alreadyGone: true };
+      throw err;
+    }),
   bulkDelete: (ids, folders) => request('POST', '/mail/messages/bulk-delete', folders ? { ids, folders } : { ids }),
   deleteMessagesOnExit: (ids, folders) => directApi.deleteMessagesOnExit(ids, folders),
   bulkMove: (ids, folder) => request('POST', '/mail/messages/bulk-move', { ids, folder }),
