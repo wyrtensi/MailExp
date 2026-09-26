@@ -2177,6 +2177,42 @@ export function classifyMoveBySearch(uids, remainingUids, destArrived) {
   return { succeeded: gone, failed: stillPresent, staleCount: 0, mappable: destArrived === gone.length };
 }
 
+// client.messageMove without its data loss (upstream maathimself/mailflow@05a8b6e8,
+// postalsys/imapflow#406). On a server without MOVE (RFC 6851) imapflow 2.0.3 emulates it as
+// COPY, then \Deleted + EXPUNGE, and runs the delete without looking at the COPY (dist
+// commands/move.js). Its COPY resolves false on a NO instead of throwing, so a COPY the server
+// refused (full quota, destination removed in another client) expunged the source and the
+// letter reached no folder. Here the COPY is checked first, and only what it copied is deleted.
+//
+// Returns what messageMove would: the COPYUID/MOVE map object, or false when nothing moved.
+async function moveUids(client, range, toFolder) {
+  // imapflow's own test for MOVE (hasCapability in dist tools.js: IMAP4rev2 includes MOVE).
+  // It must never say yes where imapflow says no, or imapflow's unchecked fallback runs.
+  const caps = client.capabilities;
+  const hasMove = caps?.has('MOVE') || client.enabled?.has('IMAP4REV2')
+    || (caps?.has('IMAP4rev2') && !caps?.has('IMAP4rev1'));
+  if (hasMove) return client.messageMove(range, toFolder, { uid: true });
+
+  const copied = await client.messageCopy(range, toFolder, { uid: true });
+  // false: the server said NO. undefined: no mailbox was selected, so nothing was sent.
+  if (!copied) return false;
+  // With UIDPLUS the server names each UID it copied; a requested UID it did not name (gone
+  // from the source meanwhile) stays out of the delete, and an empty map means nothing was
+  // copied, so nothing is deleted and nothing moved. Without UIDPLUS a COPY is all or nothing
+  // (RFC 3501 6.4.7), so the whole range was copied. Note that without UIDPLUS imapflow's delete
+  // is a plain EXPUNGE, which also removes any other message flagged \Deleted in the folder;
+  // imapflow's own fallback did the same.
+  const toDelete = copied.uidMap ? [...copied.uidMap.keys()].join(',') : range;
+  if (!toDelete) return false;
+  // The copy has landed, so a failed delete leaves the letter in both folders rather than
+  // losing it. That is still reported as moved, as imapflow did: failing it would make a
+  // retrying caller (the move queue, snooze wake-up) add another copy on every attempt.
+  if (!(await client.messageDelete(toDelete, { uid: true, silent: true }))) {
+    console.warn(`Emulated move ${client.mailbox?.path} -> ${toFolder} of UID(s) ${toDelete}: copied, but the source could not be deleted; the letter is now in both folders`);
+  }
+  return copied;
+}
+
 export class ImapManager {
   constructor(wss) {
     this.wss = wss;
@@ -7301,7 +7337,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(String(uid), toFolder, { uid: true });
+          const result = await moveUids(client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) {
             newUid = result.uidMap.get(Number(uid)) || null;
@@ -7434,7 +7470,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(String(uid), toFolder, { uid: true });
+          const result = await moveUids(client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) newUid = result.uidMap.get(Number(uid)) || null;
         } finally {
@@ -7567,7 +7603,7 @@ export class ImapManager {
       const serverUidMap = await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(uids.map(String), toFolder, { uid: true });
+          const result = await moveUids(client, uids.map(String), toFolder);
           if (result === false) throw new Error('bulk messageMove returned false — server did not confirm move');
           return result?.uidMap?.size ? result.uidMap : null;
         } finally {

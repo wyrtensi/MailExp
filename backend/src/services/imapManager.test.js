@@ -6818,6 +6818,7 @@ describe('every background login waits out a rejected password', () => {
           connect: vi.fn().mockResolvedValue(),
           logout: vi.fn().mockResolvedValue(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+          capabilities: new Map([['MOVE', true]]), // a server with MOVE: moves go to messageMove
           messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
           messageFlagsRemove: vi.fn().mockResolvedValue(true),
         });
@@ -7150,6 +7151,7 @@ describe('every background login waits out a rejected password', () => {
       const mgr = liveManager(acct);
       connectError = null;
       releasePooledClient(acct, await acquirePooledClient(acct));
+      clients[0].capabilities = new Map([['MOVE', true]]); // a server with MOVE: moves go to messageMove
       clients[0].messageMove = vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) });
       rejectedPassword(mgr, acct);
       await mgr.moveMessage(acct, 5, 'INBOX', 'Archive');
@@ -7252,6 +7254,7 @@ describe('every background login waits out a rejected password', () => {
             logout: vi.fn().mockResolvedValue(),
             getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
             status: vi.fn().mockResolvedValue({ uidNext: 51 }),
+            capabilities: new Map([['MOVE', true]]), // a server with MOVE: moves go to messageMove
             messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
           });
           client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
