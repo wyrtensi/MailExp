@@ -719,7 +719,9 @@ router.post('/system-email/test', async (req, res) => {
       auth: { user: cfg.user, pass },
       tls: testTls,
     });
-    await transport.verify();
+    // Greet the server as the real send does (services/mailer.js sends from this address), so
+    // the test checks the same EHLO name the mail will use.
+    await transport.verify(cfg.fromEmail || cfg.user);
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -777,7 +779,11 @@ router.post('/oidc', async (req, res) => {
       return res.status(400).json({ error: 'Issuer URL must use HTTPS' });
     }
     if (!allow_insecure) {
-      const hostErr = await validateHost(parsed.hostname);
+      // Honor the "Allow private / local hosts" policy like POST /system-email does: a LAN
+      // issuer with a valid public certificate was refused even with the policy on, and the
+      // only way around it, allow_insecure, also turns certificate checks off.
+      const policy = await getConnectionPolicy();
+      const hostErr = await validateHost(parsed.hostname, { allowPrivate: policy.allowPrivateHosts });
       if (hostErr) return res.status(400).json({ error: `Issuer URL: ${hostErr}` });
     }
   } catch {
@@ -858,7 +864,9 @@ router.patch('/oidc/:id', async (req, res) => {
         return res.status(400).json({ error: 'Issuer URL must use HTTPS' });
       }
       if (!effectiveAllowInsecure) {
-        const hostErr = await validateHost(parsed.hostname);
+        // Same policy as the create route.
+        const policy = await getConnectionPolicy();
+        const hostErr = await validateHost(parsed.hostname, { allowPrivate: policy.allowPrivateHosts });
         if (hostErr) return res.status(400).json({ error: `Issuer URL: ${hostErr}` });
       }
     } catch {

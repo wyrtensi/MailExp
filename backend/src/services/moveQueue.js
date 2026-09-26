@@ -626,6 +626,11 @@ export class MoveQueue {
 
     const settled = [];
     let awaiting = false;
+    // Copied, but the server kept them at the source too (a server without MOVE that refused the
+    // delete, see moveUids). The lookup of an awaiting move checks the source first and would
+    // send the COPY again, so one without a uid is dropped for the syncs, which show the letter
+    // in both folders, where the server has it.
+    const retained = new Set((outcome.sourceRetained || []).map(Number));
     for (const uid of outcome.succeeded) {
       const op = byUid.get(Number(uid));
       if (!op) continue;
@@ -633,7 +638,7 @@ export class MoveQueue {
       if (newUid) {
         const s = await this._settle(op, Number(newUid));
         if (s?.row) settled.push(s);
-      } else if (!op.message_id_header) {
+      } else if (!op.message_id_header || retained.has(Number(uid))) {
         // Moved, and nothing can find it by Message-ID: the placeholder goes now rather than
         // showing next to the copy the destination sync is about to insert.
         await this._drop(op);
@@ -684,6 +689,10 @@ export class MoveQueue {
     if (awaiting) {
       mgr.syncFolderOnDemand(account, dest, { background: true })
         .catch(err => console.warn(`Move queue: destination sync of ${dest} failed: ${err.message}`));
+    }
+    if (retained.size) {
+      mgr.syncFolderOnDemand(account, src, { background: true })
+        .catch(err => console.warn(`Move queue: source sync of ${src} failed: ${err.message}`));
     }
     return busy;
   }

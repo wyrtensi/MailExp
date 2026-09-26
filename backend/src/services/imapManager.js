@@ -1181,6 +1181,23 @@ const PROVIDERS = {
     skipFolderPatterns: [],
     skipFolderNames: [],
   },
+  strato: {
+    // The generic profile plus one opt-out. Strato's server ENABLEs IMAP4rev2 without
+    // advertising it in CAPABILITY, then answers `UID SEARCH ALL` with an EMPTY ESEARCH while
+    // EXISTS is nonzero (upstream #472, from the reporter's raw traces; without the ENABLE the
+    // classic SEARCH returns every UID). An always-empty SEARCH poisons everything that reads
+    // membership: reconcile, the integrity pass, backfill's server count. imapflow's
+    // disableIMAP4rev2 exists for servers with a broken IMAP4rev2; see makeClientCfg.
+    batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
+    connectStaggerMs: 500,
+    fetchBody: false,
+    pushesFlags: true,
+    snippetIndex: true,
+    speculativeFetch: true,
+    skipFolderPatterns: [],
+    skipFolderNames: [],
+    disableIMAP4rev2: true,
+  },
   generic: {
     batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
     connectStaggerMs: 500, // unknown provider — moderate connect spacing (#218)
@@ -1303,6 +1320,7 @@ export function providerProfile(account) {
   if (host.includes('.icloud.com') || host.includes('.apple.com') || host.includes('.me.com')) return PROVIDERS.apple;
   if (host.includes('.outlook.com') || host.includes('office365.com') || host.includes('.hotmail.com') || host.includes('.live.com') || (account.oauth_provider === 'microsoft')) return PROVIDERS.microsoft;
   if (host.includes('purelymail.com')) return PROVIDERS.purelymail;
+  if (host.includes('.strato.')) return PROVIDERS.strato;
   return PROVIDERS.generic;
 }
 
@@ -1476,16 +1494,21 @@ function sanitizeStr(str) {
 }
 
 // Propagate a resolved thread_id to earlier messages that used this message as a provisional
-// thread root (out-of-order delivery, newest-first backfill). The is_deleted predicate lets
-// Postgres use the partial idx_messages_thread_id; without it every call scanned all rows of the
-// account (40k rows: 12 ms vs 0.5 ms). Soft-deleted rows are never restored, so skipping them
-// changes nothing visible. The reason moves with the key: these rows now hang on the real root,
-// so whatever they carried ('rfc-provisional', or NULL from before migration 0063) stops being
-// true.
+// thread root (out-of-order delivery, newest-first backfill).
+//
+// Deliberately NO is_deleted filter (upstream maathimself/mailflow@5b16e3fc): soft-deleted rows
+// are still threading inputs. computeThreading's ancestor lookup reads thread_id from any row, so
+// a deleted row left on a stale provisional root would hand that root to the next reply that
+// references it and split the thread. Served by the full idx_messages_account_thread (migration
+// 0076); the partial index it replaced could not serve this statement without the predicate, and
+// every call then read all rows of the account (40k rows: 12 ms vs 0.5 ms).
+//
+// The reason moves with the key: these rows now hang on the real root, so whatever they carried
+// ('rfc-provisional', or NULL from before migration 0063) stops being true.
 export async function rerootThreadChildren(accountId, threadId, messageId) {
   await query(
     `UPDATE messages SET thread_id = $1, threading_reason = 'rfc-root'
-     WHERE account_id = $2 AND thread_id = $3 AND message_id != $3 AND is_deleted = false`,
+     WHERE account_id = $2 AND thread_id = $3 AND message_id != $3`,
     [threadId, accountId, messageId]
   );
 }
@@ -1574,6 +1597,15 @@ function nodeRestoreFailureDetail({ outcome, code, stage }) {
 // policy: result of getConnectionPolicy() — gates TLS verification override.
 // The password is currentAuthPass(account): the restored one for a row read before a node password
 // restore (services/mailNode/currentPassword.js).
+// IMAP ID (RFC 2971). imapflow sends ID on every login to a server that offers it, and by default
+// names itself: name "imapflow", its version, vendor "Postal Systems" and a support URL. The panel
+// sends no identity at all. imapflow merges these over its defaults and drops empty values, so
+// the command goes out as `ID NIL`, which RFC 2971 allows; the server still answers with its own
+// ID. Gmail, Outlook, Yahoo, iCloud and Dovecot do not require a client ID. The known exception
+// is NetEase (163.com, 126.com, yeah.net), which refuses SELECT ("Unsafe Login") until the client
+// sends a populated ID; there is no NetEase profile here, and one would need neutral values.
+export const IMAP_CLIENT_INFO = Object.freeze({ name: '', version: '', vendor: '', 'support-url': '' });
+
 export function makeClientCfg(account, resolved, { enableIdle = false, policy = {}, idleKeepaliveMs } = {}) {
   if (!policy.allowInsecureTls && !account.imap_tls) {
     throw new Error('Plain-text IMAP is not allowed: admin must enable "Allow insecure TLS"');
@@ -1599,7 +1631,12 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     // silently ignored). Its only built-in bound is a 5-minute socket inactivity timeout, so a
     // stalled command is bounded by its caller instead: the sync tick's wall clock, the flag-scan
     // sub-budgets, and withFreshClient's POOLED_OPERATION_TIMEOUT_MS for pooled work.
+    // No self-identification in IMAP ID; see IMAP_CLIENT_INFO.
+    clientInfo: { ...IMAP_CLIENT_INFO },
   };
+  // ENABLE opt-out for a server whose IMAP4rev2 is broken (Strato, see PROVIDERS.strato).
+  // Set from the profile so every connection kind (persistent, pool, backfill, probe) agrees.
+  if (providerProfile(account).disableIMAP4rev2) cfg.disableIMAP4rev2 = true;
   // Auto-IDLE: ImapFlow re-enters IDLE automatically between commands so the
   // server can push EXISTS notifications immediately when new mail arrives.
   // Only enable on sync connections (not pool/backfill/snippet clients) to
@@ -2154,6 +2191,46 @@ export function classifyMoveBySearch(uids, remainingUids, destArrived) {
     return { succeeded: [], failed: uids.slice(), staleCount: gone.length - destArrived, mappable: false };
   }
   return { succeeded: gone, failed: stillPresent, staleCount: 0, mappable: destArrived === gone.length };
+}
+
+// client.messageMove without its data loss (upstream maathimself/mailflow@05a8b6e8,
+// postalsys/imapflow#406). On a server without MOVE (RFC 6851) imapflow 2.0.3 emulates it as
+// COPY, then \Deleted + EXPUNGE, and runs the delete without looking at the COPY (dist
+// commands/move.js). Its COPY resolves false on a NO instead of throwing, so a COPY the server
+// refused (full quota, destination removed in another client) expunged the source and the
+// letter reached no folder. Here the COPY is checked first, and only what it copied is deleted.
+//
+// Returns what messageMove would: the COPYUID/MOVE map object, or false when nothing moved.
+async function moveUids(client, range, toFolder) {
+  // imapflow's own test for MOVE (hasCapability in dist tools.js: IMAP4rev2 includes MOVE).
+  // It must never say yes where imapflow says no, or imapflow's unchecked fallback runs.
+  const caps = client.capabilities;
+  const hasMove = caps?.has('MOVE') || client.enabled?.has('IMAP4REV2')
+    || (caps?.has('IMAP4rev2') && !caps?.has('IMAP4rev1'));
+  if (hasMove) return client.messageMove(range, toFolder, { uid: true });
+
+  const copied = await client.messageCopy(range, toFolder, { uid: true });
+  // false: the server said NO. undefined: no mailbox was selected, so nothing was sent.
+  if (!copied) return false;
+  // With UIDPLUS the server names each UID it copied; a requested UID it did not name (gone
+  // from the source meanwhile) stays out of the delete, and an empty map means nothing was
+  // copied, so nothing is deleted and nothing moved. Without UIDPLUS a COPY is all or nothing
+  // (RFC 3501 6.4.7), so the whole range was copied. Note that without UIDPLUS imapflow's delete
+  // is a plain EXPUNGE, which also removes any other message flagged \Deleted in the folder;
+  // imapflow's own fallback did the same.
+  const toDelete = copied.uidMap ? [...copied.uidMap.keys()].join(',') : range;
+  if (!toDelete) return false;
+  // The copy has landed, so a failed delete (no right to delete in a shared folder, say) leaves
+  // the letter in both folders rather than losing it. It is reported as copied with the source
+  // kept, `sourceRetained`, never as a failure: a caller that retries a failed move would COPY it
+  // again on every attempt. The source still holding the letter also means a caller that checks
+  // the source to decide whether a move happened (bulkMoveMessages without UIDPLUS, the move
+  // queue's lookup) must take this signal instead, or it reads "never moved" and retries too.
+  if (!(await client.messageDelete(toDelete, { uid: true, silent: true }))) {
+    console.warn(`Emulated move ${client.mailbox?.path} -> ${toFolder} of UID(s) ${toDelete}: copied, but the source could not be deleted; the letter is now in both folders`);
+    return { ...copied, sourceRetained: true };
+  }
+  return copied;
 }
 
 export class ImapManager {
@@ -4681,11 +4758,19 @@ export class ImapManager {
         });
 
         // ── New-mail phase — UID-watermark safety net for a populated local cache. Fetches only
-        // UIDs above the highest we already have — usually just the newest message, then a no-op
-        // upsert. When no local UID exists, the full plan above owns metadata ingestion instead.
+        // UIDs above the highest we already have. When no local UID exists, the full plan above
+        // owns metadata ingestion instead.
+        //
+        // The filter guards the RFC 3501 `n:*` quirk: when n exceeds the highest UID, the server
+        // returns that highest message anyway, so without it the newest message of every folder
+        // came back on every tick and its upsert wrote a new row version each time (upstream #495
+        // follow-up: the whole residue left after the CONDSTORE fix, one rewrite per folder per
+        // tick, on every provider). A uid at or below the watermark that is not cached is a hole,
+        // which is backfill's and the integrity pass's job, never this fetch's.
         if (maxKnownUid > 0) {
           try {
             for await (const msg of client.fetch(`${maxKnownUid + 1}:*`, fetchQuery, { uid: true })) {
+              if (msg.uid <= maxKnownUid) continue;
               await processMsg(msg);
             }
           } catch (err) {
@@ -4755,19 +4840,63 @@ export class ImapManager {
           }
         } else if (plan === 'full') {
           // A missing/invalid modseq baseline or an incomplete local cache requires a recent
-          // sequence scan with full metadata. Re-read exists from the live connection — ImapFlow
-          // may have decremented it if an EXPUNGE arrived during the UID phase, making a range
-          // captured at SELECT time stale. The watermark is seeded below so subsequent syncs can
-          // go delta once the local cache has a UID. Bounded to the most recent `limit` messages —
-          // older un-cached messages in a large folder are backfill's job, not this scan's; backfill
-          // runs on connect/reconnect/reindex and its dbCount-vs-serverTotal check re-detects the gap.
+          // sequence scan. Re-read exists from the live connection — ImapFlow may have decremented
+          // it if an EXPUNGE arrived during the UID phase, making a range captured at SELECT time
+          // stale. On a CONDSTORE server the watermark is seeded below so subsequent syncs go
+          // delta; a server WITHOUT CONDSTORE (Outlook, Tencent Exmail, many plain IMAP servers)
+          // lands here on EVERY tick, which is why the scan is split below. Bounded to the most
+          // recent `limit` messages — older un-cached messages in a large folder are backfill's
+          // job, not this scan's; backfill runs on connect/reconnect/reindex and its
+          // dbCount-vs-serverTotal check re-detects the gap.
           const liveExists = client.mailbox?.exists ?? 0;
           const phase2Range = liveExists > limit
             ? `${liveExists - limit + 1}:${liveExists}` : '1:*';
           try {
             const scan = (async () => {
-              for await (const msg of client.fetch(phase2Range, fetchQuery)) {
-                await processMsg(msg);
+              // After a UIDVALIDITY change every cached (folder, uid) identity is void, and with
+              // an EMPTY cache (first sync, or the purge that change just ran) there is nothing
+              // to split: both take the full-metadata path directly.
+              if (uidValidityChanged || maxKnownUid === 0) {
+                for await (const msg of client.fetch(phase2Range, fetchQuery)) {
+                  await processMsg(msg);
+                }
+                return;
+              }
+              // Split the window by whether the UID is already cached (upstream #495). This used
+              // to fetch full metadata and upsert all `limit` messages on every tick, which on a
+              // CONDSTORE-less server rewrote the newest 20-100 rows forever (upstream measured
+              // ~3 row rewrites and 5.4 WAL fsyncs a second on an idle instance). A cheap
+              // uid+flags pass answers both questions: cached rows get their flags through the
+              // delta branch's bulk path (writes only real changes, honors the 30 s local-wins
+              // window), and only unknown UIDs pay the full fetch and upsert. Those include the
+              // move queue's letters: a letter arriving in a move's destination is not cached
+              // there (its row holds a negative placeholder uid), so processMsg still gets it and
+              // claimArrival attaches it, and a letter whose move is pending is not cached at its
+              // source either, so processMsg still sees it and skips it as guarded.
+              // Metadata repairs of cached rows (subject healing, #378 re-rooting) no longer run
+              // every tick, as on delta-path providers; a reindex still re-upserts everything.
+              const seen = [];
+              for await (const msg of client.fetch(phase2Range, { uid: true, flags: true })) {
+                seen.push({ uid: msg.uid, isRead: msg.flags.has('\\Seen'), isStarred: msg.flags.has('\\Flagged') });
+              }
+              if (seen.length === 0) return;
+              const { rows: cachedRows } = await query(
+                'SELECT uid FROM messages WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])',
+                [account.id, folder, seen.map(s => s.uid)]
+              );
+              const cachedUids = new Set(cachedRows.map(r => Number(r.uid)));
+              const missing = seen.filter(s => !cachedUids.has(s.uid)).map(s => s.uid);
+              if (missing.length > 0) {
+                for await (const msg of client.fetch(missing.join(','), fetchQuery, { uid: true })) {
+                  await processMsg(msg);
+                }
+              }
+              const changed = await this._applyFlagUpdates(account, folder, seen.filter(s => cachedUids.has(s.uid)));
+              if (changed > 0) {
+                // The per-row upsert used to carry flag changes made elsewhere; now that unchanged
+                // rows are left alone, nudge readers the way the delta branch does.
+                this.broadcast({ type: 'flags_synced', accountId: account.id });
+                await emitSectionsChanged(this.pluginFacade, account, changed);
               }
             })();
             scan.catch(() => {}); // see the delta branch — swallow a post-timeout late rejection
@@ -7280,7 +7409,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(String(uid), toFolder, { uid: true });
+          const result = await moveUids(client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) {
             newUid = result.uidMap.get(Number(uid)) || null;
@@ -7413,7 +7542,7 @@ export class ImapManager {
       await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(String(uid), toFolder, { uid: true });
+          const result = await moveUids(client, String(uid), toFolder);
           if (result === false) throw new Error('messageMove returned false — server did not confirm move');
           if (result?.uidMap) newUid = result.uidMap.get(Number(uid)) || null;
         } finally {
@@ -7543,16 +7672,39 @@ export class ImapManager {
     }
 
     try {
-      const serverUidMap = await withFreshClient(account, async (client) => {
+      const moved = await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
-          const result = await client.messageMove(uids.map(String), toFolder, { uid: true });
+          const result = await moveUids(client, uids.map(String), toFolder);
           if (result === false) throw new Error('bulk messageMove returned false — server did not confirm move');
-          return result?.uidMap?.size ? result.uidMap : null;
+          const uidMap = result?.uidMap?.size ? result.uidMap : null;
+          if (!result?.sourceRetained) return { uidMap, retained: null };
+          if (uidMap) return { uidMap, retained: [...uidMap.keys()].map(Number) };
+          // Copied without UIDPLUS, and the source kept the letters (see moveUids). The COPY took
+          // every requested letter the source had, all or nothing, so those are the copied ones.
+          // A failed search cannot tell them apart: take them all rather than report the batch
+          // failed, which would copy it again on the next attempt.
+          let present = null;
+          try { present = await client.search({ uid: uids.join(',') }, { uid: true }); } catch { /* below */ }
+          return { uidMap: null, retained: Array.isArray(present) ? present.map(Number) : uids.map(Number) };
         } finally {
           lock.release();
         }
       }, poolOpts);
+      const serverUidMap = moved.uidMap;
+      // Reported to the caller as moved (the copy landed) with `sourceRetained`: the source still
+      // has these letters too, so nothing may retry their move or read the source as "never moved".
+      const retainedPart = moved.retained ? { sourceRetained: moved.retained } : {};
+
+      if (moved.retained && !serverUidMap) {
+        const kept = new Set(moved.retained);
+        return {
+          uidMap: new Map(),
+          succeeded: uids.filter(u => kept.has(Number(u))),
+          failed: uids.filter(u => !kept.has(Number(u))),
+          ...retainedPart,
+        };
+      }
 
       if (serverUidMap) {
         // #407 fix: report only what the server actually moved. A requested UID the server did
@@ -7566,7 +7718,7 @@ export class ImapManager {
         const succeeded = uids.filter(u => serverUidMap.has(Number(u)));
         const failed = uids.filter(u => !serverUidMap.has(Number(u)));
         if (failed.length) recordSyncSignal('stale_mutation_uid', { accountId: account.id, magnitude: failed.length });
-        return { uidMap: serverUidMap, succeeded, failed };
+        return { uidMap: serverUidMap, succeeded, failed, ...retainedPart };
       }
 
       // Move succeeded but the server returned no UIDPLUS map. Some servers (e.g. Dovecot/

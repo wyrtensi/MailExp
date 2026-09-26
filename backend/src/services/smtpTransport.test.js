@@ -15,6 +15,7 @@ const {
   createAccountSmtpTransport,
   createSmtpTransport,
   isPreDeliveryConnectionError,
+  smtpClientName,
 } = await import('./smtpTransport.js');
 const { noteRestoredPassword } = await import('./mailNode/currentPassword.js');
 
@@ -98,6 +99,82 @@ describe('createSmtpTransport', () => {
     expect(isPreDeliveryConnectionError({ command: 'CONN' })).toBe(true);
     expect(isPreDeliveryConnectionError({ command: 'AUTH' })).toBe(false);
     expect(isPreDeliveryConnectionError(new Error('timeout'))).toBe(false);
+  });
+});
+
+// EHLO name (upstream #492, adapted). nodemailer's default is os.hostname(), and in a container
+// that is a bare label, so it sends `EHLO [127.0.0.1]`: a loopback HELO from a remote address,
+// which spam filters read as forgery. The panel must not name itself instead (neither its host
+// nor its product), so it gives the domain of the sending address, else "localhost".
+describe('EHLO name', () => {
+  const transportWith = () => {
+    const createTransport = vi.fn(() => ({
+      sendMail: vi.fn().mockResolvedValue({ accepted: ['a@b.example'] }),
+      verify: vi.fn().mockResolvedValue(true),
+      close: vi.fn(),
+    }));
+    return { createTransport, transport: createSmtpTransport(resolved, { port: 465, secure: true }, createTransport) };
+  };
+
+  it('introduces itself with the domain of the From address, never [127.0.0.1]', async () => {
+    const { createTransport, transport } = transportWith();
+    await transport.sendMail({ from: '"Doe, Anna" <anna@Corp.Example>', to: 'a@b.example' });
+    expect(createTransport.mock.calls[0][0].name).toBe('corp.example');
+  });
+
+  it('prefers the envelope sender, which is what MAIL FROM carries', async () => {
+    const { createTransport, transport } = transportWith();
+    await transport.sendMail({ from: 'anna@corp.example', envelope: { from: 'bounce@lists.example', to: ['a@b.example'] } });
+    expect(createTransport.mock.calls[0][0].name).toBe('lists.example');
+  });
+
+  it('keeps the name on every address it fails over to', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const connErr = Object.assign(new Error('Connection timeout'), { code: 'ETIMEDOUT', command: 'CONN' });
+    const sendMail = vi.fn().mockRejectedValueOnce(connErr).mockResolvedValueOnce({ accepted: ['a@b.example'] });
+    const createTransport = vi.fn(() => ({ sendMail, close: vi.fn() }));
+    await createSmtpTransport(resolved, { port: 465 }, createTransport).sendMail({ from: 'anna@corp.example' });
+    expect(createTransport.mock.calls.map(([o]) => o.name)).toEqual(['corp.example', 'corp.example']);
+  });
+
+  it('says "localhost" to verify() without a sender', async () => {
+    const { createTransport, transport } = transportWith();
+    await transport.verify();
+    expect(createTransport.mock.calls[0][0].name).toBe('localhost');
+  });
+
+  it('greets as the real send does when verify() is given the sending address', async () => {
+    const { createTransport, transport } = transportWith();
+    await transport.verify('System <noreply@corp.example>');
+    expect(createTransport.mock.calls[0][0].name).toBe('corp.example');
+  });
+
+  it('sets it on account transports too (send and rule forwards)', async () => {
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: false, allowInsecureTls: false });
+    resolveForConnection.mockResolvedValue(resolved);
+    nodemailer.createTransport.mockReset();
+    nodemailer.createTransport.mockReturnValue({ sendMail: vi.fn().mockResolvedValue({}), close: vi.fn() });
+    const result = await createAccountSmtpTransport({
+      smtp_host: 'smtp.example.com', smtp_port: 587, smtp_tls: 'STARTTLS',
+      auth_user: 'sender@example.com', auth_pass: 'pw', imap_skip_tls_verify: false,
+    });
+    await result.transport.sendMail({ from: 'Office <office@team.example>', to: 'a@b.example' });
+    expect(nodemailer.createTransport.mock.calls[0][0].name).toBe('team.example');
+  });
+
+  it.each([
+    ['anna@corp.example', 'corp.example'],
+    [{ name: 'Anna', address: 'anna@corp.example' }, 'corp.example'],
+    [['anna@corp.example'], 'corp.example'],
+    ['user@почта.рф', 'xn--80a1acny.xn--p1ai'], // EHLO takes the A-label
+    ['root', 'localhost'],
+    ['a@[192.0.2.1]', 'localhost'],               // an address literal is the same IP signal
+    ['a@192.0.2.1', 'localhost'],
+    ['a@intranet', 'localhost'],                  // a bare label is no better than the default
+    ['', 'localhost'],
+    [undefined, 'localhost'],
+  ])('smtpClientName(%j) is %s', (from, name) => {
+    expect(smtpClientName(from)).toBe(name);
   });
 });
 

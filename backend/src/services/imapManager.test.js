@@ -242,6 +242,24 @@ describe('relocateExemptGuard — label folder relocate exemption', () => {
 // the arming timer ~100ms before it fired, so every provider silently degraded to polling.
 // The first test is the one that matters: it fails if those two values are ever equal again.
 
+describe('makeClientCfg — broken-IMAP4rev2 opt-out (upstream #472)', () => {
+  // Strato ENABLEs IMAP4rev2 without advertising it, then answers UID SEARCH ALL with an
+  // empty ESEARCH, which poisons reconcile, the integrity pass and backfill's server count.
+  it('disables the IMAP4rev2 ENABLE for Strato on every connection kind', () => {
+    const strato = { ...baseAccount, imap_host: 'imap.strato.de' };
+    expect(providerProfile(strato).disableIMAP4rev2).toBe(true);
+    expect(makeClientCfg(strato, resolved, { enableIdle: true }).disableIMAP4rev2).toBe(true);
+    expect(makeClientCfg(strato, resolved, { enableIdle: false }).disableIMAP4rev2).toBe(true);
+  });
+
+  it('leaves every other provider on full IMAP4rev2', () => {
+    for (const host of ['imap.example.com', 'imap.gmail.com', 'imap.purelymail.com']) {
+      const acct = { ...baseAccount, imap_host: host };
+      expect(makeClientCfg(acct, resolved, { enableIdle: false }).disableIMAP4rev2).toBeUndefined();
+    }
+  });
+});
+
 describe('makeClientCfg — auto-IDLE arming', () => {
   it('arms IDLE strictly faster than the fastest possible sync tick', () => {
     // The invariant. If this fails, IDLE cannot start before the next tick interrupts it.
@@ -2391,7 +2409,9 @@ describe('Gmail label memberships (#418)', () => {
       search: vi.fn(async () => serverUids),
       fetch: vi.fn(async function* (range) {
         const uids = range.includes(':') ? serverUids : range.split(',').map(Number);
-        for (const uid of uids) yield { uid, folder, threadId: `9000${uid}`, emailId: `8000${uid}` };
+        // flags ride along like a real server's FETCH: a re-sync of cached rows reads msg.flags
+        // on its cheap uid+flags pass (upstream #495).
+        for (const uid of uids) yield { uid, folder, threadId: `9000${uid}`, emailId: `8000${uid}`, flags: new Set(['\\Seen']) };
       }),
     });
   }
@@ -2431,7 +2451,10 @@ describe('Gmail label memberships (#418)', () => {
     });
   });
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
-  const manager = () => ({ ...backoffState(), backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {} });
+  // A re-sync of cached rows sends their flags through the bulk path instead of re-upserting
+  // each row (upstream #495), so the bare-object manager needs the real method.
+  const manager = () => ({ ...backoffState(), backfillRunning: new Set(), broadcast: vi.fn(), pluginFacade: {},
+    _applyFlagUpdates: ImapManager.prototype._applyFlagUpdates });
   async function sync(mgr, folder) {
     await ImapManager.prototype.syncMessages.call(mgr, acct, clientFor(folder), folder, 20, false, true);
   }
@@ -3986,7 +4009,7 @@ describe('backfill and UIDs the server will not hand over', () => {
 describe('rerootThreadChildren', () => {
   beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 0 }); });
 
-  it('moves provisional children to the resolved root through the partial thread index', async () => {
+  it('moves provisional children, deleted ones included, to the resolved root', async () => {
     await rerootThreadChildren('acct-1', '<root@x>', '<child@x>');
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
@@ -3995,9 +4018,10 @@ describe('rerootThreadChildren', () => {
     // still carries ('rfc-provisional', or NULL from before migration 0063) stops being true.
     expect(sql).toMatch(/UPDATE messages SET thread_id = \$1, threading_reason = 'rfc-root'/);
     expect(sql).toMatch(/account_id = \$2 AND thread_id = \$3 AND message_id != \$3/);
-    // idx_messages_thread_id is partial on is_deleted = false. Without the same predicate the
-    // planner scans every row of the account for each reply (measured: 12 ms vs 0.5 ms at 40k rows).
-    expect(sql).toMatch(/AND is_deleted = false/);
+    // Soft-deleted rows feed the ancestor lookup too, so they must follow the root; the full
+    // idx_messages_account_thread (migration 0076) serves the statement without the predicate.
+    // services/threading/threadIndex.pglite.test.js checks both against a real engine.
+    expect(sql).not.toMatch(/is_deleted/);
     expect(params).toEqual(['<root@x>', 'acct-1', '<child@x>']);
   });
 });
@@ -6800,6 +6824,7 @@ describe('every background login waits out a rejected password', () => {
           connect: vi.fn().mockResolvedValue(),
           logout: vi.fn().mockResolvedValue(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+          capabilities: new Map([['MOVE', true]]), // a server with MOVE: moves go to messageMove
           messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
           messageFlagsRemove: vi.fn().mockResolvedValue(true),
         });
@@ -7132,6 +7157,7 @@ describe('every background login waits out a rejected password', () => {
       const mgr = liveManager(acct);
       connectError = null;
       releasePooledClient(acct, await acquirePooledClient(acct));
+      clients[0].capabilities = new Map([['MOVE', true]]); // a server with MOVE: moves go to messageMove
       clients[0].messageMove = vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) });
       rejectedPassword(mgr, acct);
       await mgr.moveMessage(acct, 5, 'INBOX', 'Archive');
@@ -7234,6 +7260,7 @@ describe('every background login waits out a rejected password', () => {
             logout: vi.fn().mockResolvedValue(),
             getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
             status: vi.fn().mockResolvedValue({ uidNext: 51 }),
+            capabilities: new Map([['MOVE', true]]), // a server with MOVE: moves go to messageMove
             messageMove: vi.fn().mockResolvedValue({ uidMap: new Map([[5, 50]]) }),
           });
           client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
@@ -7478,5 +7505,173 @@ describe('background jobs skip rows whose move is pending', () => {
     query.mockResolvedValue({ rows: [] });
     await ImapManager.prototype.refreshBulkFlags.call({}, acct);
     expect(query.mock.calls[0][0]).toMatch(/is_bulk IS NULL[\s\S]*AND uid > 0/);
+  });
+});
+
+// ── CONDSTORE-less full sync splits cached UIDs from new ones (upstream #495) ─────────────
+//
+// A server without CONDSTORE never seeds a modseq baseline, so planModseqSync returns 'full' on
+// EVERY tick. The full branch used to fetch full metadata and upsert the newest `limit` messages
+// each time, rewriting unchanged rows forever (upstream measured ~3 row rewrites and 5.4 WAL
+// fsyncs a second on an idle 12-account instance) and re-downloading the same metadata every
+// tick. Now a cheap uid+flags pass splits the window: cached rows go through _applyFlagUpdates
+// (writes only real flag changes, like the delta branch), and only unknown UIDs pay the full
+// fetch and upsert.
+//
+// These drive the REAL syncMessages against a scripted client and a SQL-shape query dispatcher,
+// so what is under test is the branch's wiring, not a helper.
+describe('CONDSTORE-less full sync (upstream #495)', () => {
+  const account = { id: 'acct-495', user_id: 'u1', imap_host: 'imap.example.com', email_address: 'a@example.com', name: 'A' };
+
+  // serverMsgs: [{uid, seen}] visible in the mailbox. cachedUids: what the DB already has.
+  // uidPhaseYields: what the `${maxKnownUid + 1}:*` fetch returns; per RFC 3501 a server echoes
+  // its highest message even when n exceeds it.
+  function arrange({ serverMsgs, cachedUids, maxKnownUid, storedValidity = '7', uidPhaseYields = [] }) {
+    const calls = { upserts: [], fullFetches: [], cheapFetches: [], uidPhase: [], cachedSelects: [] };
+    query.mockReset();
+    query.mockImplementation(async (sql, params) => {
+      if (sql.includes('SELECT uid_validity, highest_modseq')) {
+        return { rows: [{ uid_validity: storedValidity, highest_modseq: null }] };
+      }
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return { rows: [{ max_uid: maxKnownUid }] };
+      if (sql.includes('COUNT(*) FILTER')) return { rows: [{ n: 0 }] };
+      if (sql.includes('AND uid = ANY')) {
+        calls.cachedSelects.push(params[2]);
+        return { rows: cachedUids.filter(u => params[2].includes(u)).map(u => ({ uid: u })) };
+      }
+      if (sql.includes('unnest($1::bigint[])')) return { rows: [], rowCount: 0 };
+      if (sql.includes('ON CONFLICT (account_id, uid, folder)')) {
+        calls.upserts.push(params[1]); // $2 = uid
+        return { rows: [{ id: `row-${params[1]}`, is_new: true }] };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    parseMessage.mockImplementation(async msg => ({
+      uid: msg.uid, messageId: `<m${msg.uid}@x>`, subject: 's', fromEmail: 'f@x', fromName: 'F',
+      to: [], cc: [], replyTo: [], date: new Date('2026-09-01'), isRead: true, isStarred: false,
+      flags: [], parsedHeaders: {},
+    }));
+    const flagsFor = seen => new Set(seen ? ['\\Seen'] : []);
+    const client = {
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      mailbox: { exists: serverMsgs.length, uidValidity: 7n, highestModseq: null },
+      fetch: vi.fn(function (range, q, opts) {
+        return (async function* () {
+          if (opts?.uid && typeof range === 'string' && range.endsWith(':*')) {
+            calls.uidPhase.push(range);
+            for (const m of uidPhaseYields) yield { uid: m.uid, flags: flagsFor(m.seen) };
+            return;
+          }
+          if (q?.envelope) {
+            calls.fullFetches.push({ range, uid: !!opts?.uid });
+            const wanted = opts?.uid
+              ? String(range).split(',').map(Number)
+              : serverMsgs.map(m => m.uid); // sequence range: the whole scripted window
+            for (const m of serverMsgs.filter(m => wanted.includes(m.uid))) {
+              yield { uid: m.uid, flags: flagsFor(m.seen) };
+            }
+            return;
+          }
+          calls.cheapFetches.push(range);
+          for (const m of serverMsgs) yield { uid: m.uid, flags: flagsFor(m.seen) };
+        })();
+      }),
+    };
+    const mgr = new ImapManager({ clients: new Set() });
+    mgr.backfillMessages = vi.fn().mockResolvedValue(); // post-UIDVALIDITY reindex is not under test
+    vi.spyOn(mgr, 'broadcast').mockImplementation(() => {});
+    const applied = vi.spyOn(mgr, '_applyFlagUpdates');
+    return { mgr, client, calls, applied };
+  }
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('steady state: all UIDs cached — no metadata fetch, no upsert, flags via the bulk path', async () => {
+    const serverMsgs = [{ uid: 10, seen: true }, { uid: 20, seen: true }, { uid: 30, seen: false }];
+    const { mgr, client, calls, applied } = arrange({ serverMsgs, cachedUids: [10, 20, 30], maxKnownUid: 30 });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.cheapFetches).toEqual(['1:*']);          // one uid+flags pass over the window
+    expect(calls.fullFetches).toEqual([]);                // not a full-metadata download per tick
+    expect(calls.upserts).toEqual([]);                    // and no row rewrites
+    expect(applied).toHaveBeenCalledTimes(1);             // flags ride the delta branch's bulk path,
+    expect(applied.mock.calls[0][2].map(f => f.uid)).toEqual([10, 20, 30]); // which writes only changes
+    expect(applied.mock.calls[0][2].find(f => f.uid === 30).isRead).toBe(false);
+  });
+
+  it('a hole in the window: only the unknown UID pays the full fetch and upsert', async () => {
+    const serverMsgs = [{ uid: 10, seen: true }, { uid: 20, seen: true }, { uid: 30, seen: true }];
+    const { mgr, client, calls, applied } = arrange({ serverMsgs, cachedUids: [10, 30], maxKnownUid: 30 });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.fullFetches).toEqual([{ range: '20', uid: true }]); // fetched BY UID, alone
+    expect(calls.upserts).toEqual([20]);
+    expect(applied.mock.calls[0][2].map(f => f.uid)).toEqual([10, 30]); // cached rows stay on flags
+  });
+
+  it('UIDVALIDITY change: every cached identity is void, so everything reprocesses in full', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const serverMsgs = [{ uid: 10, seen: true }, { uid: 20, seen: true }];
+    const { mgr, client, calls } = arrange({
+      serverMsgs, cachedUids: [10, 20], maxKnownUid: 20, storedValidity: '5', // server says 7
+    });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.cachedSelects).toEqual([]);            // the split trusts (folder, uid) identity — unusable here
+    expect(calls.fullFetches).toEqual([{ range: '1:*', uid: false }]);
+    expect(calls.upserts).toEqual([10, 20]);
+  });
+
+  it('a cached flag change nudges readers, since the row rewrite that used to carry it is gone', async () => {
+    const serverMsgs = [{ uid: 10, seen: false }];
+    const { mgr, client, applied } = arrange({ serverMsgs, cachedUids: [10], maxKnownUid: 10 });
+    applied.mockResolvedValue(1); // one row's flags genuinely changed
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'flags_synced', accountId: account.id });
+  });
+
+  it('a letter arriving in a move destination is not cached there, so the moved row still claims it', async () => {
+    // DB-first moves: the moved row holds a negative placeholder uid until its MOVE settles, so
+    // the letter's real uid is unknown to the cache and takes the full path to claimArrival.
+    const serverMsgs = [{ uid: 10, seen: true }, { uid: 11, seen: true }];
+    const { mgr, client, calls } = arrange({ serverMsgs, cachedUids: [10], maxKnownUid: 11 });
+    const claim = vi.spyOn(mgr.moveQueue, 'claimArrival').mockResolvedValue(true);
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(claim).toHaveBeenCalledWith(account.id, 'Work', '<m11@x>', 11);
+    expect(calls.upserts).toEqual([]);
+  });
+
+  it('the n:* echo of the newest message is skipped, not re-upserted every tick', async () => {
+    // RFC 3501: `${maxKnownUid + 1}:*` still returns the highest message when nothing is above
+    // the watermark. Upstream measured this echo as the whole residue after the split above:
+    // one row rewrite per folder per tick, on every provider.
+    const serverMsgs = [{ uid: 30, seen: true }];
+    const { mgr, client, calls } = arrange({
+      serverMsgs, cachedUids: [30], maxKnownUid: 30, uidPhaseYields: [{ uid: 30, seen: true }],
+    });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.uidPhase).toEqual(['31:*']); // the phase ran and the server echoed uid 30
+    expect(calls.upserts).toEqual([]);        // and the echo was filtered, not rewritten
+  });
+
+  it('genuinely new mail above the watermark still comes through the UID phase', async () => {
+    // The companion boundary: a filter that also swallowed uid > maxKnownUid would silently
+    // stop new mail on every account.
+    const serverMsgs = [{ uid: 30, seen: true }, { uid: 31, seen: true }];
+    const { mgr, client, calls } = arrange({
+      serverMsgs, cachedUids: [30, 31], maxKnownUid: 30, uidPhaseYields: [{ uid: 31, seen: true }],
+    });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.upserts).toEqual([31]);
   });
 });

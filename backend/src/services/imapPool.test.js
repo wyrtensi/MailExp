@@ -535,6 +535,7 @@ describe('a stale bulk move', () => {
       client.close = vi.fn();
       client.status = vi.fn(async () => ({ uidNext: 10 }));
       client.getMailboxLock = vi.fn(async () => ({ release: vi.fn() }));
+      client.capabilities = new Map([['MOVE', true]]); // Dovecot has MOVE: moves go to messageMove
       client.messageMove = vi.fn(async () => ({}));
       sockets.push(client);
       return client;
