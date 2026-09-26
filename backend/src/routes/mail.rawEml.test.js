@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #381: download a message as .eml. The route serves the raw RFC 822 source with a
-// filename derived from the subject, and never serves another user's message.
+// filename derived from the subject. Mailboxes are shared install-wide (migration 0056
+// dropped their owner column), so there is no per-user ownership check here.
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
@@ -41,7 +42,7 @@ describe('GET /api/mail/messages/:id/raw.eml (#381)', () => {
     imapManager.moveQueue.serverLocation.mockReset().mockImplementation(async (m) => ({ folder: m.folder, uid: Number(m.uid) }));
     query.mockImplementation((sql) => {
       if (sql.includes('FROM messages m')) {
-        return Promise.resolve({ rows: [{ id: MSG_ID, uid: '42', folder: 'INBOX', subject: 'Quarterly report', account_id: ACCOUNT_ID, user_id: 'user-1' }] });
+        return Promise.resolve({ rows: [{ id: MSG_ID, uid: '42', folder: 'INBOX', subject: 'Quarterly report', account_id: ACCOUNT_ID }] });
       }
       if (sql.includes('SELECT * FROM email_accounts')) {
         return Promise.resolve({ rows: [{ id: ACCOUNT_ID, imap_host: 'imap.example.com' }] });
@@ -62,8 +63,8 @@ describe('GET /api/mail/messages/:id/raw.eml (#381)', () => {
     expect(imapManager.fetchRawMessage.mock.calls[0].slice(1)).toEqual([42, 'INBOX']);
   });
 
-  it('404s a message the user does not own, without touching IMAP', async () => {
-    query.mockImplementation(() => Promise.resolve({ rows: [] })); // ownership join finds nothing
+  it('404s an id no row matches, without touching IMAP', async () => {
+    query.mockImplementation(() => Promise.resolve({ rows: [] }));
     const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);
     expect(res.status).toBe(404);
     expect(imapManager.fetchRawMessage).not.toHaveBeenCalled();

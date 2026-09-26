@@ -844,18 +844,16 @@ router.get('/messages/:id/attachments/:part', async (req, res) => {
 
 // Download the full message as an .eml file (#381). The raw RFC 822 source, exactly as the
 // server stores it, so attachments and original headers survive the round trip into any
-// other mail client. Resolved through moveQueue.serverLocation like every other IMAP read
-// here — the DB row's own uid can be a pending-move placeholder that doesn't exist on the
-// server yet (see moveQueue.js's header comment).
+// other mail client. Mailboxes are shared install-wide (migration 0056 dropped their owner
+// column), same as every other message read here — no per-user ownership filter. Resolved
+// through moveQueue.serverLocation like every other IMAP read here — the DB row's own uid
+// can be a pending-move placeholder that doesn't exist on the server yet (see
+// moveQueue.js's header comment).
 router.get('/messages/:id/raw.eml', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
 
-  const result = await query(`
-    SELECT m.id, m.uid, m.folder, m.subject, m.account_id, a.user_id FROM messages m
-    JOIN email_accounts a ON m.account_id = a.id
-    WHERE m.id = $1 AND a.user_id = $2
-  `, [id, req.session.userId]);
+  const result = await query('SELECT m.* FROM messages m WHERE m.id = $1', [id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
   const message = result.rows[0];
 
@@ -1558,7 +1556,8 @@ async function expungeClaimed(folder, rows, imapDelete) {
 // local-wins stamp (star_changed_at, same guard the single-message star handler uses), GTD
 // sibling fan-out gated the same way, then per-message IMAP \Flagged writes in bounded
 // batches with the durable retry queue on failure. Stars never touch unread counts, so no
-// folder count adjustment (unlike bulk-read).
+// folder count adjustment (unlike bulk-read). Mailboxes are shared install-wide (migration
+// 0056 dropped their owner column), so — like bulk-read — this has no per-user filter.
 router.post('/messages/bulk-star', async (req, res) => {
   const { ids, starred } = req.body;
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -1577,9 +1576,8 @@ router.post('/messages/bulk-star', async (req, res) => {
   try {
     const result = await query(
       `SELECT m.id, m.uid, m.folder, m.is_starred, m.account_id, m.message_id FROM messages m
-       JOIN email_accounts a ON m.account_id = a.id
-       WHERE m.id = ANY($2::uuid[]) AND a.user_id = $1`,
-      [req.session.userId, ids]
+       WHERE m.id = ANY($1::uuid[])`,
+      [ids]
     );
 
     const owned = result.rows;

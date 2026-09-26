@@ -4,7 +4,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // like bulk-read: only rows whose state actually changes are written (no spurious row
 // versions or IMAP round-trips), the 30s local-wins stamp guards the sync race, and a
 // failed IMAP \Flagged write lands in the durable retry queue instead of silently
-// reverting on the next flag sync.
+// reverting on the next flag sync. Mailboxes are shared install-wide (migration 0056
+// dropped their owner column), so there is no per-user ownership filter, same as bulk-read.
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
@@ -56,10 +57,10 @@ describe('POST /api/mail/messages/bulk-star (#434)', () => {
           { id: ID_UNSTARRED, uid: '12', folder: 'INBOX', is_starred: false, account_id: ACCOUNT_ID, message_id: '<m2@x>' },
           { id: ID_PENDING,   uid: -1,   folder: 'Archive', is_starred: false, account_id: ACCOUNT_ID, message_id: '<m3@x>' },
         ];
-        return Promise.resolve({ rows: all.filter(r => params[1].includes(r.id)) });
+        return Promise.resolve({ rows: all.filter(r => params[0].includes(r.id)) });
       }
       if (sql.includes('SELECT * FROM email_accounts')) {
-        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, user_id: 'user-1', imap_host: 'imap.example.com' }] });
+        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, imap_host: 'imap.example.com' }] });
       }
       return Promise.resolve({ rows: [] });
     });
