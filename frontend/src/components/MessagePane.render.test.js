@@ -204,3 +204,49 @@ describe('Download all asks first when an attachment is risky', () => {
     assert.doesNotMatch(after.textContent, armedNote);
   });
 });
+
+describe('Download as .eml from the More menu (#381)', () => {
+  // The "More" overflow menu (Print, view headers, download .eml, …) only exists on the
+  // mobile layout — desktop lays these out as individual toolbar buttons instead, and #381
+  // upstream only wired the download into this same mobile-only menu. useMobile() reads
+  // window.innerWidth in a useState initializer, so it must be set before this component's
+  // FIRST mount — a fresh root, not a re-render of the desktop-mounted one above.
+  const downloads = [];
+  let originalClick, originalInnerWidth, mobileHost, mobileRoot;
+  before(async () => {
+    originalClick = dom.window.HTMLAnchorElement.prototype.click;
+    // jsdom cannot download; record the anchors the component builds and clicks itself,
+    // same technique the Download-all suite above uses.
+    dom.window.HTMLAnchorElement.prototype.click = function () { downloads.push(this.getAttribute('href')); };
+    originalInnerWidth = dom.window.innerWidth;
+    dom.window.innerWidth = 400; // useMobile(): window.innerWidth < 768
+    mobileHost = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(mobileHost);
+    mobileRoot = createRoot(mobileHost);
+  });
+  after(async () => {
+    await React.act(async () => mobileRoot.unmount());
+    mobileHost.remove();
+    dom.window.HTMLAnchorElement.prototype.click = originalClick;
+    dom.window.innerWidth = originalInnerWidth;
+  });
+
+  test('the More menu offers an .eml download that fetches the raw source route', async () => {
+    downloads.length = 0;
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1');
+      mobileRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const moreBtn = [...mobileHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.more');
+    assert.ok(moreBtn, 'expected the More button');
+    await React.act(async () => { moreBtn.click(); });
+
+    const downloadItem = [...mobileHost.querySelectorAll('div')].find(d => d.textContent === 'message.downloadEml');
+    assert.ok(downloadItem, 'expected a "download as .eml" menu item');
+    await React.act(async () => { downloadItem.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true })); });
+
+    assert.deepEqual(downloads, ['/api/mail/messages/a1/raw.eml']);
+  });
+});

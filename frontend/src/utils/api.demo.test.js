@@ -28,6 +28,7 @@ test('demo direct API helpers resolve locally without calling fetch', async () =
   assert.equal(attachment.type, 'text/plain');
   assert.equal(await attachment.text(), 'Demo attachment: renewal order form preview.\n');
   assert.match(direct.attachmentArchiveUrl('demo-001'), /^data:application\/zip;base64,/);
+  assert.match(direct.rawEmlUrl('demo-001'), /^data:message\/rfc822;base64,/);
   assert.match(direct.gtdPetSheetUrl('demo-pet'), /^data:image\/gif;base64,/);
   assert.equal(fetchCalls, 0);
 });
@@ -69,6 +70,7 @@ test('production direct API helpers retain their existing network contracts', as
     ['/api/mail/messages/message/attachments/1', 'GET', false],
   ]);
   assert.equal(direct.attachmentArchiveUrl('message'), '/api/mail/messages/message/attachments.zip');
+  assert.equal(direct.rawEmlUrl('message'), '/api/mail/messages/message/raw.eml');
   assert.equal(direct.gtdPetSheetUrl('pet slug'), '/api/gtd/pet/pet%20slug/sheet');
 });
 

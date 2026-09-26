@@ -48,6 +48,10 @@ async function request(method, path, body, extraHeaders) {
 
 const EMPTY_ZIP_DATA_URL = 'data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
 const TRANSPARENT_GIF_DATA_URL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+// A tiny placeholder .eml for demo mode (#381) — there is no real IMAP source to serve.
+const DEMO_EML_DATA_URL = 'data:message/rfc822;base64,' + btoa(
+  'From: demo@example.com\r\nSubject: Demo message\r\n\r\nThis is a demo message.\r\n'
+);
 
 export function createDirectApi({
   demoMode = isDemoMode,
@@ -226,6 +230,11 @@ export function createDirectApi({
 
     attachmentArchiveUrl(messageId) {
       return demoMode ? EMPTY_ZIP_DATA_URL : `/api/mail/messages/${messageId}/attachments.zip`;
+    },
+
+    // Download the raw RFC 822 source as an .eml file (#381).
+    rawEmlUrl(messageId) {
+      return demoMode ? DEMO_EML_DATA_URL : `/api/mail/messages/${messageId}/raw.eml`;
     },
 
     gtdPetSheetUrl(slug) {
@@ -429,6 +438,7 @@ export const api = {
   getMessageHeaders: (id) => request('GET', `/mail/messages/${id}/headers`),
   downloadAttachment: (messageId, part) => directApi.downloadAttachment(messageId, part),
   attachmentArchiveUrl: (messageId) => directApi.attachmentArchiveUrl(messageId),
+  rawEmlUrl: (messageId) => directApi.rawEmlUrl(messageId),
   snoozeMessage: (id, until) => request('POST', `/mail/messages/${id}/snooze`, { until }),
 
   // Sanitized diagnostics report (server-owned sections; scoped to the user).

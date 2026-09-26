@@ -240,6 +240,7 @@
     "star": "Star",
     "delete": "Delete",
     "print": "Print",
+    "downloadEml": "Download as .eml",
     "more": "More",
     "summarize": "Summarize",
     "summary": "Summary",
