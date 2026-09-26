@@ -34,6 +34,7 @@ import { createLatestRequest } from '../utils/latestRequest.js';
 import { draftComposeFields } from '../utils/draftSignature.js';
 import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
 import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete, threadDeleteGuardKey } from '../utils/pendingDeletes.js';
+import { deleteView, deleteViewFolder, rowSeenFolders, foldersFor } from '../utils/deleteIntent.js';
 import {
   archiveInChunks,
   archiveTargetGroupsForRows,
@@ -997,6 +998,8 @@ export default function MessageList() {
     const isThreadRow = isThreadListRow(message);
     const key = pendingDeleteTimerKey(message, isThreadRow);
     if (pendingDeleteTimers.current.has(key)) return;
+    // Read the view now: the folder the user saw this row in (utils/deleteIntent.js).
+    const view = deleteView(useStore.getState());
 
     let deleteMessages = [message];
     try {
@@ -1009,6 +1012,7 @@ export default function MessageList() {
 
     const ids = [...new Set(deleteMessages.map(msg => msg.id).filter(Boolean))];
     const visibleMessage = message;
+    const folders = rowSeenFolders([visibleMessage], [deleteMessages], row => deleteViewFolder(row, view));
     ids.forEach((id) => setPendingDelete(id));
 
     // Advance selection to the next visible message before removing this one
@@ -1033,7 +1037,7 @@ export default function MessageList() {
       pendingDeleteTimers.current.delete(key);
       try {
         if (ids.length > 1) {
-          const result = await api.bulkDelete(ids);
+          const result = await api.bulkDelete(ids, folders);
           const deletedSet = new Set(result.deleted ?? []);
           ids.forEach(id => (deletedSet.has(id) ? setCompletedDelete(id) : clearDeleteGuard(id)));
           const failedIds = ids.filter(id => !deletedSet.has(id));
@@ -1049,7 +1053,8 @@ export default function MessageList() {
             });
           }
         } else {
-          await api.deleteMessage(ids[0] || visibleMessage.id);
+          const id = ids[0] || visibleMessage.id;
+          await api.deleteMessage(id, folders[id]);
           ids.forEach((id) => setCompletedDelete(id));
         }
       } catch (err) {
@@ -1063,7 +1068,7 @@ export default function MessageList() {
         });
       }
     }, 4500);
-    pendingDeleteTimers.current.set(key, { timer, message: visibleMessage, ids });
+    pendingDeleteTimers.current.set(key, { timer, message: visibleMessage, ids, folders });
     addNotification({
       title: ids.length > 1 ? t('messageList.bulkDeleted.title', { count: ids.length }) : t('messageList.deleted.title'),
       body: ids.length > 1 ? t('messageList.bulkDeleted.body') : t('messageList.deleted.body'),
@@ -1174,14 +1179,19 @@ export default function MessageList() {
   // the unmount cleanup below does not double-fire on normal navigation.
   useEffect(() => {
     const handleBeforeUnload = () => {
-      pendingDeleteTimers.current.forEach(({ timer, message, ids }) => {
+      // One flush for every pending delete: the keepalive budget is shared by the whole page.
+      const allIds = [];
+      const allFolders = {};
+      pendingDeleteTimers.current.forEach(({ timer, message, ids, folders }) => {
         clearTimeout(timer);
-        const deleteIds = ids?.length ? ids : [message.id];
-        try {
-          api.deleteMessagesOnExit(deleteIds).catch(() => {});
-        } catch { /* keepalive not supported — best effort */ }
+        allIds.push(...(ids?.length ? ids : [message.id]));
+        Object.assign(allFolders, folders);
       });
       pendingDeleteTimers.current.clear();
+      if (!allIds.length) return;
+      try {
+        api.deleteMessagesOnExit([...new Set(allIds)], allFolders).catch(() => {});
+      } catch { /* keepalive not supported — best effort */ }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -1192,13 +1202,17 @@ export default function MessageList() {
   // cancelling the timer would silently leave it on the server.
   // (Page refresh is handled by the beforeunload listener above which clears the map first.)
   useEffect(() => () => {
-    pendingDeleteTimers.current.forEach(({ timer, message, ids }) => {
+    pendingDeleteTimers.current.forEach(({ timer, message, ids, folders }) => {
       clearTimeout(timer);
       const deleteIds = ids?.length ? ids : [message.id];
+      // At most 500 ids per request, the server's cap.
+      const chunks = [];
+      for (let i = 0; i < deleteIds.length; i += 500) chunks.push(deleteIds.slice(i, i + 500));
       const deletePromise =
         deleteIds.length > 1
-          ? api.bulkDelete(deleteIds)
-          : api.deleteMessage(deleteIds[0]);
+          ? Promise.all(chunks.map(chunk => api.bulkDelete(chunk, foldersFor(chunk, folders))))
+            .then(results => ({ deleted: results.flatMap(r => r?.deleted ?? []) }))
+          : api.deleteMessage(deleteIds[0], folders?.[deleteIds[0]]);
       deletePromise
         .then(result => {
           const actuallyDeleted = new Set(result?.deleted ?? deleteIds);
@@ -1465,9 +1479,14 @@ export default function MessageList() {
     // single-row delete path — without this only each thread's visible
     // (newest) message was deleted and the rest of the thread survived.
     let deleteIds = ids;
+    // Every letter takes the folder the user saw its row in (utils/deleteIntent.js).
+    const view = deleteView(useStore.getState());
+    const folderOf = row => deleteViewFolder(row, view);
+    let folders = rowSeenFolders(msgs, [], folderOf);
     try {
       const resolved = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m, { excludeDrafts: true })));
       deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
+      folders = rowSeenFolders(msgs, resolved, folderOf);
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
     }
@@ -1491,7 +1510,7 @@ export default function MessageList() {
       if (undone) return;
       const chunks = [];
       for (let i = 0; i < deleteIds.length; i += 500) chunks.push(deleteIds.slice(i, i + 500));
-      const results = await Promise.allSettled(chunks.map(chunk => api.bulkDelete(chunk)));
+      const results = await Promise.allSettled(chunks.map(chunk => api.bulkDelete(chunk, foldersFor(chunk, folders))));
       results
         .filter(r => r.status === 'rejected')
         .forEach(r => console.error('Bulk delete failed:', r.reason?.message));
@@ -1517,7 +1536,7 @@ export default function MessageList() {
         setSearchReloadToken(token => token + 1);
       }
     }, 4500);
-    pendingDeleteTimers.current.set(key, { timer, message: msgs[0], ids: deleteIds });
+    pendingDeleteTimers.current.set(key, { timer, message: msgs[0], ids: deleteIds, folders });
     addNotification({
       title: t('messageList.bulkDeleted.title', { count: deleteIds.length }),
       body: t('messageList.bulkDeleted.body'),

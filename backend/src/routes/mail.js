@@ -2,6 +2,7 @@ import { STATUS_STALE_MS } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { ZipArchive } from 'archiver';
 import { query } from '../services/db.js';
+import { claimForExpunge, finishExpunge, releaseExpungeClaim } from '../services/expungeClaims.js';
 import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
 import { conversation } from '../services/conversation.js';
 import { shouldBlockImages } from '../utils/imageBlocking.js';
@@ -1415,16 +1416,112 @@ router.post('/messages/bulk-read', async (req, res) => {
   }
 });
 
+// ── Deleting: what the request means ────────────────────────────────────────
+//
+// A delete means one of two things: move the letter to Trash, or delete forever a letter the user
+// sees in Trash. The row alone cannot tell them apart. A move to Trash keeps the row's id (the move
+// queue needs it), so a second delete of a letter already moved there (a double click, a retry, a
+// second tab, two people at once, a delete while the move is still queued) finds the row in Trash
+// exactly like a delete from the Trash view does. Only the request can say which it is.
+//
+// So the client names the folder it listed each letter in: `folder` on DELETE /messages/:id,
+// `folders: { [id]: folder }` on bulk-delete. A letter is deleted forever only when the row is in
+// Trash AND the client saw it in Trash (or the request says `permanent: true`). A row in Trash
+// that the client saw anywhere else was moved there already: the delete is done, and nothing
+// happens. A request without the field (an older client, a notification action, the unsubscribe
+// toast's "Move to trash") only ever moves to Trash. bulk: read `folders` (or `seen`, below)
+// only, never `folder`.
+function deleteIntent(body, { bulk = false } = {}) {
+  const b = body && typeof body === 'object' ? body : {};
+  const folders = b.folders && typeof b.folders === 'object' && !Array.isArray(b.folders) ? b.folders : {};
+  const bySeen = bulk ? seenByFolder(b) : null;
+  return {
+    permanent: b.permanent === true,
+    seen: (id) => {
+      let f = b.folder;
+      if (bulk) f = Object.prototype.hasOwnProperty.call(folders, id) ? folders[id] : (bySeen?.get(id) ?? null);
+      return typeof f === 'string' ? f : null;
+    },
+  };
+}
+
+// bulk-delete's `seen: { [folder]: [ids] }`: the compact form of `folders`, each folder named once,
+// and its ids need not be repeated in `ids`. The page-close flush uses it to fit the browser's
+// keepalive budget. Map<id, folder>, or null when absent or not that shape.
+function seenByFolder(body) {
+  const seen = body?.seen;
+  if (!seen || typeof seen !== 'object' || Array.isArray(seen)) return null;
+  const out = new Map();
+  for (const [folder, list] of Object.entries(seen)) {
+    if (!Array.isArray(list)) return null;
+    for (const id of list) out.set(id, folder);
+  }
+  return out;
+}
+
+function wantsForever(intent, id, allTrashPaths) {
+  return intent.permanent || allTrashPaths.has(intent.seen(id));
+}
+
+// Delete forever `rows` (one account, all in `folder` with a server uid, as the route read them).
+// No transaction or row lock is held across the server delete (it can take minutes): the rows are
+// claimed first (services/expungeClaims.js). A claimed row is not moved by the move queue and not
+// claimed by another permanent delete. Only rows still at the folder and uid the route read are
+// claimed, so a letter someone moved out of Trash meanwhile is left alone ('changed'), and so is
+// one another permanent delete holds. imapDelete(uids) resolves to { succeeded, failed } (uids),
+// or to null when the mailbox was busy (nothing deleted). The rows the server deleted are removed;
+// the claim on the rest is released. Returns { deleted, changed, gone }, each a list of the rows
+// given (deleted with is_read as removed), or null when busy.
+async function expungeClaimed(folder, rows, imapDelete) {
+  const { token, claimed } = await claimForExpunge(folder, rows);
+  const still = rows.filter(r => claimed.has(r.id));
+  const unclaimed = rows.filter(r => !claimed.has(r.id));
+  let gone = [];
+  let changed = [];
+  if (unclaimed.length) {
+    const { rows: present } = await query('SELECT id FROM messages WHERE id = ANY($1::uuid[])', [unclaimed.map(r => r.id)]);
+    const exists = new Set(present.map(r => r.id));
+    gone = unclaimed.filter(r => !exists.has(r.id));
+    changed = unclaimed.filter(r => exists.has(r.id));
+  }
+  if (!still.length) return { deleted: [], changed, gone };
+  let removed = new Map();
+  let outcome;
+  try {
+    outcome = await imapDelete(still.map(r => r.uid));
+    if (outcome) {
+      const ok = new Set(outcome.succeeded.map(String));
+      removed = await finishExpunge(token, folder, still.filter(r => ok.has(String(r.uid))));
+    }
+  } finally {
+    // What was not removed goes back to normal. A failure here leaves the claim to the sweep.
+    const keep = still.filter(r => !removed.has(r.id)).map(r => r.id);
+    await releaseExpungeClaim(token, keep)
+      .catch(err => console.error(`Releasing a permanent-delete claim failed: ${err.message}`));
+  }
+  if (!outcome) return null;
+  const deleted = still.filter(r => removed.has(r.id)).map(r => ({ ...r, is_read: removed.get(r.id).is_read }));
+  return { deleted, changed, gone };
+}
+
 // Bulk delete (move to trash)
 //
 // Moving to Trash is DB-first (queueMove): the rows are in Trash at once and the server MOVE is
-// queued, so it never answers mailbox_busy. Deleting what is already in Trash (or a draft) is
-// permanent and stays server-first: the expunge must have happened before the rows go, or a failed
+// queued, so it never answers mailbox_busy. Deleting forever what the client saw in Trash (or a
+// draft) stays server-first: the expunge must have happened before the rows go, or a failed
 // expunge would leave a letter the server still has and the panel does not, which the next
-// backfill would bring back as new mail. Only that part can still be busy.
+// backfill would bring back as new mail. Only that part can still be busy. A letter already in
+// Trash that the client saw elsewhere is left alone and reported deleted (deleteIntent).
 router.post('/messages/bulk-delete', async (req, res) => {
-  const { ids } = req.body;
-  if (!Array.isArray(ids) || ids.length === 0) {
+  const bySeen = seenByFolder(req.body);
+  if (req.body?.seen !== undefined && !bySeen) {
+    return res.status(400).json({ error: 'seen must map folders to arrays of ids' });
+  }
+  if (req.body?.ids !== undefined && !Array.isArray(req.body.ids)) {
+    return res.status(400).json({ error: 'ids array required' });
+  }
+  const ids = [...new Set([...(req.body?.ids ?? []), ...(bySeen ? bySeen.keys() : [])])];
+  if (ids.length === 0) {
     return res.status(400).json({ error: 'ids array required' });
   }
   if (ids.length > 500) {
@@ -1433,6 +1530,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
   if (!areValidUUIDs(ids)) {
     return res.status(400).json({ error: 'Invalid message id format' });
   }
+  const intent = deleteIntent(req.body, { bulk: true });
 
   const busy = bulkBusyTracker();
   try {
@@ -1451,68 +1549,24 @@ router.post('/messages/bulk-delete', async (req, res) => {
       (byAccount[msg.account_id] = byAccount[msg.account_id] || []).push(msg);
     }
 
-    // expungeSucceeded: permanently deleted (already in Trash, or a draft).
+    // expungeSucceeded: permanently deleted (seen in Trash, or a draft).
     // trashMoved: moved into Trash in the database, MOVE queued.
-    // movePending: to be expunged, but still waiting for an earlier move (move_pending).
+    // alreadyTrashed: in Trash already, seen elsewhere by the client: nothing to do.
+    // movePending: to be expunged, but still waiting for an earlier move, or moved or claimed by
+    // another request while this one looked (move_pending).
+    // failedGroups: groups that threw; their letters are left out of `deleted`.
     const expungeSucceeded = [];
     const trashMoved = [];
+    const alreadyTrashed = [];
     const movePending = [];
+    let failedGroups = 0;
 
-    for (const [accountId, msgs] of Object.entries(byAccount)) {
-      const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-      const account = accountResult.rows[0];
-      const trashPath = await resolveTrashFolder(accountId, msgs[0].folder_mappings);
-      const allTrashPaths = await resolveAllTrashPaths(accountId, msgs[0].folder_mappings);
-      const allDraftsPaths = await resolveAllDraftsPaths(accountId, msgs[0].folder_mappings);
-
-      if (!trashPath) {
-        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length} messages`);
-        continue;
-      }
-
-      // Drafts and messages already in Trash are permanently deleted; others move to Trash.
-      const toExpunge = msgs.filter(m => allTrashPaths.has(m.folder) || allDraftsPaths.has(m.folder));
-      const toMove    = msgs.filter(m => !allTrashPaths.has(m.folder) && !allDraftsPaths.has(m.folder));
-
-      // A letter whose move into Trash has not reached the server has no uid there to expunge.
-      movePending.push(...toExpunge.filter(m => isPendingUid(m.uid)));
-      const expungeNow = toExpunge.filter(m => !isPendingUid(m.uid));
-
-      // Permanently delete messages already in a trash-like folder (grouped by actual folder).
-      if (expungeNow.length) {
-        const byExpungeFolder = {};
-        for (const msg of expungeNow) {
-          (byExpungeFolder[msg.folder] = byExpungeFolder[msg.folder] || []).push(msg);
-        }
-        for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
-          if (busy.skip(accountId)) break;
-          const uidToMsg = new Map(folderMsgs.map(m => [String(m.uid), m]));
-          const outcome = await busy.run(accountId, () => imapManager.bulkPermanentDelete(account, folderMsgs.map(m => m.uid), expungeFolder));
-          if (!outcome) continue;
-          const { succeeded, failed } = outcome;
-          for (const uid of succeeded) expungeSucceeded.push(uidToMsg.get(String(uid)));
-          for (const uid of failed) console.error(`bulk-delete IMAP expunge uid ${uid} from ${expungeFolder}: IMAP delete failed`);
-        }
-      }
-
-      if (toMove.length) {
-        const moved = await queueMove(accountId, toMove, trashPath, { movedBy: req.session.userId });
-        trashMoved.push(...moved);
-        if (moved.length) imapManager.broadcast({ type: 'folder_updated', folder: trashPath, accountId });
-      }
-    }
-
-    // Nothing went through: a busy mailbox, or letters still being moved.
-    if (!expungeSucceeded.length && !trashMoved.length) {
-      if (busy.busy) return sendMailboxBusy(res, busy.reason);
-      if (movePending.length) return sendMovePending(res);
-    }
-
-    // Permanently deleted: remove DB rows immediately.
-    if (expungeSucceeded.length) {
-      await query('DELETE FROM messages WHERE id = ANY($1::uuid[])', [expungeSucceeded.map(m => m.id)]);
+    // Journaled and counted as each group goes through, not after the loop: a later group that
+    // throws must not leave letters already deleted forever (or moved) unjournaled and uncounted.
+    const commitExpunged = (rows) => {
+      expungeSucceeded.push(...rows);
       const srcDeltas = {};
-      for (const msg of expungeSucceeded) {
+      for (const msg of rows) {
         const key = `${msg.account_id}:${msg.folder}`;
         if (!srcDeltas[key]) srcDeltas[key] = { accountId: msg.account_id, path: msg.folder, total: 0, unread: 0 };
         srcDeltas[key].total++;
@@ -1522,18 +1576,100 @@ router.post('/messages/bulk-delete', async (req, res) => {
         adjustFolderCounts(accountId, path, -total, -unread);
         imapManager.broadcast({ type: 'folder_updated', folder: path, accountId });
       }
+      recordAudit(deletedMessageEntries(req.session.userId, rows, true));
+    };
+    const commitMoved = (rows) => {
+      trashMoved.push(...rows);
+      recordAudit(deletedMessageEntries(req.session.userId, rows, false));
+    };
+    const groupFailed = (what, err) => {
+      if (isMailboxBusyError(err)) throw err;
+      failedGroups++;
+      console.error(`bulk-delete ${what} failed:`, err);
+    };
+
+    for (const [accountId, msgs] of Object.entries(byAccount)) {
+      let account, trashPath, allTrashPaths, allDraftsPaths;
+      try {
+        const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+        account = accountResult.rows[0];
+        trashPath = await resolveTrashFolder(accountId, msgs[0].folder_mappings);
+        allTrashPaths = await resolveAllTrashPaths(accountId, msgs[0].folder_mappings);
+        allDraftsPaths = await resolveAllDraftsPaths(accountId, msgs[0].folder_mappings);
+      } catch (err) {
+        groupFailed(`account ${accountId}`, err);
+        continue;
+      }
+
+      if (!trashPath) {
+        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length} messages`);
+        continue;
+      }
+
+      // Drafts, and letters the client saw in Trash, are permanently deleted. A letter in Trash
+      // the client saw elsewhere is there already. The rest move to Trash.
+      const isDraft = m => allDraftsPaths.has(m.folder);
+      const inTrash = m => !isDraft(m) && allTrashPaths.has(m.folder);
+      const toExpunge = msgs.filter(m => isDraft(m) || (inTrash(m) && wantsForever(intent, m.id, allTrashPaths)));
+      alreadyTrashed.push(...msgs.filter(m => inTrash(m) && !wantsForever(intent, m.id, allTrashPaths)));
+      const toMove    = msgs.filter(m => !isDraft(m) && !inTrash(m));
+
+      // A letter whose move into Trash has not reached the server has no uid there to expunge.
+      movePending.push(...toExpunge.filter(m => isPendingUid(m.uid)));
+      const expungeNow = toExpunge.filter(m => !isPendingUid(m.uid));
+
+      // Permanently delete, grouped by actual folder, under a claim (expungeClaimed).
+      if (expungeNow.length) {
+        const byExpungeFolder = {};
+        for (const msg of expungeNow) {
+          (byExpungeFolder[msg.folder] = byExpungeFolder[msg.folder] || []).push(msg);
+        }
+        for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
+          if (busy.skip(accountId)) break;
+          let outcome;
+          try {
+            outcome = await expungeClaimed(expungeFolder, folderMsgs,
+              uids => busy.run(accountId, () => imapManager.bulkPermanentDelete(account, uids, expungeFolder)));
+          } catch (err) {
+            groupFailed(`expunge from ${expungeFolder}`, err);
+            continue;
+          }
+          if (!outcome) continue;
+          commitExpunged(outcome.deleted);
+          movePending.push(...outcome.changed);
+          const done = new Set(outcome.deleted.map(m => m.id));
+          for (const m of folderMsgs) {
+            if (!done.has(m.id) && !outcome.changed.includes(m) && !outcome.gone.includes(m)) {
+              console.error(`bulk-delete IMAP expunge uid ${m.uid} from ${expungeFolder}: IMAP delete failed`);
+            }
+          }
+        }
+      }
+
+      if (toMove.length) {
+        try {
+          const moved = await queueMove(accountId, toMove, trashPath, { movedBy: req.session.userId });
+          commitMoved(moved);
+          if (moved.length) imapManager.broadcast({ type: 'folder_updated', folder: trashPath, accountId });
+        } catch (err) {
+          groupFailed(`move to ${trashPath}`, err);
+        }
+      }
     }
 
-    recordAudit([
-      ...deletedMessageEntries(req.session.userId, expungeSucceeded, true),
-      ...deletedMessageEntries(req.session.userId, trashMoved, false),
-    ]);
+    // Nothing went through: a busy mailbox, letters still being moved, or failures.
+    if (!expungeSucceeded.length && !trashMoved.length && !alreadyTrashed.length) {
+      if (busy.busy) return sendMailboxBusy(res, busy.reason);
+      if (failedGroups) return res.status(500).json({ error: 'Failed to delete messages' });
+      if (movePending.length) return sendMovePending(res);
+    }
 
     // Refresh GTD section data for any deleted thread that still carries a GTD label sibling.
     notifyMailMutation(owned);
 
-    const deleted = [...expungeSucceeded.map(m => m.id), ...trashMoved.map(m => m.id)];
-    // A busy mailbox explains the rest first; otherwise letters still being moved do.
+    const deleted = [...expungeSucceeded.map(m => m.id), ...trashMoved.map(m => m.id), ...alreadyTrashed.map(m => m.id)];
+    // A busy mailbox explains the rest first; otherwise letters still being moved do. A group that
+    // failed otherwise is told by its letters missing from `deleted`.
     const why = busy.busy ? busy.flag() : (movePending.length ? { code: MOVE_PENDING_CODE } : {});
     res.json({ ok: true, deleted, ...why });
   } catch (err) {
@@ -1938,22 +2074,36 @@ router.delete('/messages/:id', async (req, res) => {
 
   const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
   const account = accountResult.rows[0];
-  const wasUnread = !message.is_read ? 1 : 0;
+  const intent = deleteIntent(req.body);
+
+  // Delete forever, server-first, under a claim (expungeClaimed). A letter whose move is pending
+  // has no uid here yet; one moved, changed or claimed by another delete meanwhile waits too.
+  // Returns true when the response was sent with an error.
+  const expungeOne = async (failMessage) => {
+    if (isPendingUid(message.uid)) { sendMovePending(res); return true; }
+    let outcome;
+    try {
+      outcome = await expungeClaimed(message.folder, [message], async ([uid]) => {
+        await imapManager.permanentDeleteMessage(account, uid, message.folder);
+        return { succeeded: [uid], failed: [] };
+      });
+    } catch (err) {
+      console.error(`IMAP permanent delete failed: ${err.message}`);
+      if (isMailboxBusyError(err)) { sendMailboxBusy(res, err); return true; }
+      res.status(500).json({ error: failMessage });
+      return true;
+    }
+    if (outcome.changed.length) { sendMovePending(res); return true; }
+    if (!outcome.deleted.length) { res.status(404).json({ error: 'Message not found' }); return true; }
+    const [gone] = outcome.deleted;
+    adjustFolderCounts(message.account_id, message.folder, -1, gone.is_read ? 0 : -1);
+    return false;
+  };
 
   // Drafts bypass Trash and are permanently deleted (consistent with all major email clients).
   const allDraftsPaths = await resolveAllDraftsPaths(message.account_id, account.folder_mappings);
   if (allDraftsPaths.has(message.folder)) {
-    // Permanent delete stays server-first; a letter whose move is pending has no uid here yet.
-    if (isPendingUid(message.uid)) return sendMovePending(res);
-    try {
-      await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
-    } catch (err) {
-      console.error('IMAP permanent delete (draft) failed:', err.message);
-      if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
-      return res.status(500).json({ error: 'Failed to delete draft' });
-    }
-    await query('DELETE FROM messages WHERE id = $1', [id]);
-    adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+    if (await expungeOne('Failed to delete draft')) return;
     recordAudit(deletedMessageEntries(req.session.userId, [message], true));
     imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id });
     return res.json({ ok: true });
@@ -1967,6 +2117,12 @@ router.delete('/messages/:id', async (req, res) => {
     return res.status(422).json({ error: 'No Trash folder configured for this account' });
   }
 
+  // In Trash already, and the client did not see it there: an earlier delete moved it (or is
+  // moving it). The delete is done; deleting it forever is not what was asked (deleteIntent).
+  if (strategy.action === 'expunge' && !wantsForever(intent, id, allTrashPaths)) {
+    return res.json({ ok: true, alreadyInTrash: true });
+  }
+
   if (strategy.action === 'move') {
     // DB-first: the row is in Trash at once and the server MOVE is queued (queueMove).
     const moved = await queueMove(message.account_id, [message], trashPath, { movedBy: req.session.userId });
@@ -1975,20 +2131,9 @@ router.delete('/messages/:id', async (req, res) => {
       return res.status(answer.status).json({ error: answer.error, ...(answer.code ? { code: answer.code } : {}) });
     }
     imapManager.broadcast({ type: 'folder_updated', folder: trashPath, accountId: message.account_id });
-  } else {
-    // strategy.action === 'expunge': message is already in Trash — permanently delete. That stays
-    // server-first (see bulk-delete), and a letter whose move into Trash is pending has no uid
-    // there yet.
-    if (isPendingUid(message.uid)) return sendMovePending(res);
-    try {
-      await imapManager.permanentDeleteMessage(account, message.uid, message.folder);
-    } catch (err) {
-      console.error('IMAP permanent delete failed:', err.message);
-      if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
-      return res.status(500).json({ error: 'Failed to delete message' });
-    }
-    await query('DELETE FROM messages WHERE id = $1', [id]);
-    adjustFolderCounts(message.account_id, message.folder, -1, -wasUnread);
+  } else if (await expungeOne('Failed to delete message')) {
+    // strategy.action === 'expunge': the client saw the letter in Trash and it is still there.
+    return;
   }
   recordAudit(deletedMessageEntries(req.session.userId, [message], strategy.action === 'expunge'));
   imapManager.broadcast({ type: 'folder_updated', folder: message.folder, accountId: message.account_id });

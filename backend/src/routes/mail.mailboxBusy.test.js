@@ -6,7 +6,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 // changes, attachments) answer 503 { code: 'mailbox_busy' }, which the client shows as "the
 // mailbox is busy, try again". Moves (move, archive, delete to Trash, spam/not spam) are DB-first
 // (services/moveQueue.js): they never wait for the server and never answer busy.
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => {
+  const query = vi.fn();
+  return { query };
+});
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
 vi.mock('../index.js', () => ({
   imapManager: {
@@ -96,10 +99,18 @@ beforeEach(() => {
     if (/FROM messages m[\s\S]*m\.id = ANY/.test(sql)) return { rows: params[0].map((id) => rows[id]).filter(Boolean) };
     if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: [{ id: params[0], folder_mappings: null }] };
     if (sql.includes('SELECT 1 FROM folders')) return { rows: [{ '?column?': 1 }] };
+    // A permanent delete claims its rows, then removes the ones the server deleted (expungeClaimed).
+    if (sql.includes('SET expunge_claim = $1')) return { rows: params[1].map((id) => rows[id]).filter(Boolean) };
+    if (sql.includes('DELETE FROM messages m') && sql.includes('expunge_claim = $1')) return { rows: params[1].map((id) => rows[id]) };
     return { rows: [], rowCount: 0 };
   });
 });
 afterEach(() => { vi.restoreAllMocks(); });
+
+// A delete names the folder the client listed each letter in (deleteIntent): these letters were
+// seen where they are, so the ones in Trash are deleted forever.
+const deleteOne = (id) => call('DELETE', `/messages/${id}`, { folder: rows[id].folder });
+const bulkDelete = (ids) => call('POST', '/messages/bulk-delete', { ids, folders: Object.fromEntries(ids.map(id => [id, rows[id].folder])) });
 
 const call = async (method, path, body) => {
   const res = await fetch(`${base}/api/mail${path}`, {
@@ -157,12 +168,12 @@ for (const [what, busy, code] of [
 
   it('on delete of a message already in Trash', async () => {
     imapManager.permanentDeleteMessage.mockRejectedValue(busy());
-    expectBusy(await call('DELETE', `/messages/${TRASH_ID}`));
+    expectBusy(await deleteOne(TRASH_ID));
   });
 
   it('on bulk delete of messages already in Trash', async () => {
     imapManager.bulkPermanentDelete.mockRejectedValue(busy());
-    expectBusy(await call('POST', '/messages/bulk-delete', { ids: [TRASH_ID] }));
+    expectBusy(await bulkDelete([TRASH_ID]));
   });
 
   it('commits the moves to Trash when the permanent delete of the same request finds the pool busy', async () => {
@@ -170,7 +181,7 @@ for (const [what, busy, code] of [
     // busy. The move must be written, counted and journaled, and the response must name it, or the
     // UI restores a letter the panel already shows in Trash.
     imapManager.bulkPermanentDelete.mockRejectedValue(busy());
-    const res = await call('POST', '/messages/bulk-delete', { ids: [INBOX_ID, TRASH_ID] });
+    const res = await bulkDelete([INBOX_ID, TRASH_ID]);
     expect(res.status).toBe(200);
     expect(res.body.deleted).toEqual([INBOX_ID]);
     expect(res.body.busy).toBe(true);
@@ -206,7 +217,7 @@ for (const [what, busy, code] of [
 
   it('keeps other failures as they were', async () => {
     imapManager.permanentDeleteMessage.mockRejectedValue(new Error('Mailbox does not exist'));
-    const res = await call('DELETE', `/messages/${TRASH_ID}`);
+    const res = await deleteOne(TRASH_ID);
     expect(res.status).toBe(500);
     expect(res.body.code).toBeUndefined();
     imapManager.emptyFolder.mockRejectedValue(new Error('Mailbox does not exist'));
@@ -227,21 +238,21 @@ describe('a bulk request over two mailboxes names the reason both share', () => 
 
   it('says busy when one mailbox is busy and the other rejects the password', async () => {
     failByAccount({ [ACCOUNT_ID]: poolBusy, [OTHER_ACCOUNT_ID]: authHeld });
-    const res = await call('POST', '/messages/bulk-delete', { ids: [TRASH_ID, OTHER_ID] });
+    const res = await bulkDelete([TRASH_ID, OTHER_ID]);
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('mailbox_busy');
   });
 
   it('says the password was rejected when that holds back every busy mailbox', async () => {
     failByAccount({ [ACCOUNT_ID]: authHeld, [OTHER_ACCOUNT_ID]: authHeld });
-    const res = await call('POST', '/messages/bulk-delete', { ids: [TRASH_ID, OTHER_ID] });
+    const res = await bulkDelete([TRASH_ID, OTHER_ID]);
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('mailbox_auth_rejected');
   });
 
   it('keeps the rejected-password code on a partial success where only that mailbox failed', async () => {
     failByAccount({ [OTHER_ACCOUNT_ID]: authHeld });
-    const res = await call('POST', '/messages/bulk-delete', { ids: [TRASH_ID, OTHER_ID] });
+    const res = await bulkDelete([TRASH_ID, OTHER_ID]);
     expect(res.status).toBe(200);
     expect(res.body.deleted).toEqual([TRASH_ID]);
     expect(res.body.code).toBe('mailbox_auth_rejected');
@@ -250,10 +261,10 @@ describe('a bulk request over two mailboxes names the reason both share', () => 
 
 describe('a letter whose move has not reached the server', () => {
   it('cannot be deleted permanently yet: 409 move_pending, nothing sent', async () => {
-    const res = await call('DELETE', `/messages/${PENDING_ID}`);
+    const res = await deleteOne(PENDING_ID);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('move_pending');
-    const bulk = await call('POST', '/messages/bulk-delete', { ids: [PENDING_ID] });
+    const bulk = await bulkDelete([PENDING_ID]);
     expect(bulk.status).toBe(409);
     expect(bulk.body.code).toBe('move_pending');
     expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
@@ -262,7 +273,7 @@ describe('a letter whose move has not reached the server', () => {
 
   it('names move_pending for the rest of a bulk delete that went through otherwise', async () => {
     imapManager.bulkPermanentDelete.mockImplementation(async (_account, uids) => ({ succeeded: uids, failed: [] }));
-    const res = await call('POST', '/messages/bulk-delete', { ids: [TRASH_ID, PENDING_ID] });
+    const res = await bulkDelete([TRASH_ID, PENDING_ID]);
     expect(res.status).toBe(200);
     expect(res.body.deleted).toEqual([TRASH_ID]);
     expect(res.body.code).toBe('move_pending');

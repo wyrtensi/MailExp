@@ -1,6 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => {
+  const query = vi.fn();
+  return { query };
+});
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
 vi.mock('../index.js', () => ({
   imapManager: {
@@ -66,6 +69,9 @@ beforeEach(() => {
     if (/FROM messages m\s+WHERE m\.id = \$1/.test(sql)) return { rows: rows[params[0]] ? [rows[params[0]]] : [] };
     if (/FROM messages m\s+JOIN email_accounts a/.test(sql)) return { rows: params[0].map((id) => rows[id]) };
     if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: [{ id: ACCOUNT_ID, folder_mappings: null }] };
+    // A permanent delete claims its rows, then removes the ones the server deleted (expungeClaimed).
+    if (sql.includes('SET expunge_claim = $1')) return { rows: params[1].map((id) => rows[id]).filter(Boolean) };
+    if (sql.includes('DELETE FROM messages m') && sql.includes('expunge_claim = $1')) return { rows: params[1].map((id) => rows[id]) };
     return { rows: [] };
   });
 });
@@ -79,10 +85,15 @@ const deleted = (messageId, folder, permanent) => ({
   details: { messageId, folder, from: 'sender@example.com', permanent },
 });
 
+// The client names the folder it listed the letter in; only one seen in Trash is deleted forever.
+const del = (id) => fetch(`${base}/api/mail/messages/${id}`, {
+  method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ folder: rows[id].folder }),
+});
+
 describe('deleting messages is journaled', () => {
   it('records a move to Trash, a delete from Trash and a draft delete without the subject', async () => {
     for (const id of [INBOX_ID, TRASH_ID, DRAFT_ID]) {
-      expect((await fetch(`${base}/api/mail/messages/${id}`, { method: 'DELETE' })).status).toBe(200);
+      expect((await del(id)).status).toBe(200);
     }
     await vi.waitFor(() => expect(journaled()).toHaveLength(3));
     expect(journaled()).toEqual([
@@ -95,14 +106,14 @@ describe('deleting messages is journaled', () => {
 
   it('records nothing when the server refuses a permanent delete', async () => {
     imapManager.permanentDeleteMessage.mockRejectedValueOnce(new Error('NO'));
-    expect((await fetch(`${base}/api/mail/messages/${TRASH_ID}`, { method: 'DELETE' })).status).toBe(500);
+    expect((await del(TRASH_ID)).status).toBe(500);
     expect(journaled()).toEqual([]);
   });
 
   it('records one entry per message that bulk delete removed', async () => {
     imapManager.bulkPermanentDelete.mockResolvedValue({ succeeded: [22], failed: [] });
     const res = await fetch(`${base}/api/mail/messages/bulk-delete`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID] }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID], folders: { [INBOX_ID]: 'INBOX', [TRASH_ID]: 'Trash' } }),
     });
     expect(res.status).toBe(200);
     await vi.waitFor(() => expect(journaled()).toHaveLength(2));
@@ -116,7 +127,7 @@ describe('deleting messages is journaled', () => {
     failJournal = true;
     imapManager.bulkPermanentDelete.mockResolvedValue({ succeeded: [], failed: [22] });
     const res = await fetch(`${base}/api/mail/messages/bulk-delete`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID] }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: [INBOX_ID, TRASH_ID], folders: { [INBOX_ID]: 'INBOX', [TRASH_ID]: 'Trash' } }),
     });
     expect(res.status).toBe(200);
     expect((await res.json()).deleted).toEqual([INBOX_ID]);
