@@ -142,7 +142,7 @@ describe('sync intervals are install-wide', () => {
     await patchPreferences({ session: { userId: 'user-1' }, body: { syncInterval: '15', folderSyncInterval: '0' } }, res);
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/syncInterval|folderSyncInterval/);
-    expect(params).toHaveLength(39);
+    expect(params).toHaveLength(40);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
@@ -162,5 +162,33 @@ describe('sync intervals are install-wide', () => {
     const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
     await getPreferences({ session: { userId: 'user-1' } }, res);
     expect(res.json).toHaveBeenCalledWith({ theme: 'dark', syncInterval: 120, categorizationEnabled: true });
+  });
+});
+
+describe('PATCH /auth/preferences hoverActionSet (#440)', () => {
+  const call = async (body) => {
+    const req = { session: { userId: 'user-1' }, body };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences(req, res);
+    return { req, res };
+  };
+
+  it('merges a sanitized set into preferences as JSONB, canonical order, unknown keys dropped', async () => {
+    // The frontend saves through schedulePrefSave like every other preference; without this
+    // clause the key is silently dropped server-side and the setting never syncs across
+    // devices — localStorage makes it LOOK persisted on the device that set it.
+    const { res } = await call({ hoverActionSet: ['snooze', 'bogus', 'archive'] });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('hoverActionSet', $40::jsonb)");
+    expect(params[39]).toBe(JSON.stringify(['archive', 'snooze'])); // canonical order, 'bogus' gone
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('leaves the stored value untouched when the key is absent or malformed', async () => {
+    await call({ theme: 'dark' });
+    expect(query.mock.calls[0][1][39]).toBeNull();
+    query.mockClear();
+    await call({ hoverActionSet: 'markRead' }); // not an array — ignored, not stored
+    expect(query.mock.calls[0][1][39]).toBeNull();
   });
 });
