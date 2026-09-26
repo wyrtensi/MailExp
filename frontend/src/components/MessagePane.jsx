@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useState, useRef
 import { useTranslation } from 'react-i18next';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { deleteView, deleteViewFolder } from '../utils/deleteIntent.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { getEffectiveShortcuts, parseModKey, modCompactLabel } from '../utils/defaultShortcuts.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1686,6 +1687,8 @@ ${bodyContent}
 
   const handleDelete = () => {
     const deleted = message;
+    // The folder the user saw it in: the view's, not the letter's own (utils/deleteIntent.js).
+    const seenFolder = deleteViewFolder(deleted, deleteView(useStore.getState()));
     setPendingDelete(deleted.id);
     removeMessage(deleted.id);
     closeWindowIfWindowed();
@@ -1694,8 +1697,7 @@ ${bodyContent}
     const timer = setTimeout(async () => {
       if (undone) return;
       try {
-        // The folder the user saw it in: only a letter seen in Trash is deleted forever.
-        await api.deleteMessage(deleted.id, deleted.folder);
+        await api.deleteMessage(deleted.id, seenFolder);
         setCompletedDelete(deleted.id);
       } catch (err) {
         clearDeleteGuard(deleted.id);

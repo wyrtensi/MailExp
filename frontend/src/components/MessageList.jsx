@@ -34,7 +34,7 @@ import { createLatestRequest } from '../utils/latestRequest.js';
 import { draftComposeFields } from '../utils/draftSignature.js';
 import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
 import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete, threadDeleteGuardKey } from '../utils/pendingDeletes.js';
-import { seenFolders, foldersFor } from '../utils/deleteIntent.js';
+import { deleteView, deleteViewFolder, rowSeenFolders, foldersFor } from '../utils/deleteIntent.js';
 import {
   archiveInChunks,
   archiveTargetGroupsForRows,
@@ -998,6 +998,8 @@ export default function MessageList() {
     const isThreadRow = isThreadListRow(message);
     const key = pendingDeleteTimerKey(message, isThreadRow);
     if (pendingDeleteTimers.current.has(key)) return;
+    // Read the view now: the folder the user saw this row in (utils/deleteIntent.js).
+    const view = deleteView(useStore.getState());
 
     let deleteMessages = [message];
     try {
@@ -1010,7 +1012,7 @@ export default function MessageList() {
 
     const ids = [...new Set(deleteMessages.map(msg => msg.id).filter(Boolean))];
     const visibleMessage = message;
-    const folders = seenFolders(deleteMessages, [visibleMessage]);
+    const folders = rowSeenFolders([visibleMessage], [deleteMessages], row => deleteViewFolder(row, view));
     ids.forEach((id) => setPendingDelete(id));
 
     // Advance selection to the next visible message before removing this one
@@ -1181,7 +1183,7 @@ export default function MessageList() {
         clearTimeout(timer);
         const deleteIds = ids?.length ? ids : [message.id];
         try {
-          api.deleteMessagesOnExit(deleteIds, folders ?? seenFolders([message])).catch(() => {});
+          api.deleteMessagesOnExit(deleteIds, folders).catch(() => {});
         } catch { /* keepalive not supported — best effort */ }
       });
       pendingDeleteTimers.current.clear();
@@ -1198,11 +1200,10 @@ export default function MessageList() {
     pendingDeleteTimers.current.forEach(({ timer, message, ids, folders }) => {
       clearTimeout(timer);
       const deleteIds = ids?.length ? ids : [message.id];
-      const seen = folders ?? seenFolders([message]);
       const deletePromise =
         deleteIds.length > 1
-          ? api.bulkDelete(deleteIds, seen)
-          : api.deleteMessage(deleteIds[0], seen[deleteIds[0]]);
+          ? api.bulkDelete(deleteIds, folders)
+          : api.deleteMessage(deleteIds[0], folders?.[deleteIds[0]]);
       deletePromise
         .then(result => {
           const actuallyDeleted = new Set(result?.deleted ?? deleteIds);
@@ -1469,11 +1470,14 @@ export default function MessageList() {
     // single-row delete path — without this only each thread's visible
     // (newest) message was deleted and the rest of the thread survived.
     let deleteIds = ids;
-    let folders = seenFolders(msgs);
+    // Every letter takes the folder the user saw its row in (utils/deleteIntent.js).
+    const view = deleteView(useStore.getState());
+    const folderOf = row => deleteViewFolder(row, view);
+    let folders = rowSeenFolders(msgs, [], folderOf);
     try {
       const resolved = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m, { excludeDrafts: true })));
       deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
-      folders = seenFolders(resolved.flat(), msgs);
+      folders = rowSeenFolders(msgs, resolved, folderOf);
     } catch (err) {
       console.error('Failed to load thread for bulk delete:', err.message);
     }
