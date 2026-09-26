@@ -1,7 +1,8 @@
 import { STATUS_STALE_MS } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { ZipArchive } from 'archiver';
-import { query, withTransaction } from '../services/db.js';
+import { query } from '../services/db.js';
+import { claimForExpunge, finishExpunge, releaseExpungeClaim } from '../services/expungeClaims.js';
 import { SENDER_HISTORY_DEFAULT_LIMIT, SENDER_HISTORY_MAX_LIMIT, senderHistory } from '../services/senderHistory.js';
 import { conversation } from '../services/conversation.js';
 import { shouldBlockImages } from '../utils/imageBlocking.js';
@@ -1445,38 +1446,45 @@ function wantsForever(intent, id, allTrashPaths) {
   return intent.permanent || allTrashPaths.has(intent.seen(id));
 }
 
-// Delete forever `rows` (one account, all in `folder` with a server uid, as the route read them)
-// under their row locks. The locks are held across the server delete: a move out of the folder
-// (moveQueue.enqueue locks the row too) either went first, and the row is left alone here, or
-// waits and then finds the row gone. Without them, a letter someone just moved out of Trash could
-// be expunged at its old uid while the panel shows it restored. Only rows still at the folder and
-// uid the route read are deleted. imapDelete(uids) resolves to { succeeded, failed } (uids), or to
-// null when the mailbox was busy (nothing deleted). Returns { deleted, changed, gone }, each
-// a list of rows (deleted with is_read as locked), or null when busy.
-async function expungeLocked(folder, rows, imapDelete) {
-  return withTransaction(async (tx) => {
-    const { rows: locked } = await tx.query(
-      'SELECT id, folder, uid, is_read FROM messages WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
-      [rows.map(r => r.id)]
-    );
-    const now = new Map(locked.map(r => [r.id, r]));
-    const gone = rows.filter(r => !now.has(r.id));
-    const still = rows.filter(r => now.get(r.id)?.folder === folder && Number(now.get(r.id).uid) === Number(r.uid));
-    const changed = rows.filter(r => now.has(r.id) && !still.includes(r));
-    if (!still.length) return { deleted: [], changed, gone };
-    const outcome = await imapDelete(still.map(r => r.uid));
-    if (!outcome) return null;
-    const ok = new Set(outcome.succeeded.map(String));
-    const expunged = still.filter(r => ok.has(String(r.uid)));
-    if (!expunged.length) return { deleted: [], changed, gone };
-    const { rows: removed } = await tx.query(
-      'DELETE FROM messages WHERE id = ANY($1::uuid[]) RETURNING id',
-      [expunged.map(r => r.id)]
-    );
-    const removedIds = new Set(removed.map(r => r.id));
-    const deleted = expunged.filter(r => removedIds.has(r.id)).map(r => ({ ...r, is_read: now.get(r.id).is_read }));
-    return { deleted, changed, gone };
-  });
+// Delete forever `rows` (one account, all in `folder` with a server uid, as the route read them).
+// No transaction or row lock is held across the server delete (it can take minutes): the rows are
+// claimed first (services/expungeClaims.js). A claimed row is not moved by the move queue and not
+// claimed by another permanent delete. Only rows still at the folder and uid the route read are
+// claimed, so a letter someone moved out of Trash meanwhile is left alone ('changed'), and so is
+// one another permanent delete holds. imapDelete(uids) resolves to { succeeded, failed } (uids),
+// or to null when the mailbox was busy (nothing deleted). The rows the server deleted are removed;
+// the claim on the rest is released. Returns { deleted, changed, gone }, each a list of the rows
+// given (deleted with is_read as removed), or null when busy.
+async function expungeClaimed(folder, rows, imapDelete) {
+  const { token, claimed } = await claimForExpunge(folder, rows);
+  const still = rows.filter(r => claimed.has(r.id));
+  const unclaimed = rows.filter(r => !claimed.has(r.id));
+  let gone = [];
+  let changed = [];
+  if (unclaimed.length) {
+    const { rows: present } = await query('SELECT id FROM messages WHERE id = ANY($1::uuid[])', [unclaimed.map(r => r.id)]);
+    const exists = new Set(present.map(r => r.id));
+    gone = unclaimed.filter(r => !exists.has(r.id));
+    changed = unclaimed.filter(r => exists.has(r.id));
+  }
+  if (!still.length) return { deleted: [], changed, gone };
+  let removed = new Map();
+  let outcome;
+  try {
+    outcome = await imapDelete(still.map(r => r.uid));
+    if (outcome) {
+      const ok = new Set(outcome.succeeded.map(String));
+      removed = await finishExpunge(token, folder, still.filter(r => ok.has(String(r.uid))));
+    }
+  } finally {
+    // What was not removed goes back to normal. A failure here leaves the claim to the sweep.
+    const keep = still.filter(r => !removed.has(r.id)).map(r => r.id);
+    await releaseExpungeClaim(token, keep)
+      .catch(err => console.error(`Releasing a permanent-delete claim failed: ${err.message}`));
+  }
+  if (!outcome) return null;
+  const deleted = still.filter(r => removed.has(r.id)).map(r => ({ ...r, is_read: removed.get(r.id).is_read }));
+  return { deleted, changed, gone };
 }
 
 // Bulk delete (move to trash)
@@ -1551,7 +1559,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
       movePending.push(...toExpunge.filter(m => isPendingUid(m.uid)));
       const expungeNow = toExpunge.filter(m => !isPendingUid(m.uid));
 
-      // Permanently delete, grouped by actual folder, under the row locks (expungeLocked).
+      // Permanently delete, grouped by actual folder, under a claim (expungeClaimed).
       if (expungeNow.length) {
         const byExpungeFolder = {};
         for (const msg of expungeNow) {
@@ -1559,7 +1567,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
         }
         for (const [expungeFolder, folderMsgs] of Object.entries(byExpungeFolder)) {
           if (busy.skip(accountId)) break;
-          const outcome = await expungeLocked(expungeFolder, folderMsgs,
+          const outcome = await expungeClaimed(expungeFolder, folderMsgs,
             uids => busy.run(accountId, () => imapManager.bulkPermanentDelete(account, uids, expungeFolder)));
           if (!outcome) continue;
           expungeSucceeded.push(...outcome.deleted);
@@ -1586,7 +1594,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
       if (movePending.length) return sendMovePending(res);
     }
 
-    // Permanently deleted: expungeLocked removed the rows; the counts follow the rows it removed.
+    // Permanently deleted: expungeClaimed removed the rows; the counts follow the rows it removed.
     if (expungeSucceeded.length) {
       const srcDeltas = {};
       for (const msg of expungeSucceeded) {
@@ -2017,14 +2025,14 @@ router.delete('/messages/:id', async (req, res) => {
   const account = accountResult.rows[0];
   const intent = deleteIntent(req.body);
 
-  // Delete forever, server-first, under the row lock (expungeLocked). A letter whose move is
-  // pending has no uid here yet; one moved or changed while this request looked waits too.
+  // Delete forever, server-first, under a claim (expungeClaimed). A letter whose move is pending
+  // has no uid here yet; one moved, changed or claimed by another delete meanwhile waits too.
   // Returns true when the response was sent with an error.
   const expungeOne = async (failMessage) => {
     if (isPendingUid(message.uid)) { sendMovePending(res); return true; }
     let outcome;
     try {
-      outcome = await expungeLocked(message.folder, [message], async ([uid]) => {
+      outcome = await expungeClaimed(message.folder, [message], async ([uid]) => {
         await imapManager.permanentDeleteMessage(account, uid, message.folder);
         return { succeeded: [uid], failed: [] };
       });

@@ -33,6 +33,7 @@ import { query, withTransaction } from './db.js';
 import { adjustFolderCounts } from '../utils/mailUtils.js';
 import { recordAudit } from './auditLog.js';
 import { isMailboxBusyError, createKeyedSemaphore } from './imapManager.js';
+import { releaseStaleExpungeClaims } from './expungeClaims.js';
 
 export const MOVE_MAX_ATTEMPTS = 8;
 export const MOVE_RETRY_BASE_MS = 15 * 1000;
@@ -216,6 +217,9 @@ export class MoveQueue {
 
   // ── Routes ───────────────────────────────────────────────────────────────────────────────
 
+  // A row claimed by a permanent delete (services/expungeClaims.js) is not moved: enqueue leaves
+  // it out, and the route answers move_pending.
+  //
   // Locking: every statement that locks several rows locks them in id order (messages here, moves
   // in deferFlags and the claim), so overlapping bulk requests queue instead of deadlocking.
   //
@@ -243,6 +247,7 @@ export class MoveQueue {
         `WITH src AS (
            SELECT id, account_id, folder, uid, message_id, is_read FROM messages
             WHERE id = ANY($1::uuid[]) AND account_id = $2 AND uid > 0 AND folder <> $3
+              AND expunge_claim IS NULL
             ORDER BY id
             FOR UPDATE
          ), ins AS (
@@ -347,10 +352,13 @@ export class MoveQueue {
     const following = next.rows[0];
     if (following) return { op: following, moved: { id: rowId, from: following.from_folder, isRead: !!following.from_is_read } };
     // The move settled in between (the row has a server uid again) or the row is gone.
-    const { rows: [row] } = await query('SELECT id, uid, folder, is_read FROM messages WHERE id = $1 AND account_id = $2', [rowId, accountId]);
+    const { rows: [row] } = await query('SELECT id, uid, folder, is_read, expunge_claim FROM messages WHERE id = $1 AND account_id = $2', [rowId, accountId]);
     if (!row) return null;
     if (row.folder === dest) return { moved: { id: rowId, from: dest, isRead: !!row.is_read } };
     if (isPendingUid(row.uid)) return null; // moved by another request at this very moment
+    // Being deleted forever (services/expungeClaims.js): it does not move; the route answers
+    // move_pending.
+    if (row.expunge_claim) return null;
     const [again] = await this.enqueue(accountId, [row], dest, { dropRow, movedBy });
     return again ? { moved: again } : null;
   }
@@ -442,6 +450,9 @@ export class MoveQueue {
   // expected arrivals are rebuilt before any sync runs (index.js calls this right after the
   // migrations, before the mailboxes connect).
   async resume() {
+    // No permanent delete survives a restart: its claims go (services/expungeClaims.js).
+    const released = await releaseStaleExpungeClaims(0);
+    if (released) console.warn(`Move queue: released ${released} permanent-delete claim(s) left by the last run`);
     await query(
       `UPDATE message_moves SET state = CASE WHEN sent_at IS NULL THEN 'queued' ELSE 'awaiting_uid' END,
               awaiting_since = CASE WHEN sent_at IS NULL THEN NULL ELSE now() END,
@@ -473,6 +484,9 @@ export class MoveQueue {
 
   async tick() {
     await this.sweep();
+    // Claims of a permanent delete whose process stopped mid-delete (services/expungeClaims.js).
+    const released = await releaseStaleExpungeClaims();
+    if (released) console.warn(`Move queue: released ${released} stale permanent-delete claim(s)`);
     const { rows } = await query(
       `SELECT DISTINCT account_id FROM message_moves
         WHERE next_attempt_at <= now()

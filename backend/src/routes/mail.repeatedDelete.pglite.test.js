@@ -35,6 +35,7 @@ vi.mock('../index.js', () => ({ get imapManager() { return mgrState.mgr; } }));
 
 const USER = '50000000-0000-4000-8000-0000000000aa';
 const { MoveQueue, placeholderUid } = await import('../services/moveQueue.js');
+const { EXPUNGE_CLAIM_LEASE_MS, releaseStaleExpungeClaims } = await import('../services/expungeClaims.js');
 const { ImapManager } = await import('../services/imapManager.js');
 const { adjustFolderCounts } = await import('../utils/mailUtils.js');
 const express = (await import('express')).default;
@@ -138,6 +139,21 @@ const send = async (method, path, body) => {
   return { status: res.status, body: await res.json() };
 };
 // `folder`: where the client listed the letter; omitted, the request is an older client's.
+// Holds every server delete until open(): the request is then mid-delete, its rows claimed.
+function gateExpunge() {
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  for (const fn of ['permanentDeleteMessage', 'bulkPermanentDelete']) {
+    const real = mgr()[fn].getMockImplementation();
+    mgr()[fn].mockImplementation(async (...args) => { await gate; return real(...args); });
+  }
+  return { open };
+}
+const claimOf = async (id) => {
+  const { rows: [r] } = await db.query(
+    'SELECT expunge_claim IS NOT NULL AS claimed, expunge_claimed_at IS NOT NULL AS stamped FROM messages WHERE id = $1', [id]);
+  return r ? { claimed: r.claimed, at: r.stamped ? 'set' : null } : null;
+};
 const del = (id, folder) => send('DELETE', `/messages/${id}`, folder === undefined ? undefined : { folder });
 const bulkDelete = (ids, folders) => send('POST', '/messages/bulk-delete', folders ? { ids, folders } : { ids });
 const row = async (id) => {
@@ -287,7 +303,7 @@ describe('deleting forever what the user sees in Trash still works', () => {
 });
 
 describe('a delete from Trash racing a move out of Trash', () => {
-  it('the move lands after the delete read the row: the delete sees the change under the lock and expunges nothing', async () => {
+  it('the move lands after the delete read the row: the claim finds the row changed and nothing is expunged', async () => {
     hooks.afterRead = async () => {
       const moved = await mgr().moveQueue.enqueue(ACCOUNT, [{ id: T, folder: 'Trash', uid: 21 }], 'INBOX');
       expect(moved).toHaveLength(1);
@@ -313,25 +329,104 @@ describe('a delete from Trash racing a move out of Trash', () => {
     expect(await row(U)).toBeNull();
   });
 
-  it('the move comes while the server delete is in flight: it waits for the lock and then finds the letter gone', async () => {
-    let release;
-    const gate = new Promise((resolve) => { release = resolve; });
-    const expunge = mgr().permanentDeleteMessage.getMockImplementation();
-    mgr().permanentDeleteMessage.mockImplementation(async (...args) => { await gate; return expunge(...args); });
-
+  it('a move that comes while the server delete is in flight is refused at once (move_pending); the delete finishes', async () => {
+    const gate = gateExpunge();
     const deleting = del(T, 'Trash');
     await vi.waitFor(() => expect(mgr().permanentDeleteMessage).toHaveBeenCalledTimes(1));
-    const moving = send('POST', '/messages/bulk-move', { ids: [T], folder: 'INBOX' });
-    // Never awaited inside the gate: the move waits on the delete's transaction.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    release();
-    const [deleted, moved] = await Promise.all([deleting, moving]);
-
-    expect(deleted.status).toBe(200);
+    // The row is claimed while the server deletes; no transaction is open meanwhile.
+    expect(await claimOf(T)).toMatchObject({ claimed: true });
+    const moved = await send('POST', '/messages/bulk-move', { ids: [T], folder: 'INBOX' });
     expect(moved.body.moved ?? []).toEqual([]);
+    expect(await mgr().moveQueue.enqueue(ACCOUNT, [{ id: T, folder: 'Trash', uid: 21 }], 'INBOX')).toEqual([]);
+    gate.open();
+    expect((await deleting).status).toBe(200);
     expect(await row(T)).toBeNull();
     expect(await moves()).toEqual([]);
     expect(expunged()).toEqual([['Trash', 21]]);
+  });
+});
+
+// A permanent delete claims its rows (services/expungeClaims.js, migration 0077) and holds no
+// transaction or row lock across the server delete. The claim is ordinary data, so these states are
+// tested here as they are.
+describe('the claim of a permanent delete', () => {
+  it('a second delete forever while the first is on the server answers move_pending and sends nothing', async () => {
+    const gate = gateExpunge();
+    const first = del(T, 'Trash');
+    await vi.waitFor(() => expect(mgr().permanentDeleteMessage).toHaveBeenCalledTimes(1));
+    const second = await del(T, 'Trash');
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe('move_pending');
+    const bulk = await bulkDelete([T], { [T]: 'Trash' });
+    expect(bulk.status).toBe(409);
+    gate.open();
+    expect((await first).status).toBe(200);
+    expect(expunged()).toEqual([['Trash', 21]]);
+    expect(deltas(ACCOUNT, 'Trash')).toEqual([[-1, -1]]);
+  });
+
+  it('is released when the server delete fails, and a retry deletes', async () => {
+    mgr().permanentDeleteMessage.mockRejectedValueOnce(new Error('connection lost'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await del(T, 'Trash')).status).toBe(500);
+    expect(await claimOf(T)).toEqual({ claimed: false, at: null });
+    expect(await row(T)).toEqual({ uid: 21, folder: 'Trash' });
+    expect((await del(T, 'Trash')).status).toBe(200);
+    expect(await row(T)).toBeNull();
+  });
+
+  it('is released when the mailbox is busy (bulk), and the letters stay', async () => {
+    mgr().bulkPermanentDelete.mockRejectedValueOnce(Object.assign(new Error('IMAP pool busy'), { poolExhausted: true }));
+    const res = await bulkDelete([T, U], { [T]: 'Trash', [U]: 'Trash' });
+    expect(res.status).toBe(503);
+    for (const id of [T, U]) expect(await claimOf(id)).toEqual({ claimed: false, at: null });
+    expect(await row(U)).toEqual({ uid: 22, folder: 'Trash' });
+  });
+
+  it('keeps the claim on what the server did not delete released, and removes only what it did', async () => {
+    mgr().bulkPermanentDelete.mockImplementationOnce(async (account, uids, folder) => {
+      box(account.id, folder).delete(21);
+      return { succeeded: [21], failed: [22] };
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await bulkDelete([T, U], { [T]: 'Trash', [U]: 'Trash' });
+    expect(res.body.deleted).toEqual([T]);
+    expect(await row(T)).toBeNull();
+    expect(await row(U)).toEqual({ uid: 22, folder: 'Trash' });
+    expect(await claimOf(U)).toEqual({ claimed: false, at: null });
+  });
+
+  it('a claim left by a process that stopped mid-delete blocks moves and deletes until the sweep releases it after the lease', async () => {
+    await db.query("UPDATE messages SET expunge_claim = gen_random_uuid(), expunge_claimed_at = now() - interval '1 minute' WHERE id = $1", [T]);
+    expect((await del(T, 'Trash')).status).toBe(409);
+    expect(await mgr().moveQueue.enqueue(ACCOUNT, [{ id: T, folder: 'Trash', uid: 21 }], 'INBOX')).toEqual([]);
+    // Within the lease the tick leaves it alone.
+    await mgr().moveQueue.tick();
+    expect((await claimOf(T)).claimed).toBe(true);
+    await db.query(`UPDATE messages SET expunge_claimed_at = now() - ($1::int * interval '1 millisecond') - interval '1 second' WHERE id = $2`, [EXPUNGE_CLAIM_LEASE_MS, T]);
+    await mgr().moveQueue.tick();
+    expect(await claimOf(T)).toEqual({ claimed: false, at: null });
+    expect((await del(T, 'Trash')).status).toBe(200);
+    expect(expunged()).toEqual([['Trash', 21]]);
+  });
+
+  it('every claim goes at startup (resume): no permanent delete survives a restart', async () => {
+    await db.query("UPDATE messages SET expunge_claim = gen_random_uuid(), expunge_claimed_at = now() WHERE id = ANY($1::uuid[])", [[T, U]]);
+    await mgr().moveQueue.resume();
+    mgr().moveQueue.stop();
+    for (const id of [T, U]) expect(await claimOf(id)).toEqual({ claimed: false, at: null });
+  });
+
+  it('a claim swept during the server delete (past the lease) removes nothing another request changed since', async () => {
+    const gate = gateExpunge();
+    const deleting = del(T, 'Trash');
+    await vi.waitFor(() => expect(mgr().permanentDeleteMessage).toHaveBeenCalledTimes(1));
+    await releaseStaleExpungeClaims(0);
+    // Past the lease the claim is gone, so the row is no longer this request's to remove: the letter
+    // is gone on the server and the next sync drops the row, as for any letter deleted elsewhere.
+    gate.open();
+    expect((await deleting).status).toBe(404);
+    expect(await row(T)).toEqual({ uid: 21, folder: 'Trash' });
   });
 });
 

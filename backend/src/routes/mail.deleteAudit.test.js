@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 vi.mock('../services/db.js', () => {
   const query = vi.fn();
-  return { query, withTransaction: async (fn) => fn({ query: (...args) => query(...args) }) };
+  return { query };
 });
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); } }));
 vi.mock('../index.js', () => ({
@@ -69,9 +69,9 @@ beforeEach(() => {
     if (/FROM messages m\s+WHERE m\.id = \$1/.test(sql)) return { rows: rows[params[0]] ? [rows[params[0]]] : [] };
     if (/FROM messages m\s+JOIN email_accounts a/.test(sql)) return { rows: params[0].map((id) => rows[id]) };
     if (sql.includes('FROM email_accounts WHERE id = $1')) return { rows: [{ id: ACCOUNT_ID, folder_mappings: null }] };
-    // The permanent delete re-reads its rows under lock, then removes them (expungeLocked).
-    if (sql.includes('FOR UPDATE')) return { rows: params[0].map((id) => rows[id]).filter(Boolean) };
-    if (sql.includes('DELETE FROM messages WHERE id = ANY')) return { rows: params[0].map((id) => ({ id })) };
+    // A permanent delete claims its rows, then removes the ones the server deleted (expungeClaimed).
+    if (sql.includes('SET expunge_claim = $1')) return { rows: params[1].map((id) => rows[id]).filter(Boolean) };
+    if (sql.includes('DELETE FROM messages m') && sql.includes('expunge_claim = $1')) return { rows: params[1].map((id) => rows[id]) };
     return { rows: [] };
   });
 });
