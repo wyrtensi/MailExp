@@ -424,11 +424,14 @@ export const useStore = create((set, get) => ({
     set({ scrollMode: mode });
     schedulePrefSave({ scrollMode: mode });
   },
-  // When true, search spans all folders instead of the current one (per device).
-  searchAllFolders: localStorage.getItem('mailexpert_search_all_folders') === '1',
+  // When true, search spans every folder of the selected mailbox(es) instead of just the
+  // current one (per device). Defaults ON: the owner wants search to cover the whole
+  // mailbox unless narrowed, so a stored value is only ever the opt-OUT ('0') — no stored
+  // value means "on", which is also what a fresh install/device gets.
+  searchAllFolders: localStorage.getItem('mailexpert_search_all_folders') !== '0',
   setSearchAllFolders: (v) => {
-    if (v) localStorage.setItem('mailexpert_search_all_folders', '1');
-    else localStorage.removeItem('mailexpert_search_all_folders');
+    if (v) localStorage.removeItem('mailexpert_search_all_folders');
+    else localStorage.setItem('mailexpert_search_all_folders', '0');
     set({ searchAllFolders: v });
   },
   swipeActions: (() => {
