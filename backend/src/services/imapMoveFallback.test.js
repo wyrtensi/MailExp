@@ -222,6 +222,32 @@ describe('move on a server without MOVE, when the COPY succeeds but the EXPUNGE 
     expect(server.folders.Archive.uids).toEqual([1]);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('in both folders'));
   });
+
+  it('bulkMoveMessages reports the batch copied with the source kept, not failed (UIDPLUS)', async () => {
+    const r = await mgr.bulkMoveMessages(acct, [4, 5], 'INBOX', 'Archive');
+    expect(r.succeeded).toEqual([4, 5]);
+    expect(r.failed).toEqual([]);
+    expect(r.sourceRetained).toEqual([4, 5]);
+    expect([...r.uidMap]).toEqual([[4, 1], [5, 2]]);
+  });
+
+  it('bulkMoveMessages without UIDPLUS: the source still has the letters, yet they are not failed', async () => {
+    // A search of the source would read "never moved", and a caller retrying a failed move would
+    // COPY the letters again on every attempt. UID 9 is stale (not in the source): not copied.
+    server = makeServer({ capabilities: ['IMAP4rev1'], refuseExpunge: true });
+    const r = await mgr.bulkMoveMessages(acct, [4, 5, 9], 'INBOX', 'Archive');
+    expect(r.succeeded).toEqual([4, 5]);
+    expect(r.failed).toEqual([9]);
+    expect(r.sourceRetained).toEqual([4, 5]);
+    expect(server.commands.filter(([c]) => c === 'COPY')).toHaveLength(1);
+    expect(server.folders.INBOX.uids).toEqual([4, 5, 6]);
+  });
+
+  it('a completed emulated move carries no sourceRetained', async () => {
+    server = makeServer();
+    const r = await mgr.bulkMoveMessages(acct, [4], 'INBOX', 'Archive');
+    expect(r.sourceRetained).toBeUndefined();
+  });
 });
 
 describe('move on a server without MOVE, when the COPY succeeds', () => {

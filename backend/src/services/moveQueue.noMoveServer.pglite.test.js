@@ -49,7 +49,7 @@ function uidSet(range, present) {
 }
 function connectionTo() {
   return Object.assign(new EventEmitter(), {
-    capabilities: new Map([['IMAP4rev1', true], ['UIDPLUS', true]]),
+    capabilities: new Map(server.capabilities.map(c => [c, true])),
     enabled: new Set(),
     states: { NOT_AUTHENTICATED: 1, AUTHENTICATED: 2, SELECTED: 3, LOGOUT: 4 },
     state: 2,
@@ -72,12 +72,14 @@ function connectionTo() {
       const dst = server.folders[destination];
       const uidMap = new Map(uids.map(u => [u, dst.uidNext++]));
       dst.uids.push(...uidMap.values());
-      return { path: this.mailbox.path, destination, uidValidity: 1n, uidMap };
+      const res = { path: this.mailbox.path, destination };
+      return this.capabilities.has('UIDPLUS') ? { ...res, uidValidity: 1n, uidMap } : res;
     },
     async messageDelete(range) {
       const src = server.folders[this.mailbox.path];
       const uids = uidSet(range, src.uids);
       server.commands.push('EXPUNGE');
+      if (server.refuseExpunge) return false; // imapflow expunge.js: a NO resolves false
       src.uids = src.uids.filter(u => !uids.includes(u));
       return true;
     },
@@ -124,7 +126,9 @@ beforeEach(async () => {
   resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
   ImapFlow.mockImplementation(function () { return connectionTo(); });
   server = {
+    capabilities: ['IMAP4rev1', 'UIDPLUS'],
     refuseCopy: true,
+    refuseExpunge: false,
     folders: { INBOX: { uids: [11], uidNext: 12 }, Archive: { uids: [], uidNext: 900 } },
     commands: [],
   };
@@ -173,5 +177,40 @@ describe('the move queue on a server without MOVE', () => {
     expect(server.folders.Archive.uids).toEqual([900]);
     expect(await moves()).toEqual([]);
     expect(await row()).toEqual({ uid: 900, folder: 'Archive' });
+  });
+
+  // The COPY lands but the server refuses the delete (no right to delete in a shared folder, say):
+  // the letter is in both folders. That must end the move, never retry it: every retry would COPY
+  // it into the destination once more.
+  const runTwice = async () => {
+    const [rowA] = (await db.query('SELECT * FROM messages WHERE id = $1', [A])).rows;
+    await queue.enqueue(ACCOUNT, [rowA], 'Archive');
+    await queue.runAccount(ACCOUNT);
+    await db.query('UPDATE message_moves SET next_attempt_at = now()');
+    await queue.runAccount(ACCOUNT);
+  };
+
+  it('a copied letter whose source the server kept is copied once, without UIDPLUS', async () => {
+    Object.assign(server, { capabilities: ['IMAP4rev1'], refuseCopy: false, refuseExpunge: true });
+    await runTwice();
+
+    expect(server.commands.filter(c => c === 'COPY')).toHaveLength(1);
+    expect(server.folders.Archive.uids).toEqual([900]);
+    expect(server.folders.INBOX.uids).toEqual([11]);
+    expect(await moves()).toEqual([]);
+    // No uid to settle on: the row goes, and both folders sync to show the letter where it is.
+    expect(await row()).toBeUndefined();
+    expect(queue.mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'Archive', { background: true });
+    expect(queue.mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'INBOX', { background: true });
+  });
+
+  it('a copied letter whose source the server kept is copied once, with UIDPLUS', async () => {
+    Object.assign(server, { refuseCopy: false, refuseExpunge: true });
+    await runTwice();
+
+    expect(server.commands.filter(c => c === 'COPY')).toHaveLength(1);
+    expect(await moves()).toEqual([]);
+    expect(await row()).toEqual({ uid: 900, folder: 'Archive' });
+    expect(queue.mgr.syncFolderOnDemand).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 'INBOX', { background: true });
   });
 });

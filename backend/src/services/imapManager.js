@@ -2220,11 +2220,15 @@ async function moveUids(client, range, toFolder) {
   // imapflow's own fallback did the same.
   const toDelete = copied.uidMap ? [...copied.uidMap.keys()].join(',') : range;
   if (!toDelete) return false;
-  // The copy has landed, so a failed delete leaves the letter in both folders rather than
-  // losing it. That is still reported as moved, as imapflow did: failing it would make a
-  // retrying caller (the move queue, snooze wake-up) add another copy on every attempt.
+  // The copy has landed, so a failed delete (no right to delete in a shared folder, say) leaves
+  // the letter in both folders rather than losing it. It is reported as copied with the source
+  // kept, `sourceRetained`, never as a failure: a caller that retries a failed move would COPY it
+  // again on every attempt. The source still holding the letter also means a caller that checks
+  // the source to decide whether a move happened (bulkMoveMessages without UIDPLUS, the move
+  // queue's lookup) must take this signal instead, or it reads "never moved" and retries too.
   if (!(await client.messageDelete(toDelete, { uid: true, silent: true }))) {
     console.warn(`Emulated move ${client.mailbox?.path} -> ${toFolder} of UID(s) ${toDelete}: copied, but the source could not be deleted; the letter is now in both folders`);
+    return { ...copied, sourceRetained: true };
   }
   return copied;
 }
@@ -7668,16 +7672,39 @@ export class ImapManager {
     }
 
     try {
-      const serverUidMap = await withFreshClient(account, async (client) => {
+      const moved = await withFreshClient(account, async (client) => {
         const lock = await client.getMailboxLock(fromFolder);
         try {
           const result = await moveUids(client, uids.map(String), toFolder);
           if (result === false) throw new Error('bulk messageMove returned false — server did not confirm move');
-          return result?.uidMap?.size ? result.uidMap : null;
+          const uidMap = result?.uidMap?.size ? result.uidMap : null;
+          if (!result?.sourceRetained) return { uidMap, retained: null };
+          if (uidMap) return { uidMap, retained: [...uidMap.keys()].map(Number) };
+          // Copied without UIDPLUS, and the source kept the letters (see moveUids). The COPY took
+          // every requested letter the source had, all or nothing, so those are the copied ones.
+          // A failed search cannot tell them apart: take them all rather than report the batch
+          // failed, which would copy it again on the next attempt.
+          let present = null;
+          try { present = await client.search({ uid: uids.join(',') }, { uid: true }); } catch { /* below */ }
+          return { uidMap: null, retained: Array.isArray(present) ? present.map(Number) : uids.map(Number) };
         } finally {
           lock.release();
         }
       }, poolOpts);
+      const serverUidMap = moved.uidMap;
+      // Reported to the caller as moved (the copy landed) with `sourceRetained`: the source still
+      // has these letters too, so nothing may retry their move or read the source as "never moved".
+      const retainedPart = moved.retained ? { sourceRetained: moved.retained } : {};
+
+      if (moved.retained && !serverUidMap) {
+        const kept = new Set(moved.retained);
+        return {
+          uidMap: new Map(),
+          succeeded: uids.filter(u => kept.has(Number(u))),
+          failed: uids.filter(u => !kept.has(Number(u))),
+          ...retainedPart,
+        };
+      }
 
       if (serverUidMap) {
         // #407 fix: report only what the server actually moved. A requested UID the server did
@@ -7691,7 +7718,7 @@ export class ImapManager {
         const succeeded = uids.filter(u => serverUidMap.has(Number(u)));
         const failed = uids.filter(u => !serverUidMap.has(Number(u)));
         if (failed.length) recordSyncSignal('stale_mutation_uid', { accountId: account.id, magnitude: failed.length });
-        return { uidMap: serverUidMap, succeeded, failed };
+        return { uidMap: serverUidMap, succeeded, failed, ...retainedPart };
       }
 
       // Move succeeded but the server returned no UIDPLUS map. Some servers (e.g. Dovecot/
