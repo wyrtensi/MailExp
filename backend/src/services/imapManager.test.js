@@ -8052,6 +8052,39 @@ describe('secondary work over the pool on a provider that limits logins (upstrea
     expect(ImapFlow).not.toHaveBeenCalled();
   });
 
+  it('the spam poll skips the cycle quietly while held back with no open session; a node mailbox runs as before', async () => {
+    // Upstream's reporter counted this one line as a Yahoo refusal: the pool's typed fail-fast
+    // costs no login, but it was logged as a failed spam sync every cycle.
+    const acct = yahooAcct();
+    const mgr = arrange(acct);
+    mgr.syncMessages = vi.fn(async () => ({}));
+    armed(mgr, acct);
+    query.mockClear();
+    await mgr._syncSpamFolder(acct);
+    expect(query).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+    expect(console.warn.mock.calls.some(([m]) => String(m).includes('Periodic spam sync failed'))).toBe(false);
+
+    // With an idle open session it polls over it, still without a login.
+    mgr._secondaryCooldown.delete(acct.id);
+    await seedPool(acct);
+    armed(mgr, acct);
+    query.mockImplementation(async sql => ({ rows: sql.includes('lower(name) ~') ? [{ path: 'Junk' }] : [] }));
+    await mgr._syncSpamFolder(acct);
+    expect(mgr.syncMessages).toHaveBeenCalledWith(acct, clients[0], 'Junk', 50, false, true);
+    expect(ImapFlow).toHaveBeenCalledTimes(1);
+
+    const node = nodeAcct();
+    const nodeMgr = arrange(node);
+    nodeMgr.syncMessages = vi.fn(async () => ({}));
+    armed(nodeMgr, node);
+    query.mockImplementation(async sql => ({ rows: sql.includes('lower(name) ~') ? [{ path: 'Junk' }] : [] }));
+    await nodeMgr._syncSpamFolder(node);
+    expect(ImapFlow).not.toHaveBeenCalled();
+    // As before: it asks the pool and logs the refusal it gets.
+    expect(console.warn.mock.calls.some(([m]) => String(m).includes('Periodic spam sync failed'))).toBe(true);
+  });
+
   it('refusals converge: after one accepted login the periodic work opens none', async () => {
     // Two simulated hours of every periodic job on a Yahoo mailbox: the folder status monitor every
     // minute, the staleness probe every 3, delete reconcile every 10, the spam poll every 30. The

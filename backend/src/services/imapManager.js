@@ -6646,6 +6646,8 @@ export class ImapManager {
   // the frontend gates alerts/sounds and the list refresh to INBOX / the visible folder. Best-effort;
   // all failures are non-fatal.
   async _syncSpamFolder(account) {
+    // Quiet skip on a secondaryOverPool provider held back with no open session, as reconcile.
+    if (periodicPoolWorkHeld(this, account)) return;
     let spamPath;
     try {
       spamPath = await resolveSpamFolder(account.id, account.folder_mappings);
