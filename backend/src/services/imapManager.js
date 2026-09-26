@@ -1927,7 +1927,9 @@ async function growPool(pool, account, { background = false } = {}) {
     throw err;
   }
   noteHelperLoginAccepted(account);
-  await noteHelperGrowAccepted(account);
+  // Not awaited: its clears run synchronously up to the account-error UPDATE, and the client must
+  // get its close handler and its pool slot now, not after a database round trip. It never rejects.
+  noteHelperGrowAccepted(account);
   unreserve();
   // Remove from pool immediately when the server closes the socket, then give the freed slot
   // to the queue (an idle client, or a grow for the head waiter).
