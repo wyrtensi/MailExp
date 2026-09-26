@@ -1592,6 +1592,15 @@ function nodeRestoreFailureDetail({ outcome, code, stage }) {
 // policy: result of getConnectionPolicy() — gates TLS verification override.
 // The password is currentAuthPass(account): the restored one for a row read before a node password
 // restore (services/mailNode/currentPassword.js).
+// IMAP ID (RFC 2971). imapflow sends ID on every login to a server that offers it, and by default
+// names itself: name "imapflow", its version, vendor "Postal Systems" and a support URL. The panel
+// sends no identity at all. imapflow merges these over its defaults and drops empty values, so
+// the command goes out as `ID NIL`, which RFC 2971 allows; the server still answers with its own
+// ID. Gmail, Outlook, Yahoo, iCloud and Dovecot do not require a client ID. The known exception
+// is NetEase (163.com, 126.com, yeah.net), which refuses SELECT ("Unsafe Login") until the client
+// sends a populated ID; there is no NetEase profile here, and one would need neutral values.
+export const IMAP_CLIENT_INFO = Object.freeze({ name: '', version: '', vendor: '', 'support-url': '' });
+
 export function makeClientCfg(account, resolved, { enableIdle = false, policy = {}, idleKeepaliveMs } = {}) {
   if (!policy.allowInsecureTls && !account.imap_tls) {
     throw new Error('Plain-text IMAP is not allowed: admin must enable "Allow insecure TLS"');
@@ -1617,6 +1626,8 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     // silently ignored). Its only built-in bound is a 5-minute socket inactivity timeout, so a
     // stalled command is bounded by its caller instead: the sync tick's wall clock, the flag-scan
     // sub-budgets, and withFreshClient's POOLED_OPERATION_TIMEOUT_MS for pooled work.
+    // No self-identification in IMAP ID; see IMAP_CLIENT_INFO.
+    clientInfo: { ...IMAP_CLIENT_INFO },
   };
   // ENABLE opt-out for a server whose IMAP4rev2 is broken (Strato, see PROVIDERS.strato).
   // Set from the profile so every connection kind (persistent, pool, backfill, probe) agrees.

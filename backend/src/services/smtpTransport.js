@@ -1,4 +1,7 @@
 import nodemailer from 'nodemailer';
+import addressparser from 'nodemailer/lib/addressparser';
+import { isIP } from 'node:net';
+import { domainToASCII } from 'node:url';
 import { decrypt } from './encryption.js';
 import { currentAuthPass } from './mailNode/currentPassword.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -8,6 +11,33 @@ import { OAUTH_SEND_FAILURES, isOAuthAccount } from './oauth/constants.js';
 
 const SMTP_ATTEMPT_TIMEOUT_MS = 10_000;
 const SMTP_FAILOVER_BUDGET_MS = 45_000;
+
+// The name we give in EHLO/HELO. Without one nodemailer uses os.hostname(), and when that is not
+// an FQDN (any Docker container with a default hostname) it sends `EHLO [127.0.0.1]`, a loopback
+// HELO from a remote address that spam filters read as forgery (upstream #492, Bluehost discarded
+// the mail). The panel does not name itself either: not its hostname, not its product name. It
+// introduces itself with the domain of the address the letter is sent from, which the receiving
+// side already sees in MAIL FROM and the From header, so it tells nobody anything new. With no
+// usable sender domain (verify(), a malformed or IP-literal address) it says "localhost".
+export const NEUTRAL_EHLO_NAME = 'localhost';
+
+function senderAddress(from) {
+  const first = [].concat(from ?? [])[0];
+  if (!first) return '';
+  if (typeof first === 'object') return first.address || '';
+  const parsed = addressparser(String(first))[0];
+  return parsed?.address || parsed?.group?.[0]?.address || '';
+}
+
+// Pure; exported for tests.
+export function smtpClientName(from) {
+  const address = senderAddress(from);
+  const at = address.lastIndexOf('@');
+  if (at < 0) return NEUTRAL_EHLO_NAME;
+  const domain = domainToASCII(address.slice(at + 1).trim().replace(/\.$/, '')).toLowerCase();
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(domain) || isIP(domain)) return NEUTRAL_EHLO_NAME;
+  return domain;
+}
 
 export function isPreDeliveryConnectionError(err) {
   return err?.command === 'CONN';
@@ -51,17 +81,20 @@ async function runWithAddressFallback({
   throw lastError;
 }
 
+// Every SMTP transport in the app (account send, rule forwards, system email) is built here, so
+// the EHLO name is set here for all of them: after the spread, so nothing falls back to
+// nodemailer's os.hostname().
 export function createSmtpTransport(resolved, transportOptions, createTransport = nodemailer.createTransport) {
   return {
     sendMail: mailOptions => runWithAddressFallback({
       resolved,
-      transportOptions,
+      transportOptions: { ...transportOptions, name: smtpClientName(mailOptions?.envelope?.from || mailOptions?.from) },
       operation: transport => transport.sendMail(mailOptions),
       createTransport,
     }),
     verify: () => runWithAddressFallback({
       resolved,
-      transportOptions,
+      transportOptions: { ...transportOptions, name: NEUTRAL_EHLO_NAME },
       operation: transport => transport.verify(),
       createTransport,
     }),
