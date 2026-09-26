@@ -58,7 +58,9 @@ async function getDiscovery(issuerUrl, allowInsecure = false) {
     if (issuerHostErr) throw new Error(`OIDC issuer host rejected: ${issuerHostErr}`);
   }
 
-  const cacheKey = `${issuerUrl}:${allowInsecure}`;
+  // The policy is part of the key: the endpoint hosts below were checked under it, so a policy
+  // change must miss the cache and check them again rather than serve them for the TTL.
+  const cacheKey = `${issuerUrl}:${allowInsecure}:${allowPrivate}`;
   const cached = discoveryCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < DISCOVERY_TTL_MS) {
     return { doc: cached.doc, jwks: cached.jwks };

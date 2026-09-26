@@ -81,6 +81,8 @@ beforeEach(() => {
   global.fetch = realFetch;
   query.mockReset();
   validateHost.mockClear();
+  validateHost.mockImplementation(async (_host, { allowPrivate = false } = {}) =>
+    (allowPrivate ? null : 'Host cannot be a private or reserved IP address'));
   getConnectionPolicy.mockReset();
   getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true });
 });
@@ -109,6 +111,30 @@ describe('OIDC discovery honors the allow-private-hosts policy', () => {
     // buildEndSessionUrl never throws (logout must succeed locally): a refused host is null.
     expect(await buildEndSessionUrl({ providerId: 'p1', idToken: 'tok' })).toBeNull();
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('the discovery cache and the policy', () => {
+  it('turning the policy off re-checks cached endpoints: a private token endpoint is refused at once', async () => {
+    // A public issuer whose token endpoint is on the LAN. Only the endpoint check depends on the
+    // policy, and it runs only when the discovery document is fetched, not on a cache hit.
+    const publicIssuer = 'https://idp.example.com';
+    const doc = {
+      issuer: publicIssuer,
+      authorization_endpoint: `${publicIssuer}/authorize`,
+      token_endpoint: 'https://token.lan.example.org/token',
+      jwks_uri: `${publicIssuer}/jwks`,
+      end_session_endpoint: `${publicIssuer}/end-session`,
+    };
+    global.fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => doc }));
+    validateHost.mockImplementation(async (host, { allowPrivate = false } = {}) =>
+      (host.includes('.lan.') && !allowPrivate ? 'Host cannot be a private or reserved IP address' : null));
+    query.mockResolvedValue({ rows: [{ ...provider, issuer_url: publicIssuer }] });
+
+    expect(await buildEndSessionUrl({ providerId: 'p2', idToken: 'tok' })).toBeTruthy(); // cached
+
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: false });
+    expect(await buildEndSessionUrl({ providerId: 'p2', idToken: 'tok' })).toBeNull();
   });
 });
 
