@@ -87,6 +87,7 @@ const { useStore } = await import('../store/index.js');
 const MessageList = (await import('./MessageList.jsx')).default;
 const { shortcutBus } = await import('../utils/shortcutBus.js');
 const { applyDeleteGuard, clearDeleteGuard, threadDeleteGuardKey } = await import('../utils/pendingDeletes.js');
+const { api } = await import('../utils/api.js');
 
 const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
 const ACCOUNT_B = { id: 'acct-2', email_address: 'b@example.com', name: 'B', color: '#22c55e', include_in_unified_inbox: true };
@@ -270,5 +271,77 @@ describe('MessageList — Ctrl+Z undo shortcut (#449)', () => {
     await React.act(async () => { shortcutBus.emit('undoAction'); });
     await React.act(async () => { shortcutBus.emit('undoAction'); }); // nothing left — no throw, no change
     assert.deepEqual(undone, ['newer', 'older']);
+  });
+});
+
+// #434: a star button in the multi-select bulk-action bar.
+describe('MessageList — bulk star in the multi-select bar (#434)', () => {
+  const M_STARRED = { ...MESSAGE, id: 'msg-star', uid: 9, message_id: '<star@example.com>', is_starred: true };
+  const M_PLAIN   = { ...MESSAGE, id: 'msg-plain', uid: 10, message_id: '<plain@example.com>', is_starred: false };
+
+  const clickRow = async (msgid, init = {}) => {
+    const row = container.querySelector(`[data-msgid="${msgid}"]`);
+    assert.ok(row, `expected a row for ${msgid}`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, ...init }));
+    });
+  };
+
+  test('any unstarred message in the selection stars them all, optimistically and via the API', async () => {
+    await mount({ rows: [M_STARRED, M_PLAIN], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage(M_STARRED.id); });
+    await clickRow(M_PLAIN.id, { ctrlKey: true }); // enters multi-select with both rows
+
+    const calls = [];
+    const originalBulkStar = api.bulkStar;
+    api.bulkStar = async (ids, starred) => { calls.push([ids, starred]); return { ok: true }; };
+    try {
+      const starBtn = [...container.querySelectorAll('button')].find(b => b.getAttribute('title') === 'messageList.starSelected');
+      assert.ok(starBtn, 'expected the bulk star button (any unstarred selected -> "Star" label)');
+      await React.act(async () => { starBtn.click(); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0][0].sort(), [M_PLAIN.id, M_STARRED.id].sort());
+      assert.equal(calls[0][1], true); // any unstarred in selection -> star them all
+
+      // Optimistic update landed in the store for both rows, including the already-starred one.
+      const byId = Object.fromEntries(useStore.getState().messages.map(m => [m.id, m]));
+      assert.equal(byId[M_STARRED.id].is_starred, true);
+      assert.equal(byId[M_PLAIN.id].is_starred, true);
+
+      // Selection clears after the bulk action (same as bulk mark-read/archive), so the
+      // whole bulk-action bar — selectedIds.size > 0 || selectionModeActive — unmounts.
+      assert.equal(
+        [...container.querySelectorAll('button')].some(b => b.getAttribute('title') === 'messageList.starSelected'),
+        false,
+      );
+    } finally {
+      api.bulkStar = originalBulkStar;
+    }
+  });
+
+  test('a failed request reverts the optimistic star change', async () => {
+    await mount({ rows: [M_PLAIN], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage(M_PLAIN.id); });
+    await clickRow(M_PLAIN.id, { ctrlKey: true }); // ctrl-click on the only row still enters selection mode
+
+    const originalBulkStar = api.bulkStar;
+    const originalError = console.error;
+    console.error = () => {};
+    api.bulkStar = async () => { throw new Error('network down'); };
+    try {
+      const starBtn = [...container.querySelectorAll('button')].find(b => b.getAttribute('title') === 'messageList.starSelected');
+      assert.ok(starBtn);
+      await React.act(async () => { starBtn.click(); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+      const msg = useStore.getState().messages.find(m => m.id === M_PLAIN.id);
+      assert.equal(msg.is_starred, false, 'reverted back to its original state after the failed request');
+    } finally {
+      api.bulkStar = originalBulkStar;
+      console.error = originalError;
+    }
   });
 });
