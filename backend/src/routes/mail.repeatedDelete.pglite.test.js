@@ -474,6 +474,37 @@ describe('bulk delete with a mix of letters', () => {
   });
 });
 
+describe('a bulk delete whose later group fails', () => {
+  it('journals and counts what an earlier group deleted forever, and answers the partial result', async () => {
+    // T (Office Trash) goes first; G sits in Gmail's Trash and its group throws.
+    await db.query("UPDATE messages SET folder = '[Gmail]/Trash' WHERE id = $1", [G]);
+    box(GMAIL, '[Gmail]/Trash').set(41, '<41@example.com>');
+    mgr().bulkPermanentDelete.mockImplementation(async (account, uids, folder) => {
+      if (account.id === GMAIL) throw new Error('connection reset');
+      for (const uid of uids) box(account.id, folder).delete(Number(uid));
+      return { succeeded: uids, failed: [] };
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await bulkDelete([T, G], { [T]: 'Trash', [G]: '[Gmail]/Trash' });
+    expect(res).toEqual({ status: 200, body: { ok: true, deleted: [T] } });
+    expect(await row(T)).toBeNull();
+    expect(await row(G)).toEqual({ uid: 41, folder: '[Gmail]/Trash' });
+    expect(await claimOf(G)).toEqual({ claimed: false, at: null });
+    expect(deltas(ACCOUNT, 'Trash')).toEqual([[-1, -1]]);
+    await vi.waitFor(async () => {
+      const { rows } = await db.query('SELECT details FROM mailbox_audit_log');
+      expect(rows.map(r => r.details)).toMatchObject([{ folder: 'Trash', permanent: true }]);
+    });
+  });
+
+  it('answers 500 when every group failed', async () => {
+    mgr().bulkPermanentDelete.mockRejectedValue(new Error('connection reset'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect((await bulkDelete([T], { [T]: 'Trash' })).status).toBe(500);
+    expect(await row(T)).toEqual({ uid: 21, folder: 'Trash' });
+  });
+});
+
 describe('Gmail Trash is [Gmail]/Trash', () => {
   it('a repeated delete leaves the letter in [Gmail]/Trash; a delete from the Trash view expunges it there', async () => {
     expect((await del(G, 'INBOX')).status).toBe(200);
