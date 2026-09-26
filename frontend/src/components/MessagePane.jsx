@@ -1694,7 +1694,8 @@ ${bodyContent}
     const timer = setTimeout(async () => {
       if (undone) return;
       try {
-        await api.deleteMessage(deleted.id);
+        // The folder the user saw it in: only a letter seen in Trash is deleted forever.
+        await api.deleteMessage(deleted.id, deleted.folder);
         setCompletedDelete(deleted.id);
       } catch (err) {
         clearDeleteGuard(deleted.id);

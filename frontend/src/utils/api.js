@@ -168,12 +168,14 @@ export function createDirectApi({
       return res.json();
     },
 
-    deleteMessagesOnExit(ids) {
+    deleteMessagesOnExit(ids, folders) {
       const deleteIds = Array.isArray(ids) ? ids : [];
       if (deleteIds.length === 0) return Promise.resolve({ ok: true, deleted: [] });
+      const bulkBody = folders ? { ids: deleteIds, folders } : { ids: deleteIds };
+      const folder = folders?.[deleteIds[0]];
       if (demoMode) {
         return deleteIds.length > 1
-          ? demoRequestImpl('POST', '/mail/messages/bulk-delete', { ids: deleteIds })
+          ? demoRequestImpl('POST', '/mail/messages/bulk-delete', bulkBody)
           : demoRequestImpl('DELETE', `/mail/messages/${deleteIds[0]}`)
             .then(result => ({ ...result, deleted: deleteIds }));
       }
@@ -182,14 +184,17 @@ export function createDirectApi({
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
-          body: JSON.stringify({ ids: deleteIds }),
+          body: JSON.stringify(bulkBody),
           keepalive: true,
         });
       }
       return fetchImpl(`${BASE}/mail/messages/${deleteIds[0]}`, {
         method: 'DELETE',
         credentials: 'include',
-        headers: { [CSRF_HEADER]: CSRF_VALUE },
+        headers: folder
+          ? { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE }
+          : { [CSRF_HEADER]: CSRF_VALUE },
+        ...(folder ? { body: JSON.stringify({ folder }) } : {}),
         keepalive: true,
       });
     },
@@ -388,9 +393,11 @@ export const api = {
   bulkRead: (ids, read) => request('POST', '/mail/messages/bulk-read', { ids, read }),
   markStarred: (id, starred) => request('PATCH', `/mail/messages/${id}/star`, { starred }),
   markAllRead: (accountId, folder) => request('POST', '/mail/mark-all-read', { accountId, folder }),
-  deleteMessage: (id) => request('DELETE', `/mail/messages/${id}`),
-  bulkDelete: (ids) => request('POST', '/mail/messages/bulk-delete', { ids }),
-  deleteMessagesOnExit: (ids) => directApi.deleteMessagesOnExit(ids),
+  // folder / folders: where the user saw the letters (utils/deleteIntent.js). Without them the
+  // server only moves to Trash and never deletes forever.
+  deleteMessage: (id, folder) => request('DELETE', `/mail/messages/${id}`, folder ? { folder } : undefined),
+  bulkDelete: (ids, folders) => request('POST', '/mail/messages/bulk-delete', folders ? { ids, folders } : { ids }),
+  deleteMessagesOnExit: (ids, folders) => directApi.deleteMessagesOnExit(ids, folders),
   bulkMove: (ids, folder) => request('POST', '/mail/messages/bulk-move', { ids, folder }),
   bulkArchive: (ids) => request('POST', '/mail/messages/bulk-archive', { ids }),
   getUnreadCounts: () => request('GET', '/mail/unread-counts'),
