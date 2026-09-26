@@ -1494,16 +1494,21 @@ function sanitizeStr(str) {
 }
 
 // Propagate a resolved thread_id to earlier messages that used this message as a provisional
-// thread root (out-of-order delivery, newest-first backfill). The is_deleted predicate lets
-// Postgres use the partial idx_messages_thread_id; without it every call scanned all rows of the
-// account (40k rows: 12 ms vs 0.5 ms). Soft-deleted rows are never restored, so skipping them
-// changes nothing visible. The reason moves with the key: these rows now hang on the real root,
-// so whatever they carried ('rfc-provisional', or NULL from before migration 0063) stops being
-// true.
+// thread root (out-of-order delivery, newest-first backfill).
+//
+// Deliberately NO is_deleted filter (upstream maathimself/mailflow@5b16e3fc): soft-deleted rows
+// are still threading inputs. computeThreading's ancestor lookup reads thread_id from any row, so
+// a deleted row left on a stale provisional root would hand that root to the next reply that
+// references it and split the thread. Served by the full idx_messages_account_thread (migration
+// 0076); the partial index it replaced could not serve this statement without the predicate, and
+// every call then read all rows of the account (40k rows: 12 ms vs 0.5 ms).
+//
+// The reason moves with the key: these rows now hang on the real root, so whatever they carried
+// ('rfc-provisional', or NULL from before migration 0063) stops being true.
 export async function rerootThreadChildren(accountId, threadId, messageId) {
   await query(
     `UPDATE messages SET thread_id = $1, threading_reason = 'rfc-root'
-     WHERE account_id = $2 AND thread_id = $3 AND message_id != $3 AND is_deleted = false`,
+     WHERE account_id = $2 AND thread_id = $3 AND message_id != $3`,
     [threadId, accountId, messageId]
   );
 }

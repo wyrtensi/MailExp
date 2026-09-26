@@ -4009,7 +4009,7 @@ describe('backfill and UIDs the server will not hand over', () => {
 describe('rerootThreadChildren', () => {
   beforeEach(() => { query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 0 }); });
 
-  it('moves provisional children to the resolved root through the partial thread index', async () => {
+  it('moves provisional children, deleted ones included, to the resolved root', async () => {
     await rerootThreadChildren('acct-1', '<root@x>', '<child@x>');
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
@@ -4018,9 +4018,10 @@ describe('rerootThreadChildren', () => {
     // still carries ('rfc-provisional', or NULL from before migration 0063) stops being true.
     expect(sql).toMatch(/UPDATE messages SET thread_id = \$1, threading_reason = 'rfc-root'/);
     expect(sql).toMatch(/account_id = \$2 AND thread_id = \$3 AND message_id != \$3/);
-    // idx_messages_thread_id is partial on is_deleted = false. Without the same predicate the
-    // planner scans every row of the account for each reply (measured: 12 ms vs 0.5 ms at 40k rows).
-    expect(sql).toMatch(/AND is_deleted = false/);
+    // Soft-deleted rows feed the ancestor lookup too, so they must follow the root; the full
+    // idx_messages_account_thread (migration 0076) serves the statement without the predicate.
+    // services/threading/threadIndex.pglite.test.js checks both against a real engine.
+    expect(sql).not.toMatch(/is_deleted/);
     expect(params).toEqual(['<root@x>', 'acct-1', '<child@x>']);
   });
 });
