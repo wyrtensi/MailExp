@@ -1263,6 +1263,17 @@ export async function demoRequest(method, path, body = {}) {
     }
     return { ok: true, updated };
   }
+  if (verb === 'POST' && pathname === '/mail/messages/bulk-star') {
+    const updated = [];
+    for (const id of body.ids || []) {
+      const item = messageById(id);
+      if (item && item.is_starred !== Boolean(body.starred)) {
+        item.is_starred = Boolean(body.starred);
+        updated.push(id);
+      }
+    }
+    return { ok: true, updated };
+  }
   if (verb === 'POST' && pathname === '/mail/messages/bulk-delete') {
     return { ok: true, deleted: deleteMessages(body.ids) };
   }
