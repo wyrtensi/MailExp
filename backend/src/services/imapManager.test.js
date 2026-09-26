@@ -7645,4 +7645,32 @@ describe('CONDSTORE-less full sync (upstream #495)', () => {
     expect(claim).toHaveBeenCalledWith(account.id, 'Work', '<m11@x>', 11);
     expect(calls.upserts).toEqual([]);
   });
+
+  it('the n:* echo of the newest message is skipped, not re-upserted every tick', async () => {
+    // RFC 3501: `${maxKnownUid + 1}:*` still returns the highest message when nothing is above
+    // the watermark. Upstream measured this echo as the whole residue after the split above:
+    // one row rewrite per folder per tick, on every provider.
+    const serverMsgs = [{ uid: 30, seen: true }];
+    const { mgr, client, calls } = arrange({
+      serverMsgs, cachedUids: [30], maxKnownUid: 30, uidPhaseYields: [{ uid: 30, seen: true }],
+    });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.uidPhase).toEqual(['31:*']); // the phase ran and the server echoed uid 30
+    expect(calls.upserts).toEqual([]);        // and the echo was filtered, not rewritten
+  });
+
+  it('genuinely new mail above the watermark still comes through the UID phase', async () => {
+    // The companion boundary: a filter that also swallowed uid > maxKnownUid would silently
+    // stop new mail on every account.
+    const serverMsgs = [{ uid: 30, seen: true }, { uid: 31, seen: true }];
+    const { mgr, client, calls } = arrange({
+      serverMsgs, cachedUids: [30, 31], maxKnownUid: 30, uidPhaseYields: [{ uid: 31, seen: true }],
+    });
+
+    await mgr.syncMessages(account, client, 'Work', 20, false);
+
+    expect(calls.upserts).toEqual([31]);
+  });
 });
