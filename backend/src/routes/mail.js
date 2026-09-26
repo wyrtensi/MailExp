@@ -2216,10 +2216,11 @@ router.post('/messages/:id/unsubscribe', async (req, res) => {
     try {
       // safeFetch validates the resolved IP of the initial host AND every redirect
       // hop, so an attacker-supplied List-Unsubscribe URL can't redirect to an
-      // internal address. (The validateHost above stays as a fast pre-check.)
+      // internal address. (The validateHost above stays as a fast pre-check.) No User-Agent of
+      // our own: the panel does not name itself to the sender's server (undici's default).
       const unsub = await safeFetch(httpsUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'MailExpert/1.0' },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'List-Unsubscribe=One-Click',
         signal: AbortSignal.timeout(10000),
       });

@@ -156,10 +156,8 @@ router.get('/gravatar', async (req, res) => {
     // pins to the resolved public IP and blocks private ranges. d=404 → Gravatar returns 404
     // when the address has no avatar, so the client falls back to initials.
     const url = `https://www.gravatar.com/avatar/${hash}?d=404&s=80&r=g`;
-    const resp = await safeFetch(url, {
-      signal: AbortSignal.timeout(6000),
-      headers: { 'User-Agent': 'MailExpert/1.0' },
-    });
+    // No User-Agent of our own: the panel does not name itself to third parties (undici's default).
+    const resp = await safeFetch(url, { signal: AbortSignal.timeout(6000) });
     if (resp.status === 404) {
       gravatarCacheSet(hash, { miss: true, expires: now + GRAVATAR_MISS_TTL_MS });
       return res.status(404).end();

@@ -28,7 +28,8 @@ async function fetchDomainList(url) {
     try {
       // safeFetch re-validates on every hop, so the refresh path (which doesn't
       // re-run validateSubscriptionUrl) and any redirect can't reach internal IPs.
-      res = await safeFetch(url, { signal: controller.signal, headers: { 'User-Agent': 'MailExpert/1.0' } });
+      // No User-Agent of our own: the panel does not name itself to third parties (undici's default).
+      res = await safeFetch(url, { signal: controller.signal });
     } finally {
       clearTimeout(timer);
     }
