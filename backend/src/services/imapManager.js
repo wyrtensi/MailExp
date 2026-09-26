@@ -1181,6 +1181,23 @@ const PROVIDERS = {
     skipFolderPatterns: [],
     skipFolderNames: [],
   },
+  strato: {
+    // The generic profile plus one opt-out. Strato's server ENABLEs IMAP4rev2 without
+    // advertising it in CAPABILITY, then answers `UID SEARCH ALL` with an EMPTY ESEARCH while
+    // EXISTS is nonzero (upstream #472, from the reporter's raw traces; without the ENABLE the
+    // classic SEARCH returns every UID). An always-empty SEARCH poisons everything that reads
+    // membership: reconcile, the integrity pass, backfill's server count. imapflow's
+    // disableIMAP4rev2 exists for servers with a broken IMAP4rev2; see makeClientCfg.
+    batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
+    connectStaggerMs: 500,
+    fetchBody: false,
+    pushesFlags: true,
+    snippetIndex: true,
+    speculativeFetch: true,
+    skipFolderPatterns: [],
+    skipFolderNames: [],
+    disableIMAP4rev2: true,
+  },
   generic: {
     batchSize: 100, batchDelay: 1500, errorDelay: 15000, batchesPerConn: 15,
     connectStaggerMs: 500, // unknown provider — moderate connect spacing (#218)
@@ -1303,6 +1320,7 @@ export function providerProfile(account) {
   if (host.includes('.icloud.com') || host.includes('.apple.com') || host.includes('.me.com')) return PROVIDERS.apple;
   if (host.includes('.outlook.com') || host.includes('office365.com') || host.includes('.hotmail.com') || host.includes('.live.com') || (account.oauth_provider === 'microsoft')) return PROVIDERS.microsoft;
   if (host.includes('purelymail.com')) return PROVIDERS.purelymail;
+  if (host.includes('.strato.')) return PROVIDERS.strato;
   return PROVIDERS.generic;
 }
 
@@ -1600,6 +1618,9 @@ export function makeClientCfg(account, resolved, { enableIdle = false, policy = 
     // stalled command is bounded by its caller instead: the sync tick's wall clock, the flag-scan
     // sub-budgets, and withFreshClient's POOLED_OPERATION_TIMEOUT_MS for pooled work.
   };
+  // ENABLE opt-out for a server whose IMAP4rev2 is broken (Strato, see PROVIDERS.strato).
+  // Set from the profile so every connection kind (persistent, pool, backfill, probe) agrees.
+  if (providerProfile(account).disableIMAP4rev2) cfg.disableIMAP4rev2 = true;
   // Auto-IDLE: ImapFlow re-enters IDLE automatically between commands so the
   // server can push EXISTS notifications immediately when new mail arrives.
   // Only enable on sync connections (not pool/backfill/snippet clients) to
