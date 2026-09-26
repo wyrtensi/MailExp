@@ -196,6 +196,11 @@ describe('a repeated delete never expunges what the first one moved to Trash', (
     expect(expunged()).toEqual([]);
     expect(await row(T)).toEqual({ uid: 21, folder: 'Trash' });
     expect(await row(U)).toEqual({ uid: 22, folder: 'Trash' });
+    // Bulk reads the per-letter map only: a top-level `folder` does not name the letters.
+    const topLevel = await send('POST', '/messages/bulk-delete', { ids: [T, U], folder: 'Trash' });
+    expect(topLevel.status).toBe(200);
+    expect([...topLevel.body.deleted].sort()).toEqual([T, U]);
+    expect(expunged()).toEqual([]);
     // An older client's move to Trash still moves.
     expect((await del(B)).status).toBe(200);
     expect((await row(B)).folder).toBe('Trash');

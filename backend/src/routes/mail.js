@@ -1428,14 +1428,14 @@ router.post('/messages/bulk-read', async (req, res) => {
 // Trash AND the client saw it in Trash (or the request says `permanent: true`). A row in Trash
 // that the client saw anywhere else was moved there already: the delete is done, and nothing
 // happens. A request without the field (an older client, a notification action, the unsubscribe
-// toast's "Move to trash") only ever moves to Trash.
-function deleteIntent(body) {
+// toast's "Move to trash") only ever moves to Trash. bulk: read `folders` only, never `folder`.
+function deleteIntent(body, { bulk = false } = {}) {
   const b = body && typeof body === 'object' ? body : {};
   const folders = b.folders && typeof b.folders === 'object' && !Array.isArray(b.folders) ? b.folders : {};
   return {
     permanent: b.permanent === true,
     seen: (id) => {
-      const f = Object.prototype.hasOwnProperty.call(folders, id) ? folders[id] : b.folder;
+      const f = bulk ? (Object.prototype.hasOwnProperty.call(folders, id) ? folders[id] : null) : b.folder;
       return typeof f === 'string' ? f : null;
     },
   };
@@ -1498,7 +1498,7 @@ router.post('/messages/bulk-delete', async (req, res) => {
   if (!areValidUUIDs(ids)) {
     return res.status(400).json({ error: 'Invalid message id format' });
   }
-  const intent = deleteIntent(req.body);
+  const intent = deleteIntent(req.body, { bulk: true });
 
   const busy = bulkBusyTracker();
   try {
