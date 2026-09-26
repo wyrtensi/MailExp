@@ -4812,19 +4812,63 @@ export class ImapManager {
           }
         } else if (plan === 'full') {
           // A missing/invalid modseq baseline or an incomplete local cache requires a recent
-          // sequence scan with full metadata. Re-read exists from the live connection — ImapFlow
-          // may have decremented it if an EXPUNGE arrived during the UID phase, making a range
-          // captured at SELECT time stale. The watermark is seeded below so subsequent syncs can
-          // go delta once the local cache has a UID. Bounded to the most recent `limit` messages —
-          // older un-cached messages in a large folder are backfill's job, not this scan's; backfill
-          // runs on connect/reconnect/reindex and its dbCount-vs-serverTotal check re-detects the gap.
+          // sequence scan. Re-read exists from the live connection — ImapFlow may have decremented
+          // it if an EXPUNGE arrived during the UID phase, making a range captured at SELECT time
+          // stale. On a CONDSTORE server the watermark is seeded below so subsequent syncs go
+          // delta; a server WITHOUT CONDSTORE (Outlook, Tencent Exmail, many plain IMAP servers)
+          // lands here on EVERY tick, which is why the scan is split below. Bounded to the most
+          // recent `limit` messages — older un-cached messages in a large folder are backfill's
+          // job, not this scan's; backfill runs on connect/reconnect/reindex and its
+          // dbCount-vs-serverTotal check re-detects the gap.
           const liveExists = client.mailbox?.exists ?? 0;
           const phase2Range = liveExists > limit
             ? `${liveExists - limit + 1}:${liveExists}` : '1:*';
           try {
             const scan = (async () => {
-              for await (const msg of client.fetch(phase2Range, fetchQuery)) {
-                await processMsg(msg);
+              // After a UIDVALIDITY change every cached (folder, uid) identity is void, and with
+              // an EMPTY cache (first sync, or the purge that change just ran) there is nothing
+              // to split: both take the full-metadata path directly.
+              if (uidValidityChanged || maxKnownUid === 0) {
+                for await (const msg of client.fetch(phase2Range, fetchQuery)) {
+                  await processMsg(msg);
+                }
+                return;
+              }
+              // Split the window by whether the UID is already cached (upstream #495). This used
+              // to fetch full metadata and upsert all `limit` messages on every tick, which on a
+              // CONDSTORE-less server rewrote the newest 20-100 rows forever (upstream measured
+              // ~3 row rewrites and 5.4 WAL fsyncs a second on an idle instance). A cheap
+              // uid+flags pass answers both questions: cached rows get their flags through the
+              // delta branch's bulk path (writes only real changes, honors the 30 s local-wins
+              // window), and only unknown UIDs pay the full fetch and upsert. Those include the
+              // move queue's letters: a letter arriving in a move's destination is not cached
+              // there (its row holds a negative placeholder uid), so processMsg still gets it and
+              // claimArrival attaches it, and a letter whose move is pending is not cached at its
+              // source either, so processMsg still sees it and skips it as guarded.
+              // Metadata repairs of cached rows (subject healing, #378 re-rooting) no longer run
+              // every tick, as on delta-path providers; a reindex still re-upserts everything.
+              const seen = [];
+              for await (const msg of client.fetch(phase2Range, { uid: true, flags: true })) {
+                seen.push({ uid: msg.uid, isRead: msg.flags.has('\\Seen'), isStarred: msg.flags.has('\\Flagged') });
+              }
+              if (seen.length === 0) return;
+              const { rows: cachedRows } = await query(
+                'SELECT uid FROM messages WHERE account_id = $1 AND folder = $2 AND uid = ANY($3::bigint[])',
+                [account.id, folder, seen.map(s => s.uid)]
+              );
+              const cachedUids = new Set(cachedRows.map(r => Number(r.uid)));
+              const missing = seen.filter(s => !cachedUids.has(s.uid)).map(s => s.uid);
+              if (missing.length > 0) {
+                for await (const msg of client.fetch(missing.join(','), fetchQuery, { uid: true })) {
+                  await processMsg(msg);
+                }
+              }
+              const changed = await this._applyFlagUpdates(account, folder, seen.filter(s => cachedUids.has(s.uid)));
+              if (changed > 0) {
+                // The per-row upsert used to carry flag changes made elsewhere; now that unchanged
+                // rows are left alone, nudge readers the way the delta branch does.
+                this.broadcast({ type: 'flags_synced', accountId: account.id });
+                await emitSectionsChanged(this.pluginFacade, account, changed);
               }
             })();
             scan.catch(() => {}); // see the delta branch — swallow a post-timeout late rejection
