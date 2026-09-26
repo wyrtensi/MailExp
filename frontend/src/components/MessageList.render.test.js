@@ -248,3 +248,27 @@ describe('MessageList — modifier-click enters multi-select (#220)', () => {
     assert.deepEqual(checkedRows().sort(), ['msg-2', 'msg-3']);
   });
 });
+
+// #449: Ctrl+Z fires the newest still-pending undo — the same onUndo the visible toast button
+// runs, so the keyboard can never undo more than the toasts offer.
+describe('MessageList — Ctrl+Z undo shortcut (#449)', () => {
+  test('undoAction fires the newest pending undo, then the next, then nothing', async () => {
+    await mount({ rows: [MESSAGE], threadedView: false });
+    const undone = [];
+    await React.act(async () => {
+      // A prior scenario's own undoable commit can still be pending (real timers, shared
+      // store) — start from a clean slate so only this test's two notifications are seen.
+      useStore.setState({ notifications: [] });
+      useStore.getState().addNotification({ title: 'older', onUndo: () => undone.push('older') });
+      useStore.getState().addNotification({ title: 'newer', onUndo: () => undone.push('newer') });
+    });
+
+    await React.act(async () => { shortcutBus.emit('undoAction'); });
+    assert.deepEqual(undone, ['newer']);
+    assert.deepEqual(useStore.getState().notifications.filter(n => n.onUndo).map(n => n.title), ['older']);
+
+    await React.act(async () => { shortcutBus.emit('undoAction'); });
+    await React.act(async () => { shortcutBus.emit('undoAction'); }); // nothing left — no throw, no change
+    assert.deepEqual(undone, ['newer', 'older']);
+  });
+});
