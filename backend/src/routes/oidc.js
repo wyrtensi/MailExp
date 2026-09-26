@@ -7,6 +7,7 @@ import { query, pool } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { decrypt, isEncrypted } from '../services/encryption.js';
 import { validateHost } from '../services/hostValidation.js';
+import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { logAuthEvent } from '../services/authEvents.js';
 
 // In-memory OIDC discovery cache keyed by issuerUrl
@@ -47,9 +48,13 @@ async function getDiscovery(issuerUrl, allowInsecure = false) {
   if (!allowInsecure && parsed.protocol !== 'https:') throw new Error('OIDC issuer URL must use HTTPS');
 
   // Re-validate at runtime: the saved issuer may predate host validation,
-  // or DNS may have changed since the record was saved.
+  // or DNS may have changed since the record was saved. Honors the admin's "Allow private /
+  // local hosts" policy the way saving the provider does. Read before the cache lookup, so
+  // turning the policy off blocks a private issuer at once rather than after the TTL.
+  const policy = await getConnectionPolicy();
+  const allowPrivate = policy.allowPrivateHosts;
   if (!allowInsecure) {
-    const issuerHostErr = await validateHost(parsed.hostname);
+    const issuerHostErr = await validateHost(parsed.hostname, { allowPrivate });
     if (issuerHostErr) throw new Error(`OIDC issuer host rejected: ${issuerHostErr}`);
   }
 
@@ -86,7 +91,7 @@ async function getDiscovery(issuerUrl, allowInsecure = false) {
       if (endpointParsed.protocol !== 'https:') {
         throw new Error(`OIDC discovery returned non-HTTPS ${field}: ${url}`);
       }
-      const hostErr = await validateHost(endpointParsed.hostname);
+      const hostErr = await validateHost(endpointParsed.hostname, { allowPrivate });
       if (hostErr) throw new Error(`OIDC discovery ${field} points to a disallowed host: ${hostErr}`);
     }
   }
