@@ -3739,24 +3739,29 @@ describe('Yahoo connection budget (#433)', () => {
     expect(poolSizeFor({ imap_host: 'imap.example.com' })).toBe(4);
   });
 
-  it('skips the staleness probe while the Yahoo background connection is busy', async () => {
+  it('probes a Yahoo account on its pooled session, taking no background connection', async () => {
+    // The probe used to be one more Yahoo login every 3 minutes, and took the host's one
+    // background connection for it. It now rides the account's pooled session (secondaryOverPool),
+    // so a backfill holding that background connection does not stop it, and it opens no login.
+    const acct = { ...yahoo, id: 'yahoo-budget-probe' };
     const interval = vi.spyOn(globalThis, 'setInterval');
     const mgr = new ImapManager(null);
     const probeCycle = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
     for (const key of ['_healthCheckTimer', '_snippetSchedulerTimer', '_stalenessCheckTimer', '_flagPushReconcilerTimer', '_folderStatusTimer', '_providerIdSchedulerTimer']) clearInterval(mgr[key]);
-    mgr.connections.set(yahoo.id, { close: vi.fn() });
-    query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [yahoo] }));
+    mgr.connections.set(acct.id, { close: vi.fn() });
+    query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : [acct] }));
     const clients = trackedClients();
+    releasePooledClient(acct, await acquirePooledClient(acct)); // the one pooled session
+    expect(clients).toHaveLength(1);
 
     await mgr._bgConnSem.acquire(yahooHost); // e.g. a backfill holds it
     await probeCycle();
-    expect(clients).toHaveLength(0);
-
-    mgr._bgConnSem.release(yahooHost);
-    await probeCycle();
     expect(clients).toHaveLength(1);
-    expect(clients[0].close).toHaveBeenCalledOnce();
-    expect(mgr._bgConnSem.activeCount(yahooHost)).toBe(0);
+    expect(clients[0].search).toHaveBeenCalledWith({ uid: '101:*' }, { uid: true });
+    expect(clients[0].close).not.toHaveBeenCalled();
+    expect(mgr._bgConnSem.activeCount(yahooHost)).toBe(1);
+    mgr._bgConnSem.release(yahooHost);
+    evictPool(acct.id);
   });
 
   it('still probes an account on a host without a background budget', async () => {
@@ -7673,5 +7678,363 @@ describe('CONDSTORE-less full sync (upstream #495)', () => {
     await mgr.syncMessages(account, client, 'Work', 20, false);
 
     expect(calls.upserts).toEqual([31]);
+  });
+});
+
+// ── Secondary work over the pool (upstream #474 round 5) ────────────────────────────────
+//
+// Yahoo rate-limits the AUTHENTICATE command itself ("[LIMIT] AUTHENTICATE Rate limit hit.").
+// Upstream measured refusals that never converged with the tab closed: the staleness probe (a
+// fresh login every 3 minutes), the folder status monitor (a fresh login every minute, retried at
+// the ladder cap) and pool grows. Pacing fresh logins cannot converge; not opening them can. On a
+// secondaryOverPool provider the periodic work rides the account's one pooled session, and the
+// pool grow, the one login left on that road, arms and clears the secondary backoff. Each test
+// uses its own account id because the pool is module-level.
+describe('secondary work over the pool on a provider that limits logins (upstream #474 round 5)', () => {
+  let seq = 0;
+  const yahooAcct = () => ({ id: `r5-yahoo-${++seq}`, user_id: 'u1', enabled: true, imap_host: 'imap.mail.yahoo.com', imap_tls: true, email_address: 'y@example.test', auth_user: 'y', auth_pass: 'enc' });
+  const nodeAcct = () => ({ id: `r5-node-${++seq}`, user_id: 'u1', enabled: true, imap_host: 'mx.node.example', imap_tls: true, mail_node: true, email_address: 'n@example.test', auth_user: 'n', auth_pass: 'enc' });
+  // Yahoo's refusal of the login itself, as imapflow reports it.
+  const limitRefusal = () => Object.assign(new Error('Command failed'), {
+    responseText: 'AUTHENTICATE Rate limit hit.', serverResponseCode: 'LIMIT', authenticationFailed: true,
+  });
+  const used = [];
+  let clients;
+  function arrange(acct, { connect } = {}) {
+    used.push(acct.id);
+    clients = [];
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(connect || (() => Promise.resolve()));
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+      client.status = vi.fn(async () => ({ messages: 5, unseen: 0, uidNext: 10, uidValidity: 1 }));
+      client.getMailboxLock = vi.fn().mockResolvedValue({ release: vi.fn() });
+      client.search = vi.fn().mockResolvedValue([]);
+      client.fetch = vi.fn(async function* () {});
+      clients.push(client);
+      return client;
+    });
+    ImapFlow.mockClear();
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockImplementation(async sql => ({ rows: sql.includes('FROM email_accounts') ? [acct] : [] }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    return ladderManager();
+  }
+  // The staleness probe cycle of a fresh manager (its interval callback), with the other timers stopped.
+  function arrangeProbe(acct, opts) {
+    const interval = vi.spyOn(globalThis, 'setInterval');
+    const mgr = arrange(acct, opts);
+    const cycle = interval.mock.calls.find(([, ms]) => ms === 180000)[0];
+    interval.mockRestore();
+    mgr.connections.set(acct.id, { close: vi.fn() });
+    query.mockImplementation(async sql => ({ rows: sql.includes('MAX(uid)') ? [{ maxuid: 100 }] : sql.includes('FROM email_accounts') ? [acct] : [] }));
+    return { mgr, cycle };
+  }
+  const seedPool = async acct => releasePooledClient(acct, await acquirePooledClient(acct));
+  const armed = (mgr, acct, failures = 1) => mgr._secondaryCooldown.set(acct.id, { until: Date.now() + 60000, failures });
+  afterEach(() => {
+    for (const id of used.splice(0)) evictPool(id);
+    vi.restoreAllMocks();
+  });
+
+  it('marks Yahoo alone as a provider whose periodic work rides the pool', () => {
+    expect(providerProfile({ imap_host: 'imap.mail.yahoo.com' }).secondaryOverPool).toBe(true);
+    for (const host of ['imap.gmail.com', 'mx.node.example', 'imap.purelymail.com', 'imap.mail.me.com', 'outlook.office365.com']) {
+      expect(providerProfile({ imap_host: host }).secondaryOverPool).toBeUndefined();
+    }
+  });
+
+  describe('folder status and integrity sync', () => {
+    it('reuse ONE pooled session across cycles instead of a login per cycle, with no background connection', async () => {
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      vi.spyOn(mgr._bgConnSem, 'acquire');
+      const seen = [];
+      for (let i = 0; i < 3; i++) await mgr._withCountClient(acct, async c => { seen.push(c); });
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(new Set(seen).size).toBe(1);
+      expect(seen[0].close).not.toHaveBeenCalled(); // still pooled, not torn down per cycle
+      expect(mgr._bgConnSem.acquire).not.toHaveBeenCalled();
+    });
+
+    it('a reused session clears neither the secondary backoff nor a secondary auth window', async () => {
+      // Only an ACCEPTED LOGIN says logins are welcome, or that the password works.
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      await seedPool(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() - 1, failures: 3 });
+      mgr._secondaryAuthCooldown.set(acct.id, { until: Date.now() + 60000, failures: 1 });
+      mgr._syncErrorState.set(acct.id, 'Authentication failed');
+      await mgr._withCountClient(acct, async () => {});
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(mgr._secondaryCooldown.get(acct.id)?.failures).toBe(3);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(true);
+      expect(query.mock.calls.some(([sql]) => sql.includes('sync_error = NULL'))).toBe(false);
+    });
+
+    it('while a backoff holds logins back and no session is open, fail at once without a login', async () => {
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      armed(mgr, acct);
+      await expect(mgr._withCountClient(acct, async () => 'counted')).rejects.toMatchObject({ providerRefusing: true });
+      expect(ImapFlow).not.toHaveBeenCalled();
+    });
+
+    it('while a backoff holds logins back, still run over an idle open session, and keep the backoff', async () => {
+      // An established session is the one thing such a provider keeps serving, and using it is how
+      // counts stay fresh through a backoff (and how the session stays warm).
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      await seedPool(acct);
+      armed(mgr, acct);
+      expect(await mgr._withCountClient(acct, async () => 'counted')).toBe('counted');
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(mgr._secondaryCooldown.get(acct.id)?.failures).toBe(1);
+    });
+
+    it('queue as background work: a click waiting for the one session goes first', async () => {
+      // Yahoo's pool is one session with no reserve for user actions (#103), so the status pass
+      // must at least queue behind the reader's clicks rather than ahead of them.
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      const holder = await acquirePooledClient(acct, { background: true });
+      const order = [];
+      const cycle = mgr._withCountClient(acct, async () => { order.push('status'); });
+      await new Promise(r => setImmediate(r));
+      const click = acquirePooledClient(acct).then(c => { order.push('click'); releasePooledClient(acct, c); });
+      await new Promise(r => setImmediate(r));
+      releasePooledClient(acct, holder);
+      await Promise.all([cycle, click]);
+      expect(order).toEqual(['click', 'status']);
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+    });
+
+    it('bound integrity syncs of all Yahoo accounts to the host budget, as the fresh login did', async () => {
+      const acct = yahooAcct();
+      const other = yahooAcct();
+      const mgr = arrange(acct);
+      vi.spyOn(mgr._bgConnSem, 'acquire');
+      let finish;
+      mgr._refreshObservedFolder = vi.fn(() => new Promise(resolve => { finish = resolve; }));
+      const status = { messages: 1, unseen: 0, uidNext: 2, uidValidity: 1 };
+      expect(mgr._queueObservedFolder(acct, 'INBOX', status)).toBe(true);
+      expect(mgr._queueObservedFolder(other, 'INBOX', status)).toBe(false);
+      await vi.waitFor(() => expect(mgr._refreshObservedFolder).toHaveBeenCalledOnce());
+      finish(true);
+      await vi.waitFor(() => expect(mgr._statusSyncRunning.size).toBe(0));
+      expect(mgr._queueObservedFolder(other, 'INBOX', status)).toBe(true);
+      expect(mgr._bgConnSem.acquire).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the pool grow owns the secondary backoff', () => {
+    it('a refused grow arms the secondary backoff, and the next periodic cycle opens no login', async () => {
+      const acct = yahooAcct();
+      const mgr = arrange(acct, { connect: () => Promise.reject(limitRefusal()) });
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toBeTruthy();
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(mgr._secondaryCooldown.get(acct.id)?.failures).toBe(1);
+      expect(mgr._connectCooldown.has(acct.id)).toBe(false);       // never the live-sync ladder
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false); // a refusal is no rejected password
+      await expect(mgr._withCountClient(acct, async () => {})).rejects.toMatchObject({ providerRefusing: true });
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+    });
+
+    it('an accepted grow clears the secondary backoff', async () => {
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() - 1, failures: 4 });
+      await seedPool(acct);
+      expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
+    });
+
+    it('an accepted grow ends a lapsed secondary auth window and the error it recorded', async () => {
+      // The status monitor's fresh login used to be what cleared these. On the pool it no longer
+      // logs in, so without the grow a mailbox rejected once would stay red until a reconnect.
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      mgr.connections.set(acct.id, { close: vi.fn() });
+      mgr._secondaryAuthCooldown.set(acct.id, { until: Date.now() - 1, failures: 2 });
+      mgr._syncErrorState.set(acct.id, 'Authentication failed');
+      await mgr._withCountClient(acct, async () => {});
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(mgr._secondaryAuthCooldown.has(acct.id)).toBe(false);
+      expect(query.mock.calls.some(([sql]) => sql.includes('sync_error = NULL'))).toBe(true);
+      expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'account_connected', accountId: acct.id });
+    });
+
+    it('leaves a mail node mailbox as it was: its grows neither arm nor clear the secondary backoff', async () => {
+      const acct = nodeAcct();
+      const mgr = arrange(acct);
+      mgr._secondaryCooldown.set(acct.id, { until: Date.now() - 1, failures: 3 });
+      await seedPool(acct);
+      expect(mgr._secondaryCooldown.get(acct.id)?.failures).toBe(3);
+
+      const refused = nodeAcct();
+      const mgr2 = arrange(refused, { connect: () => Promise.reject(limitRefusal()) });
+      await expect(acquirePooledClient(refused)).rejects.toBeTruthy();
+      expect(mgr2._secondaryCooldown.has(refused.id)).toBe(false);
+    });
+
+    it('keeps a mail node mailbox on its fresh status login and background connection', async () => {
+      const acct = nodeAcct();
+      const mgr = arrange(acct);
+      vi.spyOn(mgr._bgConnSem, 'acquire');
+      for (let i = 0; i < 2; i++) await mgr._withCountClient(acct, async () => {});
+      expect(ImapFlow).toHaveBeenCalledTimes(2);
+      expect(mgr._bgConnSem.acquire).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('the staleness probe', () => {
+    it('probes over the pooled session: no fresh login', async () => {
+      const acct = yahooAcct();
+      const { cycle } = arrangeProbe(acct);
+      await seedPool(acct);
+      await cycle();
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(clients[0].search).toHaveBeenCalledWith({ uid: '101:*' }, { uid: true });
+      expect(clients[0].close).not.toHaveBeenCalled(); // and left the session pooled
+    });
+
+    it('skips the cycle quietly while a backoff holds logins back and no session is open', async () => {
+      const acct = yahooAcct();
+      const { mgr, cycle } = arrangeProbe(acct);
+      armed(mgr, acct);
+      await cycle();
+      expect(ImapFlow).not.toHaveBeenCalled();
+      expect(console.warn.mock.calls.some(([m]) => String(m).includes('Staleness check error'))).toBe(false);
+    });
+
+    it('skips quietly while held back when the one session is busy or dead', async () => {
+      // Only an idle, usable session can serve a job held back from logging in: a busy one would
+      // only answer providerRefusing, and a dead one would fail its first command.
+      const acct = yahooAcct();
+      const { mgr, cycle } = arrangeProbe(acct);
+      const held = await acquirePooledClient(acct);
+      armed(mgr, acct);
+      await cycle();
+      expect(held.search).not.toHaveBeenCalled();
+      releasePooledClient(acct, held);
+      held.usable = false; // the socket died without a close event
+      await cycle();
+      expect(held.search).not.toHaveBeenCalled();
+      expect(console.warn.mock.calls.some(([m]) => String(m).includes('Staleness check error'))).toBe(false);
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+    });
+
+    it('still probes over an idle open session while a backoff holds logins back', async () => {
+      const acct = yahooAcct();
+      const { mgr, cycle } = arrangeProbe(acct);
+      await seedPool(acct);
+      armed(mgr, acct, 2);
+      await cycle();
+      expect(ImapFlow).toHaveBeenCalledTimes(1);
+      expect(clients[0].search).toHaveBeenCalled();
+      expect(mgr._secondaryCooldown.get(acct.id)?.failures).toBe(2);
+    });
+
+    it('an error on a reused session arms nothing: the grow owns the backoff', async () => {
+      // "Connection not available" is imapflow's word for a socket the server dropped. On a fresh
+      // login it reads like a refusal; on a session reused from the pool it says nothing about logins.
+      const acct = yahooAcct();
+      const { mgr, cycle } = arrangeProbe(acct);
+      await seedPool(acct);
+      clients[0].getMailboxLock.mockRejectedValue(new Error('Connection not available'));
+      await cycle();
+      expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
+      expect(clients[0].close).toHaveBeenCalled(); // the failed session left the pool
+    });
+  });
+
+  it('reconcile skips the cycle quietly while held back with no open session; a node mailbox runs as before', async () => {
+    const acct = yahooAcct();
+    const mgr = arrange(acct);
+    armed(mgr, acct);
+    query.mockClear();
+    await mgr.reconcileDeletes(acct);
+    expect(query).not.toHaveBeenCalled();
+    expect(ImapFlow).not.toHaveBeenCalled();
+
+    // With an idle open session it reconciles over it, still without a login.
+    mgr._secondaryCooldown.delete(acct.id);
+    await seedPool(acct);
+    armed(mgr, acct);
+    query.mockImplementation(async sql => ({ rows: sql.includes('SELECT DISTINCT m.folder') ? [{ folder: 'INBOX' }] : [] }));
+    await mgr.reconcileDeletes(acct);
+    expect(clients[0].search).toHaveBeenCalledWith({ all: true }, { uid: true });
+    expect(ImapFlow).toHaveBeenCalledTimes(1);
+
+    const node = nodeAcct();
+    const nodeMgr = arrange(node);
+    armed(nodeMgr, node);
+    query.mockClear();
+    await nodeMgr.reconcileDeletes(node);
+    expect(query).toHaveBeenCalled(); // reads its folders and gets providerRefusing from the pool
+    expect(ImapFlow).not.toHaveBeenCalled();
+  });
+
+  it('refusals converge: after one accepted login the periodic work opens none', async () => {
+    // Two simulated hours of every periodic job on a Yahoo mailbox: the folder status monitor every
+    // minute, the staleness probe every 3, delete reconcile every 10, the spam poll every 30. The
+    // server refuses every login for the first 20 minutes, then refuses a login only when 3 landed
+    // in the last 10 minutes (a login-rate limit). Refusals are paid once per backoff window, then
+    // one login is accepted, and from there on the work reuses that session: no login at all.
+    vi.useFakeTimers();
+    try {
+      const acct = yahooAcct();
+      const start = Date.now();
+      const attempts = []; // { at, ok }
+      const connect = () => {
+        const now = Date.now();
+        const recent = attempts.filter(a => now - a.at < 10 * 60000).length;
+        const ok = now - start >= 20 * 60000 && recent < 3;
+        attempts.push({ at: now, ok });
+        return ok ? Promise.resolve() : Promise.reject(limitRefusal());
+      };
+      const { mgr, cycle } = arrangeProbe(acct, { connect });
+      mgr.folderStatusMonitor.enqueueSync = () => false; // counts only, no integrity pass
+      mgr.syncMessages = vi.fn(async () => ({}));
+      let revision = 0;
+      query.mockImplementation(async sql => {
+        if (sql.includes('FROM email_accounts')) return { rows: [acct] };
+        if (sql.includes('MAX(uid)')) return { rows: [{ maxuid: 100 }] };
+        if (sql.includes('SELECT f.*')) return { rows: [{ path: 'INBOX' }] };
+        if (sql.includes('nextval')) return { rows: [{ revision: String(++revision), started_at: new Date() }] };
+        if (sql.includes('RETURNING id')) return { rows: [{ id: 1 }] };
+        if (sql.includes('SELECT DISTINCT m.folder')) return { rows: [{ folder: 'INBOX' }] };
+        if (sql.includes('lower(name) ~')) return { rows: [{ path: 'Junk' }] };
+        return { rows: [] };
+      });
+
+      for (let minute = 1; minute <= 120; minute++) {
+        await vi.advanceTimersByTimeAsync(60000);
+        await mgr.folderStatusMonitor.refresh(acct);
+        if (minute % 3 === 0) await cycle();
+        if (minute % 10 === 0) await mgr.reconcileDeletes(acct);
+        if (minute % 30 === 0) await mgr._syncSpamFolder(acct);
+      }
+
+      const refused = attempts.filter(a => !a.ok);
+      const accepted = attempts.filter(a => a.ok);      // One refusal per backoff window during the refusing stretch (30 s doubling to 15 min),
+      // not one per job per cycle, and a single accepted login after it.
+      expect(refused.length).toBeGreaterThan(0);
+      expect(refused.length).toBeLessThanOrEqual(8);
+      expect(accepted).toHaveLength(1);
+      // The second hour: no login at all, so nothing for the provider to refuse.
+      expect(attempts.filter(a => a.at - start >= 60 * 60000)).toHaveLength(0);
+      expect(ImapFlow).toHaveBeenCalledTimes(attempts.length);
+      // And the work still ran: counts were read and the probe asked the server every cycle.
+      expect(clients.at(-1).status.mock.calls.length).toBeGreaterThan(60);
+      expect(clients.at(-1).search.mock.calls.length).toBeGreaterThan(20);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 });

@@ -1063,6 +1063,13 @@ function safeDate(d) {
 // statusOnPool:         true runs folder status and integrity sync on a pooled session instead
 //                       of a fresh login with a background slot. Needs a pool with room to spare;
 //                       never for preferFreshBodyFetch providers, whose pooled sessions go stale.
+// secondaryOverPool:    for a provider that limits logins themselves (Yahoo): periodic secondary
+//                       work opens no login of its own. Folder status, integrity sync and the
+//                       staleness probe run on the account's pooled session and may reuse an open
+//                       one while the secondary backoff holds logins back; the pool grow, the one
+//                       login left on that road, arms that backoff when refused and clears it
+//                       when accepted; reconcile and the spam poll skip quietly while it holds
+//                       them back with no open session. Works with a pool of one.
 const PROVIDERS = {
   google: {
     // Gmail folders are label memberships; matching Message-IDs are not proof of a move.
@@ -1110,6 +1117,14 @@ const PROVIDERS = {
     batchSize: 100, batchDelay: 2000, errorDelay: 30000, batchesPerConn: 50,
     poolSize: 1,
     maxBackgroundConnections: 1,
+    // Yahoo also rate-limits the AUTHENTICATE command itself ("[LIMIT] AUTHENTICATE Rate limit
+    // hit.", upstream #474 round 5). Periodic work that opens a login per cycle (the folder
+    // status monitor every minute, the staleness probe every three) is then refused around the
+    // clock, and pacing those logins better never brings the refusals to zero; not opening them
+    // does. So that work rides the account's one pooled session instead, the way flag stores
+    // ride the persistent IDLE session, which also keeps that session warm. See secondaryOverPool
+    // in the list above.
+    secondaryOverPool: true,
     idleKeepaliveMs: 4 * 60 * 1000,
     fetchBody: false,
     pushesFlags: true,
@@ -1712,6 +1727,52 @@ function noteHelperLoginAccepted(account) {
   helperManager?._nodePasswordRestored?.delete(account.id);
 }
 
+// On a secondaryOverPool provider (Yahoo) the pool grow is the one login periodic secondary work
+// still opens, so the grow owns the secondary backoff there, as the folder status client's fresh
+// login does elsewhere. A refused grow arms it: before, a refused grow armed nothing, and whoever
+// grew next (a status cycle, a click) paid another doomed AUTHENTICATE. Auth failures keep their
+// own long ladder (applyHelperAuthFailure). Other providers are unchanged: their background
+// callers are held back by _poolLoginOpts, and the status client arms the backoff for them.
+function applyHelperGrowRefusal(account, err) {
+  if (providerProfile(account).secondaryOverPool !== true || !helperManager) return;
+  if (isImapAuthFailure(err) || !isConnectionRefusal(extractImapError(err))) return;
+  helperManager._noteSecondaryRefusal(account, 'Pooled login refused');
+}
+
+// An ACCEPTED grow on a secondaryOverPool provider is the signal a fresh status login gives
+// elsewhere: logins are welcome again, and the password works. It clears the secondary refusal
+// backoff and the secondary auth window with its recorded error (_noteStatusLoginOk). Only the
+// grow clears: reusing a session that was already open proves nothing about logins. Without this
+// a Yahoo mailbox whose secondary login was rejected once would stay red, and its background
+// logins held back, until its persistent session reconnected: its status work no longer logs in.
+async function noteHelperGrowAccepted(account) {
+  if (providerProfile(account).secondaryOverPool !== true || !helperManager) return;
+  helperManager._clearSecondaryCooldown(account.id);
+  try {
+    await helperManager._noteStatusLoginOk(account);
+  } catch (err) {
+    console.warn(`Clearing the secondary login window for ${logAccount(account)} failed: ${err?.message || 'unknown error'}`);
+  }
+}
+
+// True when the account's pool holds an open session nobody is using: a caller held back from
+// logging in (_poolLoginOpts) can still be served by it, and a periodic job that could only
+// grow the pool skips its cycle without one.
+function hasIdlePooledClient(accountId) {
+  const pool = connectionPools.get(accountId);
+  return !!pool && pool.clients.some(c => c && c.usable !== false && !pool.inUse.has(c));
+}
+
+// True when a periodic job on the pool (delete reconcile, the spam poll) of a secondaryOverPool
+// provider should skip this cycle quietly: a backoff holds logins back and no open session is
+// idle, so the pool could only answer providerRefusing. That costs no login, but it was logged as
+// a failure every cycle and read like one more refusal from the provider (upstream #474). The next
+// cycle tries again. Other providers keep logging it, as before.
+function periodicPoolWorkHeld(mgr, account) {
+  if (providerProfile(account).secondaryOverPool !== true) return false;
+  return !!mgr._secondaryLoginBlocked(account.id) && !hasIdlePooledClient(account.id);
+}
+
 // True while a rejected password holds this account's new logins back (_authLoginBlocked): then no
 // pool grow and no fresh login, for background and user work alike. An open session can still
 // serve the work; without one it fails at once with providerRefusing, which routes answer with
@@ -1862,9 +1923,11 @@ async function growPool(pool, account, { background = false } = {}) {
     unreserve();
     await applyHelperOAuthFailure(account, err);
     await applyHelperAuthFailure(account, err, 'Pooled');
+    applyHelperGrowRefusal(account, err);
     throw err;
   }
   noteHelperLoginAccepted(account);
+  await noteHelperGrowAccepted(account);
   unreserve();
   // Remove from pool immediately when the server closes the socket, then give the freed slot
   // to the queue (an idle client, or a grow for the head waiter).
@@ -2510,63 +2573,82 @@ export class ImapManager {
             );
             const maxUid = w.maxuid ? Number(w.maxuid) : 0;
             if (!maxUid) continue; // nothing synced yet — backfill owns initial population
-            // The probe is one more login. While the server refuses extra connections or has
-            // rejected the password on one, it would only add another refusal (or another
-            // rejected login toward fail2ban) and could not recover anything anyway.
-            if (this._secondaryLoginBlocked(accountId)) continue;
+
+            // Shared probe body: SELECT INBOX, ask for UIDs above the watermark, confirm them
+            // with FETCH. Runs on a fresh login or on a pooled session alike.
+            const probeInbox = async (probeClient) => {
+              const lock = await probeClient.getMailboxLock('INBOX');
+              try {
+                // Filter guards the IMAP `n:*` quirk: when n exceeds the highest UID
+                // the server returns that highest UID, which is NOT above maxUid. Cap to
+                // the newest 200 — enough to prove a miss without a huge FETCH on a deep gap.
+                const above = await probeClient.search({ uid: `${maxUid + 1}:*` }, { uid: true });
+                const candidates = (above || []).filter(u => u > maxUid).slice(-200);
+                if (candidates.length === 0) return 0;
+                // Some servers advertise phantom UIDs that cannot be fetched.
+                // Confirm candidates with FETCH before diagnosing a missed message;
+                // every returned UID needs its own cached INBOX copy on all providers.
+                const fetched = [];
+                for await (const m of probeClient.fetch(candidates.join(','), { uid: true, envelope: true }, { uid: true })) {
+                  const raw = m.envelope?.messageId;
+                  fetched.push({ uid: m.uid, messageId: raw ? raw.replace(/[<>]/g, '').trim() : null });
+                }
+                if (fetched.length === 0) return 0; // every candidate was a phantom
+                return countMissingInboxCopies(account, fetched);
+              } finally { lock.release(); }
+            };
 
             let missed = 0;
-            let probe = null;
-            // On a host with its own background budget (a provider with a per-account session
-            // limit, e.g. Yahoo) the probe is one more login, so it takes a background slot and
-            // skips this cycle when none is free. Elsewhere it stays ungated: it must run even
-            // during a long backfill to recover a deaf IDLE connection.
-            const probeHost = (account.imap_host || '').toLowerCase();
-            const probeBudgeted = providerProfile(account).maxBackgroundConnections != null;
-            if (probeBudgeted && !this._bgConnSem.tryAcquire(probeHost)) continue;
-            try {
-              // Genuinely fresh login — NOT withFreshClient/pool, which can share the
-              // frozen mailbox view. Token refresh and host/DNS resolution are bounded
-              // (raceTimeout) so a hang in either can't wedge the sequential loop and, via
-              // the re-entrancy guard, silently freeze the check for ALL accounts. The
-              // probe socket is created only AFTER those succeed, so the finally below
-              // always has a real client to close (no post-timeout connection can escape).
-              const fresh = await ensureFreshToken(account);
-              const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Staleness host resolve');
-              // Use the same admission control and IPv4 fallback as every other login.
-              // Keep connection establishment outside the command deadline: otherwise
-              // that deadline cancels the fallback before it can recover.
-              probe = await connectImapClient(fresh, resolved, { policy }, 25000, 'Staleness connect');
-              missed = await raceTimeout(
-                (async () => {
-                  const lock = await probe.getMailboxLock('INBOX');
-                  try {
-                    // Filter guards the IMAP `n:*` quirk: when n exceeds the highest UID
-                    // the server returns that highest UID, which is NOT above maxUid. Cap to
-                    // the newest 200 — enough to prove a miss without a huge FETCH on a deep gap.
-                    const above = await probe.search({ uid: `${maxUid + 1}:*` }, { uid: true });
-                    const candidates = (above || []).filter(u => u > maxUid).slice(-200);
-                    if (candidates.length === 0) return 0;
-                    // Some servers advertise phantom UIDs that cannot be fetched.
-                    // Confirm candidates with FETCH before diagnosing a missed message;
-                    // every returned UID needs its own cached INBOX copy on all providers.
-                    const fetched = [];
-                    for await (const m of probe.fetch(candidates.join(','), { uid: true, envelope: true }, { uid: true })) {
-                      const raw = m.envelope?.messageId;
-                      fetched.push({ uid: m.uid, messageId: raw ? raw.replace(/[<>]/g, '').trim() : null });
-                    }
-                    if (fetched.length === 0) return 0; // every candidate was a phantom
-                    return countMissingInboxCopies(account, fetched);
-                  } finally { lock.release(); }
-                })(),
-                25000, 'Staleness probe',
-              );
-            } finally {
-              // close() (not logout()) — destroys the socket AND aborts a still-pending
-              // connect() left running by the race timeout, so a slow login can't leak an
-              // authenticated session that lingers on a connection-limited server.
-              if (probe) { try { probe.close(); } catch { /* already closed */ } }
-              if (probeBudgeted) this._bgConnSem.release(probeHost);
+            if (providerProfile(account).secondaryOverPool === true) {
+              // A provider that limits logins themselves (Yahoo) probes on the account's pooled
+              // session, not a fresh login: a login every 3 minutes was the largest share of
+              // its refusals upstream (15 an hour). The frozen-view caveat above is
+              // PurelyMail's, and PurelyMail keeps the fresh login; the pooled session is still
+              // independent of the persistent connection, so the question the probe asks keeps
+              // its meaning. The accepted cost: a provider whose pooled session froze too would
+              // go unnoticed. While a backoff holds logins back the probe may still reuse an
+              // open session (no login); without one it skips the cycle quietly, since it
+              // could only have asked the pool for a grow the backoff forbids. The pool bounds
+              // the probe (timeoutMs) and, on any failure or timeout, evicts and closes the
+              // session, so a command left running on it is never handed to the next caller.
+              // No background connection: the pooled session is not one.
+              if (this._secondaryLoginBlocked(accountId) && !hasIdlePooledClient(accountId)) continue;
+              missed = await withFreshClient(account, probeInbox,
+                { background: true, timeoutMs: 25000, ...this._poolLoginOpts(accountId) });
+            } else {
+              // The probe is one more login. While the server refuses extra connections or has
+              // rejected the password on one, it would only add another refusal (or another
+              // rejected login toward fail2ban) and could not recover anything anyway.
+              if (this._secondaryLoginBlocked(accountId)) continue;
+              let probe = null;
+              // On a host with its own background budget the probe is one more login, so it
+              // takes a background slot and skips this cycle when none is free. Elsewhere it
+              // stays ungated: it must run even during a long backfill to recover a deaf IDLE
+              // connection.
+              const probeHost = (account.imap_host || '').toLowerCase();
+              const probeBudgeted = providerProfile(account).maxBackgroundConnections != null;
+              if (probeBudgeted && !this._bgConnSem.tryAcquire(probeHost)) continue;
+              try {
+                // Genuinely fresh login — NOT withFreshClient/pool, which can share the
+                // frozen mailbox view. Token refresh and host/DNS resolution are bounded
+                // (raceTimeout) so a hang in either can't wedge the sequential loop and, via
+                // the re-entrancy guard, silently freeze the check for ALL accounts. The
+                // probe socket is created only AFTER those succeed, so the finally below
+                // always has a real client to close (no post-timeout connection can escape).
+                const fresh = await ensureFreshToken(account);
+                const { resolved, policy } = await raceTimeout(resolveAccountHost(fresh), 15000, 'Staleness host resolve');
+                // Use the same admission control and IPv4 fallback as every other login.
+                // Keep connection establishment outside the command deadline: otherwise
+                // that deadline cancels the fallback before it can recover.
+                probe = await connectImapClient(fresh, resolved, { policy }, 25000, 'Staleness connect');
+                missed = await raceTimeout(probeInbox(probe), 25000, 'Staleness probe');
+              } finally {
+                // close() (not logout()) — destroys the socket AND aborts a still-pending
+                // connect() left running by the race timeout, so a slow login can't leak an
+                // authenticated session that lingers on a connection-limited server.
+                if (probe) { try { probe.close(); } catch { /* already closed */ } }
+                if (probeBudgeted) this._bgConnSem.release(probeHost);
+              }
             }
 
             if (missed === 0) continue;
@@ -2622,7 +2704,11 @@ export class ImapManager {
             // A secondary login like the status client's, handled the same way: a rejected
             // password on the secondary (or account-wide) auth ladder, a refusal on the
             // secondary backoff. Without this the probe retried a rejected password every cycle.
-            if (probedAccount && !(await this._handleOAuthRefreshFailure(probedAccount, err))) {
+            // Not for a probe on the pool (secondaryOverPool): the grow already armed what its
+            // login earned, and an error on a reused session ("Connection not available" from a
+            // socket the server dropped) says nothing about whether logins are welcome.
+            if (probedAccount && providerProfile(probedAccount).secondaryOverPool !== true
+              && !(await this._handleOAuthRefreshFailure(probedAccount, err))) {
               if (isImapAuthFailure(err)) await this._noteSecondaryAuthFailure(probedAccount, err, 'Staleness probe');
               else if (isConnectionRefusal(detail)) this._noteSecondaryRefusal(probedAccount);
             }
@@ -4093,6 +4179,23 @@ export class ImapManager {
 
   async _withCountClient(account, fn) {
     const host = (account.imap_host || '').toLowerCase();
+    // A provider that limits logins themselves (secondaryOverPool, Yahoo): the folder status pass
+    // and integrity sync run on the account's pooled session instead of a fresh login per cycle.
+    // The fresh login below was refused around the clock there, and each refusal only re-armed
+    // the ladder it retried from. A pooled session may have a mailbox selected; STATUS tolerates
+    // that (Gmail's statusOnPool relies on it too). While a backoff holds logins back the pool
+    // may still hand over a session that is already open, which costs no login and is the one
+    // thing such a provider keeps serving, and it grows nothing (_poolLoginOpts; a rejected
+    // password holds the grow back in the pool itself). Without an open session the pool fails at
+    // once with providerRefusing, and the monitor backs off. This path neither arms nor clears
+    // the secondary backoff: a reused session proves nothing about logins, and the grow owns both
+    // (applyHelperGrowRefusal, noteHelperGrowAccepted). No background connection is taken: the
+    // pooled session is not one.
+    if (providerProfile(account).secondaryOverPool === true) {
+      const { rows: [current] } = await query('SELECT * FROM email_accounts WHERE id=$1 AND enabled', [account.id]);
+      if (!current || current.oauth_reconnect_required) return;
+      return withFreshClient(current, fn, { background: true, ...this._poolLoginOpts(account.id) });
+    }
     const pooled = !!providerProfile(account).statusOnPool;
     if (!pooled) await this._bgConnSem.acquire(host, { timeoutMs: 30000 });
     let client;
@@ -4166,7 +4269,8 @@ export class ImapManager {
     if ([...this._statusSyncRunning].some(k => k.startsWith(`${account.id}:`))) return false;
     // A folder that finds the host bound full is not queued; the next status cycle re-evaluates it.
     const host = (account.imap_host || '').toLowerCase();
-    const hostBounded = !!profile.statusOnPool;
+    // Pooled integrity syncs (statusOnPool, secondaryOverPool) take no background connection.
+    const hostBounded = !!profile.statusOnPool || profile.secondaryOverPool === true;
     if (hostBounded && !this._integritySem.tryAcquire(host)) {
       recordImapEvent(host, 'integrity_slot_full');
       return false;
@@ -8228,6 +8332,7 @@ export class ImapManager {
   // DB writes). Phase 2: diff and delete outside the IMAP connection so a DB error never
   // evicts a healthy pool client.
   async reconcileDeletes(account) {
+    if (periodicPoolWorkHeld(this, account)) return;
     // Captured before the Phase 1 snapshot. Any row inserted or re-synced after this
     // instant (new IDLE mail, a bulk-move reinsert) is NOT in the snapshot yet, so it
     // would look like an orphan. Excluding rows synced at/after the cutoff closes that
