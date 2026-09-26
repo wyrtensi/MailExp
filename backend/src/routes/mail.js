@@ -1429,17 +1429,34 @@ router.post('/messages/bulk-read', async (req, res) => {
 // Trash AND the client saw it in Trash (or the request says `permanent: true`). A row in Trash
 // that the client saw anywhere else was moved there already: the delete is done, and nothing
 // happens. A request without the field (an older client, a notification action, the unsubscribe
-// toast's "Move to trash") only ever moves to Trash. bulk: read `folders` only, never `folder`.
+// toast's "Move to trash") only ever moves to Trash. bulk: read `folders` (or `seen`, below)
+// only, never `folder`.
 function deleteIntent(body, { bulk = false } = {}) {
   const b = body && typeof body === 'object' ? body : {};
   const folders = b.folders && typeof b.folders === 'object' && !Array.isArray(b.folders) ? b.folders : {};
+  const bySeen = bulk ? seenByFolder(b) : null;
   return {
     permanent: b.permanent === true,
     seen: (id) => {
-      const f = bulk ? (Object.prototype.hasOwnProperty.call(folders, id) ? folders[id] : null) : b.folder;
+      let f = b.folder;
+      if (bulk) f = Object.prototype.hasOwnProperty.call(folders, id) ? folders[id] : (bySeen?.get(id) ?? null);
       return typeof f === 'string' ? f : null;
     },
   };
+}
+
+// bulk-delete's `seen: { [folder]: [ids] }`: the compact form of `folders`, each folder named once,
+// and its ids need not be repeated in `ids`. The page-close flush uses it to fit the browser's
+// keepalive budget. Map<id, folder>, or null when absent or not that shape.
+function seenByFolder(body) {
+  const seen = body?.seen;
+  if (!seen || typeof seen !== 'object' || Array.isArray(seen)) return null;
+  const out = new Map();
+  for (const [folder, list] of Object.entries(seen)) {
+    if (!Array.isArray(list)) return null;
+    for (const id of list) out.set(id, folder);
+  }
+  return out;
 }
 
 function wantsForever(intent, id, allTrashPaths) {
@@ -1496,8 +1513,15 @@ async function expungeClaimed(folder, rows, imapDelete) {
 // backfill would bring back as new mail. Only that part can still be busy. A letter already in
 // Trash that the client saw elsewhere is left alone and reported deleted (deleteIntent).
 router.post('/messages/bulk-delete', async (req, res) => {
-  const { ids } = req.body;
-  if (!Array.isArray(ids) || ids.length === 0) {
+  const bySeen = seenByFolder(req.body);
+  if (req.body?.seen !== undefined && !bySeen) {
+    return res.status(400).json({ error: 'seen must map folders to arrays of ids' });
+  }
+  if (req.body?.ids !== undefined && !Array.isArray(req.body.ids)) {
+    return res.status(400).json({ error: 'ids array required' });
+  }
+  const ids = [...new Set([...(req.body?.ids ?? []), ...(bySeen ? bySeen.keys() : [])])];
+  if (ids.length === 0) {
     return res.status(400).json({ error: 'ids array required' });
   }
   if (ids.length > 500) {

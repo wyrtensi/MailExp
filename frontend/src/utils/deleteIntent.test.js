@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { deleteView, deleteViewFolder, rowSeenFolders, foldersFor } from './deleteIntent.js';
+import { deleteView, deleteViewFolder, rowSeenFolders, foldersFor, exitDeleteBodies, EXIT_KEEPALIVE_BUDGET } from './deleteIntent.js';
 import { api, createDirectApi } from './api.js';
 
 const inboxView = deleteView({ searchQuery: '', selectedAccountId: 'acc', selectedFolder: 'INBOX' });
@@ -76,11 +76,47 @@ test('the deletes sent on page exit carry the folders too, as JSON with keepaliv
   const { calls, fetchImpl } = recorder();
   const direct = createDirectApi({ demoMode: false, fetchImpl });
   await direct.deleteMessagesOnExit(['a'], { a: '[Gmail]/Trash' });
-  await direct.deleteMessagesOnExit(['a', 'b'], { a: 'Trash', b: 'INBOX' });
+  await direct.deleteMessagesOnExit(['a', 'b', 'x'], { a: 'Trash', b: 'INBOX' });
   await direct.deleteMessagesOnExit(['c']);
   assert.deepEqual(calls, [
     { url: '/api/mail/messages/a', method: 'DELETE', body: { folder: '[Gmail]/Trash' }, contentType: 'application/json', keepalive: true },
-    { url: '/api/mail/messages/bulk-delete', method: 'POST', body: { ids: ['a', 'b'], folders: { a: 'Trash', b: 'INBOX' } }, contentType: 'application/json', keepalive: true },
+    { url: '/api/mail/messages/bulk-delete', method: 'POST', body: { seen: { Trash: ['a'], INBOX: ['b'] }, ids: ['x'] }, contentType: 'application/json', keepalive: true },
     { url: '/api/mail/messages/c', method: 'DELETE', body: undefined, contentType: undefined, keepalive: true },
   ]);
+});
+
+const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const bytes = (body) => new TextEncoder().encode(body).length;
+
+test('the page-close flush is chunked at 500 ids, names each folder once, and stays within the keepalive budget', () => {
+  const ids = Array.from({ length: 1200 }, (_, i) => uuid(i));
+  const folders = Object.fromEntries(ids.map((id, i) => [id, i % 2 ? 'INBOX' : '&BCcENQRABD0EPgQyBDgEOgQ4-/Archive']));
+  const { bodies, dropped } = exitDeleteBodies(ids, folders);
+  assert.equal(bodies.length, 3);
+  assert.deepEqual(dropped, []);
+  const parsed = bodies.map(b => JSON.parse(b));
+  assert.deepEqual(parsed.map(b => Object.values(b.seen).flat().length), [500, 500, 200]);
+  assert.deepEqual(parsed.flatMap(b => Object.values(b.seen).flat()).sort(), [...ids].sort());
+  for (const b of bodies) assert.equal((b.match(/INBOX/g) || []).length, 1);
+  assert.ok(bodies.reduce((n, b) => n + bytes(b), 0) <= EXIT_KEEPALIVE_BUDGET);
+});
+
+test('what does not fit the keepalive budget is not sent, and is reported', () => {
+  const ids = Array.from({ length: 3000 }, (_, i) => uuid(i));
+  const { bodies, dropped } = exitDeleteBodies(ids, {});
+  const total = bodies.reduce((n, b) => n + bytes(b), 0);
+  assert.ok(total <= EXIT_KEEPALIVE_BUDGET, `${total} bytes`);
+  const sent = bodies.flatMap(b => JSON.parse(b).ids);
+  assert.ok(sent.length >= 1000, `${sent.length} sent`);
+  assert.deepEqual([...sent, ...dropped], ids);
+});
+
+test('the flush sends one keepalive request per chunk', async () => {
+  const { calls, fetchImpl } = recorder();
+  const direct = createDirectApi({ demoMode: false, fetchImpl });
+  const ids = Array.from({ length: 700 }, (_, i) => uuid(i));
+  await direct.deleteMessagesOnExit(ids, Object.fromEntries(ids.map(id => [id, 'Trash'])));
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(c => c.keepalive && c.method === 'POST'));
+  assert.deepEqual(calls.map(c => c.body.seen.Trash.length), [500, 200]);
 });

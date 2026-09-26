@@ -507,6 +507,25 @@ describe('claim states, one statement at a time (services/expungeClaims.js)', ()
   });
 });
 
+describe('the compact form the page-close flush sends: seen { [folder]: [ids] }', () => {
+  it('names each letter\'s folder once per folder, with its ids not repeated in ids', async () => {
+    const res = await send('POST', '/messages/bulk-delete', { seen: { Trash: [T], INBOX: [B, U] }, ids: [A] });
+    expect(res.status).toBe(200);
+    expect([...res.body.deleted].sort()).toEqual([A, B, T, U].sort());
+    expect(expunged()).toEqual([['Trash', 21]]); // U is in Trash but was seen in INBOX
+    expect(await row(U)).toEqual({ uid: 22, folder: 'Trash' });
+    expect((await row(A)).folder).toBe('Trash');
+    expect((await row(B)).folder).toBe('Trash');
+  });
+
+  it('refuses a seen that is not folders to id arrays, and more than 500 ids in all', async () => {
+    expect((await send('POST', '/messages/bulk-delete', { seen: { Trash: T } })).status).toBe(400);
+    expect((await send('POST', '/messages/bulk-delete', { seen: [T] })).status).toBe(400);
+    const many = Array.from({ length: 501 }, (_, i) => `52000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+    expect((await send('POST', '/messages/bulk-delete', { seen: { INBOX: many } })).status).toBe(400);
+  });
+});
+
 describe('a bulk delete whose later group fails', () => {
   it('journals and counts what an earlier group deleted forever, and answers the partial result', async () => {
     // T (Office Trash) goes first; G sits in Gmail's Trash and its group throws.

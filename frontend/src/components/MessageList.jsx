@@ -1179,14 +1179,19 @@ export default function MessageList() {
   // the unmount cleanup below does not double-fire on normal navigation.
   useEffect(() => {
     const handleBeforeUnload = () => {
+      // One flush for every pending delete: the keepalive budget is shared by the whole page.
+      const allIds = [];
+      const allFolders = {};
       pendingDeleteTimers.current.forEach(({ timer, message, ids, folders }) => {
         clearTimeout(timer);
-        const deleteIds = ids?.length ? ids : [message.id];
-        try {
-          api.deleteMessagesOnExit(deleteIds, folders).catch(() => {});
-        } catch { /* keepalive not supported — best effort */ }
+        allIds.push(...(ids?.length ? ids : [message.id]));
+        Object.assign(allFolders, folders);
       });
       pendingDeleteTimers.current.clear();
+      if (!allIds.length) return;
+      try {
+        api.deleteMessagesOnExit([...new Set(allIds)], allFolders).catch(() => {});
+      } catch { /* keepalive not supported — best effort */ }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -1200,9 +1205,13 @@ export default function MessageList() {
     pendingDeleteTimers.current.forEach(({ timer, message, ids, folders }) => {
       clearTimeout(timer);
       const deleteIds = ids?.length ? ids : [message.id];
+      // At most 500 ids per request, the server's cap.
+      const chunks = [];
+      for (let i = 0; i < deleteIds.length; i += 500) chunks.push(deleteIds.slice(i, i + 500));
       const deletePromise =
         deleteIds.length > 1
-          ? api.bulkDelete(deleteIds, folders)
+          ? Promise.all(chunks.map(chunk => api.bulkDelete(chunk, foldersFor(chunk, folders))))
+            .then(results => ({ deleted: results.flatMap(r => r?.deleted ?? []) }))
           : api.deleteMessage(deleteIds[0], folders?.[deleteIds[0]]);
       deletePromise
         .then(result => {

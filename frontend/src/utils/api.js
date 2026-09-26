@@ -1,5 +1,6 @@
 import { demoRequest } from '../demo/index.js';
 import { isDemoMode } from '../demo/mode.js';
+import { exitDeleteBodies } from './deleteIntent.js';
 
 const BASE = '/api';
 
@@ -180,13 +181,17 @@ export function createDirectApi({
             .then(result => ({ ...result, deleted: deleteIds }));
       }
       if (deleteIds.length > 1) {
-        return fetchImpl(BASE + '/mail/messages/bulk-delete', {
+        // Chunked to the server's 500 ids, compact, and within the page's keepalive budget
+        // (utils/deleteIntent.js). What does not fit is not sent: those letters stay put.
+        const { bodies, dropped } = exitDeleteBodies(deleteIds, folders);
+        if (dropped.length) console.warn(`Page closing: ${dropped.length} pending deletes did not fit the keepalive budget and were not sent`);
+        return Promise.all(bodies.map(body => fetchImpl(BASE + '/mail/messages/bulk-delete', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
-          body: JSON.stringify(bulkBody),
+          body,
           keepalive: true,
-        });
+        })));
       }
       return fetchImpl(`${BASE}/mail/messages/${deleteIds[0]}`, {
         method: 'DELETE',

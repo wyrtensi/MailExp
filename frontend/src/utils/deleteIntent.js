@@ -38,6 +38,44 @@ export function deleteView(state) {
   };
 }
 
+// A closing page's keepalive requests share 64 KiB of body in the browser (the Fetch spec counts
+// every keepalive request in flight), and the preferences flush on unload takes a little of it.
+export const EXIT_KEEPALIVE_BUDGET = 48 * 1024;
+export const BULK_DELETE_MAX_IDS = 500;
+
+// The bulk-delete bodies for a page-close flush: at most 500 ids each (the server's cap), in the
+// compact form `{ seen: { [folder]: [ids] }, ids: [ids with no folder] }`, each folder named once.
+// Bodies are taken in order while their total stays within `budget` bytes; the ids of the rest are
+// returned as `dropped` (not deleted: the letters stay where they are).
+export function exitDeleteBodies(ids, folders, { budget = EXIT_KEEPALIVE_BUDGET, chunkSize = BULK_DELETE_MAX_IDS } = {}) {
+  const bodies = [];
+  const dropped = [];
+  let used = 0;
+  const encoder = new TextEncoder();
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+    const seen = {};
+    const bare = [];
+    for (const id of chunk) {
+      const folder = folders && Object.prototype.hasOwnProperty.call(folders, id) ? folders[id] : null;
+      if (typeof folder === 'string' && folder) (seen[folder] = seen[folder] || []).push(id);
+      else bare.push(id);
+    }
+    const body = JSON.stringify({
+      ...(Object.keys(seen).length ? { seen } : {}),
+      ...(bare.length ? { ids: bare } : {}),
+    });
+    const size = encoder.encode(body).length;
+    if (used + size > budget) {
+      dropped.push(...ids.slice(i));
+      break;
+    }
+    used += size;
+    bodies.push(body);
+  }
+  return { bodies, dropped };
+}
+
 // The part of `folders` that names `ids`, for one request of a chunked delete; undefined when
 // none is named.
 export function foldersFor(ids, folders) {
