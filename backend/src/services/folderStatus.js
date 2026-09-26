@@ -89,7 +89,10 @@ async function saveFolderStatusError(accountId, path, sample, err) {
 }
 
 // Races a status command against a timeout that destroys the transport, so a hung server
-// cannot pin the connection (or a pool slot) forever.
+// cannot pin the connection (or a pool slot) forever. The close stays on a pooled session too,
+// including Yahoo's one (secondaryOverPool): a session with an abandoned STATUS in flight must
+// never be reused, and the pool evicts it on close. The monitor's folder walk stops on an
+// unusable client, so a slow server costs one close (and one later grow) per cycle.
 function withStatusTimeout(client, promise, ms, message) {
   let timer;
   return Promise.race([

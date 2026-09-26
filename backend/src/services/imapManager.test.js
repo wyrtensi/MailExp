@@ -7952,6 +7952,79 @@ describe('secondary work over the pool on a provider that limits logins (upstrea
     });
   });
 
+  describe('the one shared session is never handed on with a command still running', () => {
+    // Upstream's review of round 5: on Yahoo the pooled session is the account's only one, so a
+    // periodic job that abandons a command (a timeout does not cancel it) must close the session
+    // rather than return it idle; otherwise a click or the next job queues behind a command nobody
+    // waits on. Here the pool's own invariant does it (withFreshClient evicts and closes a session
+    // whose job failed or timed out), and the deferred integrity scan throws instead of returning.
+    it('a timed-out pooled probe closes the session, and the pool opens a new one next time', async () => {
+      vi.useFakeTimers();
+      try {
+        const acct = yahooAcct();
+        const { cycle } = arrangeProbe(acct);
+        await seedPool(acct);
+        const pooled = clients[0];
+        pooled.getMailboxLock = vi.fn(() => new Promise(() => {})); // SELECT hangs for good
+        const run = cycle();
+        await vi.advanceTimersByTimeAsync(25000); // the probe's deadline
+        await run;
+        expect(pooled.close).toHaveBeenCalled();
+        const next = await acquirePooledClient(acct);
+        expect(next).not.toBe(pooled);
+        expect(ImapFlow).toHaveBeenCalledTimes(2);
+        releasePooledClient(acct, next);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('a deferred integrity flag scan closes the pooled session and issues no SEARCH behind it', async () => {
+      vi.useFakeTimers();
+      try {
+        const acct = yahooAcct();
+        const mgr = arrange(acct);
+        mgr.syncMessages = vi.fn().mockResolvedValue({});
+        query.mockImplementation(async sql => {
+          if (sql.includes('FROM email_accounts')) return { rows: [acct] };
+          if (sql.includes('status_synced_modseq FROM folders')) return { rows: [{ status_synced_modseq: '5' }] };
+          return { rows: [] };
+        });
+        const search = vi.fn(async () => [1, 2, 3]);
+        ImapFlow.mockImplementation(function () {
+          const client = Object.assign(new EventEmitter(), {
+            usable: true,
+            connect: vi.fn().mockResolvedValue(),
+            logout: vi.fn().mockResolvedValue(),
+            mailbox: { exists: 3, uidValidity: 8n, highestModseq: 9n, uidNext: 10 },
+            capabilities: new Map([['CONDSTORE', true]]),
+            getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+            search,
+            // Hangs forever; the unreachable yield only satisfies require-yield.
+            fetch: async function* () { await new Promise(() => {}); yield null; },
+          });
+          client.close = vi.fn(() => { client.usable = false; client.emit('close'); });
+          clients.push(client);
+          return client;
+        });
+        const pass = expect(mgr._refreshObservedFolder(acct, 'INBOX', { uidValidity: 8n, uidNext: 10, highestModseq: 9n }))
+          .rejects.toThrow(/deferred/);
+        await vi.advanceTimersByTimeAsync(25000);
+        await pass;
+        expect(clients).toHaveLength(1);
+        expect(clients[0].close).toHaveBeenCalled();
+        expect(search).not.toHaveBeenCalled();
+        const next = await acquirePooledClient(acct);
+        expect(next).not.toBe(clients[0]); // the pool healed with a new session
+        releasePooledClient(acct, next);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('reconcile skips the cycle quietly while held back with no open session; a node mailbox runs as before', async () => {
     const acct = yahooAcct();
     const mgr = arrange(acct);

@@ -109,6 +109,24 @@ describe('bounded background monitor', () => {
     expect(enqueueSync.mock.calls[0][1]).toBe('Sent');
   });
 
+  it('stops the folder walk when the client dies mid-cycle, bounding it to one close', async () => {
+    // A timed-out STATUS destroys the transport. On Yahoo (secondaryOverPool) that transport is
+    // the account's one pooled session, so the walk must not go on to fail the remaining folders
+    // against a dead client: the break bounds the cost to one close, and one later grow, per
+    // cycle (upstream #474 round 5 review).
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    query.mockImplementation(async sql => sql.includes('SELECT f.*')
+      ? { rows: [{ path: 'INBOX' }, { path: 'Sent' }, { path: 'Trash' }] }
+      : sql.includes('nextval') ? { rows: [{ revision: '1', started_at: new Date(0) }] } : { rows: [] });
+    const client = {
+      usable: true,
+      status: vi.fn(() => { client.usable = false; return Promise.reject(new Error('Folder STATUS timed out')); }),
+    };
+    const monitor = new FolderStatusMonitor({ withClient: async (_a, fn) => fn(client), enqueueSync: vi.fn(), broadcast: vi.fn() });
+    await monitor.refresh({ id: 'a' });
+    expect(client.status).toHaveBeenCalledTimes(1); // Sent and Trash wait for the next cycle
+  });
+
   it('prioritizes a measured cache gap over the first verification of an unchanged folder', async () => {
     query.mockImplementation(async sql => sql.includes('SELECT f.*')
       ? { rows: [{ path: 'Sent', cached_total: '10', cached_unread: '3' }, { path: 'INBOX', cached_total: '9', cached_unread: '3', status_sync_attempted_at: new Date(1000) }] }
