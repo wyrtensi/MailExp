@@ -1473,6 +1473,31 @@ export default function MessageList() {
     lastSelectIdxRef.current = clickedIdx;
   }, [displayMessages]);
 
+  // #220: Ctrl/Cmd- or Shift-click on a row OUTSIDE selection mode enters it in one action,
+  // the way desktop file managers do. The message already open in the pane is the anchor
+  // when there is one: Ctrl/Cmd seeds {anchor, clicked}; Shift seeds the whole range between
+  // them. Without an anchor, the clicked row alone starts the selection.
+  const handleModifierSelect = useCallback((id, isRange) => {
+    const msgs = displayMessages;
+    const clickedIdx = msgs.findIndex(m => m.id === id);
+    if (clickedIdx === -1) return;
+    const anchorIdx = msgs.findIndex(m => m.id === selectedMessageId);
+    setSelectionModeActive(true);
+    setSelectedIds(() => {
+      const next = new Set();
+      if (isRange && anchorIdx >= 0) {
+        for (let i = Math.min(anchorIdx, clickedIdx); i <= Math.max(anchorIdx, clickedIdx); i++) {
+          next.add(msgs[i].id);
+        }
+      } else {
+        if (anchorIdx >= 0) next.add(msgs[anchorIdx].id);
+        next.add(id);
+      }
+      return next;
+    });
+    lastSelectIdxRef.current = clickedIdx;
+  }, [displayMessages, selectedMessageId]);
+
   const handleBulkDelete = useCallback(async (ids, msgs) => {
     const key = `bulk:${ids[0]}`;
     // Selected thread rows delete the whole conversation, matching the
@@ -1981,7 +2006,11 @@ export default function MessageList() {
       } else if (selectedMessageId) {
         const msg = findVisibleArchiveMessage(pool, selectedMessageId, threadMessages);
         if (!msg) return;
-        archiveVisibleMessageRef.current(msg);
+        // #449: through the context-action path, whose undoable wrapper delays the real
+        // archive and shows the undo toast — calling archiveVisibleMessage directly
+        // committed instantly, which made the keyboard's own archive the one action
+        // Ctrl+Z could never take back (every pointer surface already had the toast).
+        handleContextActionRef.current('archive', msg);
       }
     };
 
@@ -3725,6 +3754,7 @@ export default function MessageList() {
                 selectionMode={selectionMode}
                 onToggleSelect={handleRowToggleSelect}
                 onRangeSelect={handleRangeSelect}
+                onModifierSelect={handleModifierSelect}
                 onLongPress={isMobile ? (id) => { setSelectionModeActive(true); toggleSelect(id); } : undefined}
               />
             );
@@ -3748,6 +3778,7 @@ export default function MessageList() {
                 onOpenWindow={!isMobile ? handleOpenInWindow : undefined}
                 onToggleSelect={handleRowToggleSelect}
                 onRangeSelect={handleRangeSelect}
+                onModifierSelect={handleModifierSelect}
                 onAvatarClick={!isMobile ? handleAvatarClick : undefined}
                 showMobileAvatars={showMobileAvatars}
                 showMessagePreviews={showMessagePreviews}
@@ -4191,7 +4222,7 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
   );
 }
 
-function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onLongPress }) {
+function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
@@ -4250,7 +4281,18 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
         onClick={selectionMode ? (e) => {
           if (e.shiftKey && onRangeSelect) { onRangeSelect(message.id); }
           else { onToggleSelect(message.id); }
-        } : () => { if (tappedRef.current) { tappedRef.current = false; return; } onThreadClick(); }}
+        } : (e) => {
+          // #220: same modifier-click entry as the flat MessageRow. Conversations are the
+          // shipped default, so this row type must handle it too or ctrl-click opens the
+          // message instead of entering multi-select on the common view.
+          if (!isMobile && (e.ctrlKey || e.metaKey || e.shiftKey) && onModifierSelect) {
+            e.preventDefault();
+            onModifierSelect(message.id, e.shiftKey);
+            return;
+          }
+          if (tappedRef.current) { tappedRef.current = false; return; }
+          onThreadClick();
+        }}
         onContextMenu={!isMobile ? (e => onContextMenu(e, message)) : undefined}
         style={{
           display: 'flex', alignItems: 'flex-start', gap: 10,
@@ -4521,7 +4563,7 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
   );
 }
 
-function MessageRow({ message, account, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
+function MessageRow({ message, account, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
@@ -4558,6 +4600,11 @@ function MessageRow({ message, account, selected, lastViewed, isChecked, selecti
       } else {
         onToggleSelect(message.id);
       }
+    } else if (!isMobile && (e.ctrlKey || e.metaKey || e.shiftKey) && onModifierSelect) {
+      // #220: a modifier-click outside selection mode enters it in one action instead of
+      // opening the message. preventDefault stops shift-click's native text selection.
+      e.preventDefault();
+      onModifierSelect(message.id, e.shiftKey);
     } else {
       // onTap already fired this from touchend — skip the redundant synthesized click.
       if (tappedRef.current) { tappedRef.current = false; return; }
