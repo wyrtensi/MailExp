@@ -19,6 +19,13 @@ describe('toolbar names', () => {
     assert.equal(showsLabel('unknown', ALL_LABELS), false);
   });
 
+  it('places the desktop .eml download between print and the overflow-prone task/ai buttons', () => {
+    assert.ok(LABEL_RANK.print < LABEL_RANK.eml, 'eml ranks after print');
+    assert.ok(LABEL_RANK.eml < LABEL_RANK.task, 'eml ranks before task');
+    assert.equal(showsLabel('eml', LABEL_RANK.eml), true);
+    assert.equal(showsLabel('eml', LABEL_RANK.eml - 1), false);
+  });
+
   it('drops one name per overflow and stops at icons only', () => {
     assert.equal(fewerLabels(3), 2);
     assert.equal(fewerLabels(0), 0);

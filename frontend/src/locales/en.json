@@ -356,6 +356,7 @@
       "unread": "Unread",
       "headers": "Headers",
       "print": "Print",
+      "eml": "Download .eml",
       "ai": "AI",
       "star": "Star",
       "unstar": "Unstar"

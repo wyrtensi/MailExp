@@ -250,3 +250,45 @@ describe('Download as .eml from the More menu (#381)', () => {
     assert.deepEqual(downloads, ['/api/mail/messages/a1/raw.eml']);
   });
 });
+
+describe('Download as .eml on the desktop toolbar (#381 follow-up)', () => {
+  // Desktop has no overflow "More" menu at all — its actions are individual toolbar
+  // buttons — so the mobile-only More-menu entry above left desktop with no way to
+  // download a message's .eml. This is a direct PaneBtn, not a menu item.
+  const downloads = [];
+  let originalClick, originalInnerWidth, desktopHost, desktopRoot;
+  before(async () => {
+    originalClick = dom.window.HTMLAnchorElement.prototype.click;
+    dom.window.HTMLAnchorElement.prototype.click = function () { downloads.push(this.getAttribute('href')); };
+    originalInnerWidth = dom.window.innerWidth;
+    dom.window.innerWidth = 1280; // useMobile(): window.innerWidth < 768 — well above it
+    desktopHost = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(desktopHost);
+    desktopRoot = createRoot(desktopHost);
+  });
+  after(async () => {
+    await React.act(async () => desktopRoot.unmount());
+    desktopHost.remove();
+    dom.window.HTMLAnchorElement.prototype.click = originalClick;
+    dom.window.innerWidth = originalInnerWidth;
+  });
+
+  test('a toolbar button downloads the raw source directly, no menu involved', async () => {
+    downloads.length = 0;
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1');
+      desktopRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // There must be no "More" button on desktop — that overflow menu is mobile-only.
+    const moreBtn = [...desktopHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.more');
+    assert.equal(moreBtn, undefined, 'desktop has no More button');
+
+    const emlBtn = [...desktopHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.downloadEml');
+    assert.ok(emlBtn, 'expected a desktop toolbar button for downloading .eml');
+    await React.act(async () => { emlBtn.click(); });
+
+    assert.deepEqual(downloads, ['/api/mail/messages/a1/raw.eml']);
+  });
+});
