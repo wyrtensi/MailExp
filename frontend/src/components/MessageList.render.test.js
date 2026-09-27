@@ -72,10 +72,12 @@ globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
 let SERVED = [];
 let THREAD_MESSAGES = [];
 let ARCHIVED = [];
+let SEARCH_CALLS = [];
 globalThis.fetch = async (url) => {
   const path = String(url);
   let body = {};
-  if (path.includes('/mail/messages?')) body = { messages: SERVED, total: SERVED.length };
+  if (path.includes('/search?')) { SEARCH_CALLS.push(path); body = { messages: [] }; }
+  else if (path.includes('/mail/messages?')) body = { messages: SERVED, total: SERVED.length };
   else if (path.includes('/mail/thread/')) body = { messages: THREAD_MESSAGES };
   else if (path.includes('/mail/messages/bulk-archive')) body = { archived: ARCHIVED, noArchiveFolder: [] };
   return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
@@ -343,5 +345,82 @@ describe('MessageList — bulk star in the multi-select bar (#434)', () => {
       api.bulkStar = originalBulkStar;
       console.error = originalError;
     }
+  });
+});
+
+// A search issued while standing IN Trash or Junk must stay scoped to that folder even with
+// "search all folders" on — the server excludes both from an ordinary all-folder search (so
+// freshly-deleted mail and spam don't resurface by default), which would otherwise silently
+// return nothing for a search the user issued while looking straight at that folder.
+describe('MessageList — search stays scoped to Trash/Junk despite "search all folders"', () => {
+  const FOLDERS_WITH_TRASH = [
+    { path: 'INBOX', name: 'INBOX', special_use: null },
+    { path: 'Trash', name: 'Trash', special_use: '\\Trash' },
+    { path: 'Junk', name: 'Junk', special_use: '\\Junk' },
+  ];
+
+  const search = async (query) => {
+    await React.act(async () => { useStore.setState({ searchQuery: query }); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 350)); }); // 300ms debounce
+  };
+
+  test('typing a search while in Trash sends folder=Trash despite searchAllFolders: true', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'Trash', searchAllFolders: true,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.match(SEARCH_CALLS[0], /[?&]folder=Trash(&|$)/);
+  });
+
+  test('typing a search while in Junk sends folder=Junk despite searchAllFolders: true', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'Junk', searchAllFolders: true,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.match(SEARCH_CALLS[0], /[?&]folder=Junk(&|$)/);
+  });
+
+  test('an ordinary folder still searches everywhere when searchAllFolders is on', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'INBOX', searchAllFolders: true,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.doesNotMatch(SEARCH_CALLS[0], /[?&]folder=/);
+  });
+
+  test('Trash still scopes the search when searchAllFolders is off (the pre-existing behavior)', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'Trash', searchAllFolders: false,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.match(SEARCH_CALLS[0], /[?&]folder=Trash(&|$)/);
   });
 });

@@ -19,6 +19,7 @@ import RowHoverActions from './RowHoverActions.jsx';
 import GtdTabList from './GtdTabList.jsx';
 import DirectionBadge from './DirectionBadge.jsx';
 import { mailboxBanner, isDraftFolder } from '../utils/mailboxBanner.js';
+import { isTrashOrJunkFolder } from '../utils/specialFolders.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
   gtdActiveForContext, buildGtdDisplaySections, GTD_COLORS, GTD_CHIP_BG, sectionBadge, isSelectedRow,
@@ -162,7 +163,15 @@ export default function MessageList() {
   // Search is scoped to the current folder unless we're in the unified view or the
   // user toggled "search all folders". An in: operator in the query overrides this
   // server-side. undefined = search all folders.
-  const searchFolder = (!isUnified && !searchAllFolders) ? selectedFolder : undefined;
+  //
+  // Trash and Junk stay scoped to the current folder even with "search all folders" on: the
+  // server excludes both from an ordinary all-folder search (so freshly-deleted mail and spam
+  // don't resurface by default — see search.js's shouldExcludeSpecialFoldersFromSearch), which
+  // would otherwise silently return nothing for a search issued while standing in one of them.
+  // An explicit in:trash / in:junk already stays eligible server-side regardless.
+  const searchFolder = (!isUnified && (!searchAllFolders || isTrashOrJunkFolder(selectedFolder, folders[selectedAccountId])))
+    ? selectedFolder
+    : undefined;
   const searchPageSize = Math.max(1, Math.min(Number(pageSize) || 50, 200));
   const undoableNotifications = notifications.filter(n => n.onUndo);
 
