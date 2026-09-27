@@ -1763,11 +1763,11 @@ function hasIdlePooledClient(accountId) {
   return !!pool && pool.clients.some(c => c && c.usable !== false && !pool.inUse.has(c));
 }
 
-// True when a periodic job on the pool (delete reconcile, the spam poll) of a secondaryOverPool
-// provider should skip this cycle quietly: a backoff holds logins back and no open session is
-// idle, so the pool could only answer providerRefusing. That costs no login, but it was logged as
-// a failure every cycle and read like one more refusal from the provider (upstream #474). The next
-// cycle tries again. Other providers keep logging it, as before.
+// True when a periodic job on the pool (delete reconcile, the spam poll, the staleness probe) of
+// a secondaryOverPool provider should skip this cycle quietly: a backoff holds logins back and no
+// open session is idle, so the pool could only answer providerRefusing. That costs no login, but
+// it was logged as a failure every cycle and read like one more refusal from the provider
+// (upstream #474). The next cycle tries again. Other providers keep logging it, as before.
 function periodicPoolWorkHeld(mgr, account) {
   if (providerProfile(account).secondaryOverPool !== true) return false;
   return !!mgr._secondaryLoginBlocked(account.id) && !hasIdlePooledClient(account.id);
@@ -2614,7 +2614,7 @@ export class ImapManager {
               // the probe (timeoutMs) and, on any failure or timeout, evicts and closes the
               // session, so a command left running on it is never handed to the next caller.
               // No background connection: the pooled session is not one.
-              if (this._secondaryLoginBlocked(accountId) && !hasIdlePooledClient(accountId)) continue;
+              if (periodicPoolWorkHeld(this, account)) continue;
               missed = await withFreshClient(account, probeInbox,
                 { background: true, timeoutMs: 25000, ...this._poolLoginOpts(accountId) });
             } else {
