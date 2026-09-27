@@ -49,6 +49,11 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 - Gmail scale test in waves of 10 → 25 → 50 → 100 mailboxes: memory, CPU, IMAP connections, provider errors and UI latency on the target server.
 - 24-hour stability run, controlled restart and restore.
+- Mail node domain setup through the mailcow API instead of hand-run steps: apply the DKIM decision (publish or skip the key), set the relayhost, TLS policy map and rate limits, and show/check the DNS records the owner needs to publish. Findings and open decisions: [docs/architecture/mail-node-research/eop-review.md](docs/architecture/mail-node-research/eop-review.md).
+- A timer script that keeps the node firewall's EOP ranges current from the Microsoft web service (IPv4 and IPv6), instead of the monthly manual check.
+- A global mailcow spam filter that files mail on EOP's `X-Forefront-Antispam-Report` header into Junk.
+- Mirror mail node mailboxes as mail users in the Microsoft tenant (Internal Relay while syncing, Authoritative once synced) so EOP's own directory blocks invalid recipients instead of the node generating backscatter NDRs.
+- Optional: report spam/phishing from the panel to Microsoft through the Graph beta threat-submission API.
 
 ## Later
 
