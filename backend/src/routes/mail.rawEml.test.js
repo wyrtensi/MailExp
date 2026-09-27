@@ -98,6 +98,30 @@ describe('GET /api/mail/messages/:id/raw.eml (#381)', () => {
     expect(imapManager.fetchRawMessage).toHaveBeenCalled();
   });
 
+  // Review finding (Low): String.prototype.slice counts UTF-16 code units, not code points, so
+  // a subject whose 80th unit lands inside an astral character (an emoji, 2 units) used to cut
+  // a surrogate pair in half. The lone surrogate then made encodeURIComponent throw inside
+  // attachmentDisposition's rfc5987(), 500ing the whole download.
+  it('never splits a surrogate pair when the subject has an emoji right at the 80-char cut', async () => {
+    const subjectWithEmojiAtCut = `${'a'.repeat(79)}\u{1F600} more text after the cut`; // 😀 sits at code point 79
+    query.mockImplementation((sql) => {
+      if (sql.includes('FROM messages m')) {
+        return Promise.resolve({ rows: [{ id: MSG_ID, uid: '42', folder: 'INBOX', subject: subjectWithEmojiAtCut, account_id: ACCOUNT_ID }] });
+      }
+      if (sql.includes('SELECT * FROM email_accounts')) {
+        return Promise.resolve({ rows: [{ id: ACCOUNT_ID, imap_host: 'imap.example.com' }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+
+    const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);
+    expect(res.status).toBe(200); // not a 500 from a lone-surrogate URIError
+    const disposition = res.headers.get('content-disposition');
+    expect(disposition).toBeTruthy();
+    // The whole emoji (not half of it) made it into the RFC 5987 filename*.
+    expect(disposition).toContain(encodeURIComponent('\u{1F600}'));
+  });
+
   it('404s an id no row matches, without touching IMAP', async () => {
     query.mockImplementation(() => Promise.resolve({ rows: [] }));
     const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);

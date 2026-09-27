@@ -881,7 +881,13 @@ router.get('/messages/:id/raw.eml', async (req, res) => {
     const buffer = await imapManager.fetchRawMessage(accountResult.rows[0], loc.uid, loc.folder);
     if (!buffer) return res.status(404).json({ error: 'Could not fetch message source' });
 
-    const name = `${(message.subject || 'message').slice(0, 80)}.eml`;
+    // Slice by code points, not UTF-16 code units: String.prototype.slice counts units, so a
+    // subject whose 80th unit lands inside an astral character (an emoji) would cut a
+    // surrogate pair in half. safeFilename doesn't strip a resulting lone surrogate, and
+    // encodeURIComponent in attachmentDisposition's rfc5987() throws on one
+    // (URIError: malformed URI sequence), 500ing the whole download. The spread operator
+    // iterates by code point, so this can never split a pair.
+    const name = `${[...(message.subject || 'message')].slice(0, 80).join('')}.eml`;
     res.setHeader('Content-Type', 'message/rfc822');
     res.setHeader('Content-Disposition', attachmentDisposition(name));
     res.setHeader('Content-Length', buffer.length);
