@@ -699,8 +699,12 @@ router.get('/messages/:id/headers', async (req, res) => {
 // Bcc recipients of a draft, for reopening it in the composer. A draft's Bcc exists only in its
 // own headers, and saving a reopened draft expunges that copy, so failing to read it has to be an
 // error, never an empty list — an empty list is exactly what erased it before (upstream #499).
-// Drafts saved from this app carry it in bcc_addresses (NULL means not known locally: saved
-// before that column existed, or by another client); anything else is read from the server copy.
+// bcc_addresses (0058) is NOT NULL DEFAULT '[]', so an empty stored array does not prove the
+// draft has no Bcc: any row no writer ever set it on (a draft first seen by sync, saved before
+// 0058, or saved by another client) got the same '[]' by default. Only a NON-EMPTY stored array
+// is trusted; anything else is read from the server copy instead, which needs no NULL-vs-'[]'
+// distinction — a draft this app really did save without a Bcc simply has no Bcc header there,
+// so the read still answers [].
 router.get('/messages/:id/bcc', async (req, res) => {
   const { id } = req.params;
   if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
@@ -716,7 +720,7 @@ router.get('/messages/:id/bcc', async (req, res) => {
     if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
     const message = result.rows[0];
     const known = typeof message.bcc_addresses === 'string' ? JSON.parse(message.bcc_addresses) : message.bcc_addresses;
-    if (Array.isArray(known)) return res.json({ bcc: known });
+    if (Array.isArray(known) && known.length) return res.json({ bcc: known });
 
     const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
     const account = accountResult.rows[0];

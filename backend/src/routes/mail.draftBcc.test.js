@@ -49,7 +49,7 @@ afterAll(() => ctx?.server?.close());
 
 // First query: the message row (mailboxes are shared install-wide — no per-user ownership check,
 // same as the other per-message routes in mail.js). Second: the account row, only reached when
-// bcc_addresses is not a known array.
+// bcc_addresses is not a known non-empty array.
 function mockDraft(bccAddresses, messageId = '<d1@example.com>') {
   query
     .mockResolvedValueOnce({ rows: [{ account_id: ACCOUNT_ID, uid: 7, folder: 'Drafts', message_id: messageId, bcc_addresses: bccAddresses }] })
@@ -72,12 +72,26 @@ describe('GET /messages/:id/bcc — a saved draft\'s Bcc for the composer', () =
     expect(imapManager.fetchHeaders).not.toHaveBeenCalled();
   });
 
-  it('returns a stored empty Bcc as empty, without asking the server', async () => {
+  // bcc_addresses is NOT NULL DEFAULT '[]' (0058), so a stored empty array does not prove the
+  // draft has no Bcc — a row no writer ever set it on got the same '[]' by default. Only a
+  // non-empty stored array is trusted; an empty one is treated the same as unknown and read from
+  // the server, same as NULL.
+  it('reads the server copy when the stored Bcc is an empty array, not known to be empty', async () => {
     mockDraft([]);
+    imapManager.fetchHeaders.mockResolvedValue('Message-ID: <d1@example.com>\r\nBcc: someone@example.com\r\n');
+    const { status, body } = await getBcc();
+    expect(status).toBe(200);
+    expect(body).toEqual({ bcc: [{ name: '', email: 'someone@example.com' }] });
+    expect(imapManager.fetchHeaders).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT_ID }), 7, 'Drafts');
+  });
+
+  it('answers empty when the stored Bcc is an empty array and the server copy really has none', async () => {
+    mockDraft([]);
+    imapManager.fetchHeaders.mockResolvedValue('From: a@example.com\r\nMessage-ID: <d1@example.com>\r\n');
     const { status, body } = await getBcc();
     expect(status).toBe(200);
     expect(body).toEqual({ bcc: [] });
-    expect(imapManager.fetchHeaders).not.toHaveBeenCalled();
+    expect(imapManager.fetchHeaders).toHaveBeenCalled();
   });
 
   it('parses bcc_addresses stored as a JSON string the same as a parsed array', async () => {
