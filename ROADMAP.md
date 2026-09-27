@@ -29,6 +29,14 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Managers see only their own mail settings; system settings are for administrators.
 - Upstream MailFlow IMAP connection fixes (#474): a full pool queues instead of opening unbounded logins, teardown never waits on LOGOUT, rejected passwords back off from 30 minutes to 6 hours, unfetchable UIDs stop re-triggering backfill, the folder integrity pass fits a large mailbox.
 - Demo mode for the whole product: 50 mailboxes, every settings screen, both roles (administrator and manager).
+- The mail node sized and tuned for one server: Dovecot settings for hibernating idle sessions, no COMPRESS to the node, search on the body index, measured with 500 node and 125 Gmail mailboxes on 4 vCPU / 8 GB ([docs/operations/mail-node.md](docs/operations/mail-node.md), section 6a).
+- IMAP connections that behave under load: backoff ladders that climb, one login gate in the pool so a wrong password stops at one rejected login (fail2ban on the node), a pooled session kept for user actions, read and star flags over the open session and in one command per folder, new letters' text fetched on the node right after sync.
+- Moves, archive, Trash and spam applied in the database at once and sent to the server from a durable queue; a repeated delete never deletes a letter forever unless the user saw it in Trash.
+- The panel restores a node mailbox's rejected password itself through the mailcow API.
+- One letter delivered to two mailboxes shows as both copies; links to a letter name its mailbox.
+- The panel does not name itself to other servers: neutral EHLO, no IMAP ID, no product User-Agent.
+- List work from upstream: Ctrl/Shift-click multi-select, Ctrl+Z undo, a choice of hover actions, download as .eml, a star in the bulk bar; search covers every folder except Trash and Spam by default.
+- A load scenario with ten employees working in shared mailboxes and a letter-by-letter check against the node (`scripts/deploy/test/e2e-mailcow.sh --scenario work`): 200 mailboxes and 60 000 letters, none lost or doubled.
 - Scripted production deployment for both sign-in hosts: `install.sh`/`configure.sh`, edge (Caddy or Cloudflare Tunnel), encrypted and verified restic backups, `update.sh`, a documented manual rollback and moving the panel to another server without losing data. Runbook: [docs/operations/deployment.md](docs/operations/deployment.md).
 
 ## Now
@@ -47,5 +55,3 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - The mail node on the same server as the panel (the edge would proxy <MAIL_HOST> to mailcow); today it needs its own server.
 - Adaptive mailbox quotas, if fixed quotas prove wasteful ([research](docs/architecture/mail-node-research/README.md), section 6).
 - Individual manager identities and mailbox membership, if per-person accountability becomes a requirement on top of the audit log.
-
-Have a request or found a bug? [Open an issue](https://github.com/wyrtensi/MailExpert/issues).
