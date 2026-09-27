@@ -7853,6 +7853,38 @@ describe('secondary work over the pool on a provider that limits logins (upstrea
       expect(mgr._secondaryCooldown.has(acct.id)).toBe(false);
     });
 
+    it('a session the server drops while the accepted grow clears the backoffs is never handed out again', async () => {
+      // The clears end in a database UPDATE (the account error). The new client gets its close
+      // handler and its pool slot before that write, not after: a socket the server dropped in
+      // the meantime would otherwise be pooled dead and served to the next caller.
+      const acct = yahooAcct();
+      const mgr = arrange(acct);
+      mgr.connections.set(acct.id, { close: vi.fn() });
+      mgr._secondaryAuthCooldown.set(acct.id, { until: Date.now() - 1, failures: 1 });
+      mgr._syncErrorState.set(acct.id, 'Authentication failed');
+      let reached;
+      const atUpdate = new Promise(resolve => { reached = resolve; });
+      let finishUpdate;
+      const update = new Promise(resolve => { finishUpdate = resolve; });
+      query.mockImplementation(async sql => {
+        if (sql.includes('sync_error = NULL')) { reached(); await update; return { rows: [], rowCount: 1 }; }
+        return { rows: sql.includes('FROM email_accounts') ? [acct] : [] };
+      });
+
+      const grow = acquirePooledClient(acct, { background: true });
+      await atUpdate;       // accepted login; the error UPDATE is in flight
+      clients[0].close();   // the server drops the new session right then
+      finishUpdate();
+      const first = await grow;
+      releasePooledClient(acct, first);
+
+      const next = await acquirePooledClient(acct);
+      expect(next).not.toBe(first);
+      expect(next.usable).toBe(true);
+      expect(ImapFlow).toHaveBeenCalledTimes(2);
+      releasePooledClient(acct, next);
+    });
+
     it('an accepted grow ends a lapsed secondary auth window and the error it recorded', async () => {
       // The status monitor's fresh login used to be what cleared these. On the pool it no longer
       // logs in, so without the grow a mailbox rejected once would stay red until a reconnect.
