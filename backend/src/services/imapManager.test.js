@@ -491,6 +491,75 @@ describe('deleteMessageCopyRow', () => {
   });
 });
 
+// ── permanentDeleteMessage — expectMessageId (upstream e8eb7583) ─────────────
+// A uid names a place in a folder, not a message. draft.js passes the Message-ID of the copy it
+// means to delete, so a uid read from a stale local row, or looked up in the wrong mailbox after
+// a From switch, deletes nothing rather than expunge whatever now sits at that uid on the server.
+// Driven through the real pool so the check is what actually guards the EXPUNGE.
+describe('permanentDeleteMessage — expectMessageId', () => {
+  let seq = 0;
+  function arrange(serverCopies) {
+    const account = { id: `acct-pdm-${++seq}`, user_id: 'u1', imap_host: 'imap.example.com', email_address: 'me@example.test', auth_user: 'me', auth_pass: 'enc' };
+    const client = Object.assign(new EventEmitter(), {
+      usable: true,
+      connect: vi.fn(() => Promise.resolve()),
+      logout: vi.fn(() => Promise.resolve()),
+      close: vi.fn(),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      fetch: vi.fn(async function* (range) {
+        for (const uid of String(range).split(',').map(Number)) {
+          if (serverCopies.has(uid)) yield { uid, envelope: { messageId: serverCopies.get(uid) } };
+        }
+      }),
+      messageDelete: vi.fn().mockResolvedValue(true),
+    });
+    ImapFlow.mockImplementation(function () { return client; });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    return { account, client };
+  }
+  afterEach(() => evictPool(`acct-pdm-${seq}`));
+
+  it('deletes the uid when the server copy carries the expected Message-ID', async () => {
+    const { account, client } = arrange(new Map([[7, '<old@example.test>']]));
+    expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(true);
+    expect(client.getMailboxLock).toHaveBeenCalledWith('Drafts');
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+
+  it('compares Message-IDs without their angle brackets', async () => {
+    const { account, client } = arrange(new Map([[7, '<old@example.test>']]));
+    expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts', { expectMessageId: 'old@example.test' })).toBe(true);
+    expect(client.messageDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes nothing when another message now holds the uid', async () => {
+    const { account, client } = arrange(new Map([[7, '<someone-elses@example.test>']]));
+    expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('deletes nothing when the uid is no longer on the server', async () => {
+    const { account, client } = arrange(new Map());
+    expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it.each([[null], ['']])('deletes nothing when the expected Message-ID is %j', async (expectMessageId) => {
+    const { account, client } = arrange(new Map([[7, null]]));
+    expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts', { expectMessageId })).toBe(false);
+    expect(client.messageDelete).not.toHaveBeenCalled();
+  });
+
+  it('without an expected Message-ID deletes as before, with no extra FETCH', async () => {
+    const { account, client } = arrange(new Map([[7, '<old@example.test>']]));
+    expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts')).toBe(true);
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+  });
+});
 
 // ── ensureMailbox — provider-correct folder creation ─────────────────────────
 // The namespace matrix (no-prefix + '/', 'INBOX.' + '.') is resolved INSIDE imapflow's
