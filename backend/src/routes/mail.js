@@ -13,7 +13,7 @@ import { isConnectionRefusal, isMailboxBusyError, extractImapError } from '../se
 import { MAILBOX_BUSY_CODE, mailboxBusyBody, sendMailboxBusy, sendMovePending, movePendingBody, MOVE_PENDING_CODE } from '../utils/mailboxBusy.js';
 import { isPendingUid } from '../services/moveQueue.js';
 import { sanitizeEmail, stripEmailHead, hasRemoteImages, blockRemoteImages, rewriteEbayImageserUrls, rewriteAnchorHrefs } from '../services/emailSanitizer.js';
-import { snippetFromBody, decodeMimeWords, parseRawHeaders, buildHeadersFromMessage } from '../services/messageParser.js';
+import { snippetFromBody, decodeMimeWords, parseRawHeaders, parseMailboxList, buildHeadersFromMessage } from '../services/messageParser.js';
 import { resolveTrashFolder, resolveAllTrashPaths, resolveAllDraftsPaths, resolveArchiveFolder, isAllMailFolder, resolveSpamFolder, resolveAllSpamPaths, getDeleteStrategy, adjustFolderCounts, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from '../utils/mailUtils.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
@@ -71,13 +71,6 @@ function sanitizeDbText(value) {
 //   - &entity; — undecoded HTML entities from before the entity-stripping fix
 //   - ##marker## — unexpanded template placeholders (UPS, Epsilon marketing mail)
 //   - --> — dangling HTML comment end leaked by comment-stripping gap
-// Bcc recipients of a draft saved from the composer, so reopening it keeps them. Other messages
-// carry no Bcc column data, so nothing is added for them.
-function draftBcc(message) {
-  const bcc = typeof message.bcc_addresses === 'string' ? JSON.parse(message.bcc_addresses) : message.bcc_addresses;
-  return Array.isArray(bcc) && bcc.length ? { bccAddresses: bcc } : {};
-}
-
 function snippetIsGarbled(s) {
   return s && (
     /&[a-z][a-z0-9]*;/i.test(s) ||   // undecoded HTML entity
@@ -580,7 +573,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(html);
       hasBlockedRemoteImages = true;
     }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, ...draftBcc(message) });
+    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -622,7 +615,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(safeHtml);
       hasBlockedRemoteImages = true;
     }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, ...draftBcc(message) });
+    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error('Body fetch error:', msg);
@@ -700,6 +693,61 @@ router.get('/messages/:id/headers', async (req, res) => {
   } catch (err) {
     console.error('Headers fetch error:', err);
     res.status(500).json({ error: 'Failed to fetch message headers' });
+  }
+});
+
+// Bcc recipients of a draft, for reopening it in the composer. A draft's Bcc exists only in its
+// own headers, and saving a reopened draft expunges that copy, so failing to read it has to be an
+// error, never an empty list — an empty list is exactly what erased it before (upstream #499).
+// bcc_addresses (0058) is NOT NULL DEFAULT '[]', so an empty stored array does not prove the
+// draft has no Bcc: any row no writer ever set it on (a draft first seen by sync, saved before
+// 0058, or saved by another client) got the same '[]' by default. Only a NON-EMPTY stored array
+// is trusted; anything else is read from the server copy instead, which needs no NULL-vs-'[]'
+// distinction — a draft this app really did save without a Bcc simply has no Bcc header there,
+// so the read still answers [].
+router.get('/messages/:id/bcc', async (req, res) => {
+  const { id } = req.params;
+  if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid message id' });
+
+  const unreadable = "Could not read this draft's Bcc recipients from the mail server.";
+  try {
+    // Mailboxes are shared install-wide (migration 0056 dropped their owner column), like every
+    // other per-message route in this file — no per-user ownership check here.
+    const result = await query(`
+      SELECT m.account_id, m.uid, m.folder, m.message_id, m.bcc_addresses FROM messages m
+      WHERE m.id = $1
+    `, [id]);
+    if (!result.rows.length) return res.status(404).json({ error: 'Message not found' });
+    const message = result.rows[0];
+    const known = typeof message.bcc_addresses === 'string' ? JSON.parse(message.bcc_addresses) : message.bcc_addresses;
+    if (Array.isArray(known) && known.length) return res.json({ bcc: known });
+
+    const accountResult = await query('SELECT * FROM email_accounts WHERE id = $1', [message.account_id]);
+    const account = accountResult.rows[0];
+    imapManager.noteUserActivity(account.id);
+
+    // A letter whose MOVE is in flight has no location for a moment (moveQueue.js).
+    const loc = await imapManager.moveQueue.serverLocation(message, account);
+    if (!loc) return sendMovePending(res);
+
+    const headers = parseRawHeaders(await fetchWithTimeout(
+      imapManager.fetchHeaders(account, loc.uid, loc.folder),
+      BODY_FETCH_TIMEOUT_MS
+    ));
+    if (!Object.keys(headers).length) {
+      console.warn(`Draft Bcc: no headers for uid ${loc.uid} in ${loc.folder}`);
+      return res.status(502).json({ error: unreadable });
+    }
+    // Stops a uid that now holds some other message from handing back that message's Bcc.
+    const norm = v => String(v || '').replace(/[<>\s]/g, '').toLowerCase();
+    if (message.message_id && norm(message.message_id) !== norm(headers['message-id'])) {
+      console.warn(`Draft Bcc: uid ${loc.uid} in ${loc.folder} holds ${headers['message-id'] || 'no Message-ID'}, not ${message.message_id}`);
+      return res.status(409).json({ error: 'This draft changed on the mail server. Refresh the folder and try again.' });
+    }
+    res.json({ bcc: (headers.bcc || '').split('\n').flatMap(line => parseMailboxList(line)) });
+  } catch (err) {
+    console.warn('Draft Bcc fetch failed:', err.message);
+    res.status(502).json({ error: unreadable });
   }
 });
 

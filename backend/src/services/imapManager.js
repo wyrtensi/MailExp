@@ -7701,12 +7701,27 @@ export class ImapManager {
   }
 
   // background: see syncFolderOnDemand (a GTD transition strip).
-  async permanentDeleteMessage(account, uid, folder, { background = false } = {}) {
-    await withFreshClient(account, async (client) => {
+  // expectMessageId: delete only if the server copy at `uid` still carries this Message-ID,
+  // checked under the same mailbox lock right before the delete. A uid names a place in the
+  // folder, not a message — a uid read from a stale local row, or looked up in the wrong
+  // mailbox after a From switch, would otherwise expunge whatever now sits there (draft.js).
+  // Without it (existing callers), deletes as before — no extra FETCH. Resolves false, having
+  // deleted nothing, when the Message-ID does not match; true otherwise.
+  async permanentDeleteMessage(account, uid, folder, { background = false, expectMessageId } = {}) {
+    return withFreshClient(account, async (client) => {
       const lock = await client.getMailboxLock(folder);
       try {
+        if (expectMessageId !== undefined) {
+          const bare = id => String(id ?? '').replace(/[<>]/g, '').trim();
+          let found = '';
+          for await (const msg of client.fetch(String(uid), { uid: true, envelope: true }, { uid: true })) {
+            if (msg.uid === Number(uid)) found = bare(msg.envelope?.messageId);
+          }
+          if (!found || found !== bare(expectMessageId)) return false;
+        }
         const result = await client.messageDelete(String(uid), { uid: true });
         if (result === false) throw new Error('messageDelete returned false — server did not confirm deletion');
+        return true;
       } finally {
         lock.release();
       }

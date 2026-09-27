@@ -1173,6 +1173,11 @@ export async function demoRequest(method, path, body = {}) {
   const headersMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/headers$/);
   if (verb === 'GET' && headersMatch) return clone(demoHeaders(decodeURIComponent(headersMatch[1])));
 
+  // No demo letter carries a stored Bcc, so a reopened demo draft always answers "known empty"
+  // rather than going through the real route's unknown-Bcc/read-only-open path.
+  const bccMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/bcc$/);
+  if (verb === 'GET' && bccMatch) return { bcc: [] };
+
   const bodyMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/body$/);
   if (verb === 'GET' && bodyMatch) {
     const item = messageById(decodeURIComponent(bodyMatch[1]));
