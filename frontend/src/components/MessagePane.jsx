@@ -1249,6 +1249,33 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     updateMessage(message.id, { is_starred: newVal });
   };
 
+  // Download the raw RFC 822 source as an .eml file (#381). A same-origin anchor click
+  // carries the session cookie; the route sets the Content-Disposition filename. Shared by
+  // the mobile More menu and the desktop toolbar button.
+  // #381 follow-up: slice by code points, not UTF-16 code units, so a subject that ends inside
+  // an astral character (an emoji) never splits a surrogate pair into the filename.
+  const emlFilename = (subject) => `${[...(subject || 'message')].slice(0, 80).join('')}.eml`;
+
+  const handleDownloadEml = async () => {
+    if (!message) return;
+    try {
+      const blob = await api.downloadRawEml(message.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = emlFilename(message.subject);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Download .eml error:', err);
+      if (err?.code === 'message_too_large') addNotification({ title: t('message.downloadEmlTooLarge') });
+      else if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+      else addNotification({ title: t('message.downloadEmlFailed') });
+    }
+  };
+
   const handlePrint = () => {
     if (!message) return;
     const esc = (s) => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -2397,7 +2424,7 @@ ${bodyContent}
                 </div>
                 <div
                   onClick={() => { handlePrint(); setShowMoreMenu(false); }}
-                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)', borderBottom: aiStatus?.enabled && aiStatus?.features?.summarize && body ? '1px solid var(--border-subtle)' : 'none' }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)' }}
                   onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
                   onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
                 >
@@ -2407,6 +2434,22 @@ ${bodyContent}
                     <rect x="6" y="14" width="12" height="8"/>
                   </svg>
                   {t('message.print')}
+                </div>
+                {/* Download the raw RFC 822 source as an .eml file (#381). A same-origin
+                    anchor click carries the session cookie; the route sets the
+                    Content-Disposition filename. */}
+                <div
+                  onClick={() => { setShowMoreMenu(false); handleDownloadEml(); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', cursor: 'pointer', fontSize: 13, color: 'var(--text-primary)', borderBottom: aiStatus?.enabled && aiStatus?.features?.summarize && body ? '1px solid var(--border-subtle)' : 'none' }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                  </svg>
+                  {t('message.downloadEml')}
                 </div>
                 {aiStatus?.enabled && aiStatus?.features?.summarize && body && (
                   <div
@@ -2485,6 +2528,15 @@ ${bodyContent}
                 <polyline points="6 9 6 2 18 2 18 9"/>
                 <path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/>
                 <rect x="6" y="14" width="12" height="8"/>
+              </svg>
+            </PaneBtn>
+            {/* Download as .eml (#381) — was mobile-only via the More menu; also on the
+                desktop toolbar directly, since desktop has no equivalent overflow menu. */}
+            <PaneBtn onClick={handleDownloadEml} kind="eml" label={t('message.toolbar.eml')} title={t('message.downloadEml')}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
               </svg>
             </PaneBtn>
             {aiStatus?.enabled && aiStatus?.features?.summarize && body && (

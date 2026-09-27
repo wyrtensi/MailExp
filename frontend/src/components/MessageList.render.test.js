@@ -72,10 +72,12 @@ globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
 let SERVED = [];
 let THREAD_MESSAGES = [];
 let ARCHIVED = [];
+let SEARCH_CALLS = [];
 globalThis.fetch = async (url) => {
   const path = String(url);
   let body = {};
-  if (path.includes('/mail/messages?')) body = { messages: SERVED, total: SERVED.length };
+  if (path.includes('/search?')) { SEARCH_CALLS.push(path); body = { messages: [] }; }
+  else if (path.includes('/mail/messages?')) body = { messages: SERVED, total: SERVED.length };
   else if (path.includes('/mail/thread/')) body = { messages: THREAD_MESSAGES };
   else if (path.includes('/mail/messages/bulk-archive')) body = { archived: ARCHIVED, noArchiveFolder: [] };
   return { ok: true, status: 200, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
@@ -87,6 +89,7 @@ const { useStore } = await import('../store/index.js');
 const MessageList = (await import('./MessageList.jsx')).default;
 const { shortcutBus } = await import('../utils/shortcutBus.js');
 const { applyDeleteGuard, clearDeleteGuard, threadDeleteGuardKey } = await import('../utils/pendingDeletes.js');
+const { api } = await import('../utils/api.js');
 
 const ACCOUNT = { id: 'acct-1', email_address: 'a@example.com', name: 'A', color: '#6366f1', include_in_unified_inbox: true };
 const ACCOUNT_B = { id: 'acct-2', email_address: 'b@example.com', name: 'B', color: '#22c55e', include_in_unified_inbox: true };
@@ -183,5 +186,241 @@ describe('MessageList — the delete guard names the row mailbox', () => {
       ['b1'],
       'the same conversation in the other mailbox was never archived and must still show',
     );
+  });
+});
+
+// #220: a Ctrl/Cmd- or Shift-click on a row OUTSIDE selection mode must enter it directly,
+// the way desktop file managers do, instead of needing the avatar or toolbar button first.
+describe('MessageList — modifier-click enters multi-select (#220)', () => {
+  const M2 = { ...MESSAGE, id: 'msg-b', uid: 2, message_id: '<m2@example.com>', subject: 'Second' };
+  const M3 = { ...MESSAGE, id: 'msg-c', uid: 3, message_id: '<m3@example.com>', subject: 'Third' };
+  // Checked and unchecked checkboxes draw the same polyline; stroke-width 3 vs 2.5 is what
+  // distinguishes a CHECKED row's checkmark (see MessageRow/ThreadRow's avatar-as-checkbox).
+  const CHECK = 'svg[stroke-width="3"] polyline[points="20 6 9 17 4 12"]';
+
+  const clickRow = async (msgid, init = {}) => {
+    // The click handler sits on the inner draggable element, and DOM events bubble upward,
+    // so the dispatch has to start there, not on the [data-msgid] wrapper.
+    const row = container.querySelector(`[data-msgid="${msgid}"]`);
+    assert.ok(row, `expected a row for ${msgid}`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, ...init }));
+    });
+  };
+  const checkedRows = () => [...container.querySelectorAll('[data-msgid]')]
+    .filter(r => r.querySelector(CHECK)).map(r => r.getAttribute('data-msgid'));
+
+  test('ctrl-click seeds {open message, clicked row} and does not open the clicked mail', async () => {
+    await mount({ rows: [MESSAGE, M2, M3], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage('msg-1'); });
+
+    await clickRow('msg-c', { ctrlKey: true });
+
+    assert.equal(useStore.getState().selectedMessageId, 'msg-1'); // clicked mail did NOT open
+    assert.deepEqual(checkedRows().sort(), ['msg-1', 'msg-c']);   // anchor + clicked selected
+  });
+
+  test('shift-click seeds the whole range from the open message', async () => {
+    await mount({ rows: [MESSAGE, M2, M3], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage('msg-1'); });
+
+    await clickRow('msg-c', { shiftKey: true });
+
+    assert.deepEqual(checkedRows().sort(), ['msg-1', 'msg-b', 'msg-c']);
+  });
+
+  test('a plain click still just opens the message', async () => {
+    await mount({ rows: [MESSAGE, M2], threadedView: false });
+    await clickRow('msg-b');
+    assert.equal(useStore.getState().selectedMessageId, 'msg-b');
+    assert.deepEqual(checkedRows(), []); // no selection mode entered
+  });
+
+  // Conversations are the shipped default (threadedView: true), so ThreadRow needs the same
+  // branch — otherwise ctrl-click opens the conversation on every default install while a
+  // test that only exercises MessageRow (threadedView: false) stays green.
+  test('ctrl-click on a conversation row enters multi-select too', async () => {
+    const T2 = { ...THREAD, id: 'msg-3', thread_id: 'thr-2', message_id: '<m3t@example.com>' };
+    await mount({ rows: [THREAD, T2], threadedView: true });
+    await React.act(async () => { useStore.getState().setSelectedMessage('msg-2'); });
+
+    await clickRow('msg-3', { ctrlKey: true });
+
+    assert.equal(useStore.getState().selectedMessageId, 'msg-2'); // clicked conversation did NOT open
+    assert.deepEqual(checkedRows().sort(), ['msg-2', 'msg-3']);
+  });
+});
+
+// #449: Ctrl+Z fires the newest still-pending undo — the same onUndo the visible toast button
+// runs, so the keyboard can never undo more than the toasts offer.
+describe('MessageList — Ctrl+Z undo shortcut (#449)', () => {
+  test('undoAction fires the newest pending undo, then the next, then nothing', async () => {
+    await mount({ rows: [MESSAGE], threadedView: false });
+    const undone = [];
+    await React.act(async () => {
+      // A prior scenario's own undoable commit can still be pending (real timers, shared
+      // store) — start from a clean slate so only this test's two notifications are seen.
+      useStore.setState({ notifications: [] });
+      useStore.getState().addNotification({ title: 'older', onUndo: () => undone.push('older') });
+      useStore.getState().addNotification({ title: 'newer', onUndo: () => undone.push('newer') });
+    });
+
+    await React.act(async () => { shortcutBus.emit('undoAction'); });
+    assert.deepEqual(undone, ['newer']);
+    assert.deepEqual(useStore.getState().notifications.filter(n => n.onUndo).map(n => n.title), ['older']);
+
+    await React.act(async () => { shortcutBus.emit('undoAction'); });
+    await React.act(async () => { shortcutBus.emit('undoAction'); }); // nothing left — no throw, no change
+    assert.deepEqual(undone, ['newer', 'older']);
+  });
+});
+
+// #434: a star button in the multi-select bulk-action bar.
+describe('MessageList — bulk star in the multi-select bar (#434)', () => {
+  const M_STARRED = { ...MESSAGE, id: 'msg-star', uid: 9, message_id: '<star@example.com>', is_starred: true };
+  const M_PLAIN   = { ...MESSAGE, id: 'msg-plain', uid: 10, message_id: '<plain@example.com>', is_starred: false };
+
+  const clickRow = async (msgid, init = {}) => {
+    const row = container.querySelector(`[data-msgid="${msgid}"]`);
+    assert.ok(row, `expected a row for ${msgid}`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true, ...init }));
+    });
+  };
+
+  test('any unstarred message in the selection stars them all, optimistically and via the API', async () => {
+    await mount({ rows: [M_STARRED, M_PLAIN], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage(M_STARRED.id); });
+    await clickRow(M_PLAIN.id, { ctrlKey: true }); // enters multi-select with both rows
+
+    const calls = [];
+    const originalBulkStar = api.bulkStar;
+    api.bulkStar = async (ids, starred) => { calls.push([ids, starred]); return { ok: true }; };
+    try {
+      const starBtn = [...container.querySelectorAll('button')].find(b => b.getAttribute('title') === 'messageList.starSelected');
+      assert.ok(starBtn, 'expected the bulk star button (any unstarred selected -> "Star" label)');
+      await React.act(async () => { starBtn.click(); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0][0].sort(), [M_PLAIN.id, M_STARRED.id].sort());
+      assert.equal(calls[0][1], true); // any unstarred in selection -> star them all
+
+      // Optimistic update landed in the store for both rows, including the already-starred one.
+      const byId = Object.fromEntries(useStore.getState().messages.map(m => [m.id, m]));
+      assert.equal(byId[M_STARRED.id].is_starred, true);
+      assert.equal(byId[M_PLAIN.id].is_starred, true);
+
+      // Selection clears after the bulk action (same as bulk mark-read/archive), so the
+      // whole bulk-action bar — selectedIds.size > 0 || selectionModeActive — unmounts.
+      assert.equal(
+        [...container.querySelectorAll('button')].some(b => b.getAttribute('title') === 'messageList.starSelected'),
+        false,
+      );
+    } finally {
+      api.bulkStar = originalBulkStar;
+    }
+  });
+
+  test('a failed request reverts the optimistic star change', async () => {
+    await mount({ rows: [M_PLAIN], threadedView: false });
+    await React.act(async () => { useStore.getState().setSelectedMessage(M_PLAIN.id); });
+    await clickRow(M_PLAIN.id, { ctrlKey: true }); // ctrl-click on the only row still enters selection mode
+
+    const originalBulkStar = api.bulkStar;
+    const originalError = console.error;
+    console.error = () => {};
+    api.bulkStar = async () => { throw new Error('network down'); };
+    try {
+      const starBtn = [...container.querySelectorAll('button')].find(b => b.getAttribute('title') === 'messageList.starSelected');
+      assert.ok(starBtn);
+      await React.act(async () => { starBtn.click(); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+      const msg = useStore.getState().messages.find(m => m.id === M_PLAIN.id);
+      assert.equal(msg.is_starred, false, 'reverted back to its original state after the failed request');
+    } finally {
+      api.bulkStar = originalBulkStar;
+      console.error = originalError;
+    }
+  });
+});
+
+// A search issued while standing IN Trash or Junk must stay scoped to that folder even with
+// "search all folders" on — the server excludes both from an ordinary all-folder search (so
+// freshly-deleted mail and spam don't resurface by default), which would otherwise silently
+// return nothing for a search the user issued while looking straight at that folder.
+describe('MessageList — search stays scoped to Trash/Junk despite "search all folders"', () => {
+  const FOLDERS_WITH_TRASH = [
+    { path: 'INBOX', name: 'INBOX', special_use: null },
+    { path: 'Trash', name: 'Trash', special_use: '\\Trash' },
+    { path: 'Junk', name: 'Junk', special_use: '\\Junk' },
+  ];
+
+  const search = async (query) => {
+    await React.act(async () => { useStore.setState({ searchQuery: query }); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 350)); }); // 300ms debounce
+  };
+
+  test('typing a search while in Trash sends folder=Trash despite searchAllFolders: true', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'Trash', searchAllFolders: true,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.match(SEARCH_CALLS[0], /[?&]folder=Trash(&|$)/);
+  });
+
+  test('typing a search while in Junk sends folder=Junk despite searchAllFolders: true', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'Junk', searchAllFolders: true,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.match(SEARCH_CALLS[0], /[?&]folder=Junk(&|$)/);
+  });
+
+  test('an ordinary folder still searches everywhere when searchAllFolders is on', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'INBOX', searchAllFolders: true,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.doesNotMatch(SEARCH_CALLS[0], /[?&]folder=/);
+  });
+
+  test('Trash still scopes the search when searchAllFolders is off (the pre-existing behavior)', async () => {
+    SEARCH_CALLS = [];
+    await mount({
+      rows: [MESSAGE], threadedView: false,
+      state: {
+        selectedFolder: 'Trash', searchAllFolders: false,
+        folders: { 'acct-1': FOLDERS_WITH_TRASH },
+      },
+    });
+    await search('invoice');
+
+    assert.equal(SEARCH_CALLS.length, 1);
+    assert.match(SEARCH_CALLS[0], /[?&]folder=Trash(&|$)/);
   });
 });

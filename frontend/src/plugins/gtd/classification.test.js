@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyWithUndo, undoLatestGtdNotification } from './classification.js';
+import { classifyWithUndo } from './classification.js';
 
 function createHarness(classifyResult = {}) {
   const notifications = [];
@@ -87,31 +87,13 @@ describe('classifyWithUndo', () => {
     assert.equal(harness.notifications[0].type, 'error');
     assert.equal(harness.notifications[0].title, 'gtd.classifyFailed');
   });
-});
 
-describe('undoLatestGtdNotification', () => {
-  it('removes and invokes only the newest GTD undo notification', () => {
-    const invoked = [];
-    const notifications = [
-      { id: 'unrelated', onUndo: () => invoked.push('unrelated') },
-      { id: 'newest-gtd', pluginId: 'gtd', onUndo: () => invoked.push('newest-gtd') },
-      { id: 'older-gtd', pluginId: 'gtd', onUndo: () => invoked.push('older-gtd') },
-    ];
-    const removed = [];
-
-    const handled = undoLatestGtdNotification(notifications, id => removed.push(id));
-
-    assert.equal(handled, true);
-    assert.deepEqual(removed, ['newest-gtd']);
-    assert.deepEqual(invoked, ['newest-gtd']);
-  });
-
-  it('is a no-op without a GTD undo notification', () => {
-    const handled = undoLatestGtdNotification(
-      [{ id: 'regular', pluginId: 'gtd' }, { id: 'other', onUndo: () => {} }],
-      () => assert.fail('must not remove a notification'),
-    );
-
-    assert.equal(handled, false);
+  // Review finding (Low): undoLatestGtdNotification was GtdRuntime.jsx's only caller. Ctrl+Z
+  // now handles GTD undo through the generic undoAction dispatcher in MessageList.jsx instead
+  // (a GTD classification's undo is an onUndo notification like any other), so this guards
+  // against the same dead code reappearing unwired.
+  it('no longer exports undoLatestGtdNotification', async () => {
+    const mod = await import('./classification.js');
+    assert.equal('undoLatestGtdNotification' in mod, false);
   });
 });

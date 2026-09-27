@@ -88,7 +88,11 @@ export function resolveSearchFolderScope(filters, folderParam = '') {
   return { folderScope, folderFuzzy };
 }
 
-export function shouldExcludeTrashFromSearch(folderScope) {
+// Gate for excluding Trash- and Junk/Spam-like folders from an ordinary all-folder search,
+// the way Gmail's default "All Mail" search does. Only applies when nothing narrowed the
+// scope (no in: operator, no folder param) — an explicit folder search (including
+// in:trash / in:spam) stays eligible to find messages there.
+export function shouldExcludeSpecialFoldersFromSearch(folderScope) {
   return folderScope === null;
 }
 
@@ -101,6 +105,23 @@ export function trashFolderExclusionCondition() {
           AND (f.special_use = '\\Trash'
                OR lower(f.name) LIKE '%trash%'
                OR lower(f.name) LIKE '%deleted%')
+      )`;
+}
+
+// Same name heuristic as mailUtils.resolveAllSpamPaths, inlined as a per-row EXISTS check
+// (like trashFolderExclusionCondition above) rather than an async per-account lookup, since
+// a search spans every selected account in one query. Deliberately does not consult
+// folder_mappings.spam (a per-account override) for the same reason the trash exclusion
+// does not consult folder_mappings.trash: this is a broad "does it look like Junk"
+// heuristic across every account in scope, not a single account's canonical spam folder.
+export function spamFolderExclusionCondition() {
+  return `NOT EXISTS (
+        SELECT 1
+        FROM folders f
+        WHERE f.account_id = m.account_id
+          AND f.path = m.folder
+          AND (f.special_use = '\\Junk'
+               OR lower(f.name) ~ '(spam|junk|bulk|indesiderata|spamverdacht|courrier ind|posta indesiderata)')
       )`;
 }
 
@@ -228,11 +249,14 @@ router.get('/', searchLimiter, async (req, res) => {
       params.push(folderScope);
       conditions.push(`m.folder = $${p++}`);
     }
-  } else if (shouldExcludeTrashFromSearch(folderScope)) {
-    // Deleting moves mail into Trash, where it remains searchable by explicit
-    // folder queries like in:trash. Keep ordinary all-folder searches from
-    // resurfacing freshly-deleted messages after the optimistic UI guard expires.
+  } else if (shouldExcludeSpecialFoldersFromSearch(folderScope)) {
+    // Deleting moves mail into Trash, where it remains searchable by explicit folder
+    // queries like in:trash. Keep ordinary all-folder searches from resurfacing
+    // freshly-deleted messages after the optimistic UI guard expires. Junk/Spam is
+    // excluded the same way Gmail's default "All Mail" search excludes it — in:spam
+    // (or in:junk, matched fuzzily) still finds it.
     conditions.push(trashFolderExclusionCondition());
+    conditions.push(spamFolderExclusionCondition());
   }
 
   const off = Math.max(0, parseInt(offset) || 0);

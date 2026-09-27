@@ -8,8 +8,9 @@ vi.mock('../middleware/auth.js', () => ({ requireAuth: vi.fn() }));
 import {
   parseSearchQuery,
   resolveSearchFolderScope,
-  shouldExcludeTrashFromSearch,
+  shouldExcludeSpecialFoldersFromSearch,
   trashFolderExclusionCondition,
+  spamFolderExclusionCondition,
   freeTextTermCondition,
   FTS_BODY_CHAR_CAP,
 } from './search.js';
@@ -118,16 +119,30 @@ describe('parseSearchQuery', () => {
     const { filters } = parseSearchQuery('subject:newsletter');
     const { folderScope } = resolveSearchFolderScope(filters);
     expect(folderScope).toBeNull();
-    expect(shouldExcludeTrashFromSearch(folderScope)).toBe(true);
+    expect(shouldExcludeSpecialFoldersFromSearch(folderScope)).toBe(true);
     expect(trashFolderExclusionCondition()).toContain('NOT EXISTS');
     expect(trashFolderExclusionCondition()).toContain('%trash%');
     expect(trashFolderExclusionCondition()).toContain('%deleted%');
   });
 
-  it('keeps explicit folder searches eligible to find trash messages', () => {
-    const { filters } = parseSearchQuery('in:trash subject:newsletter');
+  // Search defaults to every folder of the selected mailbox(es); Gmail's own default "All
+  // Mail" search excludes Trash and Spam the same way, and the owner picked that behavior
+  // here too. in:spam / in:junk (fuzzy-matched, like in:trash) still finds it.
+  it('excludes junk/spam-like folders from ordinary all-folder searches, same as trash', () => {
+    const { filters } = parseSearchQuery('subject:newsletter');
     const { folderScope } = resolveSearchFolderScope(filters);
-    expect(shouldExcludeTrashFromSearch(folderScope)).toBe(false);
+    expect(shouldExcludeSpecialFoldersFromSearch(folderScope)).toBe(true);
+    expect(spamFolderExclusionCondition()).toContain('NOT EXISTS');
+    expect(spamFolderExclusionCondition()).toContain('\\Junk');
+    expect(spamFolderExclusionCondition()).toMatch(/spam\|junk/);
+  });
+
+  it('keeps explicit folder searches eligible to find trash or spam messages', () => {
+    const { filters: trashFilters } = parseSearchQuery('in:trash subject:newsletter');
+    expect(shouldExcludeSpecialFoldersFromSearch(resolveSearchFolderScope(trashFilters).folderScope)).toBe(false);
+
+    const { filters: spamFilters } = parseSearchQuery('in:spam subject:newsletter');
+    expect(shouldExcludeSpecialFoldersFromSearch(resolveSearchFolderScope(spamFilters).folderScope)).toBe(false);
   });
 });
 

@@ -783,7 +783,7 @@ export async function patchPreferences(req, res) {
           showAppBadge, showFaviconBadge, replyDefault, sidebarWidth,
           markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars,
-          folderOrder, senderFavicons, showMessagePreviews, defaultSender } = req.body;
+          folderOrder, senderFavicons, showMessagePreviews, defaultSender, hoverActionSet } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
   // preference — it lives per-account in email_accounts.gtd_enabled.
@@ -838,6 +838,12 @@ export async function patchPreferences(req, res) {
     return res.status(400).json({ error: 'senderFavicons must be a boolean' });
   }
   const senderFaviconsVal = hasSenderFavicons ? senderFavicons : null;
+  // #440: which hover quick actions the message list shows. Same vocabulary and canonical
+  // order as frontend/src/utils/hoverActions.js; unknown keys are dropped rather than stored.
+  const HOVER_ACTION_KEYS = ['markRead', 'star', 'archive', 'snooze', 'delete', 'move'];
+  const hoverActionSetJson = Array.isArray(hoverActionSet)
+    ? JSON.stringify(HOVER_ACTION_KEYS.filter(k => hoverActionSet.includes(k)))
+    : null;
   await query(`
     UPDATE users
     SET preferences = preferences
@@ -879,6 +885,7 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $37::boolean IS NOT NULL THEN jsonb_build_object('senderFavicons', $37::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $38::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $38::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $39::text IS NOT NULL THEN jsonb_build_object('defaultSender', $39::text) ELSE '{}'::jsonb END
+      || CASE WHEN $40::jsonb IS NOT NULL THEN jsonb_build_object('hoverActionSet', $40::jsonb) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null,
@@ -889,7 +896,7 @@ export async function patchPreferences(req, res) {
       markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderOrderJson, senderFaviconsVal,
-      showMessagePreviews ?? null, defaultSenderVal]);
+      showMessagePreviews ?? null, defaultSenderVal, hoverActionSetJson]);
 
   res.json({ ok: true });
 }

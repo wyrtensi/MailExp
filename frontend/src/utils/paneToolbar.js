@@ -5,7 +5,7 @@
 // keep theirs longest.
 export const LABEL_RANK = Object.freeze({
   reply: 1, forward: 2, archive: 3, delete: 4, move: 5,
-  star: 6, unread: 7, spam: 8, headers: 9, print: 10, task: 11, ai: 12,
+  star: 6, unread: 7, spam: 8, headers: 9, print: 10, eml: 11, task: 12, ai: 13,
 });
 export const ALL_LABELS = Object.keys(LABEL_RANK).length;
 

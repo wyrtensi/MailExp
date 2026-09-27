@@ -240,6 +240,9 @@
     "star": "Star",
     "delete": "Delete",
     "print": "Print",
+    "downloadEml": "Download as .eml",
+    "downloadEmlTooLarge": "This message is too large to download as .eml (over 50 MB)",
+    "downloadEmlFailed": "Could not download the message",
     "more": "More",
     "summarize": "Summarize",
     "summary": "Summary",
@@ -355,6 +358,7 @@
       "unread": "Unread",
       "headers": "Headers",
       "print": "Print",
+      "eml": "Download .eml",
       "ai": "AI",
       "star": "Star",
       "unstar": "Unstar"
@@ -377,6 +381,8 @@
     "messagesPerPage": "Messages per page",
     "selectAll": "Select all",
     "deselectAll": "Deselect all",
+    "starSelected": "Star",
+    "unstarSelected": "Remove star",
     "markReadSelected": "Mark as read",
     "markUnreadSelected": "Mark as unread",
     "archiveSelected": "Archive selected",
@@ -677,6 +683,10 @@
         "label": "Select message",
         "description": "Check or uncheck the current message"
       },
+      "undoAction": {
+        "label": "Undo last action",
+        "description": "Undo the most recent archive, delete, move, or spam action while its toast is showing"
+      },
       "printMessage": {
         "label": "Print",
         "description": "Print the current message"
@@ -692,9 +702,6 @@
       "gtdDelegated": {
         "label": "Mark Delegated",
         "description": "Classify the selected message as Delegated"
-      },
-      "gtdUndo": {
-        "description": "Undo the latest GTD classification"
       },
       "toggleRightSidebar": {
         "label": "Toggle right sidebar",

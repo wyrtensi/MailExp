@@ -29,6 +29,10 @@ test('demo direct API helpers resolve locally without calling fetch', async () =
   assert.equal(await attachment.text(), 'Demo attachment: renewal order form preview.\n');
   assert.match(direct.attachmentArchiveUrl('demo-001'), /^data:application\/zip;base64,/);
   assert.match(direct.gtdPetSheetUrl('demo-pet'), /^data:image\/gif;base64,/);
+
+  const eml = await direct.downloadRawEml('demo-001');
+  assert.equal(eml.type, 'message/rfc822');
+  assert.match(await eml.text(), /^From: demo@example\.com\r\nSubject: /);
   assert.equal(fetchCalls, 0);
 });
 
@@ -58,6 +62,7 @@ test('production direct API helpers retain their existing network contracts', as
   await direct.deleteMessagesOnExit(['one', 'two']);
   await direct.deleteMessagesOnExit(['one']);
   assert.equal((await direct.downloadAttachment('message', '1')).type, 'text/plain');
+  assert.equal((await direct.downloadRawEml('message')).type, 'text/plain'); // fetchImpl stub is generic per-call
 
   assert.deepEqual(calls.map(([url, init]) => [url, init.method || 'GET', Boolean(init.keepalive)]), [
     ['/api/auth/unlock', 'POST', false],
@@ -67,6 +72,7 @@ test('production direct API helpers retain their existing network contracts', as
     ['/api/mail/messages/bulk-delete', 'POST', true],
     ['/api/mail/messages/one', 'DELETE', true],
     ['/api/mail/messages/message/attachments/1', 'GET', false],
+    ['/api/mail/messages/message/raw.eml', 'GET', false],
   ]);
   assert.equal(direct.attachmentArchiveUrl('message'), '/api/mail/messages/message/attachments.zip');
   assert.equal(direct.gtdPetSheetUrl('pet slug'), '/api/gtd/pet/pet%20slug/sheet');
@@ -81,4 +87,15 @@ test('a busy mailbox keeps its code on a failed attachment download', async () =
   const other = await failing(500, { error: 'Failed to fetch attachment' }).downloadAttachment('message', '1').catch(e => e);
   assert.equal(other.message, 'Download failed');
   assert.equal(other.code, undefined);
+});
+
+test('an oversized .eml download keeps its stable code, not the English error text', async () => {
+  const failing = (status, body) => createDirectApi({
+    demoMode: false,
+    fetchImpl: async () => ({ ok: false, status, json: async () => body }),
+  });
+  await assert.rejects(
+    failing(413, { error: 'Message exceeds the 50 MB download limit.', code: 'message_too_large' }).downloadRawEml('message'),
+    { code: 'message_too_large' },
+  );
 });

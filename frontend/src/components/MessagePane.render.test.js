@@ -63,6 +63,7 @@ globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => ({}),
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
+const { api } = await import('../utils/api.js');
 const MessagePane = (await import('./MessagePane.jsx')).default;
 
 const MSG_A = { id: 'a1', account_id: 'acct', folder: 'INBOX', uid: 1, subject: 'First', from_email: 'x@y.z', from_name: 'X', date: new Date().toISOString(), is_read: true, to_addresses: [], cc_addresses: [] };
@@ -202,5 +203,125 @@ describe('Download all asks first when an attachment is risky', () => {
     document.removeEventListener('click', record);
     assert.equal(cancelled, false, 'the first click downloads');
     assert.doesNotMatch(after.textContent, armedNote);
+  });
+});
+
+describe('Download as .eml from the More menu (#381)', () => {
+  // The "More" overflow menu (Print, view headers, download .eml, …) only exists on the
+  // mobile layout — desktop lays these out as individual toolbar buttons instead, and #381
+  // upstream only wired the download into this same mobile-only menu. useMobile() reads
+  // window.innerWidth in a useState initializer, so it must be set before this component's
+  // FIRST mount — a fresh root, not a re-render of the desktop-mounted one above.
+  //
+  // The download itself goes through api.downloadRawEml (fetch + blob), not a bare anchor
+  // href, so a server error (413/mailbox_busy/…) is visible to the caller instead of
+  // silently failing as a browser-level navigation would (review finding #2 follow-up).
+  // Stubbing api.downloadRawEml directly, same technique the bulk-star tests use, keeps
+  // this test about the UI wiring rather than re-testing api.js's own fetch/blob plumbing
+  // (covered by api.demo.test.js).
+  const downloads = [];
+  let originalDownloadRawEml, originalInnerWidth, mobileHost, mobileRoot;
+  before(async () => {
+    originalDownloadRawEml = api.downloadRawEml;
+    originalInnerWidth = dom.window.innerWidth;
+    dom.window.innerWidth = 400; // useMobile(): window.innerWidth < 768
+    mobileHost = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(mobileHost);
+    mobileRoot = createRoot(mobileHost);
+  });
+  after(async () => {
+    await React.act(async () => mobileRoot.unmount());
+    mobileHost.remove();
+    api.downloadRawEml = originalDownloadRawEml;
+    dom.window.innerWidth = originalInnerWidth;
+  });
+
+  test('the More menu offers an .eml download that fetches the raw source', async () => {
+    downloads.length = 0;
+    api.downloadRawEml = async (messageId) => {
+      downloads.push(messageId);
+      return new Blob(['From: a@b.c\r\n\r\nBody'], { type: 'message/rfc822' });
+    };
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1');
+      mobileRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const moreBtn = [...mobileHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.more');
+    assert.ok(moreBtn, 'expected the More button');
+    await React.act(async () => { moreBtn.click(); });
+
+    const downloadItem = [...mobileHost.querySelectorAll('div')].find(d => d.textContent === 'message.downloadEml');
+    assert.ok(downloadItem, 'expected a "download as .eml" menu item');
+    await React.act(async () => { downloadItem.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true })); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    assert.deepEqual(downloads, ['a1']);
+  });
+
+  test('an oversized message shows a localized error instead of failing silently', async () => {
+    api.downloadRawEml = async () => { throw Object.assign(new Error('Download failed'), { code: 'message_too_large' }); };
+    await React.act(async () => {
+      useStore.setState({ notifications: [] });
+      useStore.getState().setSelectedMessage('a1');
+      mobileRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const moreBtn = [...mobileHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.more');
+    await React.act(async () => { moreBtn.click(); });
+    const downloadItem = [...mobileHost.querySelectorAll('div')].find(d => d.textContent === 'message.downloadEml');
+    await React.act(async () => { downloadItem.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true })); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const notified = useStore.getState().notifications.some(n => n.title === 'message.downloadEmlTooLarge');
+    assert.ok(notified, 'expected a "too large" notification');
+  });
+});
+
+describe('Download as .eml on the desktop toolbar (#381 follow-up)', () => {
+  // Desktop has no overflow "More" menu at all — its actions are individual toolbar
+  // buttons — so the mobile-only More-menu entry above left desktop with no way to
+  // download a message's .eml. This is a direct PaneBtn, not a menu item.
+  const downloads = [];
+  let originalDownloadRawEml, originalInnerWidth, desktopHost, desktopRoot;
+  before(async () => {
+    originalDownloadRawEml = api.downloadRawEml;
+    originalInnerWidth = dom.window.innerWidth;
+    dom.window.innerWidth = 1280; // useMobile(): window.innerWidth < 768 — well above it
+    desktopHost = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(desktopHost);
+    desktopRoot = createRoot(desktopHost);
+  });
+  after(async () => {
+    await React.act(async () => desktopRoot.unmount());
+    desktopHost.remove();
+    api.downloadRawEml = originalDownloadRawEml;
+    dom.window.innerWidth = originalInnerWidth;
+  });
+
+  test('a toolbar button downloads the raw source directly, no menu involved', async () => {
+    downloads.length = 0;
+    api.downloadRawEml = async (messageId) => {
+      downloads.push(messageId);
+      return new Blob(['From: a@b.c\r\n\r\nBody'], { type: 'message/rfc822' });
+    };
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1');
+      desktopRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // There must be no "More" button on desktop — that overflow menu is mobile-only.
+    const moreBtn = [...desktopHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.more');
+    assert.equal(moreBtn, undefined, 'desktop has no More button');
+
+    const emlBtn = [...desktopHost.querySelectorAll('button')].find(b => b.getAttribute('title') === 'message.downloadEml');
+    assert.ok(emlBtn, 'expected a desktop toolbar button for downloading .eml');
+    await React.act(async () => { emlBtn.click(); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    assert.deepEqual(downloads, ['a1']);
   });
 });

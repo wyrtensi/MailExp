@@ -19,6 +19,7 @@ import {
   missingByIdentity,
 } from '../utils/gtd.js';
 import { applyGtdRemovalGuard } from '../utils/pendingGtdRemovals.js';
+import { DEFAULT_HOVER_ACTIONS, sanitizeHoverActionSet } from '../utils/hoverActions.js';
 import { clampRightSidebarWidth } from '../utils/rightSidebar.js';
 import { threadCacheKey } from '../utils/threadKey.js';
 import {
@@ -423,11 +424,14 @@ export const useStore = create((set, get) => ({
     set({ scrollMode: mode });
     schedulePrefSave({ scrollMode: mode });
   },
-  // When true, search spans all folders instead of the current one (per device).
-  searchAllFolders: localStorage.getItem('mailexpert_search_all_folders') === '1',
+  // When true, search spans every folder of the selected mailbox(es) instead of just the
+  // current one (per device). Defaults ON: the owner wants search to cover the whole
+  // mailbox unless narrowed, so a stored value is only ever the opt-OUT ('0') — no stored
+  // value means "on", which is also what a fresh install/device gets.
+  searchAllFolders: localStorage.getItem('mailexpert_search_all_folders') !== '0',
   setSearchAllFolders: (v) => {
-    if (v) localStorage.setItem('mailexpert_search_all_folders', '1');
-    else localStorage.removeItem('mailexpert_search_all_folders');
+    if (v) localStorage.removeItem('mailexpert_search_all_folders');
+    else localStorage.setItem('mailexpert_search_all_folders', '0');
     set({ searchAllFolders: v });
   },
   swipeActions: (() => {
@@ -618,6 +622,24 @@ export const useStore = create((set, get) => ({
     localStorage.setItem('mailexpert_hover_quick_actions', String(val));
     set({ hoverQuickActions: val });
     schedulePrefSave({ hoverQuickActions: val });
+  },
+
+  // #440: WHICH quick actions the hover cluster shows. Stored as a subset of
+  // HOVER_ACTION_KEYS (utils/hoverActions.js); order is always canonical, so the setter
+  // normalizes by filtering the canonical list — customization is membership, not order.
+  // Unknown keys from an older or edited pref are dropped on read.
+  hoverActionSet: (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('mailexpert_hover_action_set') || 'null');
+      if (Array.isArray(saved)) return sanitizeHoverActionSet(saved);
+    } catch { /* corrupted pref — fall back to the default cluster */ }
+    return [...DEFAULT_HOVER_ACTIONS];
+  })(),
+  setHoverActionSet: (keys) => {
+    const val = sanitizeHoverActionSet(keys);
+    localStorage.setItem('mailexpert_hover_action_set', JSON.stringify(val));
+    set({ hoverActionSet: val });
+    schedulePrefSave({ hoverActionSet: val });
   },
 
   // Show sender avatars in the mobile message list (off by default — they cost row width
@@ -1175,6 +1197,11 @@ export const useStore = create((set, get) => ({
       if (typeof prefs.hoverQuickActions === 'boolean') {
         localStorage.setItem('mailexpert_hover_quick_actions', String(prefs.hoverQuickActions));
         set({ hoverQuickActions: prefs.hoverQuickActions });
+      }
+      if (Array.isArray(prefs.hoverActionSet)) {
+        const hoverSet = sanitizeHoverActionSet(prefs.hoverActionSet);
+        localStorage.setItem('mailexpert_hover_action_set', JSON.stringify(hoverSet));
+        set({ hoverActionSet: hoverSet });
       }
       if (typeof prefs.showMobileAvatars === 'boolean') {
         localStorage.setItem('mailexpert_show_mobile_avatars', String(prefs.showMobileAvatars));

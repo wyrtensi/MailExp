@@ -44,6 +44,7 @@ function extractPatterns(source, methods) {
 const CONCRETE_PATH = {
   '/oauth/microsoft/device/poll': '/oauth/microsoft/device/poll',
   '/mail/messages/:param/attachments/:param': '/mail/messages/demo-001/attachments/1',
+  '/mail/messages/:param/raw.eml': '/mail/messages/demo-001/raw.eml',
   '/mail/messages/:param/body:param': '/mail/messages/demo-001/body',
   '/auth/me': '/auth/me',
   '/auth/config': '/auth/config',
@@ -314,6 +315,7 @@ test('manual IMAP mailbox add, edit, aliases and delete round-trip through ACCOU
 
 test('mailbox and message-list actions answer with real ids', async () => {
   await answer('/mail/messages/bulk-read', 'POST', '/mail/messages/bulk-read', { ids: ['demo-006'], read: true });
+  await answer('/mail/messages/bulk-star', 'POST', '/mail/messages/bulk-star', { ids: ['demo-006'], starred: true });
   await answer('/mail/messages/:param/star', 'PATCH', '/mail/messages/demo-006/star', { starred: true });
   await answer('/mail/mark-all-read', 'POST', '/mail/mark-all-read', { accountId: 'demo-ops', folder: 'Projects/Launch' });
   await answer('/mail/messages/bulk-move', 'POST', '/mail/messages/bulk-move', { ids: ['demo-007'], folder: 'Archive' });

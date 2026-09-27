@@ -228,6 +228,26 @@ export function createDirectApi({
       return demoMode ? EMPTY_ZIP_DATA_URL : `/api/mail/messages/${messageId}/attachments.zip`;
     },
 
+    // Download the raw RFC 822 source as an .eml file (#381). A fetch (not a bare URL the
+    // caller navigates to) so the server's 413/mailbox_busy/etc. response is visible to the
+    // caller instead of silently failing as a browser-level navigation would.
+    async downloadRawEml(messageId) {
+      if (demoMode) {
+        const eml = await demoRequestImpl('GET', `/mail/messages/${messageId}/raw.eml`);
+        return new Blob([eml.content || ''], { type: eml.type || 'message/rfc822' });
+      }
+      const res = await fetchImpl(`/api/mail/messages/${messageId}/raw.eml`, {
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        // Keep the server's stable code (message_too_large, mailbox_busy, move_pending) so
+        // the caller can show its own localized message instead of the English error text.
+        const body = await res.json().catch(() => ({}));
+        throw Object.assign(new Error('Download failed'), body.code ? { code: body.code } : {});
+      }
+      return res.blob();
+    },
+
     gtdPetSheetUrl(slug) {
       return demoMode ? TRANSPARENT_GIF_DATA_URL : `${BASE}/gtd/pet/${encodeURIComponent(slug)}/sheet`;
     },
@@ -397,6 +417,7 @@ export const api = {
     return request('GET', `/mail/thread/${encodeURIComponent(threadId)}${query}`);
   },
   bulkRead: (ids, read) => request('POST', '/mail/messages/bulk-read', { ids, read }),
+  bulkStar: (ids, starred) => request('POST', '/mail/messages/bulk-star', { ids, starred }),
   markStarred: (id, starred) => request('PATCH', `/mail/messages/${id}/star`, { starred }),
   markAllRead: (accountId, folder) => request('POST', '/mail/mark-all-read', { accountId, folder }),
   // folder / folders: where the user saw the letters (utils/deleteIntent.js). Without them the
@@ -429,6 +450,7 @@ export const api = {
   getMessageHeaders: (id) => request('GET', `/mail/messages/${id}/headers`),
   downloadAttachment: (messageId, part) => directApi.downloadAttachment(messageId, part),
   attachmentArchiveUrl: (messageId) => directApi.attachmentArchiveUrl(messageId),
+  downloadRawEml: (messageId) => directApi.downloadRawEml(messageId),
   snoozeMessage: (id, until) => request('POST', `/mail/messages/${id}/snooze`, { until }),
 
   // Sanitized diagnostics report (server-owned sections; scoped to the user).

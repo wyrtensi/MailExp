@@ -1203,6 +1203,16 @@ export async function demoRequest(method, path, body = {}) {
     };
   }
 
+  const rawEmlMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/raw\.eml$/);
+  if (verb === 'GET' && rawEmlMatch) {
+    const item = messageById(decodeURIComponent(rawEmlMatch[1]));
+    const subject = item?.subject || 'Demo message';
+    return {
+      type: 'message/rfc822',
+      content: `From: demo@example.com\r\nSubject: ${subject}\r\n\r\nThis is a demo message.\r\n`,
+    };
+  }
+
   const starMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/star$/);
   if (verb === 'PATCH' && starMatch) {
     const item = messageById(decodeURIComponent(starMatch[1]));
@@ -1258,6 +1268,17 @@ export async function demoRequest(method, path, body = {}) {
       const item = messageById(id);
       if (item && item.is_read !== Boolean(body.read)) {
         item.is_read = Boolean(body.read);
+        updated.push(id);
+      }
+    }
+    return { ok: true, updated };
+  }
+  if (verb === 'POST' && pathname === '/mail/messages/bulk-star') {
+    const updated = [];
+    for (const id of body.ids || []) {
+      const item = messageById(id);
+      if (item && item.is_starred !== Boolean(body.starred)) {
+        item.is_starred = Boolean(body.starred);
         updated.push(id);
       }
     }
