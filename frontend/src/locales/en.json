@@ -241,6 +241,8 @@
     "delete": "Delete",
     "print": "Print",
     "downloadEml": "Download as .eml",
+    "downloadEmlTooLarge": "This message is too large to download as .eml (over 50 MB)",
+    "downloadEmlFailed": "Could not download the message",
     "more": "More",
     "summarize": "Summarize",
     "summary": "Summary",

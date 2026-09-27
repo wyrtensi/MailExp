@@ -44,6 +44,7 @@ function extractPatterns(source, methods) {
 const CONCRETE_PATH = {
   '/oauth/microsoft/device/poll': '/oauth/microsoft/device/poll',
   '/mail/messages/:param/attachments/:param': '/mail/messages/demo-001/attachments/1',
+  '/mail/messages/:param/raw.eml': '/mail/messages/demo-001/raw.eml',
   '/mail/messages/:param/body:param': '/mail/messages/demo-001/body',
   '/auth/me': '/auth/me',
   '/auth/config': '/auth/config',

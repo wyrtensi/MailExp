@@ -862,6 +862,22 @@ router.get('/messages/:id/raw.eml', async (req, res) => {
     if (!accountResult.rows.length) return res.status(404).json({ error: 'Account not found' });
     const loc = await imapManager.moveQueue.serverLocation(message, accountResult.rows[0]);
     if (!loc) return sendMovePending(res);
+
+    // Reject an oversized message before buffering its raw source, the same way the
+    // attachment route rejects an oversized attachment before buffering it. A message's raw
+    // source is the sum of all its parts, so it can exceed the attachment cap even when every
+    // individual attachment is under it. There is no cached size column for a message (unlike
+    // an attachment's BODYSTRUCTURE-derived size), so this is a cheap live RFC822.SIZE fetch
+    // first. size === null means the server didn't answer — proceed rather than block a
+    // legitimate download on a quirky server.
+    const RAW_MESSAGE_SIZE_LIMIT = 50 * 1024 * 1024; // 50 MB, same cap as attachments
+    const size = await imapManager.fetchMessageSize(accountResult.rows[0], loc.uid, loc.folder);
+    if (size != null && size > RAW_MESSAGE_SIZE_LIMIT) {
+      // Stable code so the frontend can show its own localized message instead of
+      // string-matching the English text (same convention as mailbox_busy/move_pending).
+      return res.status(413).json({ error: 'Message exceeds the 50 MB download limit.', code: 'message_too_large' });
+    }
+
     const buffer = await imapManager.fetchRawMessage(accountResult.rows[0], loc.uid, loc.folder);
     if (!buffer) return res.status(404).json({ error: 'Could not fetch message source' });
 

@@ -10,6 +10,7 @@ vi.mock('../middleware/auth.js', () => ({
 vi.mock('../index.js', () => ({
   imapManager: {
     fetchRawMessage: vi.fn(),
+    fetchMessageSize: vi.fn(),
     broadcast: vi.fn(),
     // A letter with no pending move is read where its row says (moveQueue.serverLocation),
     // same as every other IMAP read in mail.js (headers, attachments, body).
@@ -39,6 +40,7 @@ describe('GET /api/mail/messages/:id/raw.eml (#381)', () => {
   beforeEach(() => {
     query.mockReset();
     imapManager.fetchRawMessage.mockReset().mockResolvedValue(Buffer.from(RAW));
+    imapManager.fetchMessageSize.mockReset().mockResolvedValue(RAW.length);
     imapManager.moveQueue.serverLocation.mockReset().mockImplementation(async (m) => ({ folder: m.folder, uid: Number(m.uid) }));
     query.mockImplementation((sql) => {
       if (sql.includes('FROM messages m')) {
@@ -61,6 +63,39 @@ describe('GET /api/mail/messages/:id/raw.eml (#381)', () => {
     // Resolved through serverLocation, so it fetches the real (resolved) uid/folder, not
     // necessarily the DB row's raw fields verbatim.
     expect(imapManager.fetchRawMessage.mock.calls[0].slice(1)).toEqual([42, 'INBOX']);
+    expect(imapManager.fetchMessageSize.mock.calls[0].slice(1)).toEqual([42, 'INBOX']);
+  });
+
+  // Review finding (Medium): a message's raw source is the sum of all its parts, so it can
+  // exceed the attachment route's own 50 MB cap even when no single attachment does.
+  it('413s an oversized message before buffering it, without fetching the raw source', async () => {
+    imapManager.fetchMessageSize.mockResolvedValue(51 * 1024 * 1024);
+    const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);
+    expect(res.status).toBe(413);
+    const body = await res.json();
+    expect(body.error).toMatch(/50 MB/);
+    // Stable code, not the English text, so the frontend can show its own localized message.
+    expect(body.code).toBe('message_too_large');
+    expect(imapManager.fetchRawMessage).not.toHaveBeenCalled();
+  });
+
+  it('allows a message right at the cap, and one just under it', async () => {
+    imapManager.fetchMessageSize.mockResolvedValue(50 * 1024 * 1024);
+    const atCap = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);
+    expect(atCap.status).toBe(200);
+
+    imapManager.fetchMessageSize.mockResolvedValue(50 * 1024 * 1024 - 1);
+    const underCap = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);
+    expect(underCap.status).toBe(200);
+  });
+
+  // A server that doesn't answer the size FETCH (size: null) should not block an otherwise
+  // legitimate download — same "0 means unknown, allow it" stance the attachment route takes.
+  it('proceeds when the server does not answer the size fetch', async () => {
+    imapManager.fetchMessageSize.mockResolvedValue(null);
+    const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/raw.eml`);
+    expect(res.status).toBe(200);
+    expect(imapManager.fetchRawMessage).toHaveBeenCalled();
   });
 
   it('404s an id no row matches, without touching IMAP', async () => {
@@ -92,6 +127,7 @@ describe('GET /api/mail/messages/:id/raw.eml (#381)', () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.code).toBe('move_pending');
+    expect(imapManager.fetchMessageSize).not.toHaveBeenCalled();
     expect(imapManager.fetchRawMessage).not.toHaveBeenCalled();
   });
 });

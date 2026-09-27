@@ -7122,6 +7122,25 @@ export class ImapManager {
     }
   }
 
+  // Cheap RFC822.SIZE fetch for the .eml download's size cap — checked before buffering the
+  // full raw source into memory (fetchRawMessage below), the same way the attachment route
+  // checks att.size before buffering an attachment. There is no per-message size column to
+  // read from the DB (unlike an attachment's size, which comes from the cached BODYSTRUCTURE),
+  // so this is a live IMAP round trip. Returns a number, or null when the server didn't answer.
+  async fetchMessageSize(account, uid, folder) {
+    return withFreshClient(account, async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        for await (const msg of client.fetch(String(uid), { uid: true, size: true }, { uid: true })) {
+          if (typeof msg.size === 'number') return msg.size;
+        }
+        return null;
+      } finally {
+        lock.release();
+      }
+    });
+  }
+
   // Full RFC 822 source, for the .eml download (#381). Pool client like fetchHeaders;
   // imapflow buffers the source the same way attachment fetches buffer their part.
   // Returns a Buffer, or null when the server has nothing for the UID.

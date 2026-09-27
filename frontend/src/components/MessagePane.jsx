@@ -1252,14 +1252,28 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Download the raw RFC 822 source as an .eml file (#381). A same-origin anchor click
   // carries the session cookie; the route sets the Content-Disposition filename. Shared by
   // the mobile More menu and the desktop toolbar button.
-  const handleDownloadEml = () => {
+  // #381 follow-up: slice by code points, not UTF-16 code units, so a subject that ends inside
+  // an astral character (an emoji) never splits a surrogate pair into the filename.
+  const emlFilename = (subject) => `${[...(subject || 'message')].slice(0, 80).join('')}.eml`;
+
+  const handleDownloadEml = async () => {
     if (!message) return;
-    const a = document.createElement('a');
-    a.href = api.rawEmlUrl(message.id);
-    a.download = '';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    try {
+      const blob = await api.downloadRawEml(message.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = emlFilename(message.subject);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Download .eml error:', err);
+      if (err?.code === 'message_too_large') addNotification({ title: t('message.downloadEmlTooLarge') });
+      else if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+      else addNotification({ title: t('message.downloadEmlFailed') });
+    }
   };
 
   const handlePrint = () => {
