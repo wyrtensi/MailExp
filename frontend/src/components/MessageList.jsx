@@ -2456,18 +2456,32 @@ export default function MessageList() {
   const handleSelect = async (message) => {
     if (isDraftsFolder) {
       try {
-        // The headers carry the draft's priority; without them the draft reopens as normal.
-        const [bodyData, headerData] = await Promise.all([
+        // The headers carry the draft's priority; without them the draft reopens as normal. The
+        // Bcc lives only in the draft's own copy, and saving a reopened draft replaces that copy,
+        // so a failed Bcc read must not silently open an editable composer whose next save would
+        // erase it (upstream #499) — it opens read-only instead, below.
+        const [bodyData, headerData, bcc] = await Promise.all([
           api.getMessageBody(message.id),
           api.getMessageHeaders(message.id).catch(() => null),
+          api.getMessageBcc(message.id).then(r => r.bcc, err => {
+            console.error('Failed to read draft Bcc:', err.message);
+            return null;
+          }),
         ]);
+        if (!Array.isArray(bcc)) {
+          addNotification({ type: 'error', title: t('messageList.draftBcc.failTitle'), body: t('messageList.draftBcc.failBody') });
+          setSelectedMessage(message.id);
+          return;
+        }
         openCompose({
           accountId: message.account_id,
           draftUid: message.uid,
           draftFolder: message.folder,
           to: formatAddressArray(message.to_addresses),
           cc: formatAddressArray(message.cc_addresses),
-          bcc: formatAddressArray(bodyData?.bccAddresses),
+          // { name, email } objects rather than formatted strings, so compose quotes a display
+          // name that contains a comma instead of splitting it into two recipients (#224).
+          bcc,
           subject: message.subject || '',
           priority: priorityFromHeaders(headerData?.headers),
           // Split the stored signature out of the body so the composer does not add a second

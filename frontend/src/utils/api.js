@@ -448,6 +448,7 @@ export const api = {
   markHam:  (id) => request('POST', `/mail/messages/${id}/ham`),
 
   getMessageHeaders: (id) => request('GET', `/mail/messages/${id}/headers`),
+  getMessageBcc: (id) => request('GET', `/mail/messages/${id}/bcc`),
   downloadAttachment: (messageId, part) => directApi.downloadAttachment(messageId, part),
   attachmentArchiveUrl: (messageId) => directApi.attachmentArchiveUrl(messageId),
   downloadRawEml: (messageId) => directApi.downloadRawEml(messageId),

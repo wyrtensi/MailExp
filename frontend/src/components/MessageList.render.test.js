@@ -73,8 +73,16 @@ let SERVED = [];
 let THREAD_MESSAGES = [];
 let ARCHIVED = [];
 let SEARCH_CALLS = [];
+// A per-path override, [status, body], consulted before the generic routing below — used to
+// script a single message's /body, /bcc and /headers responses (reopening a draft).
+let ROUTES = {};
 globalThis.fetch = async (url) => {
   const path = String(url);
+  const routed = Object.entries(ROUTES).find(([p]) => path.endsWith(p));
+  if (routed) {
+    const [status, body] = routed[1];
+    return { ok: status < 400, status, headers: { get: () => 'application/json' }, json: async () => body, text: async () => JSON.stringify(body) };
+  }
   let body = {};
   if (path.includes('/search?')) { SEARCH_CALLS.push(path); body = { messages: [] }; }
   else if (path.includes('/mail/messages?')) body = { messages: SERVED, total: SERVED.length };
@@ -422,5 +430,67 @@ describe('MessageList — search stays scoped to Trash/Junk despite "search all 
 
     assert.equal(SEARCH_CALLS.length, 1);
     assert.match(SEARCH_CALLS[0], /[?&]folder=Trash(&|$)/);
+  });
+});
+
+// upstream #499: a draft's Bcc lives only in its own copy on the server, and saving a reopened
+// draft replaces that copy. Compose used to open with whatever /body happened to report (nothing,
+// for a draft bcc_addresses never learned), so the next save silently erased the recipients.
+describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
+  const DRAFT = { ...MESSAGE, id: 'draft-1', folder: 'Drafts', uid: 7, is_read: true, subject: 'Draft subject' };
+  const DRAFTS_FOLDERS = [{ path: 'INBOX', name: 'INBOX' }, { path: 'Drafts', name: 'Drafts', special_use: '\\Drafts' }];
+
+  const clickRow = async (msgid) => {
+    const row = container.querySelector(`[data-msgid="${msgid}"]`);
+    assert.ok(row, `expected a row for ${msgid}`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    // handleSelect awaits its fetches before calling openCompose / setSelectedMessage.
+    await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  };
+
+  // bccRoute: the [status, body] GET /mail/messages/draft-1/bcc answers with.
+  const openDraft = async (bccRoute) => {
+    ROUTES = {
+      '/mail/messages/draft-1/body': [200, { html: '<p>hello</p>', text: 'hello' }],
+      '/mail/messages/draft-1/headers': [200, { headers: '' }],
+      '/mail/messages/draft-1/bcc': bccRoute,
+    };
+    const opened = [];
+    await mount({
+      rows: [DRAFT], threadedView: false,
+      state: {
+        selectedFolder: 'Drafts', folders: { 'acct-1': DRAFTS_FOLDERS },
+        openCompose: d => opened.push(d), notifications: [],
+      },
+    });
+    await clickRow('draft-1');
+    ROUTES = {};
+    return opened;
+  };
+
+  test('opens the composer with the Bcc, as recipients rather than text to re-split', async () => {
+    // { name, email } objects, not formatted strings: compose must quote a display name that
+    // contains a comma instead of splitting it into two recipients (#224).
+    const bcc = [{ name: 'Doe, Jane', email: 'jane@example.com' }];
+    const opened = await openDraft([200, { bcc }]);
+    assert.equal(opened.length, 1, 'expected the composer to open');
+    assert.deepEqual(opened[0].bcc, bcc);
+  });
+
+  test('opens the composer with an empty Bcc when the draft is known to have none', async () => {
+    const opened = await openDraft([200, { bcc: [] }]);
+    assert.equal(opened.length, 1);
+    assert.deepEqual(opened[0].bcc, []);
+  });
+
+  test('opens read-only with an error notification when the Bcc cannot be read, instead of an editable composer', async () => {
+    const opened = await openDraft([502, { error: 'Could not read this draft\'s Bcc recipients from the mail server.' }]);
+    assert.equal(opened.length, 0, 'no composer must open — its next save would erase the Bcc');
+    assert.equal(useStore.getState().selectedMessageId, 'draft-1');
+    const errors = useStore.getState().notifications.filter(n => n.type === 'error');
+    assert.equal(errors.length, 1);
   });
 });

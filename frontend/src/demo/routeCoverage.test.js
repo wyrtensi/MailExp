@@ -80,6 +80,7 @@ const CONCRETE_PATH = {
   '/mail/mailbox-usage': '/mail/mailbox-usage?accountId=demo-sales',
   '/mail/cleanup-preview': `/mail/cleanup-preview?accountId=demo-sales&fromEmail=${encodeURIComponent('newsletter@aster.example')}`,
   '/mail/messages/:param/headers': '/mail/messages/demo-001/headers',
+  '/mail/messages/:param/bcc': '/mail/messages/demo-001/bcc',
   '/integrations': '/integrations',
   '/integrations/status': '/integrations/status',
   '/oauth/google/known-emails': '/oauth/google/known-emails?q=archive',
