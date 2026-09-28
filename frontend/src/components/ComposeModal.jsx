@@ -23,6 +23,7 @@ import { ComposerLink } from '../utils/editorLink.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
 import { threadCacheKey } from '../utils/threadKey.js';
+import { clampComposePosition } from '../utils/composeWindow.js';
 import { SmileIcon } from './UiIcons.jsx';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
@@ -323,6 +324,7 @@ export default function ComposeModal() {
   const signatureRef = useRef(null);
   const quotedHtmlRef = useRef(null);
   const composeWindowRef = useRef(null);
+  const titleBarRef = useRef(null);
   const posRef = useRef(null);
   const customSizeRef = useRef(null);
   const dragCleanupRef = useRef(null);
@@ -455,18 +457,25 @@ export default function ComposeModal() {
     };
   }, [isMobile]);
 
+  // Re-clamp the saved position on a real window resize AND on a font-size (uiScale) change —
+  // both change what "inside the viewport" means in the window's own layout-space coordinates
+  // (see composeWindow.js and useUiScale.js). window.inner* and the title bar's measured height
+  // are visual/on-screen pixels; descale() converts them into the same layout space `pos` is in.
   useEffect(() => {
     const clamp = () => {
-      if (!posRef.current) return;
-      const w = customSizeRef.current?.width || COMPOSE_DEFAULT_WIDTH;
-      setPos(prev => prev ? {
-        x: Math.max(0, Math.min(window.innerWidth - w, prev.x)),
-        y: Math.max(0, Math.min(window.innerHeight - 40, prev.y)),
-      } : prev);
+      if (!posRef.current || !titleBarRef.current) return;
+      const scale = uiScale || 1;
+      const width = customSizeRef.current?.width || COMPOSE_DEFAULT_WIDTH;
+      const titleBarHeight = descale(titleBarRef.current.getBoundingClientRect().height, scale);
+      setPos(prev => prev ? clampComposePosition(prev, { width, titleBarHeight }, {
+        viewportWidth: descale(window.innerWidth, scale),
+        viewportHeight: descale(window.innerHeight, scale),
+      }) : prev);
     };
+    clamp(); // a font-size change while the composer is open re-clamps immediately too
     window.addEventListener('resize', clamp);
     return () => window.removeEventListener('resize', clamp);
-  }, []);
+  }, [uiScale]);
 
   // On mobile, prevent iOS from auto-zooming when inputs are focused.
   // All inputs already use 16px font-size but iOS can still scale on focus
@@ -521,13 +530,18 @@ export default function ComposeModal() {
     captureEl.setPointerCapture(pointerId);
     // Finish any entry animation so getBoundingClientRect reflects the final position.
     el.getAnimations().forEach(a => a.finish());
+    const scale = uiScale || 1;
     const rect = el.getBoundingClientRect();
+    // captureEl (the title bar div) sizes the "must stay reachable" strip.
+    const titleBarHeight = descale(captureEl.getBoundingClientRect().height, scale);
     const startMouseX = e.clientX;
     const startMouseY = e.clientY;
-    const startX = rect.left;
-    const startY = rect.top;
-    const w = rect.width;
-    const h = rect.height;
+    // rect/clientX/clientY are visual (on-screen) pixels; `position: fixed` top/left are resolved
+    // in the scaled wrapper's own layout space (see composeWindow.js) — descale before using them
+    // as this drag's coordinate space, the same way every other floating panel here does.
+    const startX = descale(rect.left, scale);
+    const startY = descale(rect.top, scale);
+    const w = descale(rect.width, scale);
     // Immediately switch from bottom/right to top/left in the DOM — no re-render
     // needed, so there is no frame where the window jumps to a stale position.
     el.style.bottom = '';
@@ -543,8 +557,13 @@ export default function ComposeModal() {
     // Mutate the DOM directly during drag — avoids a React re-render on every
     // pointermove event, which was the source of lag and jerkiness.
     const onMove = (ev) => {
-      curX = Math.max(0, Math.min(window.innerWidth - w, startX + ev.clientX - startMouseX));
-      curY = Math.max(0, Math.min(Math.max(0, window.innerHeight - h), startY + ev.clientY - startMouseY));
+      const next = clampComposePosition(
+        { x: startX + (ev.clientX - startMouseX) / scale, y: startY + (ev.clientY - startMouseY) / scale },
+        { width: w, titleBarHeight },
+        { viewportWidth: descale(window.innerWidth, scale), viewportHeight: descale(window.innerHeight, scale) },
+      );
+      curX = next.x;
+      curY = next.y;
       el.style.left = curX + 'px';
       el.style.top = curY + 'px';
     };
@@ -567,7 +586,7 @@ export default function ComposeModal() {
     captureEl.addEventListener('pointerup', cleanup);
     captureEl.addEventListener('pointercancel', cleanupNoCommit);
     window.addEventListener('blur', cleanupNoCommit);
-  }, [maximized]);
+  }, [maximized, uiScale]);
 
   const handleResizeDragStart = useCallback((e) => {
     if (e.button !== 0) return;
@@ -581,17 +600,22 @@ export default function ComposeModal() {
     const pointerId = e.pointerId;
     captureEl.setPointerCapture(pointerId);
     el.getAnimations().forEach(a => a.finish());
+    const scale = uiScale || 1;
     const rect = el.getBoundingClientRect();
     const startMouseX = e.clientX;
     const startMouseY = e.clientY;
     const startWidth = rect.width;
     const startHeight = rect.height;
-    // Switch to top/left positioning if not already positioned.
+    // Switch to top/left positioning if not already positioned. `pos` (and so the window's CSS
+    // top/left) is layout-space — see composeWindow.js — so the anchor read from
+    // getBoundingClientRect() (visual space) needs descale() here, same as handleTitleDragStart.
+    const anchorX = descale(rect.left, scale);
+    const anchorY = descale(rect.top, scale);
     el.style.bottom = '';
     el.style.right = '';
-    if (!el.style.top) el.style.top = rect.top + 'px';
-    if (!el.style.left) el.style.left = rect.left + 'px';
-    setPos(prev => prev ?? { x: rect.left, y: rect.top });
+    if (!el.style.top) el.style.top = anchorY + 'px';
+    if (!el.style.left) el.style.left = anchorX + 'px';
+    setPos(prev => prev ?? { x: anchorX, y: anchorY });
     document.body.style.cursor = 'nwse-resize';
     document.body.style.userSelect = 'none';
     let curW = startWidth;
@@ -622,7 +646,7 @@ export default function ComposeModal() {
     captureEl.addEventListener('pointerup', cleanup);
     captureEl.addEventListener('pointercancel', cleanupNoCommit);
     window.addEventListener('blur', cleanupNoCommit);
-  }, []);
+  }, [uiScale]);
 
   useEffect(() => { return () => { dragCleanupRef.current?.({ commit: false }); }; }, []);
 
@@ -1845,6 +1869,7 @@ export default function ComposeModal() {
       <input ref={imageInputRef} type="file" accept="image/*" onChange={e => { const f = e.target.files?.[0]; if (f) insertImageIntoEditor(f); e.target.value = ''; }} style={{ display: 'none' }} />
       {/* Title bar */}
       <div
+        ref={titleBarRef}
         onPointerDown={handleTitleDragStart}
         style={{
           padding: '10px 14px', display: 'flex', alignItems: 'center',
