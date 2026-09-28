@@ -22,7 +22,7 @@ import {
   normalizeAiForm,
   selectAiConnectionMethod,
 } from '../utils/aiConfig.js';
-import { THEMES, applyTheme, applyCustomCss } from '../themes.js';
+import { THEMES, applyCustomCss } from '../themes.js';
 import { FONT_SETS, loadFontSet, isRetroFont, DEFAULT_FONT_SIZE } from '../fonts.js';
 import { LAYOUTS, applyLayout } from '../layouts.js';
 import { NOTIFICATION_SOUNDS, playNotificationSound, playCustomSound, warmUpAudioContext } from '../utils/notificationSounds.js';
@@ -1282,7 +1282,10 @@ function AccountsTab() {
 // mount it directly instead of the whole admin panel, for the "как в системе" checkbox (#508).
 export function ThemesTab() {
   const { t } = useTranslation();
-  const { theme, setTheme, themeFollowsSystem, setThemeFollowsSystem } = useStore();
+  // effectiveTheme (not theme) drives the highlight: while "как в системе" is on, theme still
+  // holds the last hand pick, but the card that should look selected is whichever theme is
+  // actually showing (dusk on a dark OS, say), which is what effectiveTheme tracks.
+  const { setTheme, effectiveTheme, themeFollowsSystem, setThemeFollowsSystem } = useStore();
   const [customCss, setCustomCss] = useState('');
   const [cssSaving, setCssSaving] = useState(false);
   const [cssSaved, setCssSaved] = useState(false);
@@ -1294,9 +1297,9 @@ export function ThemesTab() {
       .catch(() => {});
   }, []);
 
+  // setTheme already applies the theme (and turns following off); no need to call applyTheme again.
   const handleSelect = (key) => {
     setTheme(key);
-    applyTheme(key);
   };
 
   const handleSaveCustomCss = async () => {
@@ -1343,14 +1346,14 @@ export function ThemesTab() {
             key={key}
             onClick={() => handleSelect(key)}
             style={{
-              background: theme === key ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
-              border: `2px solid ${theme === key ? 'var(--accent)' : 'var(--border-subtle)'}`,
+              background: effectiveTheme === key ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
+              border: `2px solid ${effectiveTheme === key ? 'var(--accent)' : 'var(--border-subtle)'}`,
               borderRadius: 10, padding: '12px', cursor: 'pointer',
               textAlign: 'left', transition: 'all 0.15s',
               outline: 'none',
             }}
-            onMouseEnter={e => { if (theme !== key) e.currentTarget.style.borderColor = 'var(--border)'; }}
-            onMouseLeave={e => { if (theme !== key) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
+            onMouseEnter={e => { if (effectiveTheme !== key) e.currentTarget.style.borderColor = 'var(--border)'; }}
+            onMouseLeave={e => { if (effectiveTheme !== key) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
           >
             {/* Color swatches */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
@@ -1372,7 +1375,7 @@ export function ThemesTab() {
                   {themeObj.description}
                 </div>
               </div>
-              {theme === key && (
+              {effectiveTheme === key && (
                 <div style={{
                   width: 18, height: 18, borderRadius: '50%',
                   background: 'var(--accent)', display: 'flex',

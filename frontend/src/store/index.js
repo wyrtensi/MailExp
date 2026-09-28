@@ -52,9 +52,11 @@ function schedulePrefSave(prefs) {
 // Applies whichever theme is actually going into effect right now — a hand pick, or the
 // system-resolved theme while "как в системе" is on — plus the retro-font fallout a theme
 // switch can trigger. Shared by setTheme, setThemeFollowsSystem, loadPreferences and the
-// OS-change listener below, so there is exactly one place that keeps the font picker honest.
+// OS-change listener below, so there is exactly one place that keeps the font picker honest
+// and effectiveTheme (what a settings UI should highlight as "currently showing") in sync.
 function applyThemeAndFont(get, set, theme) {
   applyTheme(theme); // keep CSS vars + favicon in sync
+  set({ effectiveTheme: theme });
   // If a retro font was left as the saved choice, a non-retro theme must not keep it —
   // normalise the stored choice so it can't "stick" (and the font picker stays honest).
   if (!THEME_FONT[theme] && isRetroFont(get().fontSet)) {
@@ -748,6 +750,12 @@ export const useStore = create((set, get) => ({
   // turning "как в системе" back off returns to it.
   theme: localStorage.getItem('mailexpert_theme') || getInitialTheme(),
   themeFollowsSystem: readThemeFollowsSystem(),
+  // The theme actually in effect right now — the system-resolved theme while following it,
+  // otherwise `theme` above. A settings UI (ThemesTab) highlights this, not `theme`, so the
+  // highlighted card matches what is actually on screen. Kept updated by applyThemeAndFont.
+  effectiveTheme: readThemeFollowsSystem()
+    ? resolveSystemTheme()
+    : (localStorage.getItem('mailexpert_theme') || getInitialTheme()),
   setTheme: (theme) => {
     // Picking a theme by hand — in the appearance settings or the command palette — always
     // turns "как в системе" off; it would otherwise be silently overridden on the next OS

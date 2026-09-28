@@ -96,4 +96,33 @@ describe('ThemesTab "как в системе" checkbox (#508)', () => {
     const checkbox = host.querySelector('input[type="checkbox"]');
     assert.equal(checkbox.checked, false);
   });
+
+  // The checkmark svg is only ever rendered on the card matching effectiveTheme (AdminPanel.jsx),
+  // so its presence/absence is a reliable proxy for "which card is highlighted".
+  const cardFor = (label) => [...host.querySelectorAll('button')].find(b => b.textContent.includes(label));
+  const isHighlighted = (label) => cardFor(label).querySelector('svg polyline') != null;
+
+  test('while following the system, the card that highlights is what is actually showing, not the last hand pick', async () => {
+    // theme (last hand pick) and effectiveTheme (what OS resolution is showing) disagree here —
+    // exactly the #508 review scenario: OS dark, Dusk shown, but Daylight was the old highlight.
+    useStore.setState({ themeFollowsSystem: true, theme: 'gruvbox', effectiveTheme: 'dusk' });
+    await React.act(async () => { root.render(React.createElement(ThemesTab)); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    assert.ok(isHighlighted('Dusk'), 'Dusk (effectiveTheme) is highlighted');
+    assert.ok(!isHighlighted('Gruvbox'), 'Gruvbox (the stale hand pick) is not highlighted');
+  });
+
+  test('picking a theme by hand highlights it immediately (setTheme alone updates effectiveTheme)', async () => {
+    useStore.setState({ themeFollowsSystem: true, theme: 'gruvbox', effectiveTheme: 'dusk' });
+    await React.act(async () => { root.render(React.createElement(ThemesTab)); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    await React.act(async () => { cardFor('Nord').click(); });
+
+    assert.equal(useStore.getState().theme, 'nord');
+    assert.equal(useStore.getState().effectiveTheme, 'nord');
+    assert.equal(useStore.getState().themeFollowsSystem, false, 'a hand pick turns following off');
+    assert.ok(isHighlighted('Nord'));
+  });
 });
