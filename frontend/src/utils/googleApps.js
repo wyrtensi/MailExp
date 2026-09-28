@@ -48,6 +48,17 @@ const WARNING_KEYS = Object.freeze({
   callback_not_configured: 'admin.integrations.googleApps.warningCallbackNotConfigured',
 });
 
+// Keys are spelled out literally so the i18n coverage tests can find them.
+const GMAIL_API_DISABLED_KEY = 'admin.integrations.googleApps.gmailApiDisabledWarning';
+
+// The app's card shows this when a Gmail API send through this project's OAuth client came back
+// "API disabled" (see backend/src/services/gmailApiSender.js / googleApps.js's
+// markGmailApiDisabled) — mail for its mailboxes falls back to SMTP until the project's owner
+// enables the API and a later send clears the flag again.
+export function googleAppGmailApiWarningKey(app) {
+  return app?.gmailApiDisabledAt ? GMAIL_API_DISABLED_KEY : null;
+}
+
 // "Full" is not stored: the server computes it for an active app whose seats reached the limit.
 export function googleAppState(app) {
   if (!STATUSES.includes(app?.status)) return null;

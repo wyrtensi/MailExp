@@ -166,6 +166,11 @@
       "tls": "TLS handshake failed",
       "unknown": "could not connect"
     },
+    "gmailQuotaExceeded": "Gmail's daily sending limit for this account has been reached. Try again tomorrow, or send fewer or smaller messages.",
+    "gmailMessageTooLarge": "This message is too large for Gmail to send. Remove or shrink an attachment and try again.",
+    "gmailInvalidRecipient": "Gmail rejected one of the recipient addresses. Check it and try again.",
+    "gmailAccessRefused": "Gmail refused to send this message.",
+    "gmailApiAuthFailed": "Gmail rejected access to this account. Reconnect it and try again.",
     "toolbar": {
       "removeTable": "Remove table",
       "textColor": "Text color",
@@ -1684,7 +1689,8 @@
         "errorClientJsonIncomplete": "The file is missing a client ID or client secret.",
         "errorClientJsonConflict": "Provide either the client JSON file or a client ID and secret, not both.",
         "warningRedirectUriMissing": "The file's redirect URIs do not include the panel's callback URL. Add it in Google Cloud Console: {{uri}}",
-        "warningCallbackNotConfigured": "No callback URL is saved yet. Save it above, then check this app's redirect URIs in Google Cloud Console."
+        "warningCallbackNotConfigured": "No callback URL is saved yet. Save it above, then check this app's redirect URIs in Google Cloud Console.",
+        "gmailApiDisabledWarning": "Gmail API is off in this Google Cloud project: mail goes through SMTP. Enable Gmail API in the project."
       },
       "oauthGenericSuccess": "Account connected.",
       "oauthGenericError": "Account authorization failed. Please try again.",

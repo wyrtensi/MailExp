@@ -6,6 +6,7 @@ import {
   googleAppErrorKey,
   googleAppForm,
   googleAppFormError,
+  googleAppGmailApiWarningKey,
   googleAppPayload,
   googleAppSeatsText,
   googleAppState,
@@ -220,6 +221,18 @@ describe('googleAppWarningKey', () => {
     assert.equal(googleAppWarningKey('redirect_uri_missing'), 'admin.integrations.googleApps.warningRedirectUriMissing');
     assert.equal(googleAppWarningKey('callback_not_configured'), 'admin.integrations.googleApps.warningCallbackNotConfigured');
     for (const code of [undefined, null, '', 'toString', '__proto__', 'other']) assert.equal(googleAppWarningKey(code), null);
+  });
+});
+
+describe('googleAppGmailApiWarningKey', () => {
+  it('warns only when the app has gmailApiDisabledAt set', () => {
+    assert.equal(
+      googleAppGmailApiWarningKey({ ...APP, gmailApiDisabledAt: '2026-09-27T00:00:00.000Z' }),
+      'admin.integrations.googleApps.gmailApiDisabledWarning',
+    );
+    assert.equal(googleAppGmailApiWarningKey({ ...APP, gmailApiDisabledAt: null }), null);
+    assert.equal(googleAppGmailApiWarningKey(APP), null);
+    assert.equal(googleAppGmailApiWarningKey(undefined), null);
   });
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { copyToClipboard } from '../utils/clipboard.js';
@@ -9,6 +9,7 @@ import {
   googleAppErrorKey,
   googleAppForm,
   googleAppFormError,
+  googleAppGmailApiWarningKey,
   googleAppPayload,
   googleAppSeatsText,
   googleAppStateKey,
@@ -284,35 +285,45 @@ export default function GoogleAppsSection() {
             <tbody>
               {apps.map((app) => {
                 const stateKey = googleAppStateKey(app);
+                const gmailApiWarningKey = googleAppGmailApiWarningKey(app);
                 return (
-                  <tr key={app.id}>
-                    <td style={cellStyle}>{app.label}</td>
-                    <td style={{ ...cellStyle, fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }} title={app.clientId}>
-                      {shortClientId(app.clientId)}
-                    </td>
-                    <td style={cellStyle}>{googleAppSeatsText(app)}</td>
-                    <td style={cellStyle}>{app.accountsCount}</td>
-                    <td style={cellStyle}>{stateKey ? t(stateKey) : app.status}</td>
-                    <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>
-                      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-                        <button type="button" disabled={busy} style={buttonStyle}
-                          onClick={() => { setError(''); setEditing({ app, form: googleAppForm(app) }); }}>
-                          {t('common.edit')}
-                        </button>
-                        {googleAppStatusActions(app).map((action) => (
-                          <button key={action.status} type="button" disabled={busy} style={buttonStyle}
-                            onClick={() => changeStatus(app, action)}>
-                            {t(action.labelKey)}
+                  <Fragment key={app.id}>
+                    <tr>
+                      <td style={cellStyle}>{app.label}</td>
+                      <td style={{ ...cellStyle, fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }} title={app.clientId}>
+                        {shortClientId(app.clientId)}
+                      </td>
+                      <td style={cellStyle}>{googleAppSeatsText(app)}</td>
+                      <td style={cellStyle}>{app.accountsCount}</td>
+                      <td style={cellStyle}>{stateKey ? t(stateKey) : app.status}</td>
+                      <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>
+                        <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                          <button type="button" disabled={busy} style={buttonStyle}
+                            onClick={() => { setError(''); setEditing({ app, form: googleAppForm(app) }); }}>
+                            {t('common.edit')}
                           </button>
-                        ))}
-                        <button type="button" disabled={busy || !canDeleteGoogleApp(app)} style={buttonStyle}
-                          title={canDeleteGoogleApp(app) ? undefined : t('admin.integrations.googleApps.deleteInUse')}
-                          onClick={() => removeApp(app)}>
-                          {t('common.delete')}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
+                          {googleAppStatusActions(app).map((action) => (
+                            <button key={action.status} type="button" disabled={busy} style={buttonStyle}
+                              onClick={() => changeStatus(app, action)}>
+                              {t(action.labelKey)}
+                            </button>
+                          ))}
+                          <button type="button" disabled={busy || !canDeleteGoogleApp(app)} style={buttonStyle}
+                            title={canDeleteGoogleApp(app) ? undefined : t('admin.integrations.googleApps.deleteInUse')}
+                            onClick={() => removeApp(app)}>
+                            {t('common.delete')}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {gmailApiWarningKey && (
+                      <tr>
+                        <td colSpan={6} style={{ ...cellStyle, color: 'var(--text-tertiary)', fontSize: 12 }}>
+                          {t(gmailApiWarningKey)}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>
