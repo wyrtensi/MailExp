@@ -10,6 +10,14 @@
 // RFC 5987 `filename*=UTF-8''…` parameter, and reduces the quoted `filename="…"` fallback to
 // printable ASCII (also neutralizing " and \, which would otherwise break the quoted-string). See #367.
 
+// Cut a name to at most `max` UTF-16 units without splitting a surrogate pair. A plain .slice()
+// can keep only the first half of an emoji, and that lone surrogate makes encodeURIComponent
+// (rfc5987 below) throw URIError, so the download fails with a 500. Ported from upstream PR #507
+// (maathimself/mailflow); this is the one place every filename cut in this codebase goes through.
+export function truncateFilename(name, max) {
+  return name.slice(0, name.codePointAt(max - 1) > 0xffff ? max - 1 : max);
+}
+
 export function safeFilename(name) {
   if (!name) return 'attachment';
   const cleaned = String(name)
@@ -18,9 +26,8 @@ export function safeFilename(name) {
     .replace(/[\u0000-\u001f\u007f]/g, '')
     // Bidi overrides/isolates + RLM/ALM (U+202A–U+202E, U+2066–U+2069, U+200F, U+061C).
     .replace(/[\u202a-\u202e\u2066-\u2069\u200f\u061c]/g, '')
-    .trim()
-    .substring(0, 255);
-  return cleaned || 'attachment';
+    .trim();
+  return truncateFilename(cleaned, 255) || 'attachment';
 }
 
 // Percent-encode a UTF-8 string as an RFC 5987 ext-value (for `filename*=UTF-8''…`). encodeURIComponent
