@@ -740,11 +740,40 @@ export function applyCustomCss(css) {
 
 // ── Theme application ─────────────────────────────────────────────────────────
 
-// The theme to use before any stored/server preference is known — i.e. on the
-// login screen and the very first visit: Daylight, whatever the OS setting.
+// The theme to use before any stored/server preference is known and when the user has
+// hand-picked a theme but "как в системе" (system-follow) is off: Daylight.
 export const DEFAULT_THEME = 'daylight';
 export function getInitialTheme() {
   return DEFAULT_THEME;
+}
+
+// ── System theme ("как в системе" / "Match system") ────────────────────────────
+
+// What "как в системе" resolves to: our two default themes stand in for light/dark, so no
+// separate "system" theme entry is needed in THEMES. Falls back to DEFAULT_THEME (never throws)
+// so a render never breaks over a matchMedia call — e.g. in a test environment without `window`.
+export function resolveSystemTheme() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dusk' : 'daylight';
+  } catch {
+    return DEFAULT_THEME;
+  }
+}
+
+// Whether the interface should track the OS light/dark setting rather than a hand-picked theme.
+// Default ON when unset, so every existing browser — not just new ones — gets the checkbox on,
+// and the login screen (no user, no server prefs yet) still follows the OS.
+const THEME_FOLLOWS_SYSTEM_KEY = 'mailexpert_theme_follows_system';
+export function readThemeFollowsSystem() {
+  try {
+    const stored = localStorage.getItem(THEME_FOLLOWS_SYSTEM_KEY);
+    return stored === null ? true : stored === 'true';
+  } catch {
+    return true;
+  }
+}
+export function writeThemeFollowsSystem(follows) {
+  try { localStorage.setItem(THEME_FOLLOWS_SYSTEM_KEY, String(follows)); } catch { /* ignore */ }
 }
 
 // CSS for the theme: its variables on :root, and for a theme with cardVars the same variables
@@ -784,6 +813,7 @@ function refreshAccentDerived() {
 }
 
 export function applyTheme(themeName) {
+  if (typeof document === 'undefined') return; // no-op without a DOM (SSR / tests) — same guard as applyFontSet
   const theme = THEMES[themeName] || THEMES.dark;
 
   // Expose the active theme as an attribute so a theme can layer scoped skeuomorphic

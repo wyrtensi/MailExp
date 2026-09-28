@@ -22,7 +22,7 @@ import {
   normalizeAiForm,
   selectAiConnectionMethod,
 } from '../utils/aiConfig.js';
-import { THEMES, applyTheme, applyCustomCss } from '../themes.js';
+import { THEMES, applyCustomCss } from '../themes.js';
 import { FONT_SETS, loadFontSet, isRetroFont, DEFAULT_FONT_SIZE } from '../fonts.js';
 import { LAYOUTS, applyLayout } from '../layouts.js';
 import { NOTIFICATION_SOUNDS, playNotificationSound, playCustomSound, warmUpAudioContext } from '../utils/notificationSounds.js';
@@ -1278,9 +1278,14 @@ function AccountsTab() {
 }
 
 // ─── Themes Tab ───────────────────────────────────────────────────────────────
-function ThemesTab() {
+// Exported (only this one, everything else here stays private) so ThemesTab.render.test.js can
+// mount it directly instead of the whole admin panel, for the "как в системе" checkbox (#508).
+export function ThemesTab() {
   const { t } = useTranslation();
-  const { theme, setTheme } = useStore();
+  // effectiveTheme (not theme) drives the highlight: while "как в системе" is on, theme still
+  // holds the last hand pick, but the card that should look selected is whichever theme is
+  // actually showing (dusk on a dark OS, say), which is what effectiveTheme tracks.
+  const { setTheme, effectiveTheme, themeFollowsSystem, setThemeFollowsSystem } = useStore();
   const [customCss, setCustomCss] = useState('');
   const [cssSaving, setCssSaving] = useState(false);
   const [cssSaved, setCssSaved] = useState(false);
@@ -1292,9 +1297,9 @@ function ThemesTab() {
       .catch(() => {});
   }, []);
 
+  // setTheme already applies the theme (and turns following off); no need to call applyTheme again.
   const handleSelect = (key) => {
     setTheme(key);
-    applyTheme(key);
   };
 
   const handleSaveCustomCss = async () => {
@@ -1322,20 +1327,33 @@ function ThemesTab() {
         {t('admin.appearance.description')}
       </div>
 
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer', marginBottom: 16 }}>
+        <input
+          type="checkbox"
+          checked={themeFollowsSystem}
+          onChange={e => setThemeFollowsSystem(e.target.checked)}
+          style={{ marginTop: 2, flexShrink: 0 }}
+        />
+        <div>
+          <div>{t('admin.appearance.matchSystem')}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.appearance.matchSystemHint')}</div>
+        </div>
+      </label>
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
         {Object.entries(THEMES).map(([key, themeObj]) => (
           <button
             key={key}
             onClick={() => handleSelect(key)}
             style={{
-              background: theme === key ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
-              border: `2px solid ${theme === key ? 'var(--accent)' : 'var(--border-subtle)'}`,
+              background: effectiveTheme === key ? 'var(--bg-hover)' : 'var(--bg-tertiary)',
+              border: `2px solid ${effectiveTheme === key ? 'var(--accent)' : 'var(--border-subtle)'}`,
               borderRadius: 10, padding: '12px', cursor: 'pointer',
               textAlign: 'left', transition: 'all 0.15s',
               outline: 'none',
             }}
-            onMouseEnter={e => { if (theme !== key) e.currentTarget.style.borderColor = 'var(--border)'; }}
-            onMouseLeave={e => { if (theme !== key) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
+            onMouseEnter={e => { if (effectiveTheme !== key) e.currentTarget.style.borderColor = 'var(--border)'; }}
+            onMouseLeave={e => { if (effectiveTheme !== key) e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
           >
             {/* Color swatches */}
             <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
@@ -1357,7 +1375,7 @@ function ThemesTab() {
                   {themeObj.description}
                 </div>
               </div>
-              {theme === key && (
+              {effectiveTheme === key && (
                 <div style={{
                   width: 18, height: 18, borderRadius: '50%',
                   background: 'var(--accent)', display: 'flex',

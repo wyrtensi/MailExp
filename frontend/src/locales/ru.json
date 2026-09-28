@@ -640,6 +640,7 @@
       "settings": "Открыть настройки",
       "themes": "Открыть темы",
       "switchTheme": "Переключиться на тему {{theme}}",
+      "matchSystemTheme": "Тема как в системе",
       "accountInbox": "{{name}} — Входящие"
     }
   },
@@ -1073,6 +1074,8 @@
     "appearance": {
       "title": "Внешний вид",
       "description": "Выберите цветовую тему интерфейса",
+      "matchSystem": "Как в системе",
+      "matchSystemHint": "Светлая или тёмная тема по настройке устройства",
       "typography": "Типографика",
       "typographyDescription": "Выберите сочетание шрифтов для интерфейса",
       "typographyLoading": "Загрузка шрифтов…",

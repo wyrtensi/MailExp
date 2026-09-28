@@ -3,7 +3,7 @@ import { api } from '../utils/api.js';
 import { mergeCountSnapshots, adjustCountPending, expireCountPending, settleCountPending, displayCountSnapshot, mergeFolderSnapshots } from '../utils/countSnapshots.js';
 import { resolveSelectedAccount, pruneFolders } from '../utils/accountScope.js';
 import { withProvisionalHealth } from '../utils/accountHealth.js';
-import { applyTheme, applyCustomCss, getInitialTheme } from '../themes.js';
+import { applyTheme, applyCustomCss, getInitialTheme, resolveSystemTheme, readThemeFollowsSystem, writeThemeFollowsSystem } from '../themes.js';
 import { applyFontSet, applyFontSize, effectiveFontSet, isRetroFont, THEME_FONT, DEFAULT_FONT_SIZE } from '../fonts.js';
 import { applyLayout, normalizeLayout } from '../layouts.js';
 import { DEFAULT_AI_ACTIONS } from '../aiActions.js';
@@ -47,6 +47,48 @@ const _prefQueue = createPrefSaveQueue({
 
 function schedulePrefSave(prefs) {
   _prefQueue.schedule(prefs);
+}
+
+// Applies whichever theme is actually going into effect right now — a hand pick, or the
+// system-resolved theme while "как в системе" is on — plus the retro-font fallout a theme
+// switch can trigger. Shared by setTheme, setThemeFollowsSystem, loadPreferences and the
+// OS-change listener below, so there is exactly one place that keeps the font picker honest
+// and effectiveTheme (what a settings UI should highlight as "currently showing") in sync.
+function applyThemeAndFont(get, set, theme) {
+  applyTheme(theme); // keep CSS vars + favicon in sync
+  set({ effectiveTheme: theme });
+  // If a retro font was left as the saved choice, a non-retro theme must not keep it —
+  // normalise the stored choice so it can't "stick" (and the font picker stays honest).
+  if (!THEME_FONT[theme] && isRetroFont(get().fontSet)) {
+    localStorage.setItem('mailexpert_font', 'default');
+    set({ fontSet: 'default' });
+    schedulePrefSave({ font: 'default' });
+  }
+  // Retro themes bring their own font; other themes fall back to the saved choice.
+  applyFontSet(effectiveFontSet(theme, get().fontSet));
+}
+
+// Live-follows the OS light/dark setting while themeFollowsSystem is on — a single
+// matchMedia listener at module scope (not a component effect), so it also works before
+// sign-in and isn't torn down/recreated by every component that reads theme state.
+// Added when following turns on, removed when it turns off ("cleaned up when turned off").
+let _systemThemeMql = null;
+let _systemThemeListener = null;
+function watchSystemTheme(follows) {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  if (follows) {
+    if (_systemThemeMql) return; // already watching
+    _systemThemeMql = window.matchMedia('(prefers-color-scheme: dark)');
+    _systemThemeListener = () => {
+      if (!useStore.getState().themeFollowsSystem) return; // stale event after a race with turning off
+      applyThemeAndFont(useStore.getState, useStore.setState, resolveSystemTheme());
+    };
+    _systemThemeMql.addEventListener('change', _systemThemeListener);
+  } else if (_systemThemeMql) {
+    _systemThemeMql.removeEventListener('change', _systemThemeListener);
+    _systemThemeMql = null;
+    _systemThemeListener = null;
+  }
 }
 
 // Drop any queued preference flush. Called on logout / account switch: a pending debounce
@@ -703,21 +745,36 @@ export const useStore = create((set, get) => ({
   setLoadingThread: (id) => set({ loadingThread: id }),
 
   // Theme
+  // `theme` always holds the user's own last hand-picked theme, meaningful even while
+  // themeFollowsSystem is on — it is never overwritten with the resolved system theme, so
+  // turning "как в системе" back off returns to it.
   theme: localStorage.getItem('mailexpert_theme') || getInitialTheme(),
+  themeFollowsSystem: readThemeFollowsSystem(),
+  // The theme actually in effect right now — the system-resolved theme while following it,
+  // otherwise `theme` above. A settings UI (ThemesTab) highlights this, not `theme`, so the
+  // highlighted card matches what is actually on screen. Kept updated by applyThemeAndFont.
+  effectiveTheme: readThemeFollowsSystem()
+    ? resolveSystemTheme()
+    : (localStorage.getItem('mailexpert_theme') || getInitialTheme()),
   setTheme: (theme) => {
+    // Picking a theme by hand — in the appearance settings or the command palette — always
+    // turns "как в системе" off; it would otherwise be silently overridden on the next OS
+    // change or reload.
     localStorage.setItem('mailexpert_theme', theme);
-    set({ theme });
-    applyTheme(theme); // keep CSS vars + favicon in sync
-    // If a retro font was left as the saved choice, a non-retro theme must not keep it —
-    // normalise the stored choice so it can't "stick" (and the font picker stays honest).
-    if (!THEME_FONT[theme] && isRetroFont(get().fontSet)) {
-      localStorage.setItem('mailexpert_font', 'default');
-      set({ fontSet: 'default' });
-      schedulePrefSave({ font: 'default' });
-    }
-    // Retro themes bring their own font; other themes fall back to the saved choice.
-    applyFontSet(effectiveFontSet(theme, get().fontSet));
-    schedulePrefSave({ theme });
+    writeThemeFollowsSystem(false);
+    set({ theme, themeFollowsSystem: false });
+    watchSystemTheme(false);
+    applyThemeAndFont(get, set, theme);
+    schedulePrefSave({ theme, themeFollowsSystem: false });
+  },
+  setThemeFollowsSystem: (follows) => {
+    writeThemeFollowsSystem(follows);
+    set({ themeFollowsSystem: follows });
+    watchSystemTheme(follows);
+    // Turning it on applies the system-resolved theme at once; turning it off returns to the
+    // user's own last pick (`theme`, never overwritten while following).
+    applyThemeAndFont(get, set, follows ? resolveSystemTheme() : get().theme);
+    schedulePrefSave({ themeFollowsSystem: follows });
   },
 
   // Font
@@ -1084,15 +1141,21 @@ export const useStore = create((set, get) => ({
       if (prefs.theme) {
         localStorage.setItem('mailexpert_theme', prefs.theme);
         set({ theme: prefs.theme });
-        applyTheme(prefs.theme);
       }
+      if (typeof prefs.themeFollowsSystem === 'boolean') {
+        writeThemeFollowsSystem(prefs.themeFollowsSystem);
+        set({ themeFollowsSystem: prefs.themeFollowsSystem });
+      }
+      watchSystemTheme(get().themeFollowsSystem);
       if (prefs.font) {
         localStorage.setItem('mailexpert_font', prefs.font);
         set({ fontSet: prefs.font });
       }
-      // Apply the effective font once theme + font are both known, so a retro theme's
-      // paired font overrides the saved font on load.
-      applyFontSet(effectiveFontSet(get().theme, get().fontSet));
+      // Apply whichever theme is actually in effect — the system-resolved theme while
+      // following it, otherwise the (possibly just-updated) hand-picked one — plus the
+      // effective font, now that theme + font + themeFollowsSystem are all known, so a retro
+      // theme's paired font overrides the saved font on load.
+      applyThemeAndFont(get, set, get().themeFollowsSystem ? resolveSystemTheme() : get().theme);
       if (prefs.fontSize) {
         const n = parseInt(prefs.fontSize) || DEFAULT_FONT_SIZE;
         localStorage.setItem('mailexpert_font_size', String(n));
@@ -1268,6 +1331,11 @@ export const useStore = create((set, get) => ({
     } catch { /* intentional */ }
   },
 }));
+
+// Start following the OS setting immediately if that is the (default-on) state — before any
+// sign-in, so the login screen tracks it too. loadPreferences re-syncs this once server prefs
+// are known, in case a signed-in user's saved preference differs from this browser's default.
+watchSystemTheme(useStore.getState().themeFollowsSystem);
 
 // The RFC message_id of the currently selected message, resolved from the same pools the
 // reading pane uses: the active folder/search list, then any stashed thread — including the

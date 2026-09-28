@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router';
 import { useStore } from './store/index.js';
 import { api } from './utils/api.js';
-import { applyTheme, getInitialTheme } from './themes.js';
+import { applyTheme, getInitialTheme, resolveSystemTheme, readThemeFollowsSystem } from './themes.js';
 import { applyFontSet, effectiveFontSet } from './fonts.js'; // still used for the instant localStorage apply on mount
 import { applyLayout } from './layouts.js';
 import LoginPage from './components/LoginPage.jsx';
@@ -57,8 +57,12 @@ export default function App() {
   }, [setUser, setLocked]);
 
   useEffect(() => {
-    // Apply localStorage immediately so there's no flash while we check auth
-    const bootTheme = localStorage.getItem('mailexpert_theme') || getInitialTheme();
+    // Apply localStorage immediately so there's no flash while we check auth. "как в системе"
+    // defaults on, so a fresh browser — and the login screen itself, before any user or server
+    // prefs — tracks the OS light/dark setting rather than always landing on Daylight.
+    const bootTheme = readThemeFollowsSystem()
+      ? resolveSystemTheme()
+      : (localStorage.getItem('mailexpert_theme') || getInitialTheme());
     applyTheme(bootTheme);
     applyFontSet(effectiveFontSet(bootTheme, localStorage.getItem('mailexpert_font') || 'default'));
     const savedListWidth = Number(localStorage.getItem('mailexpert_list_width')) || undefined;

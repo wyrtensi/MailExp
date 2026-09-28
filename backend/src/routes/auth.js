@@ -783,7 +783,8 @@ export async function patchPreferences(req, res) {
           showAppBadge, showFaviconBadge, replyDefault, sidebarWidth,
           markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars,
-          folderOrder, senderFavicons, showMessagePreviews, defaultSender, hoverActionSet } = req.body;
+          folderOrder, senderFavicons, showMessagePreviews, defaultSender, hoverActionSet,
+          themeFollowsSystem } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
   // preference — it lives per-account in email_accounts.gtd_enabled.
@@ -838,6 +839,14 @@ export async function patchPreferences(req, res) {
     return res.status(400).json({ error: 'senderFavicons must be a boolean' });
   }
   const senderFaviconsVal = hasSenderFavicons ? senderFavicons : null;
+  // "как в системе" (#508): whether the theme follows prefers-color-scheme rather than the
+  // user's hand-picked `theme`. Same boolean-or-400 contract as senderFavicons, so a device
+  // that hasn't loaded the fix yet cannot silently wipe a value another device set.
+  const hasThemeFollowsSystem = Object.prototype.hasOwnProperty.call(req.body, 'themeFollowsSystem');
+  if (hasThemeFollowsSystem && typeof themeFollowsSystem !== 'boolean') {
+    return res.status(400).json({ error: 'themeFollowsSystem must be a boolean' });
+  }
+  const themeFollowsSystemVal = hasThemeFollowsSystem ? themeFollowsSystem : null;
   // #440: which hover quick actions the message list shows. Same vocabulary and canonical
   // order as frontend/src/utils/hoverActions.js; unknown keys are dropped rather than stored.
   const HOVER_ACTION_KEYS = ['markRead', 'star', 'archive', 'snooze', 'delete', 'move'];
@@ -886,6 +895,7 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $38::boolean IS NOT NULL THEN jsonb_build_object('showMessagePreviews', $38::boolean) ELSE '{}'::jsonb END
       || CASE WHEN $39::text IS NOT NULL THEN jsonb_build_object('defaultSender', $39::text) ELSE '{}'::jsonb END
       || CASE WHEN $40::jsonb IS NOT NULL THEN jsonb_build_object('hoverActionSet', $40::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $41::boolean IS NOT NULL THEN jsonb_build_object('themeFollowsSystem', $41::boolean) ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null,
@@ -896,7 +906,7 @@ export async function patchPreferences(req, res) {
       markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderOrderJson, senderFaviconsVal,
-      showMessagePreviews ?? null, defaultSenderVal, hoverActionSetJson]);
+      showMessagePreviews ?? null, defaultSenderVal, hoverActionSetJson, themeFollowsSystemVal]);
 
   res.json({ ok: true });
 }

@@ -22,7 +22,7 @@ import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
-import { safeFilename, attachmentDisposition } from '../utils/contentDisposition.js';
+import { safeFilename, attachmentDisposition, truncateFilename } from '../utils/contentDisposition.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -814,7 +814,7 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
 
     if (entries.length === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
-    const zipName = (message.subject || 'attachments').substring(0, 100) + '-attachments.zip';
+    const zipName = truncateFilename(message.subject || 'attachments', 100) + '-attachments.zip';
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', attachmentDisposition(zipName));
 
@@ -929,13 +929,12 @@ router.get('/messages/:id/raw.eml', async (req, res) => {
     const buffer = await imapManager.fetchRawMessage(accountResult.rows[0], loc.uid, loc.folder);
     if (!buffer) return res.status(404).json({ error: 'Could not fetch message source' });
 
-    // Slice by code points, not UTF-16 code units: String.prototype.slice counts units, so a
-    // subject whose 80th unit lands inside an astral character (an emoji) would cut a
-    // surrogate pair in half. safeFilename doesn't strip a resulting lone surrogate, and
+    // truncateFilename cuts by UTF-16 unit but never splits a surrogate pair: a plain .slice()
+    // could leave a lone surrogate from a subject whose 80th unit lands inside an emoji, and
     // encodeURIComponent in attachmentDisposition's rfc5987() throws on one
-    // (URIError: malformed URI sequence), 500ing the whole download. The spread operator
-    // iterates by code point, so this can never split a pair.
-    const name = `${[...(message.subject || 'message')].slice(0, 80).join('')}.eml`;
+    // (URIError: malformed URI sequence), 500ing the whole download. Same helper as the
+    // attachments ZIP name and safeFilename's 255 cap — one way to truncate a filename.
+    const name = `${truncateFilename(message.subject || 'message', 80)}.eml`;
     res.setHeader('Content-Type', 'message/rfc822');
     res.setHeader('Content-Disposition', attachmentDisposition(name));
     res.setHeader('Content-Length', buffer.length);

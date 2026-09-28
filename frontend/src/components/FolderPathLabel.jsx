@@ -6,8 +6,13 @@ import { folderParentLabel } from '../utils/folderDisplay.js';
 // parents stay distinguishable. Long labels truncate at rest (the parent
 // chain shrinks first); hovering a label that overflows slides the text left
 // marquee-style to reveal the clipped remainder, and it snaps back on leave.
+//
+// A favorite carrying a custom `favoriteLabel` (#505) displays that instead of the real
+// folder name — the same substitution the sidebar's favorites list already makes — and the
+// real name moves to a tooltip rather than disappearing.
 export default function FolderPathLabel({ folder }) {
   const parent = folderParentLabel(folder);
+  const displayName = folder.favoriteLabel || folder.name || folder.path;
   const viewportRef = useRef(null);
   const contentRef = useRef(null);
   const [hovered, setHovered] = useState(false);
@@ -37,6 +42,7 @@ export default function FolderPathLabel({ folder }) {
       ref={viewportRef}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      title={folder.favoriteLabel ? (folder.name || folder.path) : undefined}
       style={{ flex: 1, minWidth: 0, display: 'flex', overflow: 'hidden', whiteSpace: 'nowrap' }}
     >
       <span
@@ -57,7 +63,7 @@ export default function FolderPathLabel({ folder }) {
           </span>
         )}
         <span style={segmentStyle}>
-          {folder.name || folder.path}
+          {displayName}
         </span>
       </span>
     </span>

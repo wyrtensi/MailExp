@@ -1655,7 +1655,12 @@ ${bodyContent}
   const favoritesForMove = message
     ? favoriteFolders
         .filter(fav => fav.accountId === message.account_id && fav.path !== message.folder)
-        .map(fav => movePickerFolders.find(f => f.path === fav.path))
+        .map(fav => {
+          const folder = movePickerFolders.find(f => f.path === fav.path);
+          // Carry the favorite's own label (#505) so the picker shows it instead of the real
+          // folder name — FolderPathLabel reads folder.favoriteLabel.
+          return folder && fav.label ? { ...folder, favoriteLabel: fav.label } : folder;
+        })
         .filter(Boolean)
         .filter(f => !recentForMove.some(r => r.path === f.path))
     : [];

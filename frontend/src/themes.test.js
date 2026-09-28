@@ -1,7 +1,19 @@
 // Run with: node --test src/themes.test.js
-import { describe, it } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_THEME, THEMES, getInitialTheme, themeCss } from './themes.js';
+
+// A settable localStorage + window.matchMedia so resolveSystemTheme/readThemeFollowsSystem can
+// be tested without a full jsdom — themes.js reads them as bare globals, same as store/index.js.
+let _store = {};
+globalThis.localStorage = {
+  getItem: k => (k in _store ? _store[k] : null),
+  setItem: (k, v) => { _store[k] = String(v); },
+  removeItem: k => { delete _store[k]; },
+};
+let _prefersDark = false;
+globalThis.window = { matchMedia: () => ({ matches: _prefersDark }) };
+
+const { DEFAULT_THEME, THEMES, getInitialTheme, themeCss, resolveSystemTheme, readThemeFollowsSystem, writeThemeFollowsSystem } = await import('./themes.js');
 
 const names = Object.keys(THEMES);
 
@@ -60,5 +72,41 @@ describe('Daylight and Dusk', () => {
       assert.ok(canonicalVars.includes(key), `${key} is not a theme variable`);
     }
     assert.doesNotMatch(themeCss(THEMES.daylight), /msg-card/);
+  });
+});
+
+describe('resolveSystemTheme ("как в системе", #508)', () => {
+  it('resolves to dusk when the OS prefers dark', () => {
+    _prefersDark = true;
+    assert.equal(resolveSystemTheme(), 'dusk');
+  });
+  it('resolves to daylight when the OS does not prefer dark (light, or no preference)', () => {
+    _prefersDark = false;
+    assert.equal(resolveSystemTheme(), 'daylight');
+  });
+  it('falls back to DEFAULT_THEME rather than throwing when matchMedia is unavailable', () => {
+    const original = globalThis.window;
+    globalThis.window = {};
+    try {
+      assert.equal(resolveSystemTheme(), DEFAULT_THEME);
+    } finally {
+      globalThis.window = original;
+    }
+  });
+});
+
+describe('readThemeFollowsSystem / writeThemeFollowsSystem (#508)', () => {
+  beforeEach(() => { _store = {}; });
+
+  it('defaults on when nothing was ever saved — every existing browser gets the checkbox on', () => {
+    assert.equal(readThemeFollowsSystem(), true);
+  });
+  it('a saved "false" turns it off', () => {
+    writeThemeFollowsSystem(false);
+    assert.equal(readThemeFollowsSystem(), false);
+  });
+  it('a saved "true" round-trips', () => {
+    writeThemeFollowsSystem(true);
+    assert.equal(readThemeFollowsSystem(), true);
   });
 });

@@ -325,3 +325,54 @@ describe('Download as .eml on the desktop toolbar (#381 follow-up)', () => {
     assert.deepEqual(downloads, ['a1']);
   });
 });
+
+describe('Move picker favorites show their custom label (#505)', () => {
+  let originalGetFolders, originalInnerWidth, host, testRoot;
+  before(() => {
+    originalGetFolders = api.getFolders;
+    originalInnerWidth = dom.window.innerWidth;
+    dom.window.innerWidth = 1280; // useMobile(): renders the desktop move-picker dropdown
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    testRoot = createRoot(host);
+  });
+  after(async () => {
+    await React.act(async () => testRoot.unmount());
+    host.remove();
+    api.getFolders = originalGetFolders;
+    dom.window.innerWidth = originalInnerWidth;
+    useStore.setState({ favoriteFolders: [], recentFolders: [] });
+  });
+
+  test('the favorites section shows the label, not the real folder name — which stays as a tooltip', async () => {
+    // A second, non-favorited folder stays in the plain "all folders" list below with its real
+    // name — this is only about what the Favorites section itself shows.
+    api.getFolders = async () => ([
+      { path: 'Personal/Taxes', name: 'Taxes', special_use: null },
+      { path: 'Work', name: 'Work', special_use: null },
+    ]);
+    useStore.setState({
+      favoriteFolders: [{ accountId: 'acct', path: 'Personal/Taxes', label: 'Important' }],
+      recentFolders: [],
+    });
+
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('a1'); // MSG_A: account 'acct', folder 'INBOX'
+      testRoot.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    const moveBtn = [...host.querySelectorAll('button')].find(b => b.getAttribute('title') === 'contextMenu.moveToFolder');
+    assert.ok(moveBtn, 'expected the Move toolbar button');
+    await React.act(async () => { moveBtn.click(); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // FolderPathLabel only sets a title on a row carrying a favoriteLabel, so this scopes
+    // straight to the favorites-section instance of the folder (it is listed a second time,
+    // unlabeled, further down in the plain "all folders" list — that's expected, not this bug).
+    const favLabelSpan = host.querySelector('[title="Taxes"]');
+    assert.ok(favLabelSpan, 'the favorite row keeps the real folder name as a tooltip');
+    assert.ok(favLabelSpan.textContent.includes('Important'), 'the favorites section shows the custom label');
+    assert.ok(!favLabelSpan.textContent.includes('Taxes'), 'the real folder name is not shown as visible text in the favorite row');
+  });
+});

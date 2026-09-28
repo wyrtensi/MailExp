@@ -612,6 +612,7 @@
       "settings": "Open Settings",
       "themes": "Open Themes",
       "switchTheme": "Switch to {{theme}} theme",
+      "matchSystemTheme": "Match system theme",
       "accountInbox": "{{name}} — Inbox"
     }
   },
@@ -1045,6 +1046,8 @@
     "appearance": {
       "title": "Appearance",
       "description": "Choose a color theme for the interface",
+      "matchSystem": "Match system",
+      "matchSystemHint": "Light or dark theme by your device's setting",
       "typography": "Typography",
       "typographyDescription": "Choose a font pairing for the interface",
       "typographyLoading": "Loading fonts…",
