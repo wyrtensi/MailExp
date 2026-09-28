@@ -5,4 +5,4 @@
 !**/.env.example
 certs
 *.local
-.git
+.gitdata
