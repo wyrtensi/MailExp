@@ -13,6 +13,7 @@ const {
   parseGoogleClientId,
   getGoogleAppById,
   getDefaultGoogleApp,
+  getEffectiveGoogleRedirectUri,
   resolveGoogleConfig,
   recordGoogleGrant,
   setGoogleAppStatus,
@@ -102,6 +103,26 @@ describe('app lookups', () => {
     query.mockClear();
     expect(await getGoogleAppById(null)).toBeNull();
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+describe('getEffectiveGoogleRedirectUri', () => {
+  it('prefers the stored callback URL over the environment', async () => {
+    process.env.GOOGLE_REDIRECT_URI = 'https://env.example.com/oauth/google/callback';
+    query.mockResolvedValue({ rows: [{ config: { redirectUri: REDIRECT_URI } }] });
+    expect(await getEffectiveGoogleRedirectUri()).toBe(REDIRECT_URI);
+    expect(query.mock.calls[0][0]).toMatch(/integration_config/);
+  });
+
+  it('falls back to the environment when nothing is stored', async () => {
+    process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
+    query.mockResolvedValue({ rows: [] });
+    expect(await getEffectiveGoogleRedirectUri()).toBe(REDIRECT_URI);
+  });
+
+  it('is null without a stored value or the environment', async () => {
+    query.mockResolvedValue({ rows: [{ config: {} }] });
+    expect(await getEffectiveGoogleRedirectUri()).toBeNull();
   });
 });
 

@@ -52,6 +52,19 @@ export function getGoogleRedirectUri(origin = null) {
   }
 }
 
+// The Google callback URL as saved on the Integrations screen, falling back to the environment
+// (GOOGLE_REDIRECT_URI, as the process started with it) when nothing is stored yet. Used by the
+// client-JSON import warning, from both the server process (routes/integrations.js also mirrors
+// the stored value into process.env, so this agrees with it there) and the googleApp.js CLI,
+// which runs standalone and never applies that mirroring. Queried directly instead of importing
+// routes/integrations.js, which would drag in express and the legacy-config importer.
+export async function getEffectiveGoogleRedirectUri() {
+  const { rows } = await query("SELECT config FROM integration_config WHERE provider = 'google'");
+  const stored = rows[0]?.config?.redirectUri;
+  if (typeof stored === 'string' && stored.trim()) return stored.trim();
+  return process.env.GOOGLE_REDIRECT_URI || null;
+}
+
 // Credentials for one consent flow: the given app, or the default app. Null when the
 // callback URL is missing, the app is missing or disabled, or its secret cannot be decrypted.
 export async function resolveGoogleConfig({ appId = null, origin = null } = {}) {
