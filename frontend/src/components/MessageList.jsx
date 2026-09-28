@@ -33,6 +33,7 @@ import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { createLatestRequest } from '../utils/latestRequest.js';
 import { draftComposeFields } from '../utils/draftSignature.js';
+import { isDraftMessage, pickThreadDraft } from '../utils/isDraftMessage.js';
 import { pendingMarkReadMap, completedMarkReadMap, setPending } from '../utils/pendingReads.js';
 import { applyDeleteGuard, clearDeleteGuard, clearPendingDelete, setCompletedDelete, setPendingDelete, threadDeleteGuardKey } from '../utils/pendingDeletes.js';
 import { deleteView, deleteViewFolder, rowSeenFolders, foldersFor } from '../utils/deleteIntent.js';
@@ -2005,9 +2006,11 @@ export default function MessageList() {
     };
 
     const onOpen = () => {
-      const { messages, selectedMessageId, setSelectedMessage } = getState();
+      const { messages, selectedMessageId } = getState();
       if (selectedMessageId || !messages.length) return;
-      setSelectedMessage(messages[0].id);
+      // Routed through the same 'open' action as the context menu (case 'open' below), so a
+      // draft opens in the composer here too instead of always landing in the reading pane.
+      handleContextActionRef.current?.('open', messages[0]);
     };
 
     const onSelect = () => {
@@ -2434,16 +2437,6 @@ export default function MessageList() {
     handleContextAction(hasUnreadInThread ? 'markRead' : 'markUnread', message);
   };
 
-  const isDraftsFolder = (() => {
-    if (!selectedAccountId) return false;
-    const account = accounts.find(a => a.id === selectedAccountId);
-    if (!account) return false;
-    if (account.folder_mappings?.drafts && account.folder_mappings.drafts === selectedFolder) return true;
-    const folderList = folders[selectedAccountId] || [];
-    const folderInfo = folderList.find(f => f.path === selectedFolder);
-    return folderInfo?.special_use === '\\Drafts';
-  })();
-
   const formatAddressArray = (arr) => {
     if (!Array.isArray(arr)) return [];
     return arr.map(a => {
@@ -2453,45 +2446,71 @@ export default function MessageList() {
     }).filter(Boolean);
   };
 
-  const handleSelect = async (message) => {
-    if (isDraftsFolder) {
-      try {
-        // The headers carry the draft's priority; without them the draft reopens as normal. The
-        // Bcc lives only in the draft's own copy, and saving a reopened draft replaces that copy,
-        // so a failed Bcc read must not silently open an editable composer whose next save would
-        // erase it (upstream #499) — it opens read-only instead, below.
-        const [bodyData, headerData, bcc] = await Promise.all([
-          api.getMessageBody(message.id),
-          api.getMessageHeaders(message.id).catch(() => null),
-          api.getMessageBcc(message.id).then(r => r.bcc, err => {
-            console.error('Failed to read draft Bcc:', err.message);
-            return null;
-          }),
-        ]);
-        if (!Array.isArray(bcc)) {
-          addNotification({ type: 'error', title: t('messageList.draftBcc.failTitle'), body: t('messageList.draftBcc.failBody') });
-          setSelectedMessage(message.id);
-          return;
-        }
-        openCompose({
-          accountId: message.account_id,
-          draftUid: message.uid,
-          draftFolder: message.folder,
-          to: formatAddressArray(message.to_addresses),
-          cc: formatAddressArray(message.cc_addresses),
-          // { name, email } objects rather than formatted strings, so compose quotes a display
-          // name that contains a comma instead of splitting it into two recipients (#224).
-          bcc,
-          subject: message.subject || '',
-          priority: priorityFromHeaders(headerData?.headers),
-          // Split the stored signature out of the body so the composer does not add a second
-          // copy (#432); draftSignature seeds the composer's signature editor instead.
-          ...draftComposeFields(bodyData, { plaintext: useStore.getState().plaintextEmail }),
-        });
-      } catch (err) {
-        console.error('Failed to open draft:', err.message);
+  // Opens a draft in the composer instead of the reading pane. The single path every
+  // draft-opening entry point (row click, thread-row click, keyboard open, the detached
+  // message window, ...) funnels through via resolveDraftForRow below, so they can't drift
+  // out of sync with each other.
+  const openDraftInComposer = async (message) => {
+    try {
+      // The headers carry the draft's priority; without them the draft reopens as normal. The
+      // Bcc lives only in the draft's own copy, and saving a reopened draft replaces that copy,
+      // so a failed Bcc read must not silently open an editable composer whose next save would
+      // erase it (upstream #499) — it opens read-only instead, below.
+      const [bodyData, headerData, bcc] = await Promise.all([
+        api.getMessageBody(message.id),
+        api.getMessageHeaders(message.id).catch(() => null),
+        api.getMessageBcc(message.id).then(r => r.bcc, err => {
+          console.error('Failed to read draft Bcc:', err.message);
+          return null;
+        }),
+      ]);
+      if (!Array.isArray(bcc)) {
+        addNotification({ type: 'error', title: t('messageList.draftBcc.failTitle'), body: t('messageList.draftBcc.failBody') });
         setSelectedMessage(message.id);
+        return;
       }
+      openCompose({
+        accountId: message.account_id,
+        draftUid: message.uid,
+        draftFolder: message.folder,
+        to: formatAddressArray(message.to_addresses),
+        cc: formatAddressArray(message.cc_addresses),
+        // { name, email } objects rather than formatted strings, so compose quotes a display
+        // name that contains a comma instead of splitting it into two recipients (#224).
+        bcc,
+        subject: message.subject || '',
+        priority: priorityFromHeaders(headerData?.headers),
+        // Split the stored signature out of the body so the composer does not add a second
+        // copy (#432); draftSignature seeds the composer's signature editor instead.
+        ...draftComposeFields(bodyData, { plaintext: useStore.getState().plaintextEmail }),
+      });
+    } catch (err) {
+      console.error('Failed to open draft:', err.message);
+      setSelectedMessage(message.id);
+    }
+  };
+
+  // Whether `message` is itself a draft — decided from the message (its own folder/flags),
+  // never from whichever folder happens to be selected: a Gmail conversation's rows can span
+  // folders, a unified view has no single selected folder, and search/starred/other-folder
+  // listings can surface a draft outside the Drafts folder entirely.
+  const isDraftRow = (message) => isDraftMessage(message, { accounts, folders });
+
+  // For a collapsed thread row, resolves which message of the conversation is actually the
+  // draft (the newest one) instead of assuming the row's own representative message is it —
+  // Gmail conversations mix folders, so the representative can be a received/sent copy while a
+  // reply sits in Drafts. Uses whatever the thread expansion already cached; a row that was
+  // never expanded falls back to checking itself. Returns the draft message, or null.
+  const resolveDraftForRow = (message) => {
+    if (!isThreadListRow(message)) return isDraftRow(message) ? message : null;
+    const cached = threadMessages[threadCacheKey(message)];
+    return pickThreadDraft(message, cached, { accounts, folders });
+  };
+
+  const handleSelect = async (message) => {
+    const draft = resolveDraftForRow(message);
+    if (draft) {
+      await openDraftInComposer(draft);
       return;
     }
     recentMessageOpenUntilRef.current = Date.now() + 1500;
@@ -2537,9 +2556,15 @@ export default function MessageList() {
   };
 
   // Open a message in a detached floating window (#219). Warms the body cache and marks
-  // it read (like a normal open) without disturbing the main-pane selection.
+  // it read (like a normal open) without disturbing the main-pane selection. A draft has no
+  // floating-window form — it opens in the (single, global) composer instead, same as a click.
   const handleOpenInWindow = (message) => {
     if (!message || isMobile) return;
+    const draft = resolveDraftForRow(message);
+    if (draft) {
+      openDraftInComposer(draft);
+      return;
+    }
     openMessageWindow(message.id);
     api.getMessageBody(message.id).catch(() => {});
     markMessageReadOnOpen(message);

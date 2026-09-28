@@ -494,3 +494,97 @@ describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
     assert.equal(errors.length, 1);
   });
 });
+
+// A draft used to open in the composer only when the currently SELECTED folder was the
+// account's Drafts folder — a message-level property re-derived from view state instead of
+// from the message. That missed every way a draft can reach the list some other way: a Gmail
+// conversation's representative row can be a non-draft message of the thread (Gmail threads
+// span folders), a unified view has no single selected folder, and the keyboard "open" shortcut
+// bypassed the draft check entirely. isDraftMessage/pickThreadDraft (utils/isDraftMessage.js)
+// now decide per message; these scenarios exercise the entry points that used to fall through
+// to the reading pane.
+describe('MessageList — a draft opens in the composer regardless of how it was reached', () => {
+  const clickRow = async (msgid) => {
+    const row = container.querySelector(`[data-msgid="${msgid}"]`);
+    assert.ok(row, `expected a row for ${msgid}`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  };
+  const draftRoutes = (id) => ({
+    [`/mail/messages/${id}/body`]: [200, { html: '<p>hi</p>', text: 'hi' }],
+    [`/mail/messages/${id}/headers`]: [200, { headers: '' }],
+    [`/mail/messages/${id}/bcc`]: [200, { bcc: [] }],
+  });
+
+  test('a thread row whose representative message is not the draft opens the thread\'s own draft instead', async () => {
+    // The collapsed row's representative (what handleThreadClick receives) is a received
+    // message; the actual draft is a different message of the same conversation, already
+    // cached from a previous expansion.
+    const received = { ...MESSAGE, id: 'thr-rep', thread_id: 'thr-5', message_count: 2, folder: 'INBOX' };
+    const draftChild = {
+      ...MESSAGE, id: 'draft-child-1', uid: 42, thread_id: 'thr-5', account_id: 'acct-1',
+      folder: 'Drafts', date: new Date(Date.now() + 60000).toISOString(), subject: 'Reply draft',
+    };
+    ROUTES = draftRoutes('draft-child-1');
+    const opened = [];
+    await mount({
+      rows: [received], threadedView: true,
+      state: {
+        selectedFolder: 'Drafts',
+        folders: { 'acct-1': [{ path: 'INBOX' }, { path: 'Drafts', special_use: '\\Drafts' }] },
+        threadMessages: { [`acct-1:thr-5`]: [received, draftChild] },
+        openCompose: d => opened.push(d), notifications: [],
+      },
+    });
+
+    await clickRow('thr-rep');
+    ROUTES = {};
+
+    assert.equal(opened.length, 1, 'expected the composer to open');
+    assert.equal(opened[0].draftUid, 42, 'expected the thread\'s draft, not the clicked representative');
+    assert.equal(opened[0].draftFolder, 'Drafts');
+  });
+
+  test('a draft opens the composer from the unified inbox, where no single folder is "selected"', async () => {
+    const draft = { ...MESSAGE, id: 'draft-unified', account_id: 'acct-1', folder: 'Drafts' };
+    ROUTES = draftRoutes('draft-unified');
+    const opened = [];
+    await mount({
+      rows: [draft], threadedView: false,
+      state: {
+        selectedAccountId: null, selectedFolder: 'INBOX',
+        folders: { 'acct-1': [{ path: 'INBOX' }, { path: 'Drafts', special_use: '\\Drafts' }] },
+        openCompose: d => opened.push(d), notifications: [],
+      },
+    });
+
+    await clickRow('draft-unified');
+    ROUTES = {};
+
+    assert.equal(opened.length, 1, 'a draft must open the composer even with no selected account/folder');
+  });
+
+  test('the "open" keyboard shortcut opens a draft in the composer instead of the reading pane', async () => {
+    const draft = { ...MESSAGE, id: 'draft-kbd', account_id: 'acct-1', folder: 'Drafts' };
+    ROUTES = draftRoutes('draft-kbd');
+    const opened = [];
+    await mount({
+      rows: [draft], threadedView: false,
+      state: {
+        selectedFolder: 'Drafts', selectedMessageId: null,
+        folders: { 'acct-1': [{ path: 'INBOX' }, { path: 'Drafts', special_use: '\\Drafts' }] },
+        openCompose: d => opened.push(d), notifications: [],
+      },
+    });
+
+    await React.act(async () => { shortcutBus.emit('openMessage'); });
+    await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    ROUTES = {};
+
+    assert.equal(opened.length, 1, 'the keyboard open shortcut must route a draft through the composer too');
+    assert.equal(useStore.getState().selectedMessageId, null, 'must not also fall through to selecting it for the reading pane');
+  });
+});
