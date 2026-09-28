@@ -35,6 +35,17 @@ const ERROR_KEYS = Object.freeze({
   app_in_use: 'admin.integrations.googleApps.errorInUse',
   app_not_found: 'admin.integrations.googleApps.errorNotFound',
   redirect_uri_invalid: 'admin.integrations.googleApps.errorCallbackInvalid',
+  client_json_invalid: 'admin.integrations.googleApps.errorClientJsonInvalid',
+  client_json_service_account: 'admin.integrations.googleApps.errorClientJsonServiceAccount',
+  client_json_not_web: 'admin.integrations.googleApps.errorClientJsonNotWeb',
+  client_json_incomplete: 'admin.integrations.googleApps.errorClientJsonIncomplete',
+  client_json_conflict: 'admin.integrations.googleApps.errorClientJsonConflict',
+});
+
+// Keys are spelled out literally so the i18n coverage tests can find them.
+const WARNING_KEYS = Object.freeze({
+  redirect_uri_missing: 'admin.integrations.googleApps.warningRedirectUriMissing',
+  callback_not_configured: 'admin.integrations.googleApps.warningCallbackNotConfigured',
 });
 
 // "Full" is not stored: the server computes it for an active app whose seats reached the limit.
@@ -74,13 +85,39 @@ export function canDeleteGoogleApp(app) {
 }
 
 // The secret field always starts empty: the server never returns it, and an empty value keeps it.
+// clientJson holds the raw text of an imported client file (new apps only; see googleAppPayload).
 export function googleAppForm(app) {
   return {
     label: app?.label ?? '',
     clientId: app?.clientId ?? '',
     clientSecret: '',
+    clientJson: '',
     userLimit: String(app?.userLimit ?? DEFAULT_USER_LIMIT),
   };
+}
+
+// Lightweight preview of an imported Google OAuth client JSON, for immediate feedback in the form
+// (what was read, or what is wrong with the file) without a round trip. The backend's
+// parseGoogleClientJson (backend/src/services/oauth/googleClientJson.js) is the source of truth
+// and is checked again on save; this only reads the same top-level shape.
+export function parseGoogleClientJsonPreview(text) {
+  if (typeof text !== 'string' || !text.trim()) return { ok: false, errorKey: ERROR_KEYS.client_json_invalid };
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return { ok: false, errorKey: ERROR_KEYS.client_json_invalid };
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { ok: false, errorKey: ERROR_KEYS.client_json_invalid };
+  if (data.type === 'service_account') return { ok: false, errorKey: ERROR_KEYS.client_json_service_account };
+  if (data.installed) return { ok: false, errorKey: ERROR_KEYS.client_json_not_web };
+  const web = data.web;
+  if (!web || typeof web !== 'object' || Array.isArray(web)) return { ok: false, errorKey: ERROR_KEYS.client_json_not_web };
+  const clientId = typeof web.client_id === 'string' ? web.client_id.trim() : '';
+  const hasSecret = typeof web.client_secret === 'string' && web.client_secret.trim() !== '';
+  if (!clientId || !hasSecret) return { ok: false, errorKey: ERROR_KEYS.client_json_incomplete };
+  const projectId = typeof web.project_id === 'string' ? web.project_id.trim() : '';
+  return { ok: true, clientId, projectId };
 }
 
 function parseUserLimit(value) {
@@ -90,23 +127,38 @@ function parseUserLimit(value) {
   return n > 0 && n <= USER_LIMIT_MAX ? n : null;
 }
 
+// Import mode only applies to a new app: an existing app's client ID is fixed, and re-importing
+// a file over an edit would silently try to change it.
+function importedJson(form, editing) {
+  return !editing && typeof form.clientJson === 'string' ? form.clientJson.trim() : '';
+}
+
 // The first problem that stops the form from saving, as a translation key, or null. The client
 // ID of an existing app never changes, so an edit does not check it.
 export function googleAppFormError(form, { editing }) {
   const label = form.label.trim();
   if (!label || label.length > LABEL_MAX) return ERROR_KEYS.label_invalid;
-  if (!editing && !CLIENT_ID_RE.test(form.clientId.trim())) return ERROR_KEYS.client_id_invalid;
-  const secret = form.clientSecret.trim();
-  if (!editing && !secret) return ERROR_KEYS.client_secret_required;
-  if (secret.includes('•')) return ERROR_KEYS.client_secret_redacted;
+  const clientJson = importedJson(form, editing);
+  if (clientJson) {
+    const preview = parseGoogleClientJsonPreview(clientJson);
+    if (!preview.ok) return preview.errorKey;
+  } else {
+    if (!editing && !CLIENT_ID_RE.test(form.clientId.trim())) return ERROR_KEYS.client_id_invalid;
+    const secret = form.clientSecret.trim();
+    if (!editing && !secret) return ERROR_KEYS.client_secret_required;
+    if (secret.includes('•')) return ERROR_KEYS.client_secret_redacted;
+  }
   if (parseUserLimit(form.userLimit) === null) return ERROR_KEYS.user_limit_invalid;
   return null;
 }
 
-// Body for POST (new app) or PATCH (edit). A blank secret on edit is left out, which keeps the
-// stored one; the client ID is never sent on edit.
+// Body for POST (new app, manual or imported) or PATCH (edit). A blank secret on edit is left
+// out, which keeps the stored one; the client ID is never sent on edit. An imported file sends
+// clientJson instead of clientId/clientSecret: the server refuses both together.
 export function googleAppPayload(form, { editing }) {
   const body = { label: form.label.trim(), userLimit: parseUserLimit(form.userLimit) };
+  const clientJson = importedJson(form, editing);
+  if (clientJson) return { label: body.label, clientJson, userLimit: body.userLimit };
   const secret = form.clientSecret.trim();
   if (!editing) return { label: body.label, clientId: form.clientId.trim(), clientSecret: secret, userLimit: body.userLimit };
   if (secret) body.clientSecret = secret;
@@ -115,6 +167,12 @@ export function googleAppPayload(form, { editing }) {
 
 export function googleAppErrorKey(code) {
   return typeof code === 'string' && Object.hasOwn(ERROR_KEYS, code) ? ERROR_KEYS[code] : null;
+}
+
+// A warning the server returned alongside a created app (see googleClientJsonWarnings on the
+// backend), as a translation key, or null for a code this UI does not know.
+export function googleAppWarningKey(code) {
+  return typeof code === 'string' && Object.hasOwn(WARNING_KEYS, code) ? WARNING_KEYS[code] : null;
 }
 
 // Same rule as the server: an absolute http(s) address.

@@ -4,11 +4,13 @@ import {
   GoogleAppError,
   createGoogleApp,
   deleteGoogleApp,
+  getEffectiveGoogleRedirectUri,
   getGoogleAppSummary,
   listGoogleApps,
   setGoogleAppStatus,
   updateGoogleApp,
 } from '../services/oauth/googleApps.js';
+import { googleClientJsonWarnings, parseGoogleClientJson } from '../services/oauth/googleClientJson.js';
 import { countGoogleReservations } from '../services/oauth/googleAppSelection.js';
 import { uuidParam } from '../utils/uuid.js';
 
@@ -30,6 +32,11 @@ const ERRORS = {
   app_same_project: [409, 'An app from this Google Cloud project is already added'],
   app_in_use: [409, 'The app still has connected mailboxes'],
   app_not_found: [404, 'App not found'],
+  client_json_invalid: [400, 'The file is not valid JSON, or is not a Google OAuth client file'],
+  client_json_service_account: [400, 'This is a service account key, not an OAuth client. Download the OAuth client JSON from Credentials -> OAuth client instead'],
+  client_json_not_web: [400, 'This is a desktop (installed) OAuth client. Create a Web application client instead'],
+  client_json_incomplete: [400, 'The file is missing a client ID or client secret'],
+  client_json_conflict: [400, 'Provide either the client JSON file or a client ID and secret, not both'],
 };
 
 function refuse(res, code) {
@@ -73,18 +80,47 @@ router.get('/', async (_req, res) => {
   res.json({ apps: await Promise.all(rows.map(toApi)) });
 });
 
+// A body field counts as "given" only when it has real content: an empty string alongside
+// clientJson (what an untouched form field sends) must not trip the "not both" refusal.
+function hasContent(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
 router.post('/', async (req, res) => {
   const body = req.body || {};
-  const { secret, error } = secretFromBody(body.clientSecret);
+  const hasClientJson = hasContent(body.clientJson);
+  const hasManualFields = hasContent(body.clientId) || hasContent(body.clientSecret);
+  if (hasClientJson && hasManualFields) return refuse(res, 'client_json_conflict');
+
+  let clientId = body.clientId;
+  let clientSecretInput = body.clientSecret;
+  let label = body.label;
+  let warnings = [];
+
+  if (hasClientJson) {
+    let parsed;
+    try {
+      parsed = parseGoogleClientJson(body.clientJson);
+    } catch (err) {
+      return handleRegistryError(res, err);
+    }
+    clientId = parsed.clientId;
+    clientSecretInput = parsed.clientSecret;
+    if (!hasContent(label)) label = parsed.projectId;
+    const expected = await getEffectiveGoogleRedirectUri();
+    warnings = googleClientJsonWarnings(parsed.redirectUris, expected);
+  }
+
+  const { secret, error } = secretFromBody(clientSecretInput);
   if (error) return refuse(res, error);
   try {
     const row = await createGoogleApp({
-      label: body.label,
-      clientId: body.clientId,
+      label,
+      clientId,
       clientSecret: secret,
       userLimit: body.userLimit ?? 100,
     });
-    res.status(201).json({ app: await toApi(row) });
+    res.status(201).json({ app: await toApi(row), warnings });
   } catch (err) {
     return handleRegistryError(res, err);
   }

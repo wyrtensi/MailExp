@@ -7,6 +7,7 @@ const registry = vi.hoisted(() => ({
   updateGoogleApp: vi.fn(),
   deleteGoogleApp: vi.fn(),
   setGoogleAppStatus: vi.fn(async () => []),
+  getEffectiveGoogleRedirectUri: vi.fn(async () => 'https://mail.example.com/oauth/google/callback'),
 }));
 vi.mock('../services/oauth/googleApps.js', () => {
   class GoogleAppError extends Error {
@@ -39,6 +40,7 @@ beforeEach(() => {
   Object.values(registry).forEach((fn) => fn.mockReset());
   registry.setGoogleAppStatus.mockResolvedValue([]);
   registry.getGoogleAppSummary.mockResolvedValue(ROW);
+  registry.getEffectiveGoogleRedirectUri.mockResolvedValue('https://mail.example.com/oauth/google/callback');
   manager.disconnectAccount.mockClear();
 });
 
@@ -70,12 +72,99 @@ describe('/api/admin/google-apps', () => {
     registry.createGoogleApp.mockResolvedValueOnce(ROW);
     let res = await send('POST', '', { label: 'Google 1', clientId: ROW.client_id, clientSecret: 's' });
     expect(res.status).toBe(201);
-    expect((await res.json()).app.clientId).toBe(ROW.client_id);
+    const created = await res.json();
+    expect(created.app.clientId).toBe(ROW.client_id);
+    expect(created.warnings).toEqual([]);
 
     registry.createGoogleApp.mockRejectedValueOnce(new GoogleAppError('app_same_project'));
     res = await send('POST', '', { label: 'G', clientId: ROW.client_id, clientSecret: 's' });
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'app_same_project' });
+  });
+
+  it('creates an app from an imported client JSON, defaulting the label to the project id', async () => {
+    registry.createGoogleApp.mockResolvedValueOnce(ROW);
+    const clientJson = JSON.stringify({
+      web: {
+        client_id: ROW.client_id,
+        client_secret: 'GOCSPX-secret',
+        project_id: 'my-project-123',
+        redirect_uris: ['https://mail.example.com/oauth/google/callback'],
+      },
+    });
+    const res = await send('POST', '', { clientJson });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.warnings).toEqual([]);
+    expect(registry.createGoogleApp).toHaveBeenCalledWith({
+      label: 'my-project-123', clientId: ROW.client_id, clientSecret: 'GOCSPX-secret', userLimit: 100,
+    });
+  });
+
+  it('keeps an explicit label over the client JSON project id', async () => {
+    registry.createGoogleApp.mockResolvedValueOnce(ROW);
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y', project_id: 'proj' } });
+    await send('POST', '', { label: 'Custom label', clientJson });
+    expect(registry.createGoogleApp).toHaveBeenCalledWith(expect.objectContaining({ label: 'Custom label' }));
+  });
+
+  it('warns when the imported client JSON is missing the panel callback URL', async () => {
+    registry.createGoogleApp.mockResolvedValueOnce(ROW);
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y', redirect_uris: ['https://other.example.com/cb'] } });
+    const res = await send('POST', '', { clientJson });
+    expect(res.status).toBe(201);
+    expect((await res.json()).warnings).toEqual([
+      { code: 'redirect_uri_missing', expected: 'https://mail.example.com/oauth/google/callback' },
+    ]);
+  });
+
+  it('warns that no callback is configured yet when the panel has none', async () => {
+    registry.createGoogleApp.mockResolvedValueOnce(ROW);
+    registry.getEffectiveGoogleRedirectUri.mockResolvedValue(null);
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y' } });
+    const res = await send('POST', '', { clientJson });
+    expect((await res.json()).warnings).toEqual([{ code: 'callback_not_configured' }]);
+  });
+
+  it('refuses a client JSON together with a manual client id or secret', async () => {
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y' } });
+    let res = await send('POST', '', { clientJson, clientId: 'manual-id' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'client_json_conflict' });
+
+    res = await send('POST', '', { clientJson, clientSecret: 'manual-secret' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'client_json_conflict' });
+    expect(registry.createGoogleApp).not.toHaveBeenCalled();
+  });
+
+  it('maps a service-account key and a desktop client to their own error codes', async () => {
+    let res = await send('POST', '', { clientJson: JSON.stringify({ type: 'service_account' }) });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'client_json_service_account' });
+
+    res = await send('POST', '', { clientJson: JSON.stringify({ installed: { client_id: 'x', client_secret: 'y' } }) });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'client_json_not_web' });
+
+    res = await send('POST', '', { clientJson: 'not json' });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'client_json_invalid' });
+    expect(registry.createGoogleApp).not.toHaveBeenCalled();
+  });
+
+  it('never logs the client secret while importing a client JSON', async () => {
+    registry.createGoogleApp.mockResolvedValueOnce(ROW);
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'super-secret-value' } });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await send('POST', '', { clientJson });
+    } finally {
+      expect([...errorSpy.mock.calls, ...logSpy.mock.calls].flat().join(' ')).not.toMatch(/super-secret-value/);
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    }
   });
 
   it('refuses a secret typed around the redaction placeholder', async () => {

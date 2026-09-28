@@ -13,8 +13,10 @@ import {
   googleAppSeatsText,
   googleAppStateKey,
   googleAppStatusActions,
+  googleAppWarningKey,
   googleCallbackAltUri,
   googleCallbackFormError,
+  parseGoogleClientJsonPreview,
   shortClientId,
 } from '../utils/googleApps.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
@@ -51,6 +53,8 @@ export default function GoogleAppsSection() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [warnings, setWarnings] = useState([]);
+  const fileInputRef = useRef(null);
   // The setup instructions default open only while there's no app yet to skip past them for;
   // once that first load resolves, later app list changes (adding/removing an app) don't
   // fight a manual expand/collapse the admin made in the meantime.
@@ -89,6 +93,7 @@ export default function GoogleAppsSection() {
     setBusy(true);
     setError('');
     setNotice('');
+    setWarnings([]);
     try {
       await action();
     } catch (err) {
@@ -117,16 +122,56 @@ export default function GoogleAppsSection() {
   const formErrorKey = editing ? googleAppFormError(editing.form, { editing: !!editing.app }) : null;
   const updateForm = (field, value) => setEditing((cur) => ({ ...cur, form: { ...cur.form, [field]: value } }));
 
+  // Reads a dropped or picked client JSON file, fills clientId and (when still empty) label from
+  // it for immediate feedback, and leaves the raw text in form.clientJson for googleAppPayload to
+  // send. A file that does not parse is still kept: formErrorKey then explains what is wrong.
+  const applyImportedFile = (text) => {
+    setError('');
+    const preview = parseGoogleClientJsonPreview(text);
+    setEditing((cur) => {
+      if (!cur || cur.app) return cur;
+      return {
+        ...cur,
+        form: {
+          ...cur.form,
+          clientJson: text,
+          clientId: preview.ok ? preview.clientId : cur.form.clientId,
+          label: preview.ok && !cur.form.label.trim() ? preview.projectId : cur.form.label,
+        },
+      };
+    });
+  };
+
+  const clearImport = () => setEditing((cur) => (
+    cur ? { ...cur, form: { ...cur.form, clientJson: '', clientId: '', clientSecret: '' } } : cur
+  ));
+
+  const pickImportFile = () => fileInputRef.current?.click();
+  const onImportFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) applyImportedFile(await file.text());
+  };
+  const onFormDrop = async (e) => {
+    if (!editing || editing.app) return;
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (file) applyImportedFile(await file.text());
+  };
+
   const saveApp = () => act(async () => {
     const isEdit = !!editing.app;
     const body = googleAppPayload(editing.form, { editing: isEdit });
+    let createdWarnings = [];
     if (isEdit) {
       replaceApp((await api.admin.googleApps.update(editing.app.id, body)).app);
     } else {
-      const { app } = await api.admin.googleApps.create(body);
+      const { app, warnings: created } = await api.admin.googleApps.create(body);
       setApps((list) => [...list, app]);
+      createdWarnings = created || [];
     }
     setEditing(null);
+    setWarnings(createdWarnings);
     setNotice(t('admin.integrations.googleApps.saved'));
   });
 
@@ -278,6 +323,8 @@ export default function GoogleAppsSection() {
       {editing ? (
         <form
           onSubmit={(e) => { e.preventDefault(); if (!formErrorKey && !busy) saveApp(); }}
+          onDragOver={(e) => { if (!editing.app) e.preventDefault(); }}
+          onDrop={onFormDrop}
           style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 520, marginTop: 8 }}
         >
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
@@ -287,19 +334,39 @@ export default function GoogleAppsSection() {
             <span style={labelStyle}>{t('admin.integrations.googleApps.columnLabel')}</span>
             <input value={editing.form.label} onChange={(e) => updateForm('label', e.target.value)} style={fieldStyle} />
           </label>
-          <label>
-            <span style={labelStyle}>{t('admin.integrations.googleApps.clientId')}</span>
-            <input value={editing.form.clientId} onChange={(e) => updateForm('clientId', e.target.value)}
-              disabled={!!editing.app} spellCheck={false} autoComplete="off"
-              placeholder={t('admin.integrations.googleApps.clientIdPh')} style={monoFieldStyle} />
-            {editing.app && <span style={hintStyle}>{t('admin.integrations.googleApps.clientIdFixed')}</span>}
-          </label>
-          <label>
-            <span style={labelStyle}>{t('admin.integrations.googleApps.clientSecret')}</span>
-            <input type="password" autoComplete="new-password" value={editing.form.clientSecret}
-              onChange={(e) => updateForm('clientSecret', e.target.value)} style={fieldStyle} />
-            {editing.app && <span style={hintStyle}>{t('admin.integrations.googleApps.clientSecretKeep')}</span>}
-          </label>
+          {!editing.app && (
+            <div>
+              <input ref={fileInputRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={onImportFileChange} />
+              <button type="button" disabled={busy} style={buttonStyle} onClick={pickImportFile}>
+                {t('admin.integrations.googleApps.importButton')}
+              </button>
+              <span style={{ ...hintStyle, marginTop: 6 }}>{t('admin.integrations.googleApps.importDropHint')}</span>
+            </div>
+          )}
+          {!editing.app && editing.form.clientJson ? (
+            <div style={{ ...noteBoxStyle, marginBottom: 0 }}>
+              <div>{t('admin.integrations.googleApps.clientId')}: <span style={{ fontFamily: 'JetBrains Mono, monospace' }}>{editing.form.clientId || '—'}</span></div>
+              <button type="button" disabled={busy} style={{ ...buttonStyle, marginTop: 8 }} onClick={clearImport}>
+                {t('admin.integrations.googleApps.importClear')}
+              </button>
+            </div>
+          ) : (
+            <>
+              <label>
+                <span style={labelStyle}>{t('admin.integrations.googleApps.clientId')}</span>
+                <input value={editing.form.clientId} onChange={(e) => updateForm('clientId', e.target.value)}
+                  disabled={!!editing.app} spellCheck={false} autoComplete="off"
+                  placeholder={t('admin.integrations.googleApps.clientIdPh')} style={monoFieldStyle} />
+                {editing.app && <span style={hintStyle}>{t('admin.integrations.googleApps.clientIdFixed')}</span>}
+              </label>
+              <label>
+                <span style={labelStyle}>{t('admin.integrations.googleApps.clientSecret')}</span>
+                <input type="password" autoComplete="new-password" value={editing.form.clientSecret}
+                  onChange={(e) => updateForm('clientSecret', e.target.value)} style={fieldStyle} />
+                {editing.app && <span style={hintStyle}>{t('admin.integrations.googleApps.clientSecretKeep')}</span>}
+              </label>
+            </>
+          )}
           <label>
             <span style={labelStyle}>{t('admin.integrations.googleApps.userLimit')}</span>
             <input inputMode="numeric" value={editing.form.userLimit} onChange={(e) => updateForm('userLimit', e.target.value)} style={fieldStyle} />
@@ -313,13 +380,22 @@ export default function GoogleAppsSection() {
         </form>
       ) : (
         <button type="button" disabled={busy || !apps} style={primaryButtonStyle}
-          onClick={() => { setError(''); setNotice(''); setEditing({ app: null, form: googleAppForm(null) }); }}>
+          onClick={() => { setError(''); setNotice(''); setWarnings([]); setEditing({ app: null, form: googleAppForm(null) }); }}>
           {t('admin.integrations.googleApps.add')}
         </button>
       )}
 
       {error && <div style={{ marginTop: 12, fontSize: 13, color: 'var(--red)' }}>{error}</div>}
       {notice && <div style={{ marginTop: 12, fontSize: 13, color: 'var(--text-secondary)' }}>{notice}</div>}
+      {warnings.map((warning, i) => {
+        const key = googleAppWarningKey(warning.code);
+        if (!key) return null;
+        return (
+          <div key={i} style={{ marginTop: 8, fontSize: 12, color: 'var(--text-tertiary)' }}>
+            {t(key, { uri: warning.expected })}
+          </div>
+        );
+      })}
     </div>
   );
 }

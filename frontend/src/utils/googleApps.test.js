@@ -11,8 +11,10 @@ import {
   googleAppState,
   googleAppStateKey,
   googleAppStatusActions,
+  googleAppWarningKey,
   googleCallbackAltUri,
   googleCallbackFormError,
+  parseGoogleClientJsonPreview,
   shortClientId,
 } from './googleApps.js';
 
@@ -92,11 +94,51 @@ describe('canDeleteGoogleApp', () => {
 
 describe('googleAppForm', () => {
   it('starts a new app with the default limit', () => {
-    assert.deepEqual(googleAppForm(null), { label: '', clientId: '', clientSecret: '', userLimit: '100' });
+    assert.deepEqual(googleAppForm(null), { label: '', clientId: '', clientSecret: '', clientJson: '', userLimit: '100' });
   });
 
   it('fills an edit form from the app and never from a secret', () => {
-    assert.deepEqual(googleAppForm(APP), { label: 'Google 1', clientId: CLIENT_ID, clientSecret: '', userLimit: '100' });
+    assert.deepEqual(googleAppForm(APP), { label: 'Google 1', clientId: CLIENT_ID, clientSecret: '', clientJson: '', userLimit: '100' });
+  });
+});
+
+describe('parseGoogleClientJsonPreview', () => {
+  const WEB_JSON = JSON.stringify({
+    web: { client_id: CLIENT_ID, client_secret: 'GOCSPX-x', project_id: 'my-project-123' },
+  });
+
+  it('reads the client id and project id of a web client', () => {
+    assert.deepEqual(parseGoogleClientJsonPreview(WEB_JSON), { ok: true, clientId: CLIENT_ID, projectId: 'my-project-123' });
+  });
+
+  it('rejects malformed JSON, empty input and the wrong top-level type', () => {
+    for (const bad of ['', '  ', 'not json', '[]', '42', null, undefined]) {
+      assert.equal(parseGoogleClientJsonPreview(bad).errorKey, 'admin.integrations.googleApps.errorClientJsonInvalid', String(bad));
+    }
+  });
+
+  it('rejects a service account key', () => {
+    const json = JSON.stringify({ type: 'service_account' });
+    assert.equal(parseGoogleClientJsonPreview(json).errorKey, 'admin.integrations.googleApps.errorClientJsonServiceAccount');
+  });
+
+  it('rejects a desktop client or anything without a web client', () => {
+    assert.equal(
+      parseGoogleClientJsonPreview(JSON.stringify({ installed: { client_id: 'x', client_secret: 'y' } })).errorKey,
+      'admin.integrations.googleApps.errorClientJsonNotWeb',
+    );
+    assert.equal(parseGoogleClientJsonPreview('{}').errorKey, 'admin.integrations.googleApps.errorClientJsonNotWeb');
+  });
+
+  it('rejects a web client missing the id or the secret', () => {
+    assert.equal(
+      parseGoogleClientJsonPreview(JSON.stringify({ web: { client_id: CLIENT_ID } })).errorKey,
+      'admin.integrations.googleApps.errorClientJsonIncomplete',
+    );
+    assert.equal(
+      parseGoogleClientJsonPreview(JSON.stringify({ web: { client_secret: 'y' } })).errorKey,
+      'admin.integrations.googleApps.errorClientJsonIncomplete',
+    );
   });
 });
 
@@ -123,6 +165,27 @@ describe('googleAppFormError', () => {
     assert.equal(googleAppFormError({ ...form, clientId: 'abc', clientSecret: '' }, { editing: true }), null);
     assert.equal(googleAppFormError({ ...form, clientSecret: 'x•' }, { editing: true }), 'admin.integrations.googleApps.errorClientSecretRedacted');
   });
+
+  it('accepts a new app from an imported client JSON and skips the clientId/secret checks', () => {
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y', project_id: 'p' } });
+    assert.equal(googleAppFormError({ ...form, clientId: '', clientSecret: '', clientJson }, { editing: false }), null);
+  });
+
+  it('names the client JSON problem when it is not importable', () => {
+    assert.equal(
+      googleAppFormError({ ...form, clientJson: JSON.stringify({ type: 'service_account' }) }, { editing: false }),
+      'admin.integrations.googleApps.errorClientJsonServiceAccount',
+    );
+    assert.equal(
+      googleAppFormError({ ...form, clientJson: 'not json' }, { editing: false }),
+      'admin.integrations.googleApps.errorClientJsonInvalid',
+    );
+  });
+
+  it('ignores clientJson on an edit: the clientId/secret rules apply as usual', () => {
+    const clientJson = JSON.stringify({ type: 'service_account' });
+    assert.equal(googleAppFormError({ ...form, clientId: 'abc', clientSecret: '', clientJson }, { editing: true }), null);
+  });
 });
 
 describe('googleAppPayload', () => {
@@ -137,6 +200,26 @@ describe('googleAppPayload', () => {
   it('never sends the client ID of an edited app and leaves a blank secret out', () => {
     assert.deepEqual(googleAppPayload(form, { editing: true }), { label: 'Google 2', userLimit: 50, clientSecret: 'GOCSPX-x' });
     assert.deepEqual(googleAppPayload({ ...form, clientSecret: '  ' }, { editing: true }), { label: 'Google 2', userLimit: 50 });
+  });
+
+  it('sends clientJson instead of clientId/clientSecret for an imported new app', () => {
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y' } });
+    assert.deepEqual(googleAppPayload({ ...form, clientJson }, { editing: false }), {
+      label: 'Google 2', userLimit: 50, clientJson,
+    });
+  });
+
+  it('ignores clientJson on an edit', () => {
+    const clientJson = JSON.stringify({ web: { client_id: 'x', client_secret: 'y' } });
+    assert.deepEqual(googleAppPayload({ ...form, clientJson }, { editing: true }), { label: 'Google 2', userLimit: 50, clientSecret: 'GOCSPX-x' });
+  });
+});
+
+describe('googleAppWarningKey', () => {
+  it('maps the warning codes the server can send and nothing else', () => {
+    assert.equal(googleAppWarningKey('redirect_uri_missing'), 'admin.integrations.googleApps.warningRedirectUriMissing');
+    assert.equal(googleAppWarningKey('callback_not_configured'), 'admin.integrations.googleApps.warningCallbackNotConfigured');
+    for (const code of [undefined, null, '', 'toString', '__proto__', 'other']) assert.equal(googleAppWarningKey(code), null);
   });
 });
 
