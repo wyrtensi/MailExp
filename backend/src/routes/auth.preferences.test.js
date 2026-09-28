@@ -90,6 +90,60 @@ describe('PATCH /auth/preferences senderFavicons', () => {
   });
 });
 
+describe('PATCH /auth/preferences themeFollowsSystem (#508)', () => {
+  it('merges the themeFollowsSystem boolean into preferences as JSONB', async () => {
+    const req = { session: { userId: 'user-1' }, body: { themeFollowsSystem: true } };
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
+    };
+
+    await patchPreferences(req, res);
+
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain(
+      "jsonb_build_object('themeFollowsSystem', $41::boolean)",
+    );
+    expect(params[0]).toBe('user-1');
+    expect(params[40]).toBe(true);
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('stores an explicit false the same way (turning the checkbox off)', async () => {
+    const req = { session: { userId: 'user-1' }, body: { themeFollowsSystem: false } };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+
+    await patchPreferences(req, res);
+
+    expect(query.mock.calls[0][1][40]).toBe(false);
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('rejects a non-boolean themeFollowsSystem without querying', async () => {
+    const req = { session: { userId: 'user-1' }, body: { themeFollowsSystem: 'yes' } };
+    const res = {
+      status: vi.fn().mockReturnThis(),
+      json: vi.fn(),
+    };
+
+    await patchPreferences(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ error: 'themeFollowsSystem must be a boolean' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('leaves the stored value untouched when the key is absent', async () => {
+    const req = { session: { userId: 'user-1' }, body: { theme: 'dusk' } };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+
+    await patchPreferences(req, res);
+
+    expect(query.mock.calls[0][1][40]).toBeNull();
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+});
+
 describe('PATCH /auth/preferences defaultSender (#417)', () => {
   const run = async (body) => {
     const req = { session: { userId: 'user-1' }, body };
@@ -142,7 +196,7 @@ describe('sync intervals are install-wide', () => {
     await patchPreferences({ session: { userId: 'user-1' }, body: { syncInterval: '15', folderSyncInterval: '0' } }, res);
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/syncInterval|folderSyncInterval/);
-    expect(params).toHaveLength(40);
+    expect(params).toHaveLength(41);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
