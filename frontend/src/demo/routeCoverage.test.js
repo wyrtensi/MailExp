@@ -278,10 +278,24 @@ test('admin system email round-trips and its test send rejects', async () => {
 
 test('admin Google Workspace apps round-trip through in-memory state', async () => {
   const created = await answer('/admin/google-apps', 'POST', '/admin/google-apps', { label: 'Demo Google App', clientId: 'client-123' });
+  assert.deepEqual(created.warnings, []);
   const id = created.app.id;
   const patched = await answer('/admin/google-apps/:param', 'PATCH', `/admin/google-apps/${id}`, { label: 'Renamed' });
   assert.equal(patched.app.label, 'Renamed');
   await answer('/admin/google-apps/:param', 'DELETE', `/admin/google-apps/${id}`);
+});
+
+test('admin Google Workspace apps accept an imported client JSON, defaulting the label and warning about the callback', async () => {
+  const clientJson = JSON.stringify({
+    web: { client_id: '123-abc.apps.googleusercontent.com', client_secret: 'GOCSPX-x', project_id: 'demo-project-123' },
+  });
+  const created = await answer('/admin/google-apps', 'POST', '/admin/google-apps', { clientJson });
+  assert.equal(created.app.clientId, '123-abc.apps.googleusercontent.com');
+  assert.equal(created.app.label, 'demo-project-123');
+  assert.ok(created.warnings.some((w) => w.code === 'callback_not_configured' || w.code === 'redirect_uri_missing'));
+  await answer('/admin/google-apps/:param', 'DELETE', `/admin/google-apps/${created.app.id}`);
+
+  await reject('/admin/google-apps', 'POST', '/admin/google-apps', { clientJson: JSON.stringify({ type: 'service_account' }) }, /service account/);
 });
 
 test('admin SSO provider CRUD round-trips, and unlinking your only identity rejects', async () => {

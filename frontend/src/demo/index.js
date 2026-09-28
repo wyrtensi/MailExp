@@ -1400,10 +1400,38 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'GET' && pathname === '/admin/google-apps') return { apps: clone(demoGoogleApps) };
   if (verb === 'POST' && pathname === '/admin/google-apps') {
+    // Mirrors backend/src/services/oauth/googleClientJson.js closely enough for the demo: same
+    // shapes accepted/refused, same warning codes, so the admin screen behaves the same way here.
+    const jsonText = typeof body?.clientJson === 'string' ? body.clientJson.trim() : '';
+    let clientId = body?.clientId;
+    let label = body?.label;
+    let warnings = [];
+    if (jsonText) {
+      let data;
+      try {
+        data = JSON.parse(jsonText);
+      } catch {
+        throw demoError('The file is not valid JSON', 'client_json_invalid');
+      }
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw demoError('The file is not valid JSON', 'client_json_invalid');
+      if (data.type === 'service_account') throw demoError('This is a service account key, not an OAuth client', 'client_json_service_account');
+      if (data.installed) throw demoError('This is a desktop (installed) OAuth client', 'client_json_not_web');
+      const web = data.web;
+      if (!web || typeof web !== 'object' || Array.isArray(web)) throw demoError('This is not a web OAuth client', 'client_json_not_web');
+      const jsonClientId = typeof web.client_id === 'string' ? web.client_id.trim() : '';
+      const jsonSecret = typeof web.client_secret === 'string' ? web.client_secret.trim() : '';
+      if (!jsonClientId || !jsonSecret) throw demoError('The file is missing a client ID or client secret', 'client_json_incomplete');
+      clientId = jsonClientId;
+      if (!String(label ?? '').trim()) label = typeof web.project_id === 'string' ? web.project_id.trim() : '';
+      const redirectUris = Array.isArray(web.redirect_uris) ? web.redirect_uris : [];
+      const expected = integrationsConfig?.google?.redirectUri || null;
+      if (!expected) warnings = [{ code: 'callback_not_configured' }];
+      else if (!redirectUris.includes(expected)) warnings = [{ code: 'redirect_uri_missing', expected }];
+    }
     const app = {
       id: `demo-google-app-${nextGoogleAppSequence++}`,
-      label: String(body?.label ?? '').trim() || 'Google app',
-      clientId: String(body?.clientId ?? '').trim(),
+      label: String(label ?? '').trim() || 'Google app',
+      clientId: String(clientId ?? '').trim(),
       projectNumber: null,
       userLimit: body?.userLimit ?? null,
       status: 'active',
@@ -1414,7 +1442,7 @@ export async function demoRequest(method, path, body = {}) {
       createdAt: new Date().toISOString(),
     };
     demoGoogleApps = [...demoGoogleApps, app];
-    return { app: clone(app) };
+    return { app: clone(app), warnings };
   }
   const googleAppMatch = pathname.match(/^\/admin\/google-apps\/([^/]+)$/);
   if (verb === 'PATCH' && googleAppMatch) {
