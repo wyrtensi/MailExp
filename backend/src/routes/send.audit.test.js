@@ -14,7 +14,9 @@ import { redisClient } from '../services/redis.js';
 import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
 
-const account = { id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'google' };
+// oauth_provider is 'microsoft' (non-Gmail OAuth) so this exercises serverAutoSaves without the
+// Gmail-API send path — send.gmailApiTransport.test.js covers the Gmail-specific behavior.
+const account = { id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'microsoft' };
 const sendMail = vi.fn();
 let server;
 let base;

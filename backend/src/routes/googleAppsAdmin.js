@@ -69,6 +69,7 @@ async function toApi(row) {
     grantsCount: row.grants_count ?? 0,
     reservedCount,
     accountsCount: row.accounts_count ?? 0,
+    gmailApiDisabledAt: row.gmail_api_disabled_at ?? null,
     // "Full" is not a stored status: an active app whose counted seats reached its limit.
     full: row.status === 'active' && (row.grants_count ?? 0) + reservedCount >= row.user_limit,
     createdAt: row.created_at,

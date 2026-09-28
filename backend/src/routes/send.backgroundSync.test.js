@@ -70,7 +70,8 @@ describe('the Sent folder sync after a send', () => {
   }, 15000);
 
   it('runs as background work for a mailbox whose server saves the Sent copy', async () => {
-    const oauth = { ...account, oauth_provider: 'google' };
+    // 'microsoft' (non-Gmail OAuth) exercises serverAutoSaves without the Gmail-API send path.
+    const oauth = { ...account, oauth_provider: 'microsoft' };
     query.mockImplementation(async sql => ({ rows: sql.includes('FROM email_accounts') ? [oauth] : [{ preferences: {}, id: 'book1' }] }));
     createAccountSmtpTransport.mockResolvedValue({ account: oauth, transport: { sendMail } });
     expect((await post('bg3')).status).toBe(200);

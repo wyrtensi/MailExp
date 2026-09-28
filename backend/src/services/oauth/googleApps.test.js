@@ -17,6 +17,8 @@ const {
   resolveGoogleConfig,
   recordGoogleGrant,
   setGoogleAppStatus,
+  markGmailApiDisabled,
+  clearGmailApiDisabled,
   importLegacyGoogleConfig,
   listGoogleApps,
   getGoogleAppSummary,
@@ -223,6 +225,31 @@ describe('setGoogleAppStatus', () => {
     withTransaction.mockImplementation(async (fn) => fn(client));
     const err = await setGoogleAppStatus('app-9', 'closed').catch((e) => e);
     expect(err.code).toBe('app_not_found');
+  });
+});
+
+describe('markGmailApiDisabled / clearGmailApiDisabled', () => {
+  beforeEach(() => query.mockReset());
+
+  it('journals when the Gmail API turned out to be disabled', async () => {
+    query.mockResolvedValue({ rows: [] });
+    await markGmailApiDisabled('app-1');
+    expect(query).toHaveBeenCalledWith('UPDATE google_oauth_apps SET gmail_api_disabled_at = NOW() WHERE id = $1', ['app-1']);
+  });
+
+  it('does nothing for a falsy app id', async () => {
+    await markGmailApiDisabled(null);
+    await clearGmailApiDisabled(undefined);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('clears the flag only when it was set', async () => {
+    query.mockResolvedValue({ rows: [] });
+    await clearGmailApiDisabled('app-1');
+    expect(query).toHaveBeenCalledWith(
+      'UPDATE google_oauth_apps SET gmail_api_disabled_at = NULL WHERE id = $1 AND gmail_api_disabled_at IS NOT NULL',
+      ['app-1'],
+    );
   });
 });
 
