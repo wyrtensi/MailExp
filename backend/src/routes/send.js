@@ -346,12 +346,16 @@ router.post('/send', async (req, res) => {
     // Gmail API threading: when replying, look up the original's X-GM-THRID (stored decimal, see
     // services/threading/providerIds.js) and convert it to the hex form the API's `threadId`
     // expects. Only meaningful for a Gmail mailbox; ignored by the SMTP path and by the fallback.
+    // message_id is stored with or without angle brackets depending on the ingest path (see
+    // gtdTransitions.js's runTransitionsForSentMessage and mailAccess.js's
+    // getThreadKeysForMessageIdHeaders), so both forms are matched here too.
     let threadId = null;
     if (mailOptions.inReplyTo && account.oauth_provider === 'google') {
       const repliedToId = mailOptions.inReplyTo.replace(/[<>]/g, '').trim();
       const threadRow = await query(
-        'SELECT provider_thread_id FROM messages WHERE account_id = $1 AND message_id = $2 AND provider_thread_id IS NOT NULL LIMIT 1',
-        [account.id, repliedToId]
+        `SELECT provider_thread_id FROM messages
+          WHERE account_id = $1 AND message_id = ANY($2::text[]) AND provider_thread_id IS NOT NULL LIMIT 1`,
+        [account.id, [repliedToId, `<${repliedToId}>`]]
       );
       threadId = gmailThreadIdFromProviderThreadId(threadRow.rows[0]?.provider_thread_id ?? null);
     }
@@ -365,6 +369,15 @@ router.post('/send', async (req, res) => {
       })) : []),
       ...resolvedFwdAttachments,
     ];
+    // Final backstop over the whole set. The earlier checks (above, and inside the
+    // forwardedAttachments block) run before embedInlineDataImages() decodes any inline data:
+    // images in the body into their own attachments, so a message that stays under the cap only
+    // by way of its explicit/forwarded attachments but carries large embedded images would
+    // otherwise slip through uncounted.
+    const totalAttachmentBytes = allAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
+    if (totalAttachmentBytes > 26_214_400) {
+      return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+    }
     if (allAttachments.length) {
       mailOptions.attachments = allAttachments;
     }

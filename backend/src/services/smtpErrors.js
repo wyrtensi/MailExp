@@ -2,6 +2,7 @@
 // a thrown error — services/mailSendTransport.js's Gmail API path): whether a failed send
 // certainly delivered nothing, and how to describe a connection/handshake failure to the user
 // without exposing server internals.
+import { OAUTH_SEND_FAILURES } from './oauth/constants.js';
 
 // Whether a failed sendMail certainly delivered nothing, so the idempotency reservation can be
 // released for a retry. A server reply (4xx/5xx) is an explicit rejection, and an unreachable or
@@ -17,12 +18,20 @@ export function smtpFailureIsDefinite(err) {
   return /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|Connection timeout|Greeting never received/.test(String(err?.message || ''));
 }
 
-// Any send path's own "certainly did not deliver" signal: an SMTP-shaped definite failure (above)
-// or an explicit `.definite === true` a non-SMTP path (the Gmail API sender) attaches to a
-// classified, terminal error. Kept separate from smtpFailureIsDefinite itself so that function's
-// existing unit tests (pure SMTP error shapes) stay unchanged.
+// Any send path's own "certainly did not deliver" signal: an SMTP-shaped definite failure (above),
+// an explicit `.definite === true` a non-SMTP path (the Gmail API sender) attaches to a
+// classified, terminal error, an OAuth failure whose code is one of OAUTH_SEND_FAILURES (an
+// OAuthTokenError from a forced refresh — AUTH/the API request precedes any delivery either way,
+// for both Gmail and Microsoft mailboxes), or nodemailer's own EENVELOPE (no valid recipients —
+// never opens a connection) / EMESSAGE (failed to compile the message — never leaves the
+// process). Kept separate from smtpFailureIsDefinite itself so that function's existing unit
+// tests (pure SMTP error shapes) stay unchanged.
 export function sendFailureIsDefinite(err) {
-  return smtpFailureIsDefinite(err) || err?.definite === true;
+  return smtpFailureIsDefinite(err)
+    || err?.definite === true
+    || Object.hasOwn(OAUTH_SEND_FAILURES, err?.code)
+    || err?.code === 'EENVELOPE'
+    || err?.code === 'EMESSAGE';
 }
 
 // Connection/handshake-level SMTP failures — nodemailer's SMTPConnection reports these before

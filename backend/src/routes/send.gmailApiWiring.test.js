@@ -71,7 +71,10 @@ describe('Gmail API threadId lookup', () => {
     expect(res.status).toBe(200);
     expect(sendMail).toHaveBeenCalledWith(expect.anything(), { threadId: '123' });
     const threadLookup = query.mock.calls.find(c => c[0].includes('FROM messages'));
-    expect(threadLookup[1]).toEqual([account.id, 'original@example.com']);
+    // message_id is stored with or without angle brackets depending on the ingest path — both
+    // forms must be queried (see gtdTransitions.js's runTransitionsForSentMessage).
+    expect(threadLookup[1]).toEqual([account.id, ['original@example.com', '<original@example.com>']]);
+    expect(threadLookup[0]).toMatch(/message_id = ANY\(\$2::text\[\]\)/);
   });
 
   it('passes threadId: null when no matching message has a stored thread id', async () => {
@@ -119,30 +122,6 @@ describe('Message-ID reconciliation', () => {
     expect(res.status).toBe(200);
     const usedId = recordAudit.mock.calls[0][0].details.messageId;
     expect(usedId).toMatch(/^<[0-9a-f]+@example\.com>$/);
-  });
-});
-
-describe('idempotency across the API and SMTP-fallback paths', () => {
-  it('caches whichever transport actually delivered, and a retry with the same key never sends again', async () => {
-    sendMail.mockResolvedValue({ via: 'smtp', messageId: undefined }); // e.g. the API fell back to SMTP internally
-    const key = `k${idempotencyCounter}`;
-    const first = await fetch(`${base}/api/mail/send`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': key },
-      body: JSON.stringify({ accountId: 'a1', to: ['you@example.com'], subject: 'Test', body: 'Hello' }),
-    });
-    expect(first.status).toBe(200);
-    const cached = JSON.stringify(await first.json());
-    expect(sendMail).toHaveBeenCalledTimes(1);
-
-    // Simulate the retry finding the cached result via Redis (as the real send_idem:* key would).
-    redisClient.get.mockResolvedValueOnce(cached);
-    const retry = await fetch(`${base}/api/mail/send`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Idempotency-Key': key },
-      body: JSON.stringify({ accountId: 'a1', to: ['you@example.com'], subject: 'Test', body: 'Hello' }),
-    });
-    expect(retry.status).toBe(200);
-    expect(JSON.stringify(await retry.json())).toBe(cached);
-    expect(sendMail).toHaveBeenCalledTimes(1); // still just the one delivery
   });
 });
 

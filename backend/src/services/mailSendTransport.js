@@ -6,7 +6,8 @@
 // returned. See services/gmailApiSender.js for the HTTP mechanics and error classification.
 import { decrypt } from './encryption.js';
 import { createAccountSmtpTransport, oauthRefreshFailureResult } from './smtpTransport.js';
-import { ensureFreshOAuthAccount } from './oauth/tokenManager.js';
+import { ensureFreshOAuthAccount, markReconnectRequired, OAuthTokenError } from './oauth/tokenManager.js';
+import { PROVIDER_FETCH_TIMEOUT_MS } from './oauth/constants.js';
 import { markGmailApiDisabled, clearGmailApiDisabled } from './oauth/googleApps.js';
 import {
   GMAIL_API_TIMEOUT_MS,
@@ -19,7 +20,8 @@ const VALID_TRANSPORTS = new Set(['api', 'smtp']);
 let warnedInvalidTransport = false;
 
 // GMAIL_SEND_TRANSPORT=api|smtp, default api. An unrecognized value falls back to api with one
-// startup-time warning rather than silently misbehaving or crashing the process.
+// warning (see the eager call at the bottom of this module, so it lands in the startup log
+// rather than only appearing on the first Gmail send).
 function gmailSendTransportSetting() {
   const raw = process.env.GMAIL_SEND_TRANSPORT;
   if (raw === undefined || raw === '') return 'api';
@@ -47,24 +49,44 @@ async function attemptGmailApiSend(accessToken, rawMessage, threadId) {
   }
 }
 
-// Runs the whole Gmail API attempt: the initial send, one retry after a forced token refresh if
-// Google rejects the token, and one retry without threadId if Google refused only the threading
-// metadata (a 400 whose own message names the thread — the message itself was never a problem).
-// Resolves with the Message resource on success; throws a classified error otherwise (see
-// gmailApiSender.js) for the caller to act on.
-async function sendGmailApiMessage(account, rawMessage, threadId) {
-  let accessToken = decrypt(account.oauth_access_token);
+// A definite HTTP response in the 4xx range means Google looked at the request and refused it —
+// synchronously, before accepting anything. When threadId was part of that request, retrying
+// once without it is always safe (nothing was sent either way) and recovers from the one 4xx
+// cause that has nothing to do with the message itself: a stale/invalid threadId, which Gmail
+// answers with (for example) a 404 "Requested entity was not found" that says nothing about
+// "thread" for a pattern match to catch. Applies regardless of kind (terminal, fallback, or
+// reconnect) — the retry is free of side effects, so being broad here costs at most one extra
+// request in the reconnect/accessNotConfigured/quota cases where it can't help.
+function is4xxResponse(err) {
+  const status = err?.gmailClassification?.status;
+  return typeof status === 'number' && status >= 400 && status < 500;
+}
+
+async function attemptWithThreadFallback(accessToken, rawMessage, threadId) {
   try {
     return await attemptGmailApiSend(accessToken, rawMessage, threadId);
   } catch (err) {
-    if (err?.gmailClassification?.kind !== 'auth_retry') {
-      // Only a threadId-shaped definite refusal gets the no-threadId retry; anything else
-      // (fallback, uncertain, or a terminal rejection unrelated to threading) propagates as-is.
-      if (threadId && err?.gmailClassification?.kind === 'terminal' && /thread/i.test(err.gmailClassification.googleMessage || '')) {
-        return attemptGmailApiSend(accessToken, rawMessage, null);
-      }
-      throw err;
+    if (threadId && err?.gmailClassification?.kind !== 'auth_retry' && is4xxResponse(err)) {
+      return attemptGmailApiSend(accessToken, rawMessage, null);
     }
+    throw err;
+  }
+}
+
+// Runs the whole Gmail API attempt: the initial send (with one retry without threadId on a
+// definite 4xx, see attemptWithThreadFallback), then one retry after a forced token refresh if
+// Google rejects the token. Resolves with `{ result, accessToken }` (the token actually used, for
+// the caller's post-send Message-ID check) on success; throws a classified error otherwise (see
+// gmailApiSender.js) for the caller to act on. A 401 that still fails after the refresh — from
+// either attempt, since attemptWithThreadFallback's own no-threadId retry can hit one too — is
+// reported as its own 'reconnect' classification, never left to escape unclassified.
+async function sendGmailApiMessage(account, rawMessage, threadId) {
+  let accessToken = decrypt(account.oauth_access_token);
+  try {
+    const result = await attemptWithThreadFallback(accessToken, rawMessage, threadId);
+    return { result, accessToken };
+  } catch (err) {
+    if (err?.gmailClassification?.kind !== 'auth_retry') throw err;
     // The token the caller holds was rejected. Force one refresh — same tokenManager.js entry
     // point the SMTP transport uses on an AUTH rejection — and retry exactly once with the new
     // token. A refresh failure (including oauth_reconnect_required) propagates as its
@@ -72,11 +94,13 @@ async function sendGmailApiMessage(account, rawMessage, threadId) {
     const refreshed = await ensureFreshOAuthAccount(account, { force: true });
     accessToken = decrypt(refreshed.oauth_access_token);
     try {
-      return await attemptGmailApiSend(accessToken, rawMessage, threadId);
+      const result = await attemptWithThreadFallback(accessToken, rawMessage, threadId);
+      return { result, accessToken };
     } catch (retryErr) {
       if (retryErr?.gmailClassification?.kind === 'auth_retry') {
-        throw Object.assign(new Error('Gmail API rejected the access token after a refresh — please reconnect your account.'), {
-          gmailApi: true, code: 'gmail_api_auth_failed', status: 502, definite: true,
+        throw Object.assign(new Error('Gmail API rejected the access token after a refresh'), {
+          gmailApi: true,
+          gmailClassification: { kind: 'reconnect', googleMessage: retryErr.gmailClassification.googleMessage || '', status: 401 },
         });
       }
       throw retryErr;
@@ -89,11 +113,25 @@ async function sendGmailApiMessage(account, rawMessage, threadId) {
 // classifyGmailApiResponseError/classifyGmailApiNetworkError). A 'terminal' classification and an
 // unclassified network error (uncertain) both propagate unchanged: send.js's existing
 // smtpFailureIsDefinite/send_uncertain handling (extended with sendFailureIsDefinite, which also
-// honors `.definite`) already does the right thing with them.
+// honors `.definite`) already does the right thing with them. A 'reconnect' classification flags
+// the account through the same tokenManager.js path a failed token refresh uses, then reports it
+// as a standard OAuth failure — this also makes it `sendFailureIsDefinite` via the
+// OAUTH_SEND_FAILURES codes it now recognizes.
 async function sendViaGmailApiWithFallback(account, mailOptions, { threadId = null } = {}) {
-  const rawMessage = await buildRawMessage(mailOptions);
+  let rawMessage;
   try {
-    const result = await sendGmailApiMessage(account, rawMessage, threadId);
+    rawMessage = await buildRawMessage(mailOptions);
+  } catch (err) {
+    // Never reached the network — always safe to release the send's idempotency reservation and
+    // let the user retry. Logged with the real error; reported to the user with a generic one so
+    // internal MIME-building details never reach the response.
+    console.error(`Gmail API send: failed to build the raw message for account ${account.id}: ${err.message}`);
+    throw Object.assign(new Error('Failed to build the message for sending. Please try again.'), {
+      definite: true, code: 'mail_build_failed', status: 500,
+    });
+  }
+  try {
+    const { result, accessToken } = await sendGmailApiMessage(account, rawMessage, threadId);
     // Best-effort bookkeeping only, past this point: a successful send must never end up
     // reported as failed (or "uncertain") because a cleanup step threw.
     if (account.oauth_app_id) clearGmailApiDisabled(account.oauth_app_id).catch(() => {});
@@ -101,8 +139,11 @@ async function sendViaGmailApiWithFallback(account, mailOptions, { threadId = nu
     if (result?.id) {
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), GMAIL_API_TIMEOUT_MS);
-        const headerId = await getSentMessageIdHeader({ accessToken: decrypt(account.oauth_access_token), id: result.id, signal: controller.signal })
+        // A small metadata GET, not the up-to-35-MB upload — the long GMAIL_API_TIMEOUT_MS budget
+        // would only delay reporting a hung request. Reuses the token that actually worked for the
+        // send (which may be the one from a mid-flow refresh), not account's possibly-stale one.
+        const timer = setTimeout(() => controller.abort(), PROVIDER_FETCH_TIMEOUT_MS);
+        const headerId = await getSentMessageIdHeader({ accessToken, id: result.id, signal: controller.signal })
           .finally(() => clearTimeout(timer));
         if (headerId) messageId = headerId;
       } catch (err) {
@@ -111,7 +152,13 @@ async function sendViaGmailApiWithFallback(account, mailOptions, { threadId = nu
     }
     return { via: 'api', messageId };
   } catch (err) {
-    if (err?.gmailClassification?.kind !== 'fallback') throw err;
+    const kind = err?.gmailClassification?.kind;
+    if (kind === 'reconnect') {
+      await markReconnectRequired(account.id, account.oauth_refresh_token)
+        .catch((e) => console.error(`Flagging oauth_reconnect_required failed for account ${account.id}: ${e.message}`));
+      throw new OAuthTokenError('oauth_reconnect_required');
+    }
+    if (kind !== 'fallback') throw err;
     if (err.gmailClassification.disableApi && account.oauth_app_id) {
       markGmailApiDisabled(account.oauth_app_id).catch((e) => console.error(`Flagging Gmail API disabled failed for app ${account.oauth_app_id}: ${e.message}`));
     }
@@ -134,7 +181,16 @@ async function sendViaGmailApiWithFallback(account, mailOptions, { threadId = nu
 // is normally mailOptions.messageId unchanged, but may be the id Gmail itself reports if it ever
 // differs (see gmailApiSender.js's getSentMessageIdHeader).
 export async function createAccountSendTransport(inputAccount) {
-  if (!shouldUseGmailApi(inputAccount)) return createAccountSmtpTransport(inputAccount);
+  if (!shouldUseGmailApi(inputAccount)) {
+    // A Gmail account forced to SMTP by GMAIL_SEND_TRANSPORT=smtp never gets to prove the API
+    // works again (it never tries), so an earlier gmail_api_disabled_at would otherwise sit on
+    // the admin card forever — clear it, since it is not the app's fault and there's nothing an
+    // admin can act on. Only for Gmail; other providers never set the flag.
+    if (inputAccount?.oauth_provider === 'google' && inputAccount?.oauth_app_id) {
+      clearGmailApiDisabled(inputAccount.oauth_app_id).catch(() => {});
+    }
+    return createAccountSmtpTransport(inputAccount);
+  }
 
   let account = inputAccount;
   try {
@@ -155,3 +211,8 @@ export async function createAccountSendTransport(inputAccount) {
     },
   };
 }
+
+// Eagerly validate GMAIL_SEND_TRANSPORT at import time (routes/send.js pulls this module in at
+// backend startup) so a misconfigured value is visible in the boot log, not only on the first
+// Gmail send — matches the comment on gmailSendTransportSetting above.
+gmailSendTransportSetting();

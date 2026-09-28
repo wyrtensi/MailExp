@@ -73,8 +73,33 @@ describe('classifyGmailApiResponseError', () => {
     expect(c).toMatchObject({ kind: 'fallback', reason: 'rate_limited' });
   });
 
-  it('treats a 5xx as a fallback (not accepted)', () => {
-    expect(classifyGmailApiResponseError(503, { error: { message: 'Backend Error' } })).toMatchObject({ kind: 'fallback', reason: 'http_503' });
+  it('treats "User-rate limit exceeded ... (Mail sending)" (a 429) as the mailbox quota, terminal', () => {
+    const c = classifyGmailApiResponseError(429, { error: { message: 'User-rate limit exceeded. (Mail sending)' } });
+    expect(c).toMatchObject({ kind: 'terminal', code: 'gmail_quota_exceeded' });
+  });
+
+  it('does not treat a 403 that merely mentions "quota" as the daily limit — that also covers per-minute throttling', () => {
+    const c = classifyGmailApiResponseError(403, { error: { message: 'Quota exceeded for quota metric X per minute' } });
+    expect(c.code).not.toBe('gmail_quota_exceeded');
+  });
+
+  it('maps insufficientPermissions/ACCESS_TOKEN_SCOPE_INSUFFICIENT to a reconnect classification, not a fallback or a generic refusal', () => {
+    const byReason = classifyGmailApiResponseError(403, { error: { message: 'Insufficient Permission', errors: [{ reason: 'insufficientPermissions' }] } });
+    expect(byReason).toMatchObject({ kind: 'reconnect', status: 403 });
+    const byMessage = classifyGmailApiResponseError(403, { error: { message: 'Request had insufficient authentication scopes. (ACCESS_TOKEN_SCOPE_INSUFFICIENT)' } });
+    expect(byMessage.kind).toBe('reconnect');
+  });
+
+  it('keeps Google\'s real HTTP status separate from the status shown to our own caller', () => {
+    // A daily-limit 403 from Google is reported to our caller as 429 (Too Many Requests), but the
+    // real Google status (403) is what mailSendTransport.js's threadId-retry logic must see.
+    const c = classifyGmailApiResponseError(403, { error: { message: 'dailyLimitExceeded', errors: [{ reason: 'dailyLimitExceeded' }] } });
+    expect(c.status).toBe(403);
+    expect(c.responseStatus).toBe(429);
+  });
+
+  it('treats a 5xx as uncertain, not a fallback — Google may have accepted it before failing', () => {
+    expect(classifyGmailApiResponseError(503, { error: { message: 'Backend Error' } })).toMatchObject({ kind: 'uncertain', status: 503 });
   });
 
   it('treats an invalid recipient as terminal', () => {

@@ -610,4 +610,34 @@ describe('forwardRuleMessage', () => {
     await expect(forwardRuleMessage(input)).rejects.toThrow('Forward delivery pending');
     expect(transport.sendMail).toHaveBeenCalledTimes(1);
   });
+
+  // An OAuthTokenError from sendMail's own forced token refresh (Gmail via
+  // mailSendTransport.js, or Microsoft via smtpTransport.js's createOAuthSmtpTransport) has no
+  // responseCode and no message smtpFailureIsDefinite's regex matches — AUTH (or the equivalent
+  // API request) never got far enough to deliver anything, so sendFailureIsDefinite (extended to
+  // recognize the OAUTH_SEND_FAILURES codes) must still call this definite and clear the
+  // reservation rather than leaving it pending forever.
+  it('clears the reservation for an OAuthTokenError thrown during sendMail (both Gmail and Microsoft mailboxes)', async () => {
+    const { OAuthTokenError } = await import('./oauth/tokenManager.js');
+    let reservationStatus = null;
+    transport.sendMail.mockRejectedValueOnce(new OAuthTokenError('oauth_reconnect_required'));
+    query.mockImplementation(async sql => {
+      if (sql.includes('INSERT INTO inbox_rule_forwards')) {
+        if (reservationStatus) return { rows: [] };
+        reservationStatus = 'pending';
+        return { rows: [{ id: 'delivery-1' }] };
+      }
+      if (sql.includes('FROM messages')) {
+        return { rows: [messageRow] };
+      }
+      if (sql.includes('DELETE FROM inbox_rule_forwards')) {
+        reservationStatus = null;
+        return { rows: [] };
+      }
+      throw new Error('Unexpected query');
+    });
+
+    await expect(forwardRuleMessage(input)).rejects.toThrow('Forward delivery failed');
+    expect(reservationStatus).toBeNull();
+  });
 });

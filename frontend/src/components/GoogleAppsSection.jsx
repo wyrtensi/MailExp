@@ -318,7 +318,7 @@ export default function GoogleAppsSection() {
                     </tr>
                     {gmailApiWarningKey && (
                       <tr>
-                        <td colSpan={6} style={{ ...cellStyle, color: 'var(--text-tertiary)', fontSize: 12 }}>
+                        <td colSpan={6} style={{ ...cellStyle, color: 'var(--amber)', fontSize: 12 }}>
                           {t(gmailApiWarningKey)}
                         </td>
                       </tr>
