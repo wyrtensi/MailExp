@@ -32,3 +32,6 @@ Thumbs.db
 
 .superpowers/
 output/
+
+# Local secrets for manual setup (e.g. a Google Cloud OAuth client file) - never committed
+/data/
