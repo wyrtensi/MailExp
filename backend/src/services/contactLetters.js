@@ -50,11 +50,15 @@ function addressList(value) {
 //   $5/$6 = unnest pair (account_id, folder) to skip — each account's own trash/spam/drafts path.
 //   $7/$8 = unnest pair (account_id, folder) — each account's own Inbox path, preferred on a
 //           dedup tie (see the `filtered` comment below).
-//   $9/$10 = unnest pair (account_id, folder) — each account's own Sent path (folder_mappings.sent
-//            only; unlike mailboxBanner.js's JS rule this does not fall back to special_use, to
-//            avoid a per-account query over the fleet's `folders` table on every contact click).
-//            Used both for the dedup tie (second choice, after Inbox) and, inside candidates_out,
-//            to decide whether an own-sent letter is 'out' outright.
+//   $9/$10 = unnest pair (account_id, folder) — each account's own Sent path, when
+//            folder_mappings.sent is configured. Most Gmail mailboxes have no such mapping — only
+//            special_use='\Sent' on the "[Gmail]/Sent Mail" folders row — so this is OR'd with a
+//            live EXISTS against `folders` below, not the sole signal. Used both for the dedup
+//            tie (second choice, after Inbox) and, inside candidates_out, to decide whether an
+//            own-sent letter is 'out' outright — matching mailboxBanner.js's isSentFolder exactly
+//            (folder_mappings.sent OR special_use), unlike an earlier version of this file that
+//            checked folder_mappings.sent alone and so read a self-sent Gmail letter filed in
+//            "[Gmail]/Sent Mail" as 'in' instead of 'out'.
 //
 // The 'in' branch's leading filter (account_id = ANY($1) AND lower(from_email) = ANY($2), where
 // $2 is just the contact's own handful of addresses) is index-assisted by
@@ -63,7 +67,17 @@ function addressList(value) {
 // bounded set per account), and then checks the recipient side with the GIN-indexed
 // message_recipient_addresses() (migration 0071) rather than a per-row jsonb_array_elements scan
 // — with 50-100 mailboxes, scanning every sent letter in the fleet row by row was the actual cost
-// this function used to pay on every contact click.
+// this function used to pay on every contact click. The special_use EXISTS below is a single
+// extra join against `folders`, not a per-account round trip — folders(account_id, path) carries
+// a UNIQUE constraint (migration 0001), so it is index-assisted the same way.
+const isSentSql = (table) => `(
+        EXISTS (SELECT 1 FROM sent WHERE sent.account_id = ${table}.account_id AND sent.folder = ${table}.folder)
+        OR EXISTS (
+          SELECT 1 FROM folders f
+          WHERE f.account_id = ${table}.account_id AND f.path = ${table}.folder AND f.special_use = '\\Sent'
+        )
+      )`;
+
 const FILTERED_CTE_SQL = `
   WITH own(account_id, email) AS (
     SELECT * FROM unnest($3::uuid[], $4::text[])
@@ -96,7 +110,7 @@ const FILTERED_CTE_SQL = `
       -- (Gmail keeps it in both Sent and Inbox), so outside Sent it reads as 'in' — same rule as
       -- mailboxBanner.js/conversation.js.
       CASE
-        WHEN EXISTS (SELECT 1 FROM sent WHERE sent.account_id = m.account_id AND sent.folder = m.folder) THEN 'out'
+        WHEN ${isSentSql('m')} THEN 'out'
         WHEN message_recipient_addresses(m.to_addresses, m.cc_addresses)
           && (SELECT COALESCE(array_agg(own.email), '{}') FROM own WHERE own.account_id = m.account_id)
         THEN 'in'
@@ -127,7 +141,7 @@ const FILTERED_CTE_SQL = `
     ORDER BY account_id, COALESCE(message_id, id::text),
       CASE
         WHEN EXISTS (SELECT 1 FROM inbox WHERE inbox.account_id = candidates.account_id AND inbox.folder = candidates.folder) THEN 0
-        WHEN EXISTS (SELECT 1 FROM sent WHERE sent.account_id = candidates.account_id AND sent.folder = candidates.folder) THEN 1
+        WHEN ${isSentSql('candidates')} THEN 1
         ELSE 2
       END,
       date DESC, id
