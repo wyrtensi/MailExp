@@ -1278,9 +1278,11 @@ function AccountsTab() {
 }
 
 // ─── Themes Tab ───────────────────────────────────────────────────────────────
-function ThemesTab() {
+// Exported (only this one, everything else here stays private) so ThemesTab.render.test.js can
+// mount it directly instead of the whole admin panel, for the "как в системе" checkbox (#508).
+export function ThemesTab() {
   const { t } = useTranslation();
-  const { theme, setTheme } = useStore();
+  const { theme, setTheme, themeFollowsSystem, setThemeFollowsSystem } = useStore();
   const [customCss, setCustomCss] = useState('');
   const [cssSaving, setCssSaving] = useState(false);
   const [cssSaved, setCssSaved] = useState(false);
@@ -1321,6 +1323,19 @@ function ThemesTab() {
       <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 20 }}>
         {t('admin.appearance.description')}
       </div>
+
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer', marginBottom: 16 }}>
+        <input
+          type="checkbox"
+          checked={themeFollowsSystem}
+          onChange={e => setThemeFollowsSystem(e.target.checked)}
+          style={{ marginTop: 2, flexShrink: 0 }}
+        />
+        <div>
+          <div>{t('admin.appearance.matchSystem')}</div>
+          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.appearance.matchSystemHint')}</div>
+        </div>
+      </label>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
         {Object.entries(THEMES).map(([key, themeObj]) => (

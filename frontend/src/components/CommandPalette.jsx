@@ -6,7 +6,7 @@ import { THEMES } from '../themes.js';
 
 const THEME_NAMES = Object.keys(THEMES);
 
-function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, accounts, selectedAccountId }) {
+function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId }) {
   const actions = [
     {
       id: 'compose',
@@ -34,6 +34,16 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
     },
   ];
 
+  // "как в системе": one toggle command, kept apart from the per-theme switches below since
+  // those already turn it off (setTheme does) — this is the only way back on from here.
+  actions.push({
+    id: 'theme:system',
+    label: t('commandPalette.actions.matchSystemTheme'),
+    icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
+    active: themeFollowsSystem,
+    run: () => setThemeFollowsSystem(true),
+  });
+
   // Theme switch actions
   for (const themeKey of THEME_NAMES) {
     const label = THEMES[themeKey]?.label || themeKey;
@@ -41,7 +51,9 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
       id: `theme:${themeKey}`,
       label: t('commandPalette.actions.switchTheme', { theme: label }),
       icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>,
-      active: theme === themeKey,
+      // Not active while following the system, even if it happens to match the last hand
+      // pick — "Match system theme" carries the checkmark then, so only one row ever does.
+      active: theme === themeKey && !themeFollowsSystem,
       run: () => setTheme(themeKey),
     });
   }
@@ -62,14 +74,14 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
 export default function CommandPalette({ open, onClose }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, accounts, selectedAccountId } = useStore();
+  const { openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId } = useStore();
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [listScrolled, setListScrolled] = useState(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
 
-  const actions = buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, accounts, selectedAccountId });
+  const actions = buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId });
 
   const filtered = query.trim()
     ? actions.filter(a => a.label.toLowerCase().includes(query.toLowerCase()))

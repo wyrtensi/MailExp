@@ -296,6 +296,7 @@ const ACCESS_SYNC_FIXTURE = {
 
 const DEFAULT_PREFERENCES = {
   theme: 'daylight',
+  themeFollowsSystem: true,
   language: 'en',
   pageSize: 50,
   threadedView: true,
