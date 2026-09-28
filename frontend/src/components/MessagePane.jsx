@@ -112,7 +112,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const {
     messages, searchResults, searchQuery, selectedMessageId: globalSelectedId, setSelectedMessage,
     updateMessage, removeMessage, decrementUnread, incrementUnread, openCompose, accounts, addNotification,
-    imageWhitelist, addToImageWhitelist, blockRemoteImages, threadMessages,
+    imageWhitelist, addToImageWhitelist, blockRemoteImages, threadMessages, folders,
     replyDefault, shortcuts, recentFolders, favoriteFolders, todoistConnected,
     categorizationEnabled, setCategoryCounts, adjustCategoryCount,
     aiActions, setShowAdmin, setAdminTab,
@@ -2614,7 +2614,7 @@ ${bodyContent}
           {/* Which mailbox this letter is in: with many shared mailboxes it leads the card. */}
           {(() => {
             const account = accounts.find(a => a.id === message.account_id);
-            const banner = mailboxBanner(message, account);
+            const banner = mailboxBanner(message, account, folders[message.account_id]);
             const color = message.account_color || account?.color || 'var(--accent)';
             return (
               <div style={{

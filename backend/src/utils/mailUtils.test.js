@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mappedFolderUsable, resolveTrashFolder, resolveArchiveFolder, resolveSentFolder, isAllMailFolder, resolveSpamFolder, getDeleteStrategy, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from './mailUtils.js';
+import { mappedFolderUsable, resolveTrashFolder, resolveArchiveFolder, resolveSentFolder, resolveAllSentPaths, isAllMailFolder, resolveSpamFolder, getDeleteStrategy, fanOutReadToSiblings, fanOutStarToSiblings, fanOutBulkReadToSiblings } from './mailUtils.js';
 
 vi.mock('../services/db.js', () => ({
   query: vi.fn(),
@@ -214,6 +214,27 @@ describe('resolveSentFolder', () => {
   it('returns null when no Sent folder can be resolved', async () => {
     query.mockResolvedValue({ rows: [] });
     expect(await resolveSentFolder(1, {})).toBeNull();
+  });
+});
+
+describe('resolveAllSentPaths', () => {
+  it('returns only the mapped folder when it is selectable, even if other \\Sent folders exist', async () => {
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }); // mappedFolderUsable finds it
+    const result = await resolveAllSentPaths(1, { sent: 'INBOX.Sent' });
+    expect(result).toEqual(new Set(['INBOX.Sent']));
+    expect(query).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to every special_use=\\Sent folder when no mapping is set', async () => {
+    query.mockResolvedValue({ rows: [{ path: 'Sent' }, { path: '[Gmail]/Sent Mail' }] });
+    const result = await resolveAllSentPaths(1, null);
+    expect(result).toEqual(new Set(['Sent', '[Gmail]/Sent Mail']));
+    expect(query.mock.calls[0][0]).toContain("special_use = '\\Sent'");
+  });
+
+  it('returns an empty set when no Sent folder is found', async () => {
+    query.mockResolvedValue({ rows: [] });
+    expect(await resolveAllSentPaths(1, {})).toEqual(new Set());
   });
 });
 

@@ -52,6 +52,13 @@ beforeAll(async () => {
     row(7, SALES, 'INBOX', '<f@c>', '2026-09-06T10:00:00Z', 'maya@c.example', { deleted: true }),
     row(8, SALES, 'INBOX', '<g@c>', '2026-09-07T10:00:00Z', 'boss@c.example', { thread: 't2' }),
     row(9, OPS, 'INBOX', '<a@c>', '2026-09-01T10:00:00Z', 'maya@c.example'), // same thread, other mailbox
+    // Self-sent (from = to = sales@x.example): 'in' outside Sent, 'out' in Sent.
+    row(10, SALES, 'INBOX', '<self1@x>', '2026-09-10T10:00:00Z', 'sales@x.example', { thread: 't3', to: [{ email: 'sales@x.example' }] }),
+    row(11, SALES, 'Sent', '<self2@x>', '2026-09-11T10:00:00Z', 'sales@x.example', { thread: 't4', to: [{ email: 'sales@x.example' }] }),
+    // Same self-sent letter filed in both Inbox and Sent (Gmail keeps a copy in each) — the
+    // dedup must keep exactly one copy, and it must be the Inbox one (see the SQL tie-break).
+    row(12, SALES, 'INBOX', '<self3@x>', '2026-09-12T10:00:00Z', 'sales@x.example', { thread: 't5', to: [{ email: 'sales@x.example' }] }),
+    row(13, SALES, 'Sent', '<self3@x>', '2026-09-12T10:00:00Z', 'sales@x.example', { thread: 't5', to: [{ email: 'sales@x.example' }] }),
   ];
   for (const r of rows) {
     await db.query(`INSERT INTO messages (id, account_id, thread_key, message_id, folder, subject, snippet, date,
@@ -104,5 +111,20 @@ describe('conversation', () => {
   it('is null for an unknown or deleted letter', async () => {
     expect(await conversation(id(7))).toBeNull();
     expect(await conversation('20000000-0000-0000-0000-00000000ffff')).toBeNull();
+  });
+
+  it('marks a letter the mailbox sent to itself "in" outside Sent, and "out" inside Sent', async () => {
+    const outsideSent = await conversation(id(10));
+    expect(outsideSent.items.map((i) => i.direction)).toEqual(['in']);
+
+    const insideSent = await conversation(id(11));
+    expect(insideSent.items.map((i) => i.direction)).toEqual(['out']);
+  });
+
+  it('dedups a self-sent letter filed in both Inbox and Sent to its Inbox copy, read as received', async () => {
+    const result = await conversation(id(12));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].folder).toBe('INBOX');
+    expect(result.items[0].direction).toBe('in');
   });
 });

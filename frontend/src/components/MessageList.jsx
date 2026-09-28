@@ -3854,6 +3854,7 @@ export default function MessageList() {
                 key={cacheKey}
                 message={message}
                 account={accountsById[message.account_id]}
+                folderList={folders[message.account_id]}
                 isExpanded={expandedThreadId === cacheKey}
                 threadMsgs={threadMessages[cacheKey] || null}
                 isLoadingThread={loadingThread === cacheKey}
@@ -3905,6 +3906,7 @@ export default function MessageList() {
                 key={message.id}
                 message={message}
                 account={accountsById[message.account_id]}
+                folderList={folders[message.account_id]}
                 selected={isSelectedRow(message, selectedMessageId, selectedMid, selectedAcct)}
                 lastViewed={lastViewedMessageId === message.id && selectedMessageId !== message.id}
                 isChecked={selectedIds.has(message.id)}
@@ -4363,7 +4365,7 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
   );
 }
 
-function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress }) {
+function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoadingThread, selectedMessageId, selectedMid, selectedAcct, lastViewedMessageId, showAccount, isNarrow, onThreadClick, onThreadToggle, showMobileAvatars, showMessagePreviews, onSelect, onOpenWindow, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, isChecked, selectionMode, onToggleSelect, onRangeSelect, onModifierSelect, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const messageCount = message.message_count || 1;
@@ -4570,7 +4572,7 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
                   // e.g. a group thread where two different people wrote into the same INBOX.
                   direction={isDraftFolder(message.folder, account.folder_mappings)
                     ? 'draft'
-                    : mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account).direction}
+                    : mailboxBanner({ ...message, from_email: message.latest_from_email ?? message.from_email }, account, folderList).direction}
                   compact={isNarrow || isMobile}
                 />
               )}
@@ -4682,7 +4684,7 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
                       // this is its own real sender — no root-vs-latest ambiguity here, unlike
                       // the collapsed thread row above.
                       <DirectionBadge
-                        direction={isDraftFolder(msg.folder, account.folder_mappings) ? 'draft' : mailboxBanner(msg, account).direction}
+                        direction={isDraftFolder(msg.folder, account.folder_mappings) ? 'draft' : mailboxBanner(msg, account, folderList).direction}
                         compact={isNarrow || isMobile}
                       />
                     )}
@@ -4707,7 +4709,7 @@ function ThreadRow({ message, account, isExpanded, threadMsgs, isLoadingThread, 
   );
 }
 
-function MessageRow({ message, account, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
+function MessageRow({ message, account, folderList, selected, lastViewed, isChecked, selectionMode, showAccount, isNarrow, onSelect, onOpenWindow, onToggleSelect, onRangeSelect, onModifierSelect, onAvatarClick, showMobileAvatars, showMessagePreviews, onMarkRead, onStar, onDelete, hoverQuickActions, hoverActionSet, onArchive, onSnooze, onContextMenu, onMove, onDragStart, isMobile, swipeLeftAction, swipeRightAction, onSwipeLeft, onSwipeRight, onLongPress }) {
   const { t } = useTranslation();
   const [hovered, setHovered] = useState(false);
   const [avatarHovered, setAvatarHovered] = useState(false);
@@ -4914,7 +4916,7 @@ function MessageRow({ message, account, selected, lastViewed, isChecked, selecti
               <DirectionBadge
                 direction={isDraftFolder(message.folder, account.folder_mappings)
                   ? 'draft'
-                  : mailboxBanner(message, account).direction}
+                  : mailboxBanner(message, account, folderList).direction}
                 compact={isNarrow || isMobile}
               />
             )}

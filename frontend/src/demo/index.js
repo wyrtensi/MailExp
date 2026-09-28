@@ -787,6 +787,8 @@ function demoSenderHistory(id) {
   if (!current) return { correspondent: null, total: 0, items: [] };
   const account = ACCOUNT_FIXTURES.find(item => item.id === current.account_id);
   const own = account?.email_address;
+  const mappings = account?.folder_mappings || {};
+  const ownSet = new Set([account?.email_address, ...(account?.aliases || []).map(a => a.email)].map(normalizeEmail));
   const other = current.from_email === own ? current.to_addresses[0]?.email : current.from_email;
   const earlier = MESSAGE_FIXTURES
     .filter(m => m.id !== id && m.account_id === current.account_id && m.date < current.date)
@@ -797,7 +799,7 @@ function demoSenderHistory(id) {
     total: earlier.length,
     items: earlier.slice(0, 5).map(m => ({
       id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
-      direction: m.from_email === own ? 'out' : 'in',
+      direction: letterDirection(m, mappings, ownSet),
     })),
   };
 }
@@ -805,6 +807,9 @@ function demoSenderHistory(id) {
 // The open letter's conversation in its mailbox (GET /api/mail/messages/:id/conversation), the
 // server's rules (services/conversation.js) over the demo's `messages`: same mailbox and thread
 // key, trash and spam left out, one copy per letter, oldest first, drafts marked as drafts.
+// Direction matches mailboxBanner()/conversation.js exactly: an own sender is 'out' only in the
+// account's Sent folder, or when none of the recipients is the account itself — a letter the
+// mailbox sent to itself (own address in own recipients) is also a received copy outside Sent.
 function demoConversation(id) {
   const current = messageById(id);
   if (!current) return null;
@@ -826,9 +831,20 @@ function demoConversation(id) {
       id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
       from_name: m.from_name, from_email: m.from_email, to_addresses: m.to_addresses, cc_addresses: m.cc_addresses,
       has_attachments: !!m.has_attachments,
-      direction: m.folder === mappings.drafts ? 'draft' : own.has(normalizeEmail(m.from_email)) ? 'out' : 'in',
+      direction: m.folder === mappings.drafts ? 'draft' : letterDirection(m, mappings, own),
     }));
   return { threadKey: current.thread_key, total: items.length, items };
+}
+
+// Shared by demoConversation and demoContactLetters: 'out' when the account (or an alias) wrote
+// the letter AND it sits in the account's own Sent folder, or none of its recipients is the
+// account itself; otherwise (including every letter someone else wrote) 'in'.
+function letterDirection(m, mappings, own) {
+  const from = normalizeEmail(m.from_email);
+  if (!own.has(from)) return 'in';
+  if (mappings.sent && m.folder === mappings.sent) return 'out';
+  const recipients = [...(m.to_addresses || []), ...(m.cc_addresses || [])].map(r => normalizeEmail(r.email));
+  return recipients.some(r => own.has(r)) ? 'in' : 'out';
 }
 
 // A contact's correspondence across every enabled mailbox (GET /api/contacts/:id/letters), the
@@ -836,9 +852,9 @@ function demoConversation(id) {
 // own address = the mailbox's address plus its aliases, per mailbox; trash/spam/drafts are
 // skipped per mailbox's own folder mapping; a letter counts once per mailbox by message_id;
 // newest first. Precedence matches mailboxBanner() / contactLetters.js exactly: an own address
-// as the sender always wins ('out', once the contact is confirmed in the recipients) — checked
-// BEFORE the contact-address match, so a contact whose address happens to be one of our own
-// mailboxes is never misread as having "sent" us its own outgoing mail.
+// as the sender always wins ('out'/'in' via letterDirection, once the contact is confirmed in
+// the recipients) — checked BEFORE the contact-address match, so a contact whose address happens
+// to be one of our own mailboxes is never misread as having "sent" us its own outgoing mail.
 function demoContactLetters(contactId, { limit = 20, offset = 0 } = {}) {
   const contact = contacts.find(item => item.id === contactId);
   if (!contact) return null;
@@ -858,7 +874,7 @@ function demoContactLetters(contactId, { limit = 20, offset = 0 } = {}) {
     const from = normalizeEmail(m.from_email);
     if (own.has(from)) {
       const recipients = [...(m.to_addresses || []), ...(m.cc_addresses || [])].map(r => normalizeEmail(r.email));
-      if (recipients.some(r => addresses.has(r))) acc.push({ message: m, direction: 'out' });
+      if (recipients.some(r => addresses.has(r))) acc.push({ message: m, direction: letterDirection(m, mappings, own) });
       return acc;
     }
     if (addresses.has(from)) acc.push({ message: m, direction: 'in' });

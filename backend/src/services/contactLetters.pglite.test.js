@@ -53,6 +53,10 @@ const M8 = '20000000-0000-0000-0000-000000000008'; // pagination tie, letter A
 const M9 = '20000000-0000-0000-0000-000000000009'; // pagination tie, letter B
 const M_SELF_SENT = '30000000-0000-0000-0000-000000000001'; // precedence: own address, not to contact2
 const M_CROSS_MAILBOX = '30000000-0000-0000-0000-000000000002'; // sales@ writes to ops@ — a genuine 'in' for contact2
+const M_SELF_ADDRESSED_INBOX = '30000000-0000-0000-0000-000000000003'; // sales@ -> sales@, in INBOX: 'in'
+const M_SELF_ADDRESSED_SENT = '30000000-0000-0000-0000-000000000004'; // sales@ -> sales@, in Sent: 'out'
+const M_SELF_DEDUP_INBOX = '30000000-0000-0000-0000-000000000005'; // same letter filed in both Inbox...
+const M_SELF_DEDUP_SENT = '30000000-0000-0000-0000-000000000006'; // ...and Sent — Inbox copy must survive
 
 let db;
 
@@ -146,6 +150,14 @@ beforeAll(async () => {
     // 'in' for contact2 at acct-ops: sales@x.example writes to ops@x.example. sales@x.example is
     // NOT acct-ops's own address there, so this is a normal incoming letter for contact2.
     [M_CROSS_MAILBOX, ACCT_OPS, 'INBOX', 'sales@x.example', rcpt('ops@x.example'), '2026-09-09T10:00:00Z', 'msg-cross-mailbox'],
+    // Self-sent for contact2 (contact2's address == acct-sales's own address): 'in' outside Sent...
+    [M_SELF_ADDRESSED_INBOX, ACCT_SALES, 'INBOX', 'sales@x.example', rcpt('sales@x.example'), '2026-09-10T10:00:00Z', 'msg-self-inbox'],
+    // ...and 'out' when the same shape of letter sits in the account's own Sent folder.
+    [M_SELF_ADDRESSED_SENT, ACCT_SALES, 'Sent', 'sales@x.example', rcpt('sales@x.example'), '2026-09-11T10:00:00Z', 'msg-self-sent'],
+    // Same self-sent letter (same message_id) filed in both Inbox and Sent, as Gmail does: the
+    // dedup must keep exactly one copy, and it must be the Inbox one (direction 'in').
+    [M_SELF_DEDUP_INBOX, ACCT_SALES, 'INBOX', 'sales@x.example', rcpt('sales@x.example'), '2026-09-12T10:00:00Z', 'msg-self-dedup'],
+    [M_SELF_DEDUP_SENT, ACCT_SALES, 'Sent', 'sales@x.example', rcpt('sales@x.example'), '2026-09-12T10:00:00Z', 'msg-self-dedup'],
   ];
   for (const [id, accountId, folder, from, to, date, messageId] of messages) {
     await db.query(`
@@ -214,6 +226,23 @@ describe('contactLetters — behavioural (PGlite)', () => {
     // The genuine cross-mailbox incoming letter must count as 'in'.
     const crossMailbox = result.items.find((i) => i.id === M_CROSS_MAILBOX);
     expect(crossMailbox?.direction).toBe('in');
+  });
+
+  it('a letter the mailbox sent to itself is "in" outside Sent, and "out" inside Sent', async () => {
+    const result = await contactLetters(CONTACT_SELF_MAILBOX, { limit: 50, offset: 0 });
+    const inbox = result.items.find((i) => i.id === M_SELF_ADDRESSED_INBOX);
+    const sent = result.items.find((i) => i.id === M_SELF_ADDRESSED_SENT);
+    expect(inbox?.direction).toBe('in');
+    expect(sent?.direction).toBe('out');
+  });
+
+  it('dedups a self-sent letter filed in both Inbox and Sent to its Inbox copy, read as received', async () => {
+    const result = await contactLetters(CONTACT_SELF_MAILBOX, { limit: 50, offset: 0 });
+    const survivors = result.items.filter((i) => [M_SELF_DEDUP_INBOX, M_SELF_DEDUP_SENT].includes(i.id));
+    expect(survivors.length).toBe(1);
+    expect(survivors[0].id).toBe(M_SELF_DEDUP_INBOX);
+    expect(survivors[0].folder).toBe('INBOX');
+    expect(survivors[0].direction).toBe('in');
   });
 
   it('is null for an unknown contact', async () => {
