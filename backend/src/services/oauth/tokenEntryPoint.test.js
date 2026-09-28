@@ -22,16 +22,19 @@ const files = sourceFiles(SRC).map((path) => ({
 }));
 
 describe('OAuth token entry point (static)', () => {
-  it('decrypts stored access tokens only in the IMAP and SMTP transport builders', () => {
+  it('decrypts stored access tokens only in the IMAP, SMTP and Gmail-API-send transport builders', () => {
     const offenders = files
       .filter(({ text }) => /decrypt\(\s*[\w.]*oauth_access_token\s*\)/.test(text))
       .map(({ rel }) => rel)
       .sort();
-    expect(offenders).toEqual(['services/imapManager.js', 'services/smtpTransport.js']);
+    // mailSendTransport.js is a sibling of smtpTransport.js: it builds the Gmail API's own
+    // send transport (and falls back to smtpTransport.js's), so it decrypts a fresh access
+    // token the same way.
+    expect(offenders).toEqual(['services/imapManager.js', 'services/mailSendTransport.js', 'services/smtpTransport.js']);
   });
 
-  it('refreshes through the token manager in both transport builders', () => {
-    for (const rel of ['services/imapManager.js', 'services/smtpTransport.js']) {
+  it('refreshes through the token manager in every transport builder', () => {
+    for (const rel of ['services/imapManager.js', 'services/mailSendTransport.js', 'services/smtpTransport.js']) {
       const { text } = files.find(f => f.rel === rel);
       expect(text, rel).toMatch(/import \{[^}]*\bensureFreshOAuthAccount\b[^}]*\} from '\.\/oauth\/tokenManager\.js'/);
     }

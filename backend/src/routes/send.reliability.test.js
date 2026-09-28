@@ -14,7 +14,7 @@ import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
 
 const account = {
-  id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'google',
+  id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'microsoft', // non-Gmail OAuth: exercises serverAutoSaves without the new Gmail-API send path
   smtp_host: 'smtp.gmail.com', smtp_port: 465,
 };
 const sendMail = vi.fn();

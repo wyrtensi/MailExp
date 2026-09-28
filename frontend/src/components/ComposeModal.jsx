@@ -912,6 +912,13 @@ export default function ComposeModal() {
         setTimeout(refreshThread, 10000);
       }
     } catch (err) {
+      const GMAIL_API_ERROR_KEYS = {
+        gmail_quota_exceeded: 'compose.gmailQuotaExceeded',
+        gmail_message_too_large: 'compose.gmailMessageTooLarge',
+        gmail_invalid_recipient: 'compose.gmailInvalidRecipient',
+        gmail_access_refused: 'compose.gmailAccessRefused',
+        gmail_api_auth_failed: 'compose.gmailApiAuthFailed',
+      };
       if (err.code === 'send_uncertain') {
         setError(t('compose.sendUncertain'));
       } else if (err.code === 'smtp_connection_failed') {
@@ -922,6 +929,8 @@ export default function ComposeModal() {
           target,
           reason: t(`compose.smtpConnectionReasons.${err.reason}`, t('compose.smtpConnectionReasons.unknown')),
         }));
+      } else if (Object.hasOwn(GMAIL_API_ERROR_KEYS, err.code)) {
+        setError(t(GMAIL_API_ERROR_KEYS[err.code]));
       } else {
         setError(err.message);
       }

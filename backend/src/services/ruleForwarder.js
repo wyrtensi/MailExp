@@ -1,7 +1,8 @@
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { query } from './db.js';
 import { sanitizeEmail } from './emailSanitizer.js';
-import { createAccountSmtpTransport } from './smtpTransport.js';
+import { createAccountSendTransport } from './mailSendTransport.js';
+import { sendFailureIsDefinite } from './smtpErrors.js';
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
@@ -286,14 +287,24 @@ export async function forwardRuleMessage({
       ...content,
     });
 
-    const smtp = await createAccountSmtpTransport(account);
-    if (smtp.error) throw new Error(smtp.error);
-    if (!smtp.transport) throw new Error('SMTP transport is unavailable');
+    const sendTransport = await createAccountSendTransport(account);
+    if (sendTransport.error) throw new Error(sendTransport.error);
+    if (!sendTransport.transport) throw new Error('Mail transport is unavailable');
 
     try {
-      await smtp.transport.sendMail(mailOptions);
-    } catch {
-      throw new Error('Forward delivery failed');
+      await sendTransport.transport.sendMail(mailOptions);
+    } catch (sendErr) {
+      // A definite failure (the server rejected it, or refused the connection outright) never
+      // delivered anything — safe to drop the reservation below and let the rule retry this
+      // message on its next match. Anything else (a connection break with no reply, or a Gmail
+      // API timeout with no result — see services/mailSendTransport.js) is uncertain: the
+      // message may already be on its way, so `.definite = false` keeps the reservation and
+      // stops a retry from sending a second copy.
+      const definite = sendFailureIsDefinite(sendErr);
+      throw Object.assign(new Error(definite ? 'Forward delivery failed' : 'Forward delivery uncertain — leaving it pending to avoid a duplicate'), {
+        cause: sendErr,
+        definite,
+      });
     }
     delivered = true;
     await query(
@@ -304,7 +315,12 @@ export async function forwardRuleMessage({
     );
     return 'sent';
   } catch (err) {
-    if (!delivered) {
+    // err.definite === false marks the one uncertain case above: leave the reservation pending
+    // (it blocks this rule+message pair forever, which is correct — the message may already be
+    // sent) rather than deleting it and letting the tick retry into a possible duplicate. Every
+    // other failure — including every failure that happens before a send is even attempted —
+    // never delivered anything, so it is always safe to delete and retry.
+    if (!delivered && err.definite !== false) {
       await query(
         `DELETE FROM inbox_rule_forwards
          WHERE id = $1 AND status = 'pending'`,

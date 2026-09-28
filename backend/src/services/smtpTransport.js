@@ -111,8 +111,10 @@ export function isSmtpAuthRejection(err) {
   return err?.code === 'EAUTH' && /^AUTH\b/i.test(String(err?.command || ''));
 }
 
-// Stable, secret-free results for token-manager failures before a transport exists.
-function oauthRefreshFailureResult(err) {
+// Stable, secret-free results for token-manager failures before a transport exists. Exported so
+// gmailApiSender.js's createAccountSendTransport can apply the same mapping before trying the
+// Gmail API — its OAuth token refresh is the same tokenManager.js entry point.
+export function oauthRefreshFailureResult(err) {
   const failure = Object.hasOwn(OAUTH_SEND_FAILURES, err?.code) ? OAUTH_SEND_FAILURES[err.code] : null;
   return failure ? { status: failure.status, code: err.code, error: failure.error } : null;
 }

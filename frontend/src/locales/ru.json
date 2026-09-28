@@ -166,6 +166,11 @@
       "tls": "ошибка TLS-рукопожатия",
       "unknown": "не удалось подключиться"
     },
+    "gmailQuotaExceeded": "Достигнут дневной лимит отправки Gmail для этого аккаунта. Попробуйте завтра или отправляйте меньше писем либо меньшего размера.",
+    "gmailMessageTooLarge": "Это письмо слишком большое для отправки через Gmail. Удалите или уменьшите вложение и попробуйте снова.",
+    "gmailInvalidRecipient": "Gmail отклонил один из адресов получателей. Проверьте его и попробуйте снова.",
+    "gmailAccessRefused": "Gmail отказался отправлять это письмо.",
+    "gmailApiAuthFailed": "Gmail отклонил доступ к этому аккаунту. Переподключите его и попробуйте снова.",
     "toolbar": {
       "removeTable": "Удалить таблицу",
       "textColor": "Цвет текста",
@@ -1718,7 +1723,8 @@
         "errorClientJsonIncomplete": "В файле нет идентификатора или секрета клиента.",
         "errorClientJsonConflict": "Укажите либо файл клиента JSON, либо идентификатор и секрет клиента, а не то и другое сразу.",
         "warningRedirectUriMissing": "В файле среди redirect URI нет callback-адреса панели. Добавьте его в Google Cloud Console: {{uri}}",
-        "warningCallbackNotConfigured": "Callback-адрес ещё не сохранён. Сохраните его выше, затем проверьте redirect URI этого приложения в Google Cloud Console."
+        "warningCallbackNotConfigured": "Callback-адрес ещё не сохранён. Сохраните его выше, затем проверьте redirect URI этого приложения в Google Cloud Console.",
+        "gmailApiDisabledWarning": "Gmail API отключён в этом проекте Google Cloud: почта уходит через SMTP. Включите Gmail API в проекте."
       },
       "oauthGenericSuccess": "Аккаунт подключён.",
       "oauthGenericError": "Не удалось авторизовать аккаунт. Повторите попытку.",

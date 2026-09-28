@@ -13,86 +13,21 @@ import { resolveSentFolder } from '../utils/mailUtils.js';
 import { generateVCard } from '../utils/vcard.js';
 import { defaultAddressBookId } from '../services/addressBooks.js';
 import { recordAudit } from '../services/auditLog.js';
-import { createAccountSmtpTransport } from '../services/smtpTransport.js';
+import { createAccountSendTransport } from '../services/mailSendTransport.js';
+import { gmailThreadIdFromProviderThreadId } from '../services/gmailApiSender.js';
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
+import { smtpFailureIsDefinite, sendFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
+
+// Re-exported for send.smtpConnectionFailure.test.js — the logic itself lives in
+// services/smtpErrors.js, shared with services/mailSendTransport.js and services/ruleForwarder.js.
+export { smtpFailureIsDefinite, smtpConnectionFailure };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-// Map SMTP/connection errors to user-friendly messages that don't expose server internals.
-// Whether a failed sendMail certainly delivered nothing, so the idempotency reservation can be
-// released for a retry. A server reply (4xx/5xx) is an explicit rejection, and an unreachable or
-// refusing server never got the message. nodemailer tags a connection that closes mid-session as
-// CONN as well, so a bare connection error may come after DATA was accepted: that one is unknown.
-export function smtpFailureIsDefinite(err) {
-  const responseCode = Number(err?.responseCode);
-  if (Number.isInteger(responseCode) && responseCode >= 400 && responseCode < 600) return true;
-  // ETLS: nodemailer only ever raises it while upgrading the connection (implicit TLS or
-  // STARTTLS) — always before EHLO/AUTH, so nothing was sent yet either.
-  if (['EAUTH', 'EDNS', 'ETLS'].includes(err?.code)) return true;
-  // Connecting and waiting for the greeting both happen before any message data is sent.
-  return /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|Connection timeout|Greeting never received/.test(String(err?.message || ''));
-}
-
-// Connection/handshake-level SMTP failures — nodemailer's SMTPConnection reports these before
-// AUTH ever runs (see its _onError/_formatError: the OS-level code like ECONNREFUSED/ENOTFOUND/
-// EHOSTUNREACH ends up in err.message, while err.code is overwritten with one of these transport
-// codes). EAUTH (a server AUTH rejection) is deliberately excluded — that keeps its existing
-// handling below, unchanged.
-const SMTP_CONNECTION_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNECTION', 'EDNS', 'ESOCKET', 'ETLS']);
-
-// A short, stable reason for both the log line and the (localized) client message. Never the raw
-// error text: that can carry a resolved IP or other transport detail beyond host, port and kind.
-function smtpConnectionFailureReason(err) {
-  const msg = String(err?.message || '');
-  if (/ECONNREFUSED/i.test(msg)) return 'refused';
-  if (/ENOTFOUND/i.test(msg)) return 'not_found';
-  if (/EHOSTUNREACH/i.test(msg)) return 'unreachable';
-  if (err?.code === 'ETLS' || /TLS|handshake/i.test(msg)) return 'tls';
-  if (err?.code === 'ETIMEDOUT' || /timeout|timed out|greeting never received/i.test(msg)) return 'timeout';
-  return 'unknown';
-}
-
-const SMTP_CONNECTION_REASON_TEXT = {
-  refused: 'connection refused',
-  not_found: 'host not found',
-  unreachable: 'host unreachable',
-  tls: 'TLS handshake failed',
-  timeout: 'timed out',
-  unknown: 'could not connect',
-};
-
-// nodemailer tags a mid-session close as ECONNECTION with command 'CONN' too — the same command
-// a pre-AUTH connect failure gets — so command can't tell the two apart. These messages can only
-// happen after the session was already under way (an EHLO reply or a later abrupt close), so a
-// send that reaches them may already have been accepted; never describe them as "could not
-// connect", that would wrongly promise nothing was delivered.
-const SMTP_MIDSESSION_CLOSE_RE = /Connection closed unexpectedly|Server terminates connection|EHLO failed/i;
-
-// Never reached AUTH: describe it with only the account's configured host, port and a generic
-// kind. Returns null for anything else (including auth rejections and ambiguous mid-session
-// closes, which keep their own handling).
-export function smtpConnectionFailure(err, account) {
-  const msg = String(err?.message || '');
-  if (SMTP_MIDSESSION_CLOSE_RE.test(msg)) return null;
-  const isConnectionFailure = SMTP_CONNECTION_ERROR_CODES.has(err?.code)
-    || /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(msg);
-  if (!isConnectionFailure) return null;
-  const reason = smtpConnectionFailureReason(err);
-  const host = account?.smtp_host || 'the mail server';
-  const target = account?.smtp_port ? `${host}:${account.smtp_port}` : host;
-  return {
-    code: 'smtp_connection_failed',
-    reason,
-    host: account?.smtp_host || null,
-    port: account?.smtp_port || null,
-    error: `Could not connect to ${target} (${SMTP_CONNECTION_REASON_TEXT[reason]}). The server's network may block outgoing mail ports.`,
-  };
 }
 
 function sanitizeSmtpError(err) {
@@ -367,12 +302,12 @@ router.post('/send', async (req, res) => {
   let reservationAcquired = false;
   let delivered = false; // true once transport.sendMail has actually handed off the message
   try {
-    const smtp = await createAccountSmtpTransport(account);
-    if (smtp.error) {
-      return res.status(smtp.status).json(smtp.code ? { error: smtp.error, code: smtp.code } : { error: smtp.error });
+    const sendTransport = await createAccountSendTransport(account);
+    if (sendTransport.error) {
+      return res.status(sendTransport.status).json(sendTransport.code ? { error: sendTransport.error, code: sendTransport.code } : { error: sendTransport.error });
     }
-    account = smtp.account;
-    const transport = smtp.transport;
+    account = sendTransport.account;
+    const transport = sendTransport.transport;
 
     // Use a stable Message-ID so the SMTP copy and any IMAP APPEND reference the same message.
     const domain = fromEmail.split('@')[1] || 'mailexpert.local';
@@ -407,6 +342,24 @@ router.post('/send', async (req, res) => {
       // Use the full prior references chain if available; fall back to just inReplyTo.
       mailOptions.references = sanitizeHeaderValue(references || inReplyTo);
     }
+
+    // Gmail API threading: when replying, look up the original's X-GM-THRID (stored decimal, see
+    // services/threading/providerIds.js) and convert it to the hex form the API's `threadId`
+    // expects. Only meaningful for a Gmail mailbox; ignored by the SMTP path and by the fallback.
+    // message_id is stored with or without angle brackets depending on the ingest path (see
+    // gtdTransitions.js's runTransitionsForSentMessage and mailAccess.js's
+    // getThreadKeysForMessageIdHeaders), so both forms are matched here too.
+    let threadId = null;
+    if (mailOptions.inReplyTo && account.oauth_provider === 'google') {
+      const repliedToId = mailOptions.inReplyTo.replace(/[<>]/g, '').trim();
+      const threadRow = await query(
+        `SELECT provider_thread_id FROM messages
+          WHERE account_id = $1 AND message_id = ANY($2::text[]) AND provider_thread_id IS NOT NULL LIMIT 1`,
+        [account.id, [repliedToId, `<${repliedToId}>`]]
+      );
+      threadId = gmailThreadIdFromProviderThreadId(threadRow.rows[0]?.provider_thread_id ?? null);
+    }
+
     const allAttachments = [
       ...inlineImageAttachments,
       ...(attachments?.length ? attachments.map(a => ({
@@ -416,6 +369,15 @@ router.post('/send', async (req, res) => {
       })) : []),
       ...resolvedFwdAttachments,
     ];
+    // Final backstop over the whole set. The earlier checks (above, and inside the
+    // forwardedAttachments block) run before embedInlineDataImages() decodes any inline data:
+    // images in the body into their own attachments, so a message that stays under the cap only
+    // by way of its explicit/forwarded attachments but carries large embedded images would
+    // otherwise slip through uncounted.
+    const totalAttachmentBytes = allAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
+    if (totalAttachmentBytes > 26_214_400) {
+      return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+    }
     if (allAttachments.length) {
       mailOptions.attachments = allAttachments;
     }
@@ -458,8 +420,14 @@ router.post('/send', async (req, res) => {
       reservationAcquired = true;
     }
 
-    await transport.sendMail(mailOptions);
+    const sendInfo = await transport.sendMail(mailOptions, { threadId });
     delivered = true;
+    // The Gmail API path normally keeps our own Message-ID (it sends the raw message as-is), but
+    // when it differs — verified via a post-send metadata GET, see gmailApiSender.js — adopt
+    // Gmail's id so the Sent-row reconciliation below (by Message-ID) actually finds the copy.
+    if (sendInfo?.messageId && sendInfo.messageId !== mailOptions.messageId) {
+      mailOptions.messageId = sendInfo.messageId;
+    }
     // Journal the accepted message by its Message-ID and recipients; never its subject or body.
     recordAudit({
       actorUserId: req.session.userId,
@@ -623,10 +591,19 @@ router.post('/send', async (req, res) => {
     } else {
       console.error('Send failed:', err.message);
     }
-    // The transport's forced token refresh after an SMTP AUTH rejection failed. AUTH precedes
-    // MAIL FROM, so nothing was delivered; answer with the token manager's stable code only.
+    // The transport's forced token refresh after an SMTP AUTH rejection (or a Gmail API 401
+    // that survived its own forced retry) failed. AUTH precedes MAIL FROM and the Gmail API
+    // request was never accepted either way, so nothing was delivered; answer with the token
+    // manager's stable code only.
     const oauthFailure = Object.hasOwn(OAUTH_SEND_FAILURES, err?.code) ? OAUTH_SEND_FAILURES[err.code] : null;
-    if (reservationAcquired && !oauthFailure && !smtpFailureIsDefinite(err)) {
+    // A definite, non-OAuth mail-send failure that isn't SMTP-shaped: a classified Gmail API
+    // rejection, or the SMTP transport setup failing while falling back from the API (see
+    // services/mailSendTransport.js, which sets `.definite`/`.status`/`.code` on these). Checked
+    // before the uncertain branch so it is never mistaken for "may have been delivered".
+    const mailSendFailure = (!oauthFailure && err?.definite === true && typeof err?.status === 'number')
+      ? { status: err.status, code: err.code, error: err.message }
+      : null;
+    if (reservationAcquired && !oauthFailure && !mailSendFailure && !sendFailureIsDefinite(err)) {
       // The server may already have accepted the message. Keep the reservation, so a retry with
       // the same key is refused while it lasts instead of delivering a second copy.
       return res.status(502).json({
@@ -637,6 +614,9 @@ router.post('/send', async (req, res) => {
     // A failure before reservation must not delete a concurrent request's lock.
     if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
     if (oauthFailure) return res.status(oauthFailure.status).json({ error: oauthFailure.error, code: err.code });
+    if (mailSendFailure) {
+      return res.status(mailSendFailure.status).json(mailSendFailure.code ? { error: mailSendFailure.error, code: mailSendFailure.code } : { error: mailSendFailure.error });
+    }
     if (connectionFailure) {
       return res.status(502).json({
         error: connectionFailure.error,

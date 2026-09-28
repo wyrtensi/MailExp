@@ -7,7 +7,7 @@ const GOOGLE_CLIENT_ID_PATTERN = /^(\d+)-[a-z0-9]+\.apps\.googleusercontent\.com
 
 export const GOOGLE_APP_STATUSES = Object.freeze(['active', 'closed', 'disabled']);
 
-const APP_COLUMNS = 'id, label, client_id, client_secret, project_number, user_limit, status, created_at';
+const APP_COLUMNS = 'id, label, client_id, client_secret, project_number, user_limit, status, gmail_api_disabled_at, created_at';
 
 // Stable, secret-free error for app registry operations.
 export class GoogleAppError extends Error {
@@ -107,7 +107,20 @@ export async function setGoogleAppStatus(appId, status) {
   });
 }
 
-const PUBLIC_APP_COLUMNS = 'id, label, client_id, project_number, user_limit, status, created_at';
+// Best-effort journal of a Gmail API send that hit accessNotConfigured/SERVICE_DISABLED, or one
+// that succeeded after that — see gmailApiSender.js. Callers swallow the error themselves; these
+// must never throw into a send path that already delivered (or is about to fall back).
+export async function markGmailApiDisabled(appId) {
+  if (!appId) return;
+  await query('UPDATE google_oauth_apps SET gmail_api_disabled_at = NOW() WHERE id = $1', [appId]);
+}
+
+export async function clearGmailApiDisabled(appId) {
+  if (!appId) return;
+  await query('UPDATE google_oauth_apps SET gmail_api_disabled_at = NULL WHERE id = $1 AND gmail_api_disabled_at IS NOT NULL', [appId]);
+}
+
+const PUBLIC_APP_COLUMNS = 'id, label, client_id, project_number, user_limit, status, gmail_api_disabled_at, created_at';
 const LABEL_MAX = 100;
 
 function normalizeLabel(label) {
@@ -130,7 +143,7 @@ function normalizeUserLimit(userLimit) {
 // Shared by listGoogleApps and getGoogleAppSummary: the seats Google has counted and the
 // mailboxes bound to each app. The secret is never selected.
 const APPS_WITH_COUNTS_SELECT = `
-  SELECT a.id, a.label, a.client_id, a.project_number, a.user_limit, a.status, a.created_at,
+  SELECT a.id, a.label, a.client_id, a.project_number, a.user_limit, a.status, a.gmail_api_disabled_at, a.created_at,
          (SELECT count(*) FROM google_oauth_grants g WHERE g.app_id = a.id)::int AS grants_count,
          (SELECT count(*) FROM email_accounts e WHERE e.oauth_app_id = a.id)::int AS accounts_count
   FROM google_oauth_apps a`;

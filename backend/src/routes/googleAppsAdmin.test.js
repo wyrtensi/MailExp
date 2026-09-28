@@ -64,8 +64,16 @@ describe('/api/admin/google-apps', () => {
     expect(body.apps).toEqual([{
       id: ID, label: 'Google 1', clientId: ROW.client_id, projectNumber: '1', userLimit: 2, status: 'active',
       grantsCount: 1, reservedCount: 1, accountsCount: 1, full: true, createdAt: ROW.created_at,
+      gmailApiDisabledAt: null,
     }]);
     expect(JSON.stringify(body)).not.toMatch(/secret/i);
+  });
+
+  it('surfaces when the Gmail API turned out to be disabled for the project', async () => {
+    registry.listGoogleApps.mockResolvedValue([{ ...ROW, gmail_api_disabled_at: '2026-09-27T00:00:00.000Z' }]);
+    const res = await send('GET', '');
+    const body = await res.json();
+    expect(body.apps[0].gmailApiDisabledAt).toBe('2026-09-27T00:00:00.000Z');
   });
 
   it('creates an app and maps registry errors to stable codes', async () => {
@@ -189,6 +197,7 @@ describe('/api/admin/google-apps', () => {
     expect(body.app).toEqual({
       id: ID, label: 'Renamed', clientId: ROW.client_id, projectNumber: '1', userLimit: 2, status: 'active',
       grantsCount: 2, reservedCount: 1, accountsCount: 2, full: true, createdAt: ROW.created_at,
+      gmailApiDisabledAt: null,
     });
     expect(registry.getGoogleAppSummary).toHaveBeenCalledWith(ID);
   });

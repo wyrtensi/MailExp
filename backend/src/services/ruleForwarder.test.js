@@ -527,11 +527,13 @@ describe('forwardRuleMessage', () => {
     expect(query.mock.calls.at(-1)[0]).toContain('DELETE FROM inbox_rule_forwards');
   });
 
-  it('clears a failed delivery reservation so a retry can send', async () => {
-    const unsafeMessage = 'timeout after DATA for recipient@example.com';
+  it('clears a failed delivery reservation so a retry can send, for a definite rejection', async () => {
+    // A server reply (responseCode) is a definite refusal — sendFailureIsDefinite (shared with
+    // routes/send.js, see services/smtpErrors.js) reports it as safe to retry.
+    const unsafeMessage = 'Message failed: 550 rejected for recipient@example.com';
     let reservationStatus = null;
     transport.sendMail
-      .mockRejectedValueOnce(new Error(unsafeMessage))
+      .mockRejectedValueOnce(Object.assign(new Error(unsafeMessage), { responseCode: 550 }))
       .mockResolvedValueOnce({ accepted: true });
     query.mockImplementation(async sql => {
       if (sql.includes('INSERT INTO inbox_rule_forwards')) {
@@ -566,10 +568,76 @@ describe('forwardRuleMessage', () => {
     expect(thrown.message).toBe('Forward delivery failed');
     expect(thrown.message).not.toContain('recipient@example.com');
     expect(thrown.message).not.toContain(unsafeMessage);
-    expect(thrown.cause).toBeUndefined();
+    expect(thrown.cause).toBeInstanceOf(Error);
     await expect(forwardRuleMessage(input)).resolves.toBe('sent');
     expect(transport.sendMail).toHaveBeenCalledTimes(2);
     expect(createAccountSmtpTransport).toHaveBeenCalledTimes(2);
     expect(reservationStatus).toBe('sent');
+  });
+
+  // The server may already have accepted the message (a connection break with no reply, or —
+  // for a Gmail mailbox — a Gmail API timeout after the request was sent, see
+  // services/mailSendTransport.js). Unlike a definite rejection above, this must NOT clear the
+  // reservation: a retry could deliver the same forward a second time. The rule simply never
+  // retries this message again.
+  it('leaves the reservation pending after an uncertain delivery failure, so no retry follows', async () => {
+    let reservationStatus = null;
+    transport.sendMail.mockRejectedValueOnce(Object.assign(new Error('Connection closed unexpectedly'), { code: 'ECONNECTION', command: 'CONN' }));
+    query.mockImplementation(async sql => {
+      if (sql.includes('INSERT INTO inbox_rule_forwards')) {
+        if (reservationStatus) return { rows: [] };
+        reservationStatus = 'pending';
+        return { rows: [{ id: 'delivery-1' }] };
+      }
+      if (sql.includes('SELECT status')) {
+        return { rows: [{ status: reservationStatus }] };
+      }
+      if (sql.includes('FROM messages')) {
+        return { rows: [messageRow] };
+      }
+      if (sql.includes('DELETE FROM inbox_rule_forwards')) {
+        reservationStatus = null;
+        return { rows: [] };
+      }
+      throw new Error('Unexpected query');
+    });
+
+    await expect(forwardRuleMessage(input)).rejects.toThrow('Forward delivery uncertain — leaving it pending to avoid a duplicate');
+    expect(reservationStatus).toBe('pending');
+
+    // The tick calling this again for the same rule+message (its normal retry path) must not
+    // attempt a second send while the outcome of the first is unknown.
+    await expect(forwardRuleMessage(input)).rejects.toThrow('Forward delivery pending');
+    expect(transport.sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  // An OAuthTokenError from sendMail's own forced token refresh (Gmail via
+  // mailSendTransport.js, or Microsoft via smtpTransport.js's createOAuthSmtpTransport) has no
+  // responseCode and no message smtpFailureIsDefinite's regex matches — AUTH (or the equivalent
+  // API request) never got far enough to deliver anything, so sendFailureIsDefinite (extended to
+  // recognize the OAUTH_SEND_FAILURES codes) must still call this definite and clear the
+  // reservation rather than leaving it pending forever.
+  it('clears the reservation for an OAuthTokenError thrown during sendMail (both Gmail and Microsoft mailboxes)', async () => {
+    const { OAuthTokenError } = await import('./oauth/tokenManager.js');
+    let reservationStatus = null;
+    transport.sendMail.mockRejectedValueOnce(new OAuthTokenError('oauth_reconnect_required'));
+    query.mockImplementation(async sql => {
+      if (sql.includes('INSERT INTO inbox_rule_forwards')) {
+        if (reservationStatus) return { rows: [] };
+        reservationStatus = 'pending';
+        return { rows: [{ id: 'delivery-1' }] };
+      }
+      if (sql.includes('FROM messages')) {
+        return { rows: [messageRow] };
+      }
+      if (sql.includes('DELETE FROM inbox_rule_forwards')) {
+        reservationStatus = null;
+        return { rows: [] };
+      }
+      throw new Error('Unexpected query');
+    });
+
+    await expect(forwardRuleMessage(input)).rejects.toThrow('Forward delivery failed');
+    expect(reservationStatus).toBeNull();
   });
 });
