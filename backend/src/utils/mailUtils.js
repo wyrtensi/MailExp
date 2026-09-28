@@ -154,6 +154,21 @@ export async function resolveSentFolder(accountId, folderMappings) {
   return result.rows[0]?.path || null;
 }
 
+// Resolve ALL Sent-like folder paths for an account — same pattern as resolveAllDraftsPaths:
+// when folder_mappings.sent points at a selectable folder, only that path counts as "Sent";
+// otherwise every folder whose special_use is '\Sent' (no name heuristic, matching
+// resolveSentFolder's own narrower fallback above — Sent is unlike Trash/Spam in that stock
+// providers reliably expose special_use for it, so a name guess would only risk a false match).
+export async function resolveAllSentPaths(accountId, folderMappings) {
+  const mapped = await mappedFolderUsable(accountId, folderMappings?.sent);
+  if (mapped) return new Set([mapped]);
+  const result = await query(
+    "SELECT path FROM folders WHERE account_id = $1 AND special_use = '\\Sent'",
+    [accountId]
+  );
+  return new Set(result.rows.map(r => r.path));
+}
+
 // Adjust cached folder row counts after local message mutations so that pagination
 // totals stay accurate without waiting for the next IMAP sync. Fire-and-forget —
 // errors are logged but never block the caller; sync will correct any discrepancy.

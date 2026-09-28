@@ -1,10 +1,19 @@
 import { query } from './db.js';
+import { resolveAllSentPaths } from '../utils/mailUtils.js';
 
 // "Before this letter": the earlier correspondence of the open message's mailbox with the same
 // person. The person is the sender, or for a letter the mailbox sent, its first recipient that is
 // not the mailbox itself. Their letters and the mailbox's letters to them both count, each marked
 // with its direction. Only this mailbox, never trash, spam or drafts, and a letter synced into several
-// folders (Gmail labels) counts once.
+// folders (Gmail labels) counts once — Inbox preferred over Sent, either over any other label,
+// same tie-break as conversation.js/contactLetters.js.
+//
+// Direction matches mailboxBanner()/conversation.js/contactLetters.js exactly: an own sender
+// (the mailbox's address or one of its aliases) is 'out' only when the surviving copy sits in
+// the account's own Sent folder, or none of its recipients is the account itself. A letter the
+// mailbox sent to a real correspondent while also cc'ing itself (own address among its own
+// recipients) is still a received copy from the mailbox's own perspective outside Sent — Gmail
+// keeps such a letter in both Sent and Inbox — so it reads as 'in' there, not 'out'.
 
 export const SENDER_HISTORY_DEFAULT_LIMIT = 5;
 export const SENDER_HISTORY_MAX_LIMIT = 20;
@@ -55,12 +64,13 @@ export async function senderHistory(messageId, { limit = SENDER_HISTORY_DEFAULT_
 
   const mappings = message.folder_mappings || {};
   const skippedFolders = [mappings.trash, mappings.spam, mappings.drafts].filter((f) => typeof f === 'string' && f);
+  const sentPaths = await resolveAllSentPaths(message.account_id, mappings);
+  const inboxPath = 'INBOX';
 
   const { rows } = await query(`
     WITH history AS (
       SELECT DISTINCT ON (COALESCE(m.message_id, m.id::text))
-             m.id, m.folder, m.subject, m.snippet, m.date,
-             lower(m.from_email) = ANY($5::text[]) AS outgoing
+             m.id, m.folder, m.subject, m.snippet, m.date, m.from_email, m.to_addresses, m.cc_addresses
       FROM messages m
       WHERE m.account_id = $1
         AND m.is_deleted = false
@@ -81,13 +91,18 @@ export async function senderHistory(messageId, { limit = SENDER_HISTORY_DEFAULT_
             )
           )
         )
-      ORDER BY COALESCE(m.message_id, m.id::text), m.date DESC
+      -- Inbox preferred over Sent, either over any other label — same tie-break as
+      -- conversation.js/contactLetters.js, so a letter filed in both (e.g. cc'd to self) always
+      -- surfaces its Inbox copy and reads as received, deterministically.
+      ORDER BY COALESCE(m.message_id, m.id::text),
+               CASE WHEN m.folder = $7 THEN 0 WHEN m.folder = ANY($8::text[]) THEN 1 ELSE 2 END,
+               m.date DESC
     )
-    SELECT id, folder, subject, snippet, date, outgoing, count(*) OVER () AS total
+    SELECT id, folder, subject, snippet, date, from_email, to_addresses, cc_addresses, count(*) OVER () AS total
     FROM history
     ORDER BY date DESC NULLS LAST
-    LIMIT $7
-  `, [message.account_id, messageId, message.date, correspondent, [...own], skippedFolders, limit]);
+    LIMIT $9
+  `, [message.account_id, messageId, message.date, correspondent, [...own], skippedFolders, inboxPath, [...sentPaths], limit]);
 
   return {
     correspondent,
@@ -98,7 +113,19 @@ export async function senderHistory(messageId, { limit = SENDER_HISTORY_DEFAULT_
       subject: r.subject,
       snippet: r.snippet,
       date: r.date,
-      direction: r.outgoing ? 'out' : 'in',
+      direction: letterDirection(r, own, sentPaths),
     })),
   };
+}
+
+// 'out' only when the letter sits in the account's own Sent folder, or none of its recipients is
+// the account itself; otherwise 'in' — see the module comment for why a letter cc'd to the
+// mailbox's own address is 'in' outside Sent even though the mailbox also sent it.
+function letterDirection(row, own, sentPaths) {
+  const from = lower(row.from_email);
+  if (!own.has(from)) return 'in';
+  if (sentPaths.has(row.folder)) return 'out';
+  const recipients = [...addressList(row.to_addresses), ...addressList(row.cc_addresses)]
+    .map((entry) => lower(typeof entry === 'string' ? entry : entry?.email));
+  return recipients.some((address) => own.has(address)) ? 'in' : 'out';
 }

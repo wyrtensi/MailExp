@@ -40,9 +40,10 @@ describe('senderHistory folders', () => {
         account_id: 'a1', from_email: 'maya@c.example', to_addresses: [{ email: 'sales@x.example' }], cc_addresses: [],
         date: new Date('2026-09-20T10:00:00Z'), email_address: 'sales@x.example', alias_emails: [],
         folder_mappings: { trash: 'Trash', spam: 'Junk', drafts: 'Drafts', sent: 'Sent' },
-      }] })
-      .mockResolvedValueOnce({ rows: [] });
+      }] }) // found
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // resolveAllSentPaths: mapped 'Sent' is selectable
+      .mockResolvedValueOnce({ rows: [] }); // history
     await senderHistory(7);
-    expect(queryMock.mock.calls[1][1][5]).toEqual(['Trash', 'Junk', 'Drafts']);
+    expect(queryMock.mock.calls[2][1][5]).toEqual(['Trash', 'Junk', 'Drafts']);
   });
 });

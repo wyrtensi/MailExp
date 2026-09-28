@@ -37,9 +37,11 @@ async function runMigrationFile(pglite, filename) {
 const ACCT_SALES = '00000000-0000-0000-0000-000000000001';
 const ACCT_OPS = '00000000-0000-0000-0000-000000000002';
 const ACCT_DISABLED = '00000000-0000-0000-0000-000000000003';
+const ACCT_GMAIL = '00000000-0000-0000-0000-000000000004'; // no folder_mappings.sent, special_use only
 
 const CONTACT_MAYA = '10000000-0000-0000-0000-000000000001';
 const CONTACT_SELF_MAILBOX = '10000000-0000-0000-0000-000000000002'; // address == ACCT_SALES's own
+const CONTACT_GMAIL_SELF = '10000000-0000-0000-0000-000000000003'; // address == ACCT_GMAIL's own
 
 const M1 = '20000000-0000-0000-0000-000000000001'; // in: plain incoming letter
 const M2 = '20000000-0000-0000-0000-000000000002'; // out: sent through the alias
@@ -53,6 +55,12 @@ const M8 = '20000000-0000-0000-0000-000000000008'; // pagination tie, letter A
 const M9 = '20000000-0000-0000-0000-000000000009'; // pagination tie, letter B
 const M_SELF_SENT = '30000000-0000-0000-0000-000000000001'; // precedence: own address, not to contact2
 const M_CROSS_MAILBOX = '30000000-0000-0000-0000-000000000002'; // sales@ writes to ops@ — a genuine 'in' for contact2
+const M_SELF_ADDRESSED_INBOX = '30000000-0000-0000-0000-000000000003'; // sales@ -> sales@, in INBOX: 'in'
+const M_SELF_ADDRESSED_SENT = '30000000-0000-0000-0000-000000000004'; // sales@ -> sales@, in Sent: 'out'
+const M_SELF_DEDUP_INBOX = '30000000-0000-0000-0000-000000000005'; // same letter filed in both Inbox...
+const M_SELF_DEDUP_SENT = '30000000-0000-0000-0000-000000000006'; // ...and Sent — Inbox copy must survive
+const M_GMAIL_SELF_SENT_MAIL = '30000000-0000-0000-0000-000000000007'; // Gmail self-send in special_use \Sent: 'out'
+const M_GMAIL_SELF_INBOX = '30000000-0000-0000-0000-000000000008'; // same shape, in INBOX: 'in'
 
 let db;
 
@@ -97,6 +105,14 @@ beforeAll(async () => {
       is_deleted boolean NOT NULL DEFAULT false
     )
   `);
+  await db.query(`
+    CREATE TABLE folders (
+      account_id uuid NOT NULL,
+      path text NOT NULL,
+      special_use text,
+      UNIQUE(account_id, path)
+    )
+  `);
 
   // Runs migration 0071 (the function + GIN index the 'out' branch depends on) as a file, the
   // way the real runner would apply it. Also runs 0070 for its own sake — it only touches
@@ -117,12 +133,24 @@ beforeAll(async () => {
   `, [ACCT_SALES, ACCT_OPS, ACCT_DISABLED, mappings]);
   await db.query('INSERT INTO account_aliases (account_id, email) VALUES ($1::uuid, $2)', [ACCT_SALES, 'help@x.example']);
 
+  // A Gmail-style account: no folder_mappings.sent at all (the common case — Gmail accounts are
+  // rarely explicitly mapped), so "is this letter's folder Sent" must come from special_use.
+  await db.query(
+    "INSERT INTO email_accounts (id, email_address, enabled, folder_mappings) VALUES ($1::uuid, 'gmail-self@g.example', true, '{}'::jsonb)",
+    [ACCT_GMAIL],
+  );
+  await db.query(
+    "INSERT INTO folders (account_id, path, special_use) VALUES ($1::uuid, '[Gmail]/Sent Mail', '\\Sent'), ($1::uuid, 'INBOX', NULL)",
+    [ACCT_GMAIL],
+  );
+
   await db.query(`
-    INSERT INTO contacts (id, emails) VALUES ($1::uuid, $3::jsonb), ($2::uuid, $4::jsonb)
+    INSERT INTO contacts (id, emails) VALUES ($1::uuid, $4::jsonb), ($2::uuid, $5::jsonb), ($3::uuid, $6::jsonb)
   `, [
-    CONTACT_MAYA, CONTACT_SELF_MAILBOX,
+    CONTACT_MAYA, CONTACT_SELF_MAILBOX, CONTACT_GMAIL_SELF,
     JSON.stringify([{ value: 'maya@c.example' }]),
     JSON.stringify([{ value: 'sales@x.example' }]), // a contact whose address is also our mailbox
+    JSON.stringify([{ value: 'gmail-self@g.example' }]), // a contact whose address is the Gmail mailbox itself
   ]);
 
   const rcpt = (addr) => JSON.stringify([{ email: addr }]);
@@ -146,6 +174,19 @@ beforeAll(async () => {
     // 'in' for contact2 at acct-ops: sales@x.example writes to ops@x.example. sales@x.example is
     // NOT acct-ops's own address there, so this is a normal incoming letter for contact2.
     [M_CROSS_MAILBOX, ACCT_OPS, 'INBOX', 'sales@x.example', rcpt('ops@x.example'), '2026-09-09T10:00:00Z', 'msg-cross-mailbox'],
+    // Self-sent for contact2 (contact2's address == acct-sales's own address): 'in' outside Sent...
+    [M_SELF_ADDRESSED_INBOX, ACCT_SALES, 'INBOX', 'sales@x.example', rcpt('sales@x.example'), '2026-09-10T10:00:00Z', 'msg-self-inbox'],
+    // ...and 'out' when the same shape of letter sits in the account's own Sent folder.
+    [M_SELF_ADDRESSED_SENT, ACCT_SALES, 'Sent', 'sales@x.example', rcpt('sales@x.example'), '2026-09-11T10:00:00Z', 'msg-self-sent'],
+    // Same self-sent letter (same message_id) filed in both Inbox and Sent, as Gmail does: the
+    // dedup must keep exactly one copy, and it must be the Inbox one (direction 'in').
+    [M_SELF_DEDUP_INBOX, ACCT_SALES, 'INBOX', 'sales@x.example', rcpt('sales@x.example'), '2026-09-12T10:00:00Z', 'msg-self-dedup'],
+    [M_SELF_DEDUP_SENT, ACCT_SALES, 'Sent', 'sales@x.example', rcpt('sales@x.example'), '2026-09-12T10:00:00Z', 'msg-self-dedup'],
+    // Gmail-style account with no folder_mappings.sent: a self-send filed in the folder whose
+    // special_use is '\Sent' ("[Gmail]/Sent Mail") must still read 'out', not 'in'.
+    [M_GMAIL_SELF_SENT_MAIL, ACCT_GMAIL, '[Gmail]/Sent Mail', 'gmail-self@g.example', rcpt('gmail-self@g.example'), '2026-09-13T10:00:00Z', 'msg-gmail-self-sent'],
+    // Same shape, filed in INBOX instead — no Sent signal at all, so 'in'.
+    [M_GMAIL_SELF_INBOX, ACCT_GMAIL, 'INBOX', 'gmail-self@g.example', rcpt('gmail-self@g.example'), '2026-09-14T10:00:00Z', 'msg-gmail-self-inbox'],
   ];
   for (const [id, accountId, folder, from, to, date, messageId] of messages) {
     await db.query(`
@@ -214,6 +255,31 @@ describe('contactLetters — behavioural (PGlite)', () => {
     // The genuine cross-mailbox incoming letter must count as 'in'.
     const crossMailbox = result.items.find((i) => i.id === M_CROSS_MAILBOX);
     expect(crossMailbox?.direction).toBe('in');
+  });
+
+  it('a letter the mailbox sent to itself is "in" outside Sent, and "out" inside Sent', async () => {
+    const result = await contactLetters(CONTACT_SELF_MAILBOX, { limit: 50, offset: 0 });
+    const inbox = result.items.find((i) => i.id === M_SELF_ADDRESSED_INBOX);
+    const sent = result.items.find((i) => i.id === M_SELF_ADDRESSED_SENT);
+    expect(inbox?.direction).toBe('in');
+    expect(sent?.direction).toBe('out');
+  });
+
+  it('dedups a self-sent letter filed in both Inbox and Sent to its Inbox copy, read as received', async () => {
+    const result = await contactLetters(CONTACT_SELF_MAILBOX, { limit: 50, offset: 0 });
+    const survivors = result.items.filter((i) => [M_SELF_DEDUP_INBOX, M_SELF_DEDUP_SENT].includes(i.id));
+    expect(survivors.length).toBe(1);
+    expect(survivors[0].id).toBe(M_SELF_DEDUP_INBOX);
+    expect(survivors[0].folder).toBe('INBOX');
+    expect(survivors[0].direction).toBe('in');
+  });
+
+  it('reads special_use=\\Sent when folder_mappings.sent is not configured (Gmail-style account)', async () => {
+    const result = await contactLetters(CONTACT_GMAIL_SELF, { limit: 50, offset: 0 });
+    const sentMail = result.items.find((i) => i.id === M_GMAIL_SELF_SENT_MAIL);
+    const inbox = result.items.find((i) => i.id === M_GMAIL_SELF_INBOX);
+    expect(sentMail?.direction).toBe('out');
+    expect(inbox?.direction).toBe('in');
   });
 
   it('is null for an unknown contact', async () => {

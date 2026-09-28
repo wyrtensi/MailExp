@@ -66,7 +66,10 @@ describe('contactLetters', () => {
     const pageCall = query.mock.calls[5];
     const pageParams = pageCall[1];
 
-    const [accountIds, contactAddresses, ownAccountIds, ownEmails, skipAccountIds, skipFolders, primaryAccountIds, primaryFolders] = aggParams;
+    const [
+      accountIds, contactAddresses, ownAccountIds, ownEmails, skipAccountIds, skipFolders,
+      inboxAccountIds, inboxFolders, sentAccountIds, sentFolders,
+    ] = aggParams;
     expect(accountIds).toEqual(['acct-1', 'acct-2']);
     expect(contactAddresses).toEqual(['maya@c.example', 'm.chen@c.example']);
     // Own addresses include both accounts' own address plus the alias, each paired with its account.
@@ -75,14 +78,16 @@ describe('contactLetters', () => {
     // acct-1 defines trash/spam/drafts; acct-2 defines none.
     expect(skipAccountIds).toEqual(['acct-1', 'acct-1', 'acct-1']);
     expect(skipFolders).toEqual(['Trash', 'Spam', 'Drafts']);
-    // acct-1 defines inbox+sent; acct-2 has no folder_mappings, so it falls back to the literal
-    // 'INBOX' default and has no configured sent folder.
-    expect(primaryAccountIds).toEqual(['acct-1', 'acct-1', 'acct-2']);
-    expect(primaryFolders).toEqual(['INBOX', 'Sent', 'INBOX']);
+    // Inbox is unnested for every account, falling back to the literal 'INBOX' default when no
+    // folder_mappings.inbox is configured (acct-2). Sent is only unnested when configured.
+    expect(inboxAccountIds).toEqual(['acct-1', 'acct-2']);
+    expect(inboxFolders).toEqual(['INBOX', 'INBOX']);
+    expect(sentAccountIds).toEqual(['acct-1']);
+    expect(sentFolders).toEqual(['Sent']);
 
     // limit/offset are clamped and appended as the last two page-query params.
-    expect(pageParams.slice(8)).toEqual([CONTACT_LETTERS_MAX_LIMIT, 0]);
-    expect(pageCall[0]).toContain('LIMIT $9 OFFSET $10');
+    expect(pageParams.slice(10)).toEqual([CONTACT_LETTERS_MAX_LIMIT, 0]);
+    expect(pageCall[0]).toContain('LIMIT $11 OFFSET $12');
 
     expect(result).toEqual({
       received: 3,
@@ -105,6 +110,6 @@ describe('contactLetters', () => {
     await contactLetters('contact-1', { limit: 12.9, offset: 3.7 });
 
     const pageParams = query.mock.calls[5][1];
-    expect(pageParams.slice(8)).toEqual([12, 3]);
+    expect(pageParams.slice(10)).toEqual([12, 3]);
   });
 });
