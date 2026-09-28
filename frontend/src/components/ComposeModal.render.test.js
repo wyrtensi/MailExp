@@ -146,3 +146,32 @@ describe('reopening a draft in plain-text mode', () => {
     assert.equal(saved.length, 0, 'an untouched draft must not be rewritten');
   });
 });
+
+// Minimizing used to be local React state inside ComposeModal, invisible to the store — so
+// clicking Compose again while minimized just reset composeData to a blank message; the mounted
+// instance never noticed. `composeMinimized` now lives in the store (see store/compose.test.js
+// for the pure openCompose behavior); this checks the toolbar button and the mounted DOM agree
+// with it in both directions.
+describe('minimizing and restoring the composer', () => {
+  let close;
+  before(async () => { close = await openDraft({ plaintextEmail: false, body: 'Hi Bob,\n\nThe contract is attached.' }); });
+  after(() => close());
+
+  const minimizeBtn = () => document.querySelector('button[title="compose.toolbar.minimize"]');
+
+  test('the minimize button collapses the composer and updates the store', async () => {
+    assert.ok(minimizeBtn(), 'expected the full toolbar, with its minimize button, to be mounted');
+    await React.act(async () => { minimizeBtn().click(); });
+    assert.equal(useStore.getState().composeMinimized, true);
+    assert.equal(minimizeBtn(), null, 'the full toolbar unmounts while minimized');
+  });
+
+  test('reopening (the Compose button/shortcut) restores it and keeps the in-progress draft', async () => {
+    // Same call MailApp/Sidebar/CommandPalette/the keyboard shortcut all make for "new message" —
+    // it must restore the minimized composer rather than discard it for a blank one.
+    await React.act(async () => { useStore.getState().openCompose({ accountId: 'acct' }); });
+    assert.equal(useStore.getState().composeMinimized, false, 'restored (un-minimized)');
+    assert.equal(useStore.getState().composeData.subject, 'Contract', 'the original draft was kept, not replaced');
+    assert.ok(minimizeBtn(), 'the full toolbar is mounted again');
+  });
+});
