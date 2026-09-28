@@ -655,7 +655,12 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
                   .filter(Boolean);
                 const favoritesForAccount = favoriteFolders
                   .filter(fav => fav.accountId === message.account_id && fav.path !== message.folder)
-                  .map(fav => (moveFolders || []).find(f => f.path === fav.path))
+                  .map(fav => {
+                    const folder = (moveFolders || []).find(f => f.path === fav.path);
+                    // Carry the favorite's own label (#505) so the picker shows it instead of
+                    // the real folder name — FolderPathLabel reads folder.favoriteLabel.
+                    return folder && fav.label ? { ...folder, favoriteLabel: fav.label } : folder;
+                  })
                   .filter(Boolean)
                   .filter(f => !recentForAccount.some(r => r.path === f.path));
                 return (
