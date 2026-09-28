@@ -72,7 +72,10 @@ describe('mailboxes are shared by every user', () => {
   it('deletes a mailbox someone else added', async () => {
     const res = await fetch(`${base}/api/accounts/${ID}`, { method: 'DELETE' });
     expect(res.status).toBe(200);
-    expect(query).toHaveBeenCalledWith('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [ID]);
+    expect(query).toHaveBeenCalledWith(
+      'SELECT id, email_address, mail_node, oauth_provider, oauth_refresh_token, oauth_access_token FROM email_accounts WHERE id = $1',
+      [ID]
+    );
     expect(query).toHaveBeenCalledWith('DELETE FROM email_accounts WHERE id = $1', [ID]);
     expect(imapManager.disconnectAccount).toHaveBeenCalledWith(ID);
     expect(ownerFilters()).toEqual([]);

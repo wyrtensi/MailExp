@@ -38,6 +38,25 @@ describe('API error propagation', () => {
     });
   });
 
+  it('attaches host/port from a send failure so the composer can build its own message', async () => {
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 502,
+      json: async () => ({
+        error: "Could not connect to smtp.gmail.com:465 (timed out). The server's network may block outgoing mail ports.",
+        code: 'smtp_connection_failed', reason: 'timeout', host: 'smtp.gmail.com', port: 465,
+      }),
+    });
+
+    await assert.rejects(api.getIntegrationsStatus(), (err) => {
+      assert.equal(err.code, 'smtp_connection_failed');
+      assert.equal(err.reason, 'timeout');
+      assert.equal(err.host, 'smtp.gmail.com');
+      assert.equal(err.port, 465);
+      return true;
+    });
+  });
+
   it('leaves code unset when the response has none', async () => {
     globalThis.fetch = async () => ({ ok: false, status: 500, json: async () => ({ error: 'Boom' }) });
 

@@ -13,7 +13,10 @@ import { redisClient } from '../services/redis.js';
 import { createAccountSmtpTransport } from '../services/smtpTransport.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
 
-const account = { id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'google' };
+const account = {
+  id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'google',
+  smtp_host: 'smtp.gmail.com', smtp_port: 465,
+};
 const sendMail = vi.fn();
 let server, base;
 beforeAll(async () => {
@@ -70,15 +73,47 @@ describe('send failure semantics', () => {
     expect((await post()).status).toBe(500);
     expect(redisClient.del).toHaveBeenCalledWith('send_idem:u1:send1');
   });
-  it('releases its own reservation when the server could not be reached', async () => {
+  it('releases its own reservation when the server could not be reached, with a specific host:port error', async () => {
     sendMail.mockRejectedValueOnce(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:587'), { code: 'ESOCKET', command: 'CONN' }));
-    expect((await post()).status).toBe(500);
+    const res = await post();
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: "Could not connect to smtp.gmail.com:465 (connection refused). The server's network may block outgoing mail ports.",
+      code: 'smtp_connection_failed', reason: 'refused', host: 'smtp.gmail.com', port: 465,
+    });
     expect(redisClient.del).toHaveBeenCalledWith('send_idem:u1:send1');
   });
-  it('releases its own reservation when connecting times out', async () => {
+  it('releases its own reservation when connecting times out, with a specific host:port error', async () => {
     sendMail.mockRejectedValueOnce(Object.assign(new Error('Connection timeout'), { code: 'ETIMEDOUT', command: 'CONN' }));
-    expect((await post()).status).toBe(500);
+    const res = await post();
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      error: "Could not connect to smtp.gmail.com:465 (timed out). The server's network may block outgoing mail ports.",
+      code: 'smtp_connection_failed', reason: 'timeout', host: 'smtp.gmail.com', port: 465,
+    });
     expect(redisClient.del).toHaveBeenCalledWith('send_idem:u1:send1');
+  });
+  it('reports a DNS lookup failure the same way', async () => {
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('getaddrinfo ENOTFOUND smtp.gmail.com'), { code: 'EDNS', command: 'CONN' }));
+    const res = await post();
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toEqual({
+      error: "Could not connect to smtp.gmail.com:465 (host not found). The server's network may block outgoing mail ports.",
+      code: 'smtp_connection_failed', reason: 'not_found', host: 'smtp.gmail.com', port: 465,
+    });
+  });
+  it('reports a TLS handshake failure the same way', async () => {
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('Error initiating TLS - self signed certificate'), { code: 'ETLS', command: 'CONN' }));
+    const res = await post();
+    expect(res.status).toBe(502);
+    expect((await res.json()).reason).toBe('tls');
+  });
+  it('keeps auth rejections on their existing generic message', async () => {
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('Invalid login: 535 5.7.8 authentication failed'), { code: 'EAUTH', responseCode: 535, command: 'AUTH PLAIN' }));
+    const res = await post();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Authentication failed. Check your email account credentials.' });
   });
   it('keeps the reservation when the connection breaks with no server reply', async () => {
     // nodemailer tags a mid-session close as CONN too, so it may come after DATA was accepted.

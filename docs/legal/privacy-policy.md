@@ -40,8 +40,9 @@ including the Limited Use requirements.
 ## Retention and deletion
 
 Letters stay in the mailbox itself. When a mailbox is removed from the panel, its tokens and the
-panel's copy of its letters are deleted. A mailbox owner can revoke the panel's access at any time
-at [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
+panel's copy of its letters are deleted, and — for a Gmail mailbox — the panel also revokes its
+own access to that Google account, the same access a mailbox owner can otherwise revoke at any
+time at [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 The audit log is kept as long as the operator's policy requires.
 
 ## Security
