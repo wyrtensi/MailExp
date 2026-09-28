@@ -69,6 +69,10 @@ services:
       BOOTSTRAP_ADMIN_EMAILS: ${BOOTSTRAP_ADMIN_EMAILS:-}
       # Fallback Google callback URL; the one saved on the Google apps screen takes precedence.
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      # api (default): a Gmail mailbox sends over the Gmail API, falling back to SMTP only when
+      # the API definitely did not accept the message. smtp: always use SMTP for Gmail, like
+      # every other provider. See docs/operations/google-oauth.md.
+      GMAIL_SEND_TRANSPORT: ${GMAIL_SEND_TRANSPORT:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -14,7 +14,9 @@ When a Gmail mailbox is connected, Google asks its owner to grant the panel acce
 (`https://mail.google.com/`) and to the mailbox's email address. With this access the panel:
 
 - reads the mailbox over IMAP to show its folders and letters to the signed-in team members;
-- sends mail over SMTP when a team member sends or replies from that mailbox;
+- sends mail when a team member sends or replies from that mailbox — for a Gmail mailbox, by
+  default over the Gmail API (HTTPS), falling back to SMTP only when the API did not accept the
+  message; every other mailbox always sends over SMTP;
 - moves, flags and deletes letters when a team member asks for it.
 
 The panel stores, in the operator's database on the operator's server: the OAuth tokens
