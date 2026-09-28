@@ -187,7 +187,7 @@ function parseChips(val) {
 
 export default function ComposeModal() {
   const { t } = useTranslation();
-  const { closeCompose, composeData, accounts, addNotification, setSelectedAccount, plaintextEmail, setThreadMessages } = useStore();
+  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, setSelectedAccount, plaintextEmail, setThreadMessages } = useStore();
   const isMobile = useMobile();
   const uiScale = useUiScale();
 
@@ -293,7 +293,6 @@ export default function ComposeModal() {
   // High by default (owner decision 2026-09-23): the writer lowers it per letter.
   // High by default (owner's choice); a reopened draft keeps the priority it was saved with.
   const [priority, setPriority] = useState(() => composeData?.priority || 'high');
-  const [minimized, setMinimized] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [pos, setPos] = useState(null);
   const [customSize, setCustomSize] = useState(() => {
@@ -1809,10 +1808,10 @@ export default function ComposeModal() {
     outline: 'none',
   };
 
-  if (minimized) {
+  if (composeMinimized) {
     return (
       <div
-        onClick={() => setMinimized(false)}
+        onClick={() => setComposeMinimized(false)}
         style={{
           position: 'fixed', bottom: 0, right: 24,
           background: 'var(--bg-elevated)', border: '1px solid var(--border)',
@@ -1955,7 +1954,7 @@ export default function ComposeModal() {
         )}
 
         <div style={{ display: 'flex', gap: 4 }}>
-          <TitleBtn onClick={() => setMinimized(true)} title={t('compose.toolbar.minimize')}>
+          <TitleBtn onClick={() => setComposeMinimized(true)} title={t('compose.toolbar.minimize')}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
               <line x1="5" y1="12" x2="19" y2="12"/>
             </svg>

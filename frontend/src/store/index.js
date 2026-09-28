@@ -509,8 +509,19 @@ export const useStore = create((set, get) => ({
   },
   composing: false,
   composeData: null,
-  openCompose: (data = null) => set({ composing: true, composeData: data }),
-  closeCompose: () => set({ composing: false, composeData: null }),
+  // Desktop-only minimize state for the single global composer (#compose-minimize-restore).
+  composeMinimized: false,
+  openCompose: (data = null) => set(state => {
+    // Reopening while a composer is already up: if it's minimized, restore
+    // + focus it instead of discarding the in-progress draft underneath,
+    // mirroring how openMessageWindow re-focuses an existing window below.
+    if (state.composing && state.composeMinimized) {
+      return { composeMinimized: false };
+    }
+    return { composing: true, composeData: data, composeMinimized: false };
+  }),
+  setComposeMinimized: (minimized) => set({ composeMinimized: minimized }),
+  closeCompose: () => set({ composing: false, composeData: null, composeMinimized: false }),
 
   // Detached message windows (#219): floating, draggable/resizable in-app windows
   // that each show one message via a MessagePane instance. Desktop-only; mounted by
