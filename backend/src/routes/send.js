@@ -32,9 +32,67 @@ function escapeHtml(str) {
 export function smtpFailureIsDefinite(err) {
   const responseCode = Number(err?.responseCode);
   if (Number.isInteger(responseCode) && responseCode >= 400 && responseCode < 600) return true;
-  if (['EAUTH', 'EDNS'].includes(err?.code)) return true;
+  // ETLS: nodemailer only ever raises it while upgrading the connection (implicit TLS or
+  // STARTTLS) — always before EHLO/AUTH, so nothing was sent yet either.
+  if (['EAUTH', 'EDNS', 'ETLS'].includes(err?.code)) return true;
   // Connecting and waiting for the greeting both happen before any message data is sent.
   return /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|Connection timeout|Greeting never received/.test(String(err?.message || ''));
+}
+
+// Connection/handshake-level SMTP failures — nodemailer's SMTPConnection reports these before
+// AUTH ever runs (see its _onError/_formatError: the OS-level code like ECONNREFUSED/ENOTFOUND/
+// EHOSTUNREACH ends up in err.message, while err.code is overwritten with one of these transport
+// codes). EAUTH (a server AUTH rejection) is deliberately excluded — that keeps its existing
+// handling below, unchanged.
+const SMTP_CONNECTION_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNECTION', 'EDNS', 'ESOCKET', 'ETLS']);
+
+// A short, stable reason for both the log line and the (localized) client message. Never the raw
+// error text: that can carry a resolved IP or other transport detail beyond host, port and kind.
+function smtpConnectionFailureReason(err) {
+  const msg = String(err?.message || '');
+  if (/ECONNREFUSED/i.test(msg)) return 'refused';
+  if (/ENOTFOUND/i.test(msg)) return 'not_found';
+  if (/EHOSTUNREACH/i.test(msg)) return 'unreachable';
+  if (err?.code === 'ETLS' || /TLS|handshake/i.test(msg)) return 'tls';
+  if (err?.code === 'ETIMEDOUT' || /timeout|timed out|greeting never received/i.test(msg)) return 'timeout';
+  return 'unknown';
+}
+
+const SMTP_CONNECTION_REASON_TEXT = {
+  refused: 'connection refused',
+  not_found: 'host not found',
+  unreachable: 'host unreachable',
+  tls: 'TLS handshake failed',
+  timeout: 'timed out',
+  unknown: 'could not connect',
+};
+
+// nodemailer tags a mid-session close as ECONNECTION with command 'CONN' too — the same command
+// a pre-AUTH connect failure gets — so command can't tell the two apart. These messages can only
+// happen after the session was already under way (an EHLO reply or a later abrupt close), so a
+// send that reaches them may already have been accepted; never describe them as "could not
+// connect", that would wrongly promise nothing was delivered.
+const SMTP_MIDSESSION_CLOSE_RE = /Connection closed unexpectedly|Server terminates connection|EHLO failed/i;
+
+// Never reached AUTH: describe it with only the account's configured host, port and a generic
+// kind. Returns null for anything else (including auth rejections and ambiguous mid-session
+// closes, which keep their own handling).
+export function smtpConnectionFailure(err, account) {
+  const msg = String(err?.message || '');
+  if (SMTP_MIDSESSION_CLOSE_RE.test(msg)) return null;
+  const isConnectionFailure = SMTP_CONNECTION_ERROR_CODES.has(err?.code)
+    || /ECONNREFUSED|ENOTFOUND|EHOSTUNREACH/i.test(msg);
+  if (!isConnectionFailure) return null;
+  const reason = smtpConnectionFailureReason(err);
+  const host = account?.smtp_host || 'the mail server';
+  const target = account?.smtp_port ? `${host}:${account.smtp_port}` : host;
+  return {
+    code: 'smtp_connection_failed',
+    reason,
+    host: account?.smtp_host || null,
+    port: account?.smtp_port || null,
+    error: `Could not connect to ${target} (${SMTP_CONNECTION_REASON_TEXT[reason]}). The server's network may block outgoing mail ports.`,
+  };
 }
 
 function sanitizeSmtpError(err) {
@@ -557,7 +615,14 @@ router.post('/send', async (req, res) => {
       if (idemKeyRedis) redisClient.set(idemKeyRedis, JSON.stringify(sendResult), { EX: 86400 }).catch(() => {});
       return res.json(sendResult);
     }
-    console.error('Send failed:', err.message);
+    // A connection/handshake failure never reached AUTH, so it always names accountId's own
+    // configured host — safe (and useful) to log even before we know which branch below applies.
+    const connectionFailure = smtpConnectionFailure(err, account);
+    if (connectionFailure) {
+      console.error(`Send failed: ${err.message} [${connectionFailure.code}=${connectionFailure.reason} target=${connectionFailure.host}:${connectionFailure.port}]`);
+    } else {
+      console.error('Send failed:', err.message);
+    }
     // The transport's forced token refresh after an SMTP AUTH rejection failed. AUTH precedes
     // MAIL FROM, so nothing was delivered; answer with the token manager's stable code only.
     const oauthFailure = Object.hasOwn(OAUTH_SEND_FAILURES, err?.code) ? OAUTH_SEND_FAILURES[err.code] : null;
@@ -572,6 +637,15 @@ router.post('/send', async (req, res) => {
     // A failure before reservation must not delete a concurrent request's lock.
     if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
     if (oauthFailure) return res.status(oauthFailure.status).json({ error: oauthFailure.error, code: err.code });
+    if (connectionFailure) {
+      return res.status(502).json({
+        error: connectionFailure.error,
+        code: connectionFailure.code,
+        reason: connectionFailure.reason,
+        host: connectionFailure.host,
+        port: connectionFailure.port,
+      });
+    }
     res.status(500).json({ error: sanitizeSmtpError(err) });
   }
 });

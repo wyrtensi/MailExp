@@ -882,7 +882,19 @@ export default function ComposeModal() {
         setTimeout(refreshThread, 10000);
       }
     } catch (err) {
-      setError(err.code === 'send_uncertain' ? t('compose.sendUncertain') : err.message);
+      if (err.code === 'send_uncertain') {
+        setError(t('compose.sendUncertain'));
+      } else if (err.code === 'smtp_connection_failed') {
+        const target = err.host
+          ? (err.port ? `${err.host}:${err.port}` : err.host)
+          : t('compose.smtpConnectionUnknownHost');
+        setError(t('compose.smtpConnectionFailed', {
+          target,
+          reason: t(`compose.smtpConnectionReasons.${err.reason}`, t('compose.smtpConnectionReasons.unknown')),
+        }));
+      } else {
+        setError(err.message);
+      }
       setSending(false);
     }
   };

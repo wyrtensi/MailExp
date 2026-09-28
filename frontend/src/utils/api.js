@@ -37,9 +37,13 @@ async function request(method, path, body, extraHeaders) {
     // Stable machine-readable code (e.g. send_in_progress) for callers that branch on it.
     if (err.code) e.code = err.code;
     // Same idea as code, for a 409 that also names why it refused (e.g. threading_switch_blocked's
-    // reason: not_gmail/index_invalid/ids_missing) and, for ids_missing, the row count.
+    // reason: not_gmail/index_invalid/ids_missing) and, for ids_missing, the row count. A send's
+    // smtp_connection_failed also carries the SMTP host/port it could not reach, so the composer
+    // can build its own localized message instead of the backend's English one.
     if (err.reason) e.reason = err.reason;
     if (err.count != null) e.count = err.count;
+    if (err.host) e.host = err.host;
+    if (err.port != null) e.port = err.port;
     e.status = res.status;
     throw e;
   }

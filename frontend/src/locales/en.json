@@ -156,6 +156,16 @@
       "action": "View"
     },
     "sendUncertain": "The connection to the mail server broke while sending. The message may have been delivered: check Sent before sending it again.",
+    "smtpConnectionFailed": "Could not connect to {{target}} ({{reason}}). The server's network may block outgoing mail ports.",
+    "smtpConnectionUnknownHost": "the mail server",
+    "smtpConnectionReasons": {
+      "timeout": "timed out",
+      "refused": "connection refused",
+      "not_found": "host not found",
+      "unreachable": "host unreachable",
+      "tls": "TLS handshake failed",
+      "unknown": "could not connect"
+    },
     "toolbar": {
       "removeTable": "Remove table",
       "textColor": "Text color",
