@@ -2496,19 +2496,50 @@ export default function MessageList() {
   // listings can surface a draft outside the Drafts folder entirely.
   const isDraftRow = (message) => isDraftMessage(message, { accounts, folders });
 
+  // Whether `folder` is the Drafts folder of `accountId`'s account — same per-message check
+  // isDraftRow uses, just applied to an arbitrary folder rather than a message's own.
+  const isAccountDraftsFolder = (accountId, folder) =>
+    isDraftMessage({ account_id: accountId, folder }, { accounts, folders });
+
+  // Cheap, synchronous pre-check for whether a thread row is worth a network round-trip to
+  // look for its draft: true when either the folder currently being browsed is this row's
+  // account's Drafts folder (browsing Drafts, but the representative happens to be a
+  // received/sent copy of the thread), or the representative's own folder is one (it likely
+  // is the draft, but e.g. a not-yet-loaded folder list made isDraftRow miss it).
+  const rowPlausiblyHoldsDraft = (message) =>
+    isAccountDraftsFolder(message.account_id, selectedFolder) || isAccountDraftsFolder(message.account_id, message.folder);
+
   // For a collapsed thread row, resolves which message of the conversation is actually the
   // draft (the newest one) instead of assuming the row's own representative message is it —
   // Gmail conversations mix folders, so the representative can be a received/sent copy while a
-  // reply sits in Drafts. Uses whatever the thread expansion already cached; a row that was
-  // never expanded falls back to checking itself. Returns the draft message, or null.
-  const resolveDraftForRow = (message) => {
+  // reply sits in Drafts.
+  //   1. Fast path: whatever a prior thread expansion already cached — no network call.
+  //   2. A thread that was never expanded has nothing cached. If the representative isn't a
+  //      draft but the row plausibly holds one anyway (rowPlausiblyHoldsDraft), fetch the
+  //      thread fresh through GET /thread/:id — the same endpoint expansion uses, whose rows
+  //      carry an authoritative backend `is_draft` — and look again there. Gated on the
+  //      plausibility check so an ordinary open of an ordinary conversation never pays for the
+  //      extra request.
+  // Returns the draft message, or null.
+  const resolveDraftForRow = async (message) => {
     if (!isThreadListRow(message)) return isDraftRow(message) ? message : null;
     const cached = threadMessages[threadCacheKey(message)];
-    return pickThreadDraft(message, cached, { accounts, folders });
+    if (cached) return pickThreadDraft(message, cached, { accounts, folders });
+    if (isDraftRow(message)) return message;
+    if (!rowPlausiblyHoldsDraft(message)) return null;
+    try {
+      const tid = message.thread_id || message.id;
+      const effectiveFolder = selectedAccountId ? selectedFolder : 'INBOX';
+      const data = await api.getThread(tid, effectiveFolder, isUnified, message.account_id);
+      return pickThreadDraft(message, data?.messages, { accounts, folders });
+    } catch (err) {
+      console.error('Failed to resolve the thread\'s draft:', err.message);
+      return null;
+    }
   };
 
   const handleSelect = async (message) => {
-    const draft = resolveDraftForRow(message);
+    const draft = await resolveDraftForRow(message);
     if (draft) {
       await openDraftInComposer(draft);
       return;
@@ -2558,9 +2589,9 @@ export default function MessageList() {
   // Open a message in a detached floating window (#219). Warms the body cache and marks
   // it read (like a normal open) without disturbing the main-pane selection. A draft has no
   // floating-window form — it opens in the (single, global) composer instead, same as a click.
-  const handleOpenInWindow = (message) => {
+  const handleOpenInWindow = async (message) => {
     if (!message || isMobile) return;
-    const draft = resolveDraftForRow(message);
+    const draft = await resolveDraftForRow(message);
     if (draft) {
       openDraftInComposer(draft);
       return;

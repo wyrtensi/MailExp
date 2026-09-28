@@ -588,3 +588,92 @@ describe('MessageList — a draft opens in the composer regardless of how it was
     assert.equal(useStore.getState().selectedMessageId, null, 'must not also fall through to selecting it for the reading pane');
   });
 });
+
+// The owner's exact report: a Gmail conversation row sits in the Drafts folder, its
+// representative message is not itself a draft (a received/sent copy of the thread), and the
+// thread was never expanded — so there is nothing cached to find the real draft in. Only then
+// does resolveDraftForRow fetch the thread fresh through GET /thread/:id and look again there.
+describe('MessageList — an uncached thread row fetches the thread to look for its draft', () => {
+  const clickRow = async (msgid) => {
+    const row = container.querySelector(`[data-msgid="${msgid}"]`);
+    assert.ok(row, `expected a row for ${msgid}`);
+    const target = row.querySelector('[draggable]') || row;
+    await React.act(async () => {
+      target.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    });
+    await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  };
+  const draftRoutes = (id) => ({
+    [`/mail/messages/${id}/body`]: [200, { html: '<p>hi</p>', text: 'hi' }],
+    [`/mail/messages/${id}/headers`]: [200, { headers: '' }],
+    [`/mail/messages/${id}/bcc`]: [200, { bcc: [] }],
+  });
+  // The row currently being browsed IS the account's Drafts folder (matching the folder list's
+  // special_use below) — the "plausibly holds a draft" gate that gets the fetch to fire at all.
+  const draftsState = {
+    selectedFolder: 'Drafts',
+    folders: { 'acct-1': [{ path: 'INBOX' }, { path: 'Drafts', special_use: '\\Drafts' }] },
+    threadMessages: {}, // nothing cached — the thread was never expanded
+  };
+
+  test('fetch-and-open: finds the draft in the freshly fetched thread and opens it', async () => {
+    const received = { ...MESSAGE, id: 'unc-rep-1', thread_id: 'thr-unc-1', message_count: 2, folder: 'INBOX' };
+    const draftChild = {
+      ...MESSAGE, id: 'unc-draft-1', uid: 77, thread_id: 'thr-unc-1', account_id: 'acct-1',
+      folder: 'Drafts', date: new Date(Date.now() + 60000).toISOString(), subject: 'Fetched draft',
+    };
+    THREAD_MESSAGES = [received, draftChild];
+    ROUTES = draftRoutes('unc-draft-1');
+    const opened = [];
+    await mount({
+      rows: [received], threadedView: true,
+      state: { ...draftsState, openCompose: d => opened.push(d), notifications: [] },
+    });
+
+    await clickRow('unc-rep-1');
+    ROUTES = {};
+
+    assert.equal(opened.length, 1, 'expected the composer to open with the fetched draft');
+    assert.equal(opened[0].draftUid, 77);
+    assert.equal(opened[0].draftFolder, 'Drafts');
+  });
+
+  test('fetch finds nothing: falls back to the reading pane when the fetched thread has no draft', async () => {
+    const received = { ...MESSAGE, id: 'unc-rep-2', thread_id: 'thr-unc-2', message_count: 2, folder: 'INBOX' };
+    const otherCopy = { ...MESSAGE, id: 'unc-other-2', thread_id: 'thr-unc-2', account_id: 'acct-1', folder: 'Sent' };
+    THREAD_MESSAGES = [received, otherCopy]; // neither message is a draft
+    const opened = [];
+    await mount({
+      rows: [received], threadedView: true,
+      state: { ...draftsState, openCompose: d => opened.push(d), notifications: [] },
+    });
+
+    await clickRow('unc-rep-2');
+
+    assert.equal(opened.length, 0, 'no draft was found — the composer must not open');
+    assert.equal(useStore.getState().selectedMessageId, 'unc-rep-2', 'falls back to opening it in the reading pane');
+  });
+
+  test('fetch fails: falls back to the reading pane instead of throwing', async () => {
+    const received = { ...MESSAGE, id: 'unc-rep-3', thread_id: 'thr-unc-3', message_count: 2, folder: 'INBOX' };
+    const opened = [];
+    await mount({
+      rows: [received], threadedView: true,
+      state: { ...draftsState, openCompose: d => opened.push(d), notifications: [] },
+    });
+
+    const originalGetThread = api.getThread;
+    const originalError = console.error;
+    console.error = () => {};
+    api.getThread = async () => { throw new Error('network down'); };
+    try {
+      await clickRow('unc-rep-3');
+
+      assert.equal(opened.length, 0, 'a failed thread fetch must not open the composer');
+      assert.equal(useStore.getState().selectedMessageId, 'unc-rep-3', 'falls back to the reading pane');
+    } finally {
+      api.getThread = originalGetThread;
+      console.error = originalError;
+    }
+  });
+});
