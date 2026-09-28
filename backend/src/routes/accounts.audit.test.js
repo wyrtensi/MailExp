@@ -51,7 +51,9 @@ beforeEach(() => {
   query.mockReset().mockImplementation(async (sql) => {
     if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ ...STORED }] };
     if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [stored] };
-    if (sql === 'SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1') return { rows: stored ? [{ id: ID, email_address: stored.email_address, mail_node: false }] : [] };
+    if (sql === 'SELECT id, email_address, mail_node, oauth_provider, oauth_refresh_token, oauth_access_token FROM email_accounts WHERE id = $1') {
+      return { rows: stored ? [{ id: ID, email_address: stored.email_address, mail_node: false, oauth_provider: stored.oauth_provider ?? null, oauth_refresh_token: null, oauth_access_token: null }] : [] };
+    }
     if (sql === 'SELECT * FROM email_accounts WHERE id = $1') return { rows: stored ? [stored] : [] };
     return { rows: [] };
   });
