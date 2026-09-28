@@ -20,3 +20,18 @@ export function clampComposePosition({ x, y }, { width, titleBarHeight }, { view
     y: Math.max(0, Math.min(maxY, y)),
   };
 }
+
+// Same coordinate-space contract as clampComposePosition (layout space, descale() before
+// calling). Mirrors the window's own minimum size and edge margins — a little breathing room on
+// the right, more at the bottom so the title bar / toolbar chrome never gets squeezed away.
+const COMPOSE_MIN_WIDTH = 360;
+const COMPOSE_MIN_HEIGHT = 200;
+const COMPOSE_RIGHT_MARGIN = 16;
+const COMPOSE_BOTTOM_MARGIN = 40;
+
+export function clampComposeSize({ width, height }, { viewportWidth, viewportHeight }) {
+  return {
+    width: Math.min(viewportWidth - COMPOSE_RIGHT_MARGIN, Math.max(COMPOSE_MIN_WIDTH, width)),
+    height: Math.min(viewportHeight - COMPOSE_BOTTOM_MARGIN, Math.max(COMPOSE_MIN_HEIGHT, height)),
+  };
+}

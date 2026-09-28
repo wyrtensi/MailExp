@@ -21,6 +21,7 @@ vi.mock('../services/oauth/googleOAuth.js', () => ({ revokeGoogleToken: vi.fn(as
 import express from 'express';
 import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
+import { decrypt } from '../services/encryption.js';
 import { revokeGoogleToken } from '../services/oauth/googleOAuth.js';
 
 const ID = '88888888-8888-4888-8888-888888888888';
@@ -76,6 +77,27 @@ describe('DELETE /api/accounts/:id revokes the Google grant', () => {
     await del();
     await flush();
     expect(revokeGoogleToken).toHaveBeenCalledWith('access-1');
+  });
+
+  it('still deletes the row when decrypt throws on a corrupted token (bad auth tag)', async () => {
+    query.mockImplementation(async (sql) => (
+      sql.startsWith('SELECT id, email_address, mail_node')
+        ? { rows: [{
+            id: ID, email_address: 'user@gmail.com', mail_node: false,
+            oauth_provider: 'google', oauth_refresh_token: 'enc(refresh-1)', oauth_access_token: 'enc(access-1)',
+          }] }
+        : { rows: [] }
+    ));
+    decrypt.mockImplementationOnce(() => { throw new Error('Unsupported state or unable to authenticate data'); });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await del();
+    errorSpy.mockRestore();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE FROM email_accounts'))).toBe(true);
+    await flush();
+    // Nothing readable to revoke with — the revoke step is skipped, not retried with garbage.
+    expect(revokeGoogleToken).not.toHaveBeenCalled();
   });
 
   it('does not call Google for a non-Google mailbox', async () => {

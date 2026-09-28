@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { clampComposePosition } from './composeWindow.js';
+import { clampComposePosition, clampComposeSize } from './composeWindow.js';
 
 const VIEWPORT = { viewportWidth: 1200, viewportHeight: 800 };
 const WINDOW = { width: 760, titleBarHeight: 44 };
@@ -49,6 +49,35 @@ describe('clampComposePosition', () => {
   it('is idempotent — clamping an already-clamped position is a no-op', () => {
     const once = clampComposePosition({ x: 5000, y: 5000 }, WINDOW, VIEWPORT);
     const twice = clampComposePosition(once, WINDOW, VIEWPORT);
+    assert.deepEqual(once, twice);
+  });
+});
+
+describe('clampComposeSize', () => {
+  it('leaves an in-bounds size unchanged', () => {
+    assert.deepEqual(
+      clampComposeSize({ width: 760, height: 500 }, VIEWPORT),
+      { width: 760, height: 500 },
+    );
+  });
+
+  it('pulls the width/height back to the viewport minus its edge margins when grown too far', () => {
+    assert.deepEqual(
+      clampComposeSize({ width: 5000, height: 5000 }, VIEWPORT),
+      { width: VIEWPORT.viewportWidth - 16, height: VIEWPORT.viewportHeight - 40 },
+    );
+  });
+
+  it('never shrinks below the minimum size, even when the viewport itself is smaller', () => {
+    assert.deepEqual(
+      clampComposeSize({ width: 10, height: 10 }, VIEWPORT),
+      { width: 360, height: 200 },
+    );
+  });
+
+  it('is idempotent — clamping an already-clamped size is a no-op', () => {
+    const once = clampComposeSize({ width: 5000, height: 5000 }, VIEWPORT);
+    const twice = clampComposeSize(once, VIEWPORT);
     assert.deepEqual(once, twice);
   });
 });

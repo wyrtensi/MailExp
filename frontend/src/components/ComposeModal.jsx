@@ -23,7 +23,7 @@ import { ComposerLink } from '../utils/editorLink.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { resolveInitialFrom } from '../utils/defaultSender.js';
 import { threadCacheKey } from '../utils/threadKey.js';
-import { clampComposePosition } from '../utils/composeWindow.js';
+import { clampComposePosition, clampComposeSize } from '../utils/composeWindow.js';
 import { SmileIcon } from './UiIcons.jsx';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
@@ -604,8 +604,11 @@ export default function ComposeModal() {
     const rect = el.getBoundingClientRect();
     const startMouseX = e.clientX;
     const startMouseY = e.clientY;
-    const startWidth = rect.width;
-    const startHeight = rect.height;
+    // rect is visual (on-screen) pixels, same mismatch as handleTitleDragStart's rect — descale
+    // into layout space so it's comparable to the mouse delta (also converted below) and to the
+    // viewport bounds clampComposeSize checks against.
+    const startWidth = descale(rect.width, scale);
+    const startHeight = descale(rect.height, scale);
     // Switch to top/left positioning if not already positioned. `pos` (and so the window's CSS
     // top/left) is layout-space — see composeWindow.js — so the anchor read from
     // getBoundingClientRect() (visual space) needs descale() here, same as handleTitleDragStart.
@@ -621,8 +624,12 @@ export default function ComposeModal() {
     let curW = startWidth;
     let curH = startHeight;
     const onMove = (ev) => {
-      curW = Math.min(window.innerWidth - 16, Math.max(360, startWidth + ev.clientX - startMouseX));
-      curH = Math.min(window.innerHeight - 40, Math.max(200, startHeight + ev.clientY - startMouseY));
+      const next = clampComposeSize(
+        { width: startWidth + (ev.clientX - startMouseX) / scale, height: startHeight + (ev.clientY - startMouseY) / scale },
+        { viewportWidth: descale(window.innerWidth, scale), viewportHeight: descale(window.innerHeight, scale) },
+      );
+      curW = next.width;
+      curH = next.height;
       el.style.width = curW + 'px';
       el.style.height = curH + 'px';
     };

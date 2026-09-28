@@ -490,9 +490,17 @@ router.delete('/:id', async (req, res) => {
     // tokens) still exists. Refresh token first — it is what a revoke call actually needs to
     // kill the whole grant; the access token is a fallback for a mailbox that never got one
     // (e.g. added before offline access, or already refresh-token-less for another reason).
-    const googleRevokeToken = check.rows[0].oauth_provider === 'google'
-      ? (decrypt(check.rows[0].oauth_refresh_token) || decrypt(check.rows[0].oauth_access_token) || null)
-      : null;
+    // decrypt() is documented to return null rather than throw on a corrupted value, but a
+    // removal must never be blocked by the revoke step regardless — wrap the read so a bad
+    // auth tag (or any other decrypt failure) skips the revoke instead of failing the delete.
+    let googleRevokeToken = null;
+    if (check.rows[0].oauth_provider === 'google') {
+      try {
+        googleRevokeToken = decrypt(check.rows[0].oauth_refresh_token) || decrypt(check.rows[0].oauth_access_token) || null;
+      } catch (err) {
+        console.error(`Could not read the Google token to revoke for removed mailbox ${redactEmail(check.rows[0].email_address)}: ${err?.name || 'Error'}`);
+      }
+    }
 
     // Delete from DB first (cascades to messages and folders immediately).
     // Disconnect IMAP afterward — fire-and-forget so a slow server logout
