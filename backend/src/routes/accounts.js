@@ -4,7 +4,9 @@ import { query, withTransaction } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
-import { encrypt } from '../services/encryption.js';
+import { encrypt, decrypt } from '../services/encryption.js';
+import { revokeGoogleToken } from '../services/oauth/googleOAuth.js';
+import { redactEmail } from '../utils/redact.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
@@ -461,7 +463,10 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const check = await query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [id]);
+    const check = await query(
+      'SELECT id, email_address, mail_node, oauth_provider, oauth_refresh_token, oauth_access_token FROM email_accounts WHERE id = $1',
+      [id]
+    );
     if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
     // A mail node mailbox is only disabled there. The row stays when that fails: deleting it would
@@ -481,6 +486,14 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
+    // The panel's own access token/grant at Google, read while the row (and its encrypted
+    // tokens) still exists. Refresh token first — it is what a revoke call actually needs to
+    // kill the whole grant; the access token is a fallback for a mailbox that never got one
+    // (e.g. added before offline access, or already refresh-token-less for another reason).
+    const googleRevokeToken = check.rows[0].oauth_provider === 'google'
+      ? (decrypt(check.rows[0].oauth_refresh_token) || decrypt(check.rows[0].oauth_access_token) || null)
+      : null;
+
     // Delete from DB first (cascades to messages and folders immediately).
     // Disconnect IMAP afterward — fire-and-forget so a slow server logout
     // doesn't block the response.
@@ -495,6 +508,16 @@ router.delete('/:id', async (req, res) => {
     imapManager.disconnectAccount(id).catch(err =>
       console.error(`Disconnect error after delete for ${id}:`, err.message)
     );
+    // Best effort, fire-and-forget: revokeGoogleToken never throws and times out on its own
+    // (PROVIDER_FETCH_TIMEOUT_MS), so it cannot delay or fail this response. The grant journal
+    // (google_oauth_grants) is left untouched, same as every other revoke path in this codebase
+    // — it is a lifetime record for the app's Google user cap, not a list of live grants, and a
+    // revoked user still counts against that cap.
+    if (googleRevokeToken) {
+      revokeGoogleToken(googleRevokeToken).then((revoked) => {
+        console.log(`Google OAuth grant ${revoked ? 'revoked' : 'revoke failed'} for removed mailbox ${redactEmail(check.rows[0].email_address)}`);
+      }).catch(() => {});
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error('Account delete error:', err);

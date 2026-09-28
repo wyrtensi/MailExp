@@ -14,8 +14,9 @@ use of an installation of MailExpert.
 3. **Acceptable use.** Do not use MailExpert to send spam or unsolicited bulk mail, to break the
    law, or to access mailboxes without authorisation.
 4. **Your data.** Letters stay in your mailboxes. How the panel handles data is described in the
-   [Privacy Policy](privacy-policy.md). You can remove a mailbox from the panel, or revoke the
-   panel's access at your mail provider, at any time.
+   [Privacy Policy](privacy-policy.md). You can remove a mailbox from the panel, which for Gmail
+   also revokes the panel's access at Google, or revoke the panel's access at your mail provider
+   directly, at any time.
 5. **No warranty.** The software is provided "as is", without warranty of any kind, as stated in
    its [licence](../../LICENSE). To the extent the law allows, the authors are not liable for loss
    of data, mail or business arising from its use.
