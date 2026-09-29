@@ -376,3 +376,37 @@ describe('Move picker favorites show their custom label (#505)', () => {
     assert.ok(!favLabelSpan.textContent.includes('Taxes'), 'the real folder name is not shown as visible text in the favorite row');
   });
 });
+
+describe('A plain-text body stays translatable under the translate="no" UI', () => {
+  // index.html marks <html> translate="no" so browser translators cannot break React's DOM.
+  // A plain-text letter renders in the main document, so without an opt-in the browser could no
+  // longer translate a letter written in another language.
+  const MSG_TEXT = { ...MSG_A, id: 't9', uid: 9, subject: 'Plain' };
+  let originalFetch;
+  before(() => {
+    globalThis.requestAnimationFrame ??= cb => setTimeout(() => cb(Date.now()), 0);
+    globalThis.cancelAnimationFrame ??= id => clearTimeout(id);
+    dom.window.requestAnimationFrame ??= globalThis.requestAnimationFrame;
+    dom.window.cancelAnimationFrame ??= globalThis.cancelAnimationFrame;
+    useStore.getState().setMessages?.([MSG_A, MSG_B, MSG_TEXT]);
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const json = /\/messages\/[^/]+\/body/.test(String(url))
+        ? { html: '', text: 'Plain text letter', attachments: [] }
+        : {};
+      return { ok: true, status: 200, json: async () => json, text: async () => '' };
+    };
+  });
+  after(() => { globalThis.fetch = originalFetch; });
+
+  test('the plain-text body opts back into translation', async () => {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage('t9');
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const card = [...document.querySelectorAll('.msg-card')].find(el => /Plain text letter/.test(el.textContent));
+    assert.ok(card, 'the plain-text body is rendered');
+    assert.equal(card.getAttribute('translate'), 'yes');
+  });
+});

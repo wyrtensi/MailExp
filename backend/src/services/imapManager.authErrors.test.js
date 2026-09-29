@@ -146,3 +146,27 @@ describe('extractImapError / isImapAuthFailure against real ImapFlow errors', ()
     expectNoSecrets(err, detail);
   });
 });
+
+// Node's shape for a connect refused on every resolved address (upstream mailflow #510): empty
+// message, the aggregate carries a code, and each address has its own error.
+describe('extractImapError on a connect that failed on every address', () => {
+  const refusedEverywhere = () => Object.assign(new AggregateError([
+    Object.assign(new Error('connect ECONNREFUSED ::1:993'), { code: 'ECONNREFUSED' }),
+    Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:993'), { code: 'ECONNREFUSED' }),
+  ], ''), { code: 'ECONNREFUSED' });
+
+  it('lists the reason for each address instead of the empty aggregate message', () => {
+    expect(String(refusedEverywhere())).toBe('AggregateError'); // what the log used to show
+    expect(extractImapError(refusedEverywhere())).toBe('connect ECONNREFUSED ::1:993; connect ECONNREFUSED 127.0.0.1:993');
+  });
+
+  it('reports a reason shared by every address once', () => {
+    const err = new AggregateError([new Error('connect ETIMEDOUT 10.0.0.1:993'), new Error('connect ETIMEDOUT 10.0.0.1:993')], '');
+    expect(extractImapError(err)).toBe('connect ETIMEDOUT 10.0.0.1:993');
+  });
+
+  it('falls back to the aggregate code when the per-address errors say nothing', () => {
+    const err = Object.assign(new AggregateError([{}, null], ''), { code: 'ECONNREFUSED' });
+    expect(extractImapError(err)).toBe('ECONNREFUSED');
+  });
+});

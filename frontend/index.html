@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html translate="no" lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -26,7 +26,17 @@
   -->
   <link rel="stylesheet" href="/fonts/fonts.css">
 </head>
-<body>
+<!--
+  translate="no" on <html>, so the tab title in <head> is covered too: the app ships its own
+  translations (Settings -> Appearance -> Language). A browser translator rewrites the text nodes
+  React owns, and React's next update then fails with "Failed to execute 'removeChild' on 'Node'"
+  and takes the whole app down. HTML mail renders in its own frame, a separate document this
+  attribute does not reach. The open letter's plain-text body, and HTML mail under the div
+  renderer (VITE_EMAIL_DIV_RENDER), set translate="yes" again: React writes each in one piece, so
+  a translator has no React text node to break. Upstream reports that Chrome honours the nested
+  translate="yes" and Edge's translator does not; not checked here.
+-->
+<body class="notranslate">
   <div id="root"></div>
   <script type="module" src="/src/main.jsx"></script>
 </body>
