@@ -353,7 +353,8 @@
 3. `SKIP_CLAMD=y`. `SKIP_FTS` включать по тому, нужен ли серверный поиск по телу. SOGo оставить, `SKIP_SOGO` не поддерживается.
 4. EOP:
    - Общий `relayhost = <EOP_HOST>` в `extra.cf` (голое имя без скобок и порта; `<EOP_HOST>` — значение MX домена из тенанта, у каждого домена своё, для новых доменов в зоне `*.mx.microsoft`). `add/transport "*"` не использовать: он заворачивает в EOP и почту собственных доменов узла. Подробно — [eop-panel-requirements.md](eop-panel-requirements.md), раздел 2.
-   - `tls-policy-map` на тот же `<EOP_HOST>` дословно, с `secure`/`encrypt` и `active: 1`.
+   - Relayhost домена (`add/relayhost` с `hostname = <EOP_HOST>` без логина, затем `edit/domain` с его id) — той же строкой: `extra.cf` нужен отбивкам, relayhost домена виден и сверяется из панели ([eop-panel-requirements.md](eop-panel-requirements.md), D-12).
+   - `tls-policy-map` на тот же `<EOP_HOST>` дословно, с `active: 1`; политика (`secure`, `dane` или без записи) зависит от формы имени — эксперимент 4 там же.
    - В терминах Microsoft: Inbound connector (узел -> EOP) по сертификату, домен из SAN сертификата узла должен быть accepted domain тенанта; Outbound connector (EOP -> узел) с обязательным TLS и проверкой сертификата. В ранних документах направления были названы наоборот.
 5. IP MailExpert в whitelist netfilter. В MailExpert: backoff при ошибке аутентификации, ограничение параллельных переподключений (imap `process_limit` 1024, лимит соединений Postfix submission 50 с одного IP).
 6. Сценарий «удалить» в MailExpert = `active:"0"` (или `"2"`, если почту нужно продолжать принимать). «Пересоздать» = `edit/mailbox` с `active:"1"` и новым паролем.

@@ -221,7 +221,7 @@ https://learn.microsoft.com/en-us/defender-office-365/outbound-spam-high-risk-de
 | Message rate limit (на ящик) | 30 писем/минуту | Превышение — троттлинг, не блокировка |
 | Recipient limit per message | 500 по умолчанию (1–1000 настраиваемо) | EAC/PowerShell |
 | TERRL (на тенант) | формула ниже | см. 2.7 |
-| SMTP relay (connector-based) | 10 000 получателей/сутки **на ящик, используемый для релея** | требует настроенного outbound-коннектора |
+| SMTP relay (connector-based) | 10 000 получателей/сутки **на ящик, используемый для релея** | требует настроенного коннектора (ревизия 2026-09-30: в терминах Microsoft релей идёт через Inbound connector; к add-on для локальных ящиков этот лимит не применяется, см. ниже) |
 
 https://learn.microsoft.com/en-us/defender-office-365/outbound-spam-sending-limits-troubleshoot
 
@@ -345,8 +345,8 @@ https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/manage-accep
 
 **[инференс, важное архитектурное следствие для MailExpert]**: поскольку у вас нет локального AD/Exchange
 для directory sync, а ящики создаются/удаляются напрямую в Postfix/Dovecot через MailExpert, "зеркало"
-каждого ящика как mail user в M365-тенанте придётся поддерживать программно самим MailExpert (Graph API
-или Exchange Online PowerShell) при каждом создании/удалении ящика. Если этого не делать и держать домен
+каждого ящика как mail user в M365-тенанте придётся поддерживать программно самим MailExpert (Exchange
+Online PowerShell; ревизия 2026-09-30: Graph таких получателей не создаёт, `orgContact` только для чтения) при каждом создании/удалении ящика. Если этого не делать и держать домен
 в Internal Relay — DBEB просто не будет работать, и невалидные адреса будет отбраковывать только ваш
 Postfix (что тоже рабочий, просто менее выгодный по нагрузке на EOP-фильтры вариант — письма на "мусорные"
 адреса пройдут через весь стек антиспама EOP прежде чем будут отвергнуты вами).
@@ -372,20 +372,21 @@ https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-
 
 ### 4.1. MX
 
-MX домена указывает на `<domain-через-дефисы>.mail.protection.outlook.com` (пример из
-официальной документации: `contoso-com.mail.protection.outlook.com` для домена `contoso.com`).
+MX домена указывает на хост EOP, выданный этому домену. Пример из официальной документации —
+`contoso-com.mail.protection.outlook.com` для домена `contoso.com` (ревизия 2026-09-30: это пример, а не
+правило — выводить имя из домена нельзя, см. ниже).
 https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/set-up-connectors-to-route-mail
+Отдельно подтверждается в инструкции по настройке standalone EOP — "Be sure to point your MX record
+directly to Microsoft 365 instead of a non-Microsoft service."
+https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-service
 
-> **Ревизия 2026-09-30.** Имя MX — токен на домен (`<MX token>.mail.protection.outlook.com`, токен из
+> **Ревизия 2026-09-30.** Имя MX — токен на домен (`<token>.mail.protection.outlook.com`, токен из
 > центра администрирования), а не имя тенанта, и выводить его из имени домена нельзя: для доменов,
 > добавленных после 2026-07-01, MX создаётся под `mx.microsoft`, и единственный источник значения —
 > Graph `serviceConfigurationRecords` (Message Center MC1048624, вторичный источник). Существующие домены
 > не затронуты.
 > https://learn.microsoft.com/en-us/microsoft-365/enterprise/external-domain-name-system-records ,
 > https://mc.merill.net/message/MC1048624
-Отдельно подтверждается в инструкции по настройке standalone EOP — "Be sure to point your MX record
-directly to Microsoft 365 instead of a non-Microsoft service."
-https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-service
 
 ### 4.2. SPF
 
@@ -686,8 +687,10 @@ https://www.hornetsecurity.com/en/blog/retention-archiving-email-security/
    сертификат/IP-based коннектору без привязки к конкретному EXO-ящику.~~ Закрыт 2026-09-30: к add-on
    для локальных ящиков лимиты на ящик не применяются (2.6).
 6. Для DBEB и корректного отклонения писем на несуществующие адреса вам придётся программно зеркалить
-   каждый созданный в Postfix/Dovecot ящик как mail user в M365-тенанте (нет AD/Entra Connect для
-   автосинхронизации) — это отдельная интеграционная задача для MailExpert. (Ревизия 2026-09-28:
+   каждый созданный в Postfix/Dovecot ящик как mail user или mail contact в M365-тенанте, вместе с каждым
+   алиасом (иначе после Authoritative алиас получит `550 5.4.1`; нет AD/Entra Connect для
+   автосинхронизации) — это отдельная интеграционная задача для MailExpert, только через EXO PowerShell
+   ([eop-panel-requirements.md](eop-panel-requirements.md), R-29). (Ревизия 2026-09-28:
    без этого Internal Relay даёт постоянный NDR-бэкскаттер, а не просто менее эффективную фильтрацию —
    [eop-review.md](eop-review.md), находки 8-9.)
 7. DKIM для исходящей почты логично доверить EOP (подпись accepted domain на стороне EOP), а не

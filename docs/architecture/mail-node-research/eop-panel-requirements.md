@@ -75,8 +75,13 @@ Microsoft считает направление относительно тен�
   не важно, если тенант атрибутирует письмо по сертификату, а не по имени хоста (**Inferred**, проверка —
   раздел 6). Панель хранит ожидаемые MX каждого домена отдельно от `<EOP_HOST>`: первые нужны проверке DNS,
   второе — relayhost и TLS Policy Map.
-- Проверка имени сертификата для имён под `mx.microsoft` и наличие у них TLSA (DANE) не выяснены —
-  раздел 6.
+- TLS к `<EOP_HOST>` зависит от формы имени. У `*.mail.protection.outlook.com` TLSA нет, и уровень `dane`
+  mailcow откатывается к непроверенному TLS — нужна запись TLS Policy Map. Для новых хостов под
+  `mx.microsoft` Microsoft объявила зоны с DNSSEC и TLSA (входящий SMTP DANE с DNSSEC в GA, блоги Exchange
+  Team «Announcing general availability of inbound SMTP DANE with DNSSEC» и «Modernizing DNS Security for
+  Exchange Online Mail Flow»): для такого `<EOP_HOST>` штатный `dane` может уже проверять сертификат, а
+  `secure` с правилом `nexthop, dot-nexthop` — упасть на несовпадении имени. Что ставить в TLS Policy Map
+  (`secure`, `dane` или ничего) для каждой формы, решает эксперимент 4 (раздел 6).
 
 ### 2.4. Next-hop в Postfix mailcow
 
@@ -88,10 +93,11 @@ Microsoft считает направление относительно тен�
 | Transport maps | `add/transport` | адрес или домен **получателя** (`transport_maps`, `postfix.sh:155-164`) |
 | Общий `relayhost` | нет, только `data/conf/postfix/extra.cf` + перезапуск `postfix-mailcow` | всё, что не поймали первые два (`main.cf:18`, дописывание `extra.cf` — `postfix.sh:479-491`) |
 
-- **Отбивки и DSN** (`MAIL FROM:<>`) не попадают под relayhost домена: у пустого отправителя нет строки в
-  `relayhosts`, запрос mailcow возвращает `smtp:` с пустым next-hop, и Postfix берёт общий `relayhost`
-  (**Inferred** по порядку next-hop из `postconf(5)`; проверяется на стенде). Поэтому общий relayhost в
-  `extra.cf` обязателен, API его не заменяет.
+- **Отбивки и DSN** (`MAIL FROM:<>`) не попадают под relayhost домена: пустой отправитель Postfix ищет
+  по ключу `<>` (`empty_address_default_transport_maps_lookup_key`, `postconf(5)`), а запрос mailcow
+  содержит `%d`, и по `mysql_table(5)` для ключа без домена запрос не выполняется — результата нет. Тогда
+  Postfix берёт `default_transport`, а next-hop — из общего `relayhost` (**Inferred** по документации
+  Postfix; проверяется на стенде). Поэтому общий relayhost в `extra.cf` обязателен, API его не заменяет.
 - **`add/transport destination="*"` небезопасен** (рекомендация прежней версии eop-review, находка 2,
   отозвана): `transport_maps` старше `virtual_transport` (`transport(5)`), штатный приём «сначала свои
   домены с пустым результатом, потом `*`» в mailcow невыразим — `add/transport` требует непустой
@@ -121,11 +127,21 @@ Microsoft считает направление относительно тен�
 Диапазоны EOP как «forwarding hosts» mailcow (`add/fwdhost`) это закрывают, и это больше, чем думала
 прежняя версия eop-review (находка 13):
 - postscreen пропускает такие адреса без DNSBL (`whitelist_forwardinghosts.sh` → `forwardinghosts.php`);
-- greylisting не применяется (`greylist.conf:1`, `force_actions.conf:7-11`);
+- greylisting не применяется (`local.d/greylist.conf:1`, `local.d/force_actions.conf:7-11`);
 - `reject` понижается до `add header`, то есть письмо уходит в Junk, а не отклоняется
-  (`force_actions.conf:2-6`) — это и есть «per-IP force action» из находки 14;
-- с символов групп `rbl`, `policies`, `hfilter`, `neural` снимаются положительные веса
-  (`composites.conf:50-52`), `SPOOFED_UNAUTH` и `FREEMAIL_POLICY_FAILURE` их не трогают.
+  (`local.d/force_actions.conf:2-6`) — это и есть «per-IP force action» из находки 14;
+- с символов групп `rbl`, `policies`, `hfilter` снимаются положительные веса, группа `neural`
+  отключается целиком (`local.d/composites.conf:50-52`); `SPOOFED_UNAUTH` и `FREEMAIL_POLICY_FAILURE` такие
+  адреса не трогают.
+
+Цена этого решения:
+- `UPSTREAM_CHECKS_EXCLUDE_FWD_HOST` (`local.d/composites.conf:54-56`) гасит для forwarding hosts символ
+  rspamd `MICROSOFT_SPAM`, который читает `X-Forefront-Antispam-Report`, — rspamd перестаёт учитывать
+  вердикт EOP;
+- `SPOOFED_UNAUTH` (вес 50, `local.d/composites.conf:29-32`) не срабатывает для forwarding hosts, то есть
+  пропадает защита от чужого письма с `From` на собственный домен узла;
+- значит, после R-12 вердикт EOP доходит до Junk **только** через Sieve-правило R-11: R-12 без R-11 не
+  включать.
 
 Ловушка: `filter_spam` по умолчанию 0, и тогда rspamd ставит адресу pre-result `accept` и не проверяет
 письмо вовсе (`functions.fwdhost.inc.php:20,41-46`, `rspamd.local.lua:340-341`). Для EOP всегда
@@ -223,7 +239,7 @@ Microsoft считает направление относительно тен�
 | Файрвол `DOCKER-USER`, таймер диапазонов EOP | хост | скрипт, таймер | узел |
 | Ключ API mailcow и его `allow_from` | админка mailcow | руками (бутстрап) | узел |
 | TLS Policy Map, relayhost, домен, DKIM mailcow, лимиты, глобальный prefilter, forwarding hosts, псевдонимы, sender ACL, очередь, логи, карантин | БД mailcow | API mailcow из панели | узел, домен, ящик |
-| Whitelist fail2ban для `<PANEL_IP>` | админка mailcow | руками; API — **Inferred** (R-13) | узел |
+| Whitelist fail2ban для `<PANEL_IP>` | админка mailcow | руками или API `get/fail2ban` + `edit/fail2ban` с чтением и записью всех полей (R-13) | узел |
 | Домен в тенанте, TXT-верификация, ожидаемый MX, трассировка, алерты | тенант | Graph (app-only) | домен |
 | Тип accepted domain, коннекторы (сверка, список доменов), DKIM EOP, антиспам-политика, блокировки коннектора, зеркало DBEB, карантин EOP | тенант | EXO PowerShell V3 (app-only) | тенант, домен, ящик |
 | Создание коннекторов | тенант | владелец мастером EAC, один раз | тенант |
@@ -292,6 +308,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   лимиты по умолчанию, фактический TERRL (вводится руками из отчёта EAC), параметры подключения к тенанту
   (id тенанта, id приложения, отпечаток сертификата — R-35). До тенанта это журнал ручных шагов с
   проверками того, что проверяемо. Демо-данные для экрана (обещание демо для всех экранов настроек).
+- Зачем: `<EOP_HOST>`, режим DKIM и лимиты нужны R-07..R-10 и R-19, а в настройках узла сейчас только
+  host, ключ, квота и ping URL (`mailcow.js:56-66`); ручные шаги тенанта панель никак не отмечает.
 - Без EOP: да.
 
 ### Настройка узла через API mailcow
@@ -300,7 +318,10 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Зачем: без записи TLS к EOP не проверяется (раздел 2.4; [eop-review](eop-review.md), находка 1).
 - Как: `get/tls-policy-map/all`; если нет `dest = <EOP_HOST>` — `add/tls-policy-map {dest:"<EOP_HOST>",
   policy:"secure", parameters:"", active:1}`, при расхождении — `edit/tls-policy-map`. `policy` PHP не
-  проверяет (в БД ENUM, `init_db.inc.php:318`) — панель валидирует сама.
+  проверяет (в БД ENUM, `init_db.inc.php:318`) — панель валидирует сама. Политика зависит от формы
+  `<EOP_HOST>` (раздел 2.3): для `*.mail.protection.outlook.com` — `secure`; для имени под `mx.microsoft`
+  с объявленными DNSSEC и TLSA — `secure`, `dane` или без записи, по итогам эксперимента 4. Панель хранит
+  выбранную политику в настройках (R-06), а не зашивает `secure`.
 - Без EOP: частично. На стенде с fake-EOP (раздел 5): `policy=encrypt` → в `get/logs/postfix`
   «Untrusted TLS connection established to <fake>»; `policy=fingerprint`, `parameters=match=<sha256>` →
   «Verified»; `dest` со скобками или портом → строки нет. `secure` против настоящего сертификата EOP —
@@ -322,7 +343,9 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   публикации ключа ([eop-review](eop-review.md), находка 3).
 - Как: `add/domain` с `key_size: 2048, dkim_selector: "dkim"` или `key_size: 0`. С ключом — сразу
   `get/dkim/<DOMAIN>` и показ записи `dkim._domainkey.<DOMAIN>` TXT = `dkim_txt`; домен не переходит в
-  `dns_ok`, пока TXT не совпал по `p=`. Для уже созданных доменов без записи — публикация или
+  `dns_ok`, пока TXT не совпал по `p=`. При `SPLIT_DKIM_255` mailcow отдаёт `dkim_txt` кусками по 255
+  символов в кавычках через пробел (`functions.dkim.inc.php:255-257`): перед показом и сравнением
+  нормализовать (снять кавычки, склеить; то же для TXT из DNS, R-14). Для уже созданных доменов без записи — публикация или
   `delete/dkim ["<DOMAIN>"]`. Новый ключ — `delete/dkim` + `add/dkim {domains, dkim_selector, key_size}`.
 - Без EOP: да — письмо через submission стенда приходит в fake-EOP с `DKIM-Signature: d=<DOMAIN>`;
   с `key_size: 0` подписи нет.
@@ -355,8 +378,9 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: да — письмо с `X-Forefront-Antispam-Report` через порт 25 внутри сети стенда: `SFV:SPM` → Junk,
   `SFV:SKQ` и `SFV:NSPM` → INBOX; Junk панель видит опросом (`backend/src/services/imapManager.js:6647-6650`).
 
-**R-12. Диапазоны EOP как forwarding hosts.** S-M. По решению D-3.
-- Зачем: раздел 2.5.
+**R-12. Диапазоны EOP как forwarding hosts.** S-M. По решению D-3. Требует R-11.
+- Зачем: раздел 2.5. Цена там же: rspamd перестаёт учитывать `MICROSOFT_SPAM` и `SPOOFED_UNAUTH` для этих
+  адресов, поэтому включать только вместе с R-11 или после него — иначе вердикт EOP до Junk не дойдёт.
 - Как: `get/fwdhost/all` → сравнить с актуальными CIDR (запись Exchange/25 веб-сервиса, раздел 2.10) →
   `add/fwdhost {hostname:"<EOP_RANGE>", filter_spam:1}` и `delete/fwdhost ["<EOP_RANGE>"]`. Без
   `filter_spam: 1` не отправлять никогда. Источник списка — тот же разбор, что у таймера файрвола (R-40):
@@ -366,16 +390,22 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 
 **R-13. Whitelist fail2ban для панели.** S.
 - Что: `<PANEL_IP>` в whitelist fail2ban (runbook, раздел 3, шаг 7), чтение для проверки раздела 9.
-- Как: `get/fail2ban` / `edit/fail2ban` — ни одно исследование не проверило их по исходникам
-  (**Inferred**). Если API нет — шаг остаётся в runbook, панель только показывает напоминание.
-- Без EOP: да — стенд.
+- Зачем: панель ходит ко всем ящикам с одного адреса; бан за неудачные входы одного ящика отрезал бы все.
+- Как: `get/fail2ban` (`json_api.php:1277`) и `edit/fail2ban {items:[...], attr:{...}}`
+  (`json_api.php:2022-2029`). Ловушка: обычная правка (`functions.fail2ban.inc.php:239-250`) заменяет
+  `whitelist` целиком, а пропущенные `ban_time_increment` и `manage_external` сбрасывает в 0 (остальные
+  поля берутся из текущих). Панель делает read-modify-write: читает все поля `get/fail2ban`, дописывает
+  `<PANEL_IP>` в `whitelist`, если его нет, и отправляет все поля обратно.
+- Без EOP: да — стенд: после правки `get/fail2ban` показывает прежние `ban_time_increment`,
+  `manage_external` и `blacklist` и дополненный `whitelist`.
 
 ### Проверка DNS и сертификата
 
 **R-14. Проверка DNS домена.** M.
 - Что: MX — ровно ожидаемые значения (из Graph или введённые руками до тенанта), других MX нет; SPF — одна
   запись `v=spf1` с `include:spf.protection.outlook.com`, без `ip4:<NODE_IP>`; DKIM по режиму — TXT
-  `dkim._domainkey` совпадает с `get/dkim` по `p=` (формула как в mailcow `dns_diagnostics.php:402-410`)
+  `dkim._domainkey` совпадает с `get/dkim` по `p=` после нормализации кусков по 255 символов (R-09; формула
+  как в mailcow `dns_diagnostics.php:402-410`)
   и/или CNAME `selector1/selector2._domainkey` равны `Selector1CNAME/Selector2CNAME`; DMARC `_dmarc`
   начинается с `v=DMARC1`; TXT верификации тенанта равен `text` из `verificationDnsRecords`; `_mta-sts`
   — предупреждение, если политика mailcow публикует MX узла (приём сломается). Autodiscover не нужен.
@@ -397,6 +427,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 ### Эксплуатация
 
 **R-16. Очередь узла.** M.
+- Зачем: при `4xx` от EOP или блокировке коннектора письма копятся в deferred, а панель этого не видит;
+  сейчас очередь смотрят только в админке mailcow или `postqueue` на хосте.
 - Как: `get/mailq/all` (`postqueue -j`, до 10 000 записей; состав полей задаёт Postfix — проверить на
   стенде), `get/postcat/<qid>`, `edit/mailq {items:[qid], attr:{action:"hold"|"unhold"|"deliver"}}`,
   `edit/mailq {attr:{action:"flush"}}`, `delete/mailq [qid]`. `super_delete` в панели не давать. Только
@@ -416,16 +448,23 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Сигналы: `5.7.711`/`AS(2204)`, `5.7.64`, `5.7.233` в логах; deferred больше N писем или старше T;
   сертификат `<MAIL_HOST>` истекает меньше чем через 14 дней; контейнеры (`get/status/containers`); обход
   EOP (R-19); с тенантом — `Get-BlockedConnector` (R-27). Диск уже есть.
+- Зачем: сейчас панель следит только за диском узла (`diskWatch.js`), а блокировку коннектора или
+  истёкший сертификат клиенты заметят раньше владельца.
 - Как: отдельная проверка Healthchecks тем же механизмом ping URL, что у диска (`diskWatch.js:14-37`).
 - Без EOP: да.
 
 **R-19. Контроль обхода EOP.** S.
-- Что: любая строка `status=sent` в `get/logs/postfix` с `relay=`, отличным от `<EOP_HOST>` и от локальной
-  доставки в Dovecot, — тревога: почта ушла мимо EOP (нет общего relayhost, неверный relayhost домена).
+- Что: любая строка `status=sent` в `get/logs/postfix`, у которой `relay=` не указывает на EOP и не на
+  локальную доставку в Dovecot, — тревога: почта ушла мимо EOP (нет общего relayhost, неверный relayhost
+  домена). Postfix пишет `relay=` как разрешённое имя и адрес (`relay=<имя>[<IP>]:25`), и имя не обязано
+  совпасть с `<EOP_HOST>` буквально: считать «через EOP», если совпало имя **или** IP входит в диапазоны
+  EOP (раздел 2.10, тот же список, что у R-12 и R-40).
 - Зачем: `extra.cf` через API не прочитать, а отбивки без него уходят напрямую (раздел 2.4).
 - Без EOP: да — фикстуры строк лога; на стенде прогон с `extra.cf` и без него.
 
 **R-20. Карантин mailcow и история rspamd.** M.
+- Зачем: письма, которые rspamd узла счёл спамом (в том числе из-за SPF по адресу EOP, раздел 2.5), лежат в
+  карантине mailcow, куда сотрудники панели не ходят; ложные срабатывания некому выпустить.
 - Как: `get/quarantine/all`, `get/quarantine/<id>` (сырое письмо, символы, IP), `edit/qitem {items:[id],
   attr:{action:"release"|"learnham"}}`, `delete/qitem`, настройки `edit/quarantine`;
   `get/logs/rspamd-history` — «почему письмо в Junk». Копия попадает в карантин и при `add header`
@@ -436,6 +475,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Что: уникальные внешние получатели за скользящие 24 часа (журнал `message.sent` панели и/или
   `get/logs/postfix`), порог 80% (совет Microsoft), фактический лимит из R-06, рампа молодого тенанта.
   Получатели на accepted domains не считаются.
+- Зачем: превышение TERRL останавливает внешнюю почту всего тенанта (`550 5.7.233`), а лимиты mailcow
+  считают сообщения, не получателей (раздел 2.9).
 - Без EOP: да — чистая функция, таблица значений: 100 лицензий → 22 059, 500 → 48 248; 10% и 25%.
 
 ### Тенант
@@ -447,6 +488,9 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   операция, аргументы, состояние, попытки, последняя ошибка, время следующей попытки) и один исполнитель с
   блокировкой в БД: backend рассчитан на один процесс (`backend/src/services/mailNode/currentPassword.js:10-13`).
   Вне пути HTTP-запроса: подключение EXO занимает секунды и десятки секунд.
+- Зачем: коннекторы, типы доменов, DKIM EOP, антиспам, карантин и получатели DBEB доступны только через EXO
+  PowerShell (публичного REST нет), домены и трассировка — через Graph; без общего драйвера R-23..R-31 не
+  построить и не протестировать без тенанта.
 - Как: `Connect-ExchangeOnline -AppId <id> -Organization <tenant>.onmicrosoft.com -Certificate <X509>`
   (или `-CertificateFilePath` + `-CertificatePassword`; `-CertificateThumbprint` только в Windows)
   `-CommandName <белый список> -SkipLoadingFormatData`, один долгоживущий сеанс (частые connect/disconnect
@@ -460,6 +504,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   контрактный тест против живого тенанта — вручную, как проверка OAuth.
 
 **R-23. Домен в тенанте через Graph.** M.
+- Зачем: без домена в тенанте нет ни релея, ни MX; MX нового домена можно узнать только из Graph (раздел
+  2.3), а TXT верификации — показать владельцу домена.
 - Как: `POST /domains {"id":"<DOMAIN>"}` → `GET /domains/<DOMAIN>/verificationDnsRecords` (показать
   `label`, `recordType`, `text`, `ttl`) → проверка DNS (R-14) → `POST /domains/<DOMAIN>/verify` →
   `PATCH /domains/<DOMAIN> {supportedServices:["Email"]}` → `GET /domains/<DOMAIN>/serviceConfigurationRecords`
@@ -468,6 +514,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: да — мок, обе формы MX. Реальные задержки и формат TXT — тенант.
 
 **R-24. Тип accepted domain.** S.
+- Зачем: новый домен, вероятно, Authoritative по умолчанию (раздел 2.8): до зеркала получателей EOP
+  отклонял бы почту на все адреса узла.
 - Как: как только домен виден в `Get-AcceptedDomain`, до смены MX — `Set-AcceptedDomain -Identity <DOMAIN>
   -DomainType InternalRelay`. `Authoritative` — только из R-29, после полного зеркала.
 - Без EOP: логика — да; поведение — тенант.
@@ -477,6 +525,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   `Get-OutboundConnector` как эталон, затем сверяет ключевые свойства (`ConnectorType OnPremises`,
   `TlsSenderCertificateName`, `SmartHosts`, `TlsSettings`, `TlsDomain`, список доменов) и показывает
   расхождения.
+- Зачем: домен, не добавленный в Outbound connector, не доходит до узла; чужая правка коннектора (TLS,
+  smart host) ломает приём или атрибуцию молча — сейчас это видно только в EAC.
 - Как: новый домен — `Set-OutboundConnector -Identity <имя> -RecipientDomains @{Add="<DOMAIN>"}` (решение
   D-9); проверка — `Validate-OutboundConnector -Identity <имя> -Recipients <адрес>@<DOMAIN>`, затем
   `Set-OutboundConnector -IsValidated $true -LastValidationTimestamp <UTC>` (сам `Validate-*` статус не
@@ -484,6 +534,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: мок; настоящее — тенант.
 
 **R-26. DKIM в EOP.** S-M. Если по решению D-1 подписывает EOP.
+- Зачем: значения CNAME нельзя вычислить (формат сменился в мае 2025), их надо прочитать и показать
+  владельцу домена, а включение возможно только после публикации.
 - Как: `New-DkimSigningConfig -DomainName <DOMAIN> -Enabled $false -KeySize 2048` →
   `Get-DkimSigningConfig -Identity <DOMAIN>` (`Status`, `Selector1CNAME`, `Selector2CNAME`) → показать
   CNAME `selector1._domainkey` и `selector2._domainkey` → опрос `Set-DkimSigningConfig -Identity <DOMAIN>
@@ -492,6 +544,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: мок; подпись релейной почты — тенант.
 
 **R-27. Блокировка коннектора.** S.
+- Зачем: блокировка Inbound connector останавливает исходящую почту всех ящиков узла
+  ([eop-review](eop-review.md), находка 7); алерт Microsoft уходит администраторам тенанта, а не в панель.
 - Как: опрос `Get-BlockedConnector` раз в 5-10 минут (пусто — норма); `Remove-BlockedConnector
   -ConnectorId <GUID>` только по кнопке администратора с подтверждением и ссылкой на процедуру Microsoft
   «Respond to a compromised connector»; снятие действует до часа. Роли: снятие — Organization Management
@@ -500,6 +554,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: мок; быстрый сигнал по логам (R-18) работает без тенанта.
 
 **R-28. Антиспам-политика — только чтение.** S.
+- Зачем: раскладка R-11 работает, только если EOP доставляет спам на узел с заголовками; действие
+  `Quarantine` в политике молча уводит письма туда, где сотрудники их не видят (находка 6).
 - Как: `Get-HostedContentFilterPolicy -Identity Default` → показать `SpamAction`, `HighConfidenceSpamAction`,
   `PhishSpamAction`, `HighConfidencePhishAction`; предупреждать, если действие расходится с раскладкой
   R-11 (например `Quarantine` для обычного спама — сотрудники его не увидят). `Set-HostedContentFilterPolicy`
@@ -510,6 +566,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Что: желаемое множество — адреса ящиков и алиасов (без catch-all) доменов, идущих в DBEB; фактическое —
   `Get-Recipient -ResultSize unlimited` (или `Get-MailContact`) по домену; создать недостающих, удалить
   лишних; пачками по 20-50 с экспоненциальными повторами («you might encounter throttling», числа нет).
+- Зачем: без зеркала домен остаётся Internal Relay, и каждый неизвестный или удалённый адрес даёт
+  бэкскаттер от EOP ([eop-review](eop-review.md), находки 8-9); синхронизации из не-AD каталога у Microsoft нет.
 - Как: контакт — `New-MailContact -Name -ExternalEmailAddress` + `-HiddenFromAddressListsEnabled $true`;
   mail user — `New-MailUser -Name -ExternalEmailAddress -MicrosoftOnlineServicesID -Password` +
   `RemotePowerShellEnabled $false`. Алиасы — proxy-адреса (`Set-MailContact -EmailAddresses
@@ -521,6 +579,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   идемпотентности; поведение DBEB — только тенант (раздел 6, эксперимент 8).
 
 **R-30. Трассировка по запросу.** M.
+- Зачем: логи узла (R-17) заканчиваются на передаче в EOP; что EOP сделал с письмом дальше (доставил,
+  отфильтровал, задержал), видно только в трассировке тенанта.
 - Как: кнопка «статус доставки» у письма: Graph `GET /admin/exchange/tracing/messageTraces` с `$filter` по
   `messageId` (v1.0; нужен сервис-принципал `8bd644d1-64a1-4d4b-ae52-2e0cbf64e373` в тенанте, провижининг
   до нескольких часов) или `Get-MessageTraceV2 -MessageId` (для add-on подтверждён, Graph для add-on —
@@ -529,6 +589,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: мок.
 
 **R-31. Карантин EOP и Tenant Allow/Block List.** L. Только если по D-2 явный фишинг остаётся в карантине.
+- Зачем: у сотрудников панели нет учётных записей Microsoft, самообслуживание карантина им недоступно, и
+  ложное срабатывание «high confidence phish» иначе выпускается только из портала Defender.
 - Как: `Get-QuarantineMessage`, `Release-QuarantineMessage -Identity <id> (-ReleaseToAll | -User <адрес>)
   [-AllowSender] [-ReportFalsePositive]`; TABL — `New/Get/Remove-TenantAllowBlockListItems` (без Defender
   500 allow + 500 block на подтип, без срока — 30 дней). Graph-эквивалента нет. Риск: выпущенное письмо на
@@ -538,6 +600,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 ### Жизненный цикл ящика и псевдонимов
 
 **R-32. Создание ящика.** S без DBEB, M с DBEB.
+- Зачем: сейчас `provisionMailbox` не ставит лимит отправки (`mailcow.js:205-218`), не смотрит на
+  состояние домена и ничего не делает в тенанте, а с DBEB порядок «узел → тенант» обязателен (находка 9).
 - Как: домен `ready` (R-03) → `add/mailbox` с `rl_value`/`rl_frame` (R-10) → строка панели → задание
   «создать получателя» (R-29). В `authoritative`-домене письма на новый адрес получают `550 5.4.1`, пока
   получатель не создан, — ящик показывается «ожидает тенант». Повторное создание удалённого адреса
@@ -545,6 +609,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Без EOP: да.
 
 **R-33. Удаление и отключение.** S-M.
+- Зачем: удаление сейчас — `active: 0` на узле (`mailcow.js:229-233`), на Internal Relay это бэкскаттер, а
+  с DBEB неверный порядок оставляет окно, где EOP принимает почту на уже отключённый адрес (находка 9).
 - Как: с DBEB — сначала убрать получателя в тенанте, затем `edit/mailbox active:0`, затем строку (сейчас
   узел → строка, `accounts.js:474-508`); после удаления в тенанте EOP (домен в `authoritative`) отклоняет адрес на границе
   синхронно, без бэкскаттера. Без DBEB удалённый адрес — источник NDR от EOP: подсказка в интерфейсе
@@ -574,20 +640,28 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   `tenant-worker`, пароль — секрет контейнера (Microsoft: для локального сертификата «no automated and secure
   way»); в БД панели — только id тенанта, id приложения, отпечаток. Не логировать ответы `get/relayhost/all`.
   mailcow сам пишет тела API-запросов в `API_LOG`, маскируя только поля с `pass` в имени (`json_api.php:11-35`).
+- Без EOP: да — тест, что логи панели и ответы API не содержат пароля relayhost и пароля PFX; на стенде
+  `tenant-worker` стартует с PFX из тома и отказывается стартовать без него.
 
 **R-36. Никакого произвольного PowerShell.** S.
 - `tenant-worker` исполняет только операции из белого списка; параметры — провалидированные домены и
   адреса (`parseHostName`, `parseLocalPart`), передаются как аргументы, не склейкой строк; `-CommandName`
   ограничивает загружаемые командлеты.
+- Без EOP: да — тесты воркера в режиме печати команд: неизвестная операция и адрес с `;`, `$(...)`,
+  кавычками отклоняются до запуска pwsh.
 
 **R-37. Минимальные права.** S.
 - Ключ mailcow — rw только с `<PANEL_IP>`; Graph — три application-права из R-22; EXO — сначала Exchange
   Administrator, затем кастомная группа ролей (`New-ServicePrincipal` + `Add-RoleGroupMember`) после проверки
   на тенанте; только чтение (`Get-BlockedConnector`, трассировка) — ролям чтения.
+- Без EOP: частично — `allow_from` ключа mailcow проверяется на стенде (запрос не с адреса панели получает
+  отказ); набор ролей EXO — только тенант (эксперимент 16).
 
 **R-38. Одновременность и нагрузка на API.** S.
 - Массовые операции (лимиты на 500 ящиков, сверка, зеркало) — с ограничением одновременных вызовов по
   образцу `NODE_RESTORE_CONCURRENCY` (`imapManager.js:1588-1590`); `add/global-filter` — никогда в цикле.
+- Без EOP: да — на стенде применить лимиты к 500 ящикам (сценарий `load` `e2e-mailcow.sh`), следить за
+  числом одновременных запросов к API и за ошибками.
 
 ### Хост узла (скрипты, не панель)
 
@@ -597,9 +671,13 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   привязка `SMTP_PORT=<NODE_IP>:25` и других портов, `generate_config.sh:218-226`), `extra.cf` с
   `relayhost = <EOP_HOST>` и перезапуск `postfix-mailcow`, `dovecot-extra.conf`, правила `DOCKER-USER`.
   Идемпотентно, с bats-тестами (инфраструктура есть в `scripts/deploy/test/*.bats`).
+- Зачем: это файлы хоста без API (раздел 3); сейчас из них в репозитории есть только `dovecot-extra.conf`,
+  остальное владелец делает руками по runbook.
 - Без EOP: да.
 
 **R-40. Таймер диапазонов EOP.** S-M.
+- Зачем: порт 25 открыт только диапазонам EOP, а список меняется; сейчас сверка ручная и раз в месяц
+  ([eop-review](eop-review.md), находка 11).
 - Как: раздел 2.10; не применять пустой список; замена правил атомарно (ipset или временная цепочка с
   переключением); IPv4 и, если IPv6 включён, IPv6; пинг Healthchecks. Результат — источник для R-12.
 - Без EOP: да — bats и записанный ответ веб-сервиса, случаи 400 без GUID, 429, новое поле в `version`.
@@ -608,8 +686,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 
 ### 5.1. Что добавить в стенд
 
-Стенд — [`scripts/deploy/test/stage.sh`](../../scripts/deploy/test/stage.sh) и
-[`e2e-mailcow.sh`](../../scripts/deploy/test/e2e-mailcow.sh), описание — [local-stand.md](../../operations/local-stand.md).
+Стенд — [`scripts/deploy/test/stage.sh`](../../../scripts/deploy/test/stage.sh) и
+[`e2e-mailcow.sh`](../../../scripts/deploy/test/e2e-mailcow.sh), описание — [local-stand.md](../../operations/local-stand.md).
 
 - **fake-EOP** — контейнер во внутреннем Docker стенда, в сети compose mailcow, с именем, которое
   резолвится из `postfix-mailcow` (например `eop.test.local`). SMTP-приёмник (Node `smtp-server` или Postfix
@@ -659,7 +737,7 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 | 1 | Inbound connector по сертификату: набор свойств после мастера EAC | `Get-InboundConnector \| Format-List` → эталон R-25 |
 | 2 | Релей обычной почты и пустого отправителя (DSN) через сертификат; домен `<MAIL_HOST>` как accepted domain нужен ли | письмо наружу и отбивка (письмо на несуществующий адрес с внешнего ящика) — `status=sent relay=<EOP_HOST>` в логе, NDR дошёл, нет `5.7.64 ATTR36` |
 | 3 | Цепочка сертификата | временно leaf без промежуточного на тестовом узле → ожидаем `5.7.64` |
-| 4 | TLS к EOP: `secure` для `<EOP_HOST>` обеих форм, голое имя без MX, TLSA | лог «Verified TLS connection established to <EOP_HOST>»; `dig +dnssec TLSA _25._tcp.<EOP_HOST>` |
+| 4 | TLS к EOP для обеих форм `<EOP_HOST>`: голое имя без MX; есть ли TLSA и DNSSEC (для `*.mx.microsoft` объявлены — блоги Exchange Team «Modernizing DNS Security for Exchange Online Mail Flow» и о GA входящего SMTP DANE с DNSSEC, см. «Источники»); проходит ли `secure` по имени или хватает штатного `dane` | `dig +dnssec TLSA _25._tcp.<EOP_HOST>`; лог «Verified TLS connection established to <EOP_HOST>» при `dane` без записи TLS Policy Map и при `secure`; по итогу — политика в R-07 |
 | 5 | Форма MX нового домена; годится ли MX одного домена как relayhost для всех | `serviceConfigurationRecords`; отправка с второго домена через `<EOP_HOST>` первого |
 | 6 | Домен: тип по умолчанию после Graph, задержка до `Get-AcceptedDomain`, формат TXT | R-23 шаг за шагом с отметками времени |
 | 7 | Outbound connector: `DomainValidation` против `CertificateValidation`, `Validate-OutboundConnector`, `RecipientDomains` против `AllAcceptedDomains` | валидация, письмо снаружи доходит, `Received` через EOP |
@@ -685,7 +763,7 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 |---|---|---|---|
 | D-1 | Кто подписывает DKIM | mailcow; EOP; оба | mailcow сразу (ключ публикуется при создании домена, проверяемо на стенде); DKIM EOP включать дополнительно после эксперимента 9. Две подписи допустимы |
 | D-2 | Явный фишинг | карантин администратора; `Redirect` на отдельный ящик узла, видимый администраторам в панели | начать с карантина (рекомендация Microsoft) и ручной проверки в портале; `Redirect` — если ложных срабатываний станет много и эксперимент 11 пройдёт |
-| D-3 | Диапазоны EOP как forwarding hosts (`filter_spam: 1`) | да, с синхронизацией; нет | да, после проверки `rspamc -i` на стенде (R-12); это отменяет прежнюю рекомендацию находки 13 |
+| D-3 | Диапазоны EOP как forwarding hosts (`filter_spam: 1`) | да, с синхронизацией; нет | да, после проверки `rspamc -i` на стенде (R-12) и только вместе с Sieve-правилом R-11: forwarding hosts гасят `MICROSOFT_SPAM` (вердикт EOP в rspamd) и `SPOOFED_UNAUTH` (подделка своего домена в From), раздел 2.5. Отменяет прежнюю рекомендацию находки 13 |
 | D-4 | Когда DBEB | сразу; после первого узла | пилотный домен на Internal Relay; R-29 строится и проверяется на моках параллельно; первый рабочий домен — в Authoritative, как только пройдёт эксперимент 8, до масштабирования на сотни ящиков |
 | D-5 | Объект зеркала | mail contact; mail user | mail contact (нет пароля и входа); mail user — запасной вариант с `RemotePowerShellEnabled $false` и паролем, который нигде не хранится |
 | D-6 | Catch-all на доменах узла | разрешить; запретить | запретить на доменах, идущих в DBEB; панель не создаёт catch-all |
@@ -702,28 +780,36 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 
 Внесены 2026-09-30 вместе с этим документом:
 
-- [eop-review.md](eop-review.md): находка 1 — `<EOP_HOST>` вместо одного имени тенанта, второе звено
-  `postfix-tlspol`, `active: 1`, ENUM `policy`, скобки в `dest`; находка 2 — голое имя вместо
-  `[...]:25` (противоречило находке 1), `add/transport "*"` отозван, relayhost = «Sender-dependent
+- [eop-review.md](eop-review.md): находка 1 — `<EOP_HOST>` вместо одного имени тенанта, TLSA есть у хостов
+  под `mx.microsoft`, второе звено `postfix-tlspol`, `active: 1`, ENUM `policy`, скобки в `dest`; находка 2 — голое имя вместо
+  `[...]:25` (противоречило находке 1), путь пустого отправителя через `<>` и `default_transport`,
+  `add/transport "*"` отозван, relayhost = «Sender-dependent
   transports»; находка 3 — ротации нет, формат CNAME EOP; находка 4 — автоопределение `ENABLE_IPV6`,
   привязка портов; находка 5 — три штатных правила `postfilter`, перезапуск Dovecot, свёрнутые заголовки,
   `SKQ`; находка 6 — вариант (b) невозможен; находка 7 — `Get-BlockedConnector`, единицы лимита; находка 9
   — лицензии, контакт вместо mail user, алиасы, catch-all, петля `5.4.14`; находка 10 и 15 — устаревшие
-  ссылки на строки; находка 11 — `ClientRequestId`, `*.mx.microsoft`; находка 13 — пересмотрена; находка 14
-  — реализуется forwarding hosts; находка 15 — поведение mailcow подтверждено по коду; находка 16 — 48 248,
+  ссылки на строки; находка 11 — `ClientRequestId`, `*.mx.microsoft`; находка 13 — пересмотрена, «Что сделать» и «Кто делает» зачёркнуты, добавлена цена (`MICROSOFT_SPAM`,
+  `SPOOFED_UNAUTH`); находка 14
+  — реализуется forwarding hosts; находка 15 — поведение mailcow подтверждено по коду; находка 16 — 48 248 (и в тексте находки),
   рампа молодого тенанта; «Решения владельца» и «Проверить на реальном тенанте» ссылаются сюда.
 - [eop-and-hosting.md](eop-and-hosting.md): направления коннекторов в терминах Microsoft (разделы 1.6,
   2.2, 2.3), домены через Graph или центр администрирования (`New-AcceptedDomain` только on-prem), mail
   contact как объект DBEB, лимиты на ящик к add-on не применяются (2.6 и сводка, п. 5), TERRL 48 248 и рампа
-  (2.7 и сводка, п. 4), форма MX (4.1).
+  (2.7 и сводка, п. 4), форма MX (4.1), строка таблицы про SMTP relay (2.6), Graph не создаёт получателей
+  (3.2), зеркало с контактами и алиасами (сводка, п. 6).
+- [platforms.md](platforms.md): relayhost домена рядом с общим (D-12), политика TLS Policy Map по
+  эксперименту 4.
 - [README.md](README.md): ссылка на этот документ; названия коннекторов, forwarding hosts, TERRL и лимит на
   ящик в разделе 2; открытые решения ссылаются на раздел 7.
 - [mail-node.md](../../operations/mail-node.md): плейсхолдер `<EOP_HOST>`; коннекторы в терминах Microsoft;
   MX и smart host — значение из тенанта, не `<tenant>.mail.protection.outlook.com`; relayhost домена =
   «Sender-dependent transports» (`add/relayhost`, не `add/transport`); `ENABLE_IPV6`; перезапуск Dovecot при
   `add/global-filter`; явный фишинг без `MoveToJmf`; домен в тенант через центр администрирования и
-  `Set-AcceptedDomain`; бэкскаттер при удалении ящика на Internal Relay; forwarding hosts — по решению D-3.
-- [ROADMAP.md](../../../ROADMAP.md): пункты Next про почтовый узел выровнены по этапам раздела 5.
+  `Set-AcceptedDomain`; бэкскаттер при удалении ящика на Internal Relay; forwarding hosts — по решению D-3;
+  порядок блока «Один раз на узел и тенант» (домен сертификата до Inbound connector, relayhost и TLS Policy
+  Map после шага 2 первого домена); TLSA для `mx.microsoft`; TXT верификации в шаге DNS.
+- [ROADMAP.md](../../../ROADMAP.md): пункты Next про почтовый узел выровнены по этапам раздела 5 (forwarding
+  hosts — в этапе 5, псевдонимы — в этапе 6).
 
 ## Источники
 
@@ -731,13 +817,19 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   `backend/src/routes/accounts.js`, `backend/src/routes/send.js`, `backend/src/services/ruleForwarder.js`,
   `backend/src/services/imapManager.js`, `backend/src/services/auditLog.js`, `scripts/deploy/test/stage.sh`.
 - mailcow-dockerized, коммит `ca07d8d3` (тег `2026-09`): `data/web/json_api.php`,
-  `data/web/inc/functions.{mailbox,transports,tls_policy_maps,dkim,fwdhost,ratelimit,mailq,quarantine}.inc.php`,
-  `data/web/inc/init_db.inc.php`, `data/Dockerfiles/postfix/postfix.sh`, `data/conf/postfix/main.cf`,
-  `data/conf/dovecot/global_sieve_after`, `data/conf/rspamd/local.d/{actions,policies_group,greylist}.conf`,
-  `data/conf/rspamd/{force_actions,composites}.conf`, `data/conf/rspamd/lua/rspamd.local.lua`,
+  `data/web/inc/functions.{mailbox,transports,tls_policy_maps,dkim,fwdhost,fail2ban,ratelimit,mailq,quarantine}.inc.php`,
+  `data/web/inc/init_db.inc.php`, `data/web/inc/ajax/dns_diagnostics.php`, `data/Dockerfiles/postfix/postfix.sh`,
+  `data/Dockerfiles/postfix/whitelist_forwardinghosts.sh`, `data/conf/postfix/main.cf`,
+  `data/conf/dovecot/global_sieve_after`,
+  `data/conf/rspamd/local.d/{actions,policies_group,greylist,force_actions,composites,metadata_exporter}.conf`,
+  `data/conf/rspamd/dynmaps/forwardinghosts.php`, `data/conf/rspamd/lua/rspamd.local.lua`,
   `_modules/scripts/ipv6_controller.sh`, `generate_config.sh`.
-- Postfix: `transport(5)`, `postconf(5)` (`sender_dependent_default_transport_maps`), TLS_README (ключ
-  `smtp_tls_policy_maps`).
+- Postfix: `transport(5)`, `postconf(5)` (`sender_dependent_default_transport_maps`,
+  `empty_address_default_transport_maps_lookup_key`), `mysql_table(5)` (запрос с `%d` для ключа без домена
+  не выполняется), TLS_README (ключ `smtp_tls_policy_maps`).
+- Microsoft Tech Community (блог Exchange Team): DANE и DNSSEC для новых MX —
+  https://techcommunity.microsoft.com/blog/exchange/modernizing-dns-security-for-exchange-online-mail-flow/4514248 ;
+  https://techcommunity.microsoft.com/blog/exchange/announcing-general-availability-of-inbound-smtp-dane-with-dnssec-for-exchange-on/4281292
 - Microsoft Learn (дата обновления страницы):
   - New-InboundConnector (2026-05-16): https://learn.microsoft.com/en-us/powershell/module/exchange/new-inboundconnector
   - New-OutboundConnector (2026-05-19): https://learn.microsoft.com/en-us/powershell/module/exchange/new-outboundconnector

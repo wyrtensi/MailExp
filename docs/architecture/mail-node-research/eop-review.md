@@ -66,8 +66,13 @@ next-hop (`extra.cf`, sender-dependent transport, `dest`), что голое и�
 - Одного имени `<tenant>.mail.protection.outlook.com` нет: MX — значение на домен
   (`<token>.mail.protection.outlook.com`, у доменов, добавленных после 2026-07-01, — имя под
   `mx.microsoft`), единственный источник — Graph `serviceConfigurationRecords` (V-2: MC1048624). Smart
-  host узла `<EOP_HOST>` — MX одного из доменов; проверка имени сертификата и TLSA для имён под
-  `mx.microsoft` — на тенанте.
+  host узла `<EOP_HOST>` — MX одного из доменов.
+- Утверждение «Microsoft TLSA не публикует» верно только для `*.mail.protection.outlook.com`. Для новых
+  хостов под `mx.microsoft` Microsoft объявила DNSSEC и TLSA (блоги Exchange Team: https://techcommunity.microsoft.com/blog/exchange/modernizing-dns-security-for-exchange-online-mail-flow/4514248 ,
+  https://techcommunity.microsoft.com/blog/exchange/announcing-general-availability-of-inbound-smtp-dane-with-dnssec-for-exchange-on/4281292).
+  Для такого `<EOP_HOST>` штатный `dane` mailcow может уже проверять сертификат, а `secure` — упасть на
+  несовпадении имени. Что ставить в TLS Policy Map для каждой формы, решает эксперимент 4
+  [eop-panel-requirements.md](eop-panel-requirements.md), раздел 6.
 - Голое имя Postfix ищет сначала по MX, затем по A (`transport(5)`, RESULT FORMAT), так что без MX-записи
   оно работает (вывод для хостов EOP).
 - В `smtp_tls_policy_maps` вторым звеном стоит `postfix-tlspol` (DANE и MTA-STS, `main.cf:153`); запись
@@ -123,9 +128,11 @@ Policy Map, находка 1) в `extra.cf` —
 - «Sender-dependent transports» в интерфейсе mailcow — это relayhost (`add/relayhost`, таблица
   `relayhosts`), а не `add/transport` (Transport Maps, ключ — получатель). Глобальный `relayhost` есть
   только в `extra.cf` (`postfix.sh:479-491`), применяется перезапуском `postfix-mailcow`.
-- Для пустого отправителя строки в `relayhosts` нет, запрос mailcow отдаёт `smtp:` с пустым next-hop, и
-  Postfix берёт общий `relayhost` (вывод по `postconf(5)`, проверяется на стенде) — per-domain relayhost
-  отбивки не покрывает, `extra.cf` обязателен.
+- Пустого отправителя Postfix ищет по ключу `<>` (`empty_address_default_transport_maps_lookup_key`,
+  `postconf(5)`); запрос mailcow содержит `%d`, а по `mysql_table(5)` для ключа без домена такой запрос не
+  выполняется — результата нет. Тогда Postfix берёт `default_transport` и next-hop из общего `relayhost`
+  (вывод по документации Postfix, проверяется на стенде) — per-domain relayhost отбивки не покрывает,
+  `extra.cf` обязателен.
 - **`add/transport destination="*"` небезопасен.** `transport_maps` старше `virtual_transport`
   (`transport(5)`), штатный приём «свои домены с пустым результатом, потом `*`» в mailcow невыразим:
   `add/transport` требует непустой `nexthop` (`functions.transports.inc.php:204-211`). Транспорт `*`
@@ -540,11 +547,13 @@ greylisting и слегка смягчает композитные правил
 `WHITELISTED_FWD_HOST` — greylist bypass и смягчение SPF/DMARC-композитов, не более); `postscreen_
 access.cidr` (диапазоны Microsoft уже внутри, например `40.92.0.0/15`, `40.107.0.0/16`).
 
-**Что сделать.** Не заводить EOP как forwarding host. Если ретраи EOP на greylist-4xx нежелательны —
+**Что сделать.** ~~Не заводить EOP как forwarding host. Если ретраи EOP на greylist-4xx нежелательны —
 выключить greylisting глобально (`greylist.conf`, `enabled = false`, или тумблер в админке) — чище, чем
-держать весь диапазон EOP как «форвардер», который к тому же придётся обновлять руками.
+держать весь диапазон EOP как «форвардер», который к тому же придётся обновлять руками.~~ Отозвано
+2026-09-30: заводить диапазоны EOP как forwarding hosts с `filter_spam: 1`, см. дополнение ниже.
 
-**Кто делает.** Руками (одна настройка в админке mailcow), если решено отключать greylisting.
+**Кто делает.** ~~Руками (одна настройка в админке mailcow), если решено отключать greylisting.~~
+Панель через API mailcow (синхронизация `add/fwdhost`/`delete/fwdhost`), по решению владельца.
 
 **Статус.** ~~Подтверждено.~~ Пересмотрено 2026-09-30, см. дополнение: вывод «не заводить» отменён.
 
@@ -562,6 +571,11 @@ access.cidr` (диапазоны Microsoft уже внутри, например
 - «Не обновляется автоматически» — верно для одного вызова, но панель может синхронизировать список через
   API (`get/fwdhost/all`, `add/fwdhost`, `delete/fwdhost`) из того же веб-сервиса, что таймер файрвола.
 - Тумблера greylisting в UI и API mailcow 2026-09 нет — только файл `local.d/greylist.conf`.
+- Цена: для forwarding hosts `UPSTREAM_CHECKS_EXCLUDE_FWD_HOST` (`local.d/composites.conf:54-56`) гасит
+  символ `MICROSOFT_SPAM` (вердикт EOP из `X-Forefront-Antispam-Report`), а `SPOOFED_UNAUTH` (вес 50,
+  `local.d/composites.conf:29-32`) не срабатывает — пропадает защита от чужого письма с `From` на свой
+  домен. Вердикт EOP после этого доходит до Junk только через Sieve-правило находки 5, поэтому forwarding
+  hosts включать только вместе с ним.
 - Рекомендация: заводить диапазоны EOP как forwarding hosts с `filter_spam: 1` и синхронизировать —
   [eop-panel-requirements.md](eop-panel-requirements.md), R-12 и D-3.
 
@@ -643,7 +657,8 @@ nodemailer по умолчанию берёт из From (вывод) — зна�
 **Что не так / риск.** Не находка, а подтверждение и уточнение уже написанного. Формула тенантного
 лимита внешних получателей (TERRL) меняется с 2026-08-13, раскатка — с 2026-09-14 (то есть уже идёт):
 базовая формула для платных лицензий (`500 × licenses^0.7 + 9500`) остаётся практически прежней,
-меняется вес для триальных и бесплатных EDU-лицензий (не наш случай). Ориентир ≈46 500 внешних
+меняется вес для триальных и бесплатных EDU-лицензий (не наш случай). Ориентир ~~≈46 500~~ ≈48 248
+(исправлено 2026-09-30, см. дополнение) внешних
 получателей/сутки на 500 лицензий остаётся в силе как оценка, но не переподтверждён напрямую для
 EOP-standalone лицензий в формуле. MTA-STS для собственных доменов остаётся опциональным усилением
 (Exchange Online не хостит чужую policy-запись — её пришлось бы публиковать самостоятельно, отдельно

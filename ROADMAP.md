@@ -52,10 +52,11 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - Mail node behind EOP, built and tested on the local stand without a tenant; requirements, stages and owner decisions: [docs/architecture/mail-node-research/eop-panel-requirements.md](docs/architecture/mail-node-research/eop-panel-requirements.md).
   - Stand: a fake-EOP SMTP relay (client certificate check, EOP error codes, header injection), DNS fixtures, `extra.cf` relayhost, `ENABLE_IPV6=false`.
   - Foundation: node settings saved without overwriting, a domain table with onboarding state, node mailboxes only on ready domains, audit entries for node actions.
-  - Node setup through the mailcow API: TLS policy map, relayhost, the DKIM decision, rate limits, the EOP-header Junk filter (prefilter), EOP ranges as forwarding hosts with `filter_spam`, sender ACL for aliases.
+  - Node setup through the mailcow API: TLS policy map, relayhost, the DKIM decision, rate limits, the EOP-header Junk filter (prefilter), the fail2ban allow list for the panel.
   - DNS and certificate checks for each domain and the node.
   - Operations: node queue, delivery status and bounces with EOP codes, alerts (blocked connector, bypassed EOP, certificate), mailcow quarantine, TERRL budget.
-  - Node scripts: install/config script (`mailcow.conf`, `extra.cf`, firewall) and a timer that keeps EOP ranges current from the Microsoft web service.
+  - Node scripts and rspamd: install/config script (`mailcow.conf`, `extra.cf`, firewall), a timer that keeps EOP ranges current from the Microsoft web service, and the same ranges as mailcow forwarding hosts with `filter_spam` (only together with the Junk filter).
+  - Mailbox lifecycle: who may create and delete node mailboxes, create/delete order, disable semantics, aliases checked against the node's sender ACL.
 - Tenant automation behind a `TenantDriver` (Graph plus an EXO PowerShell worker), first on mocks, then against a live tenant: domain verification, accepted domain type, connector checks, EOP DKIM, blocked connector polling, message trace, and DBEB mirroring of node addresses and aliases (Internal Relay while syncing, Authoritative once synced).
 - Optional: report spam/phishing from the panel to Microsoft through the Graph beta threat-submission API.
 
