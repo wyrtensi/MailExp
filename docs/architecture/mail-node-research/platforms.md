@@ -349,13 +349,13 @@
 
 **Жёсткие условия развёртывания mailcow** [вывод]:
 1. UI и API mailcow недоступны из интернета: только VPN или внутренняя сеть. `API_ALLOW_FROM` = IP MailExpert. Причина: история CVE в UI из раздела 3.1.
-2. На firewall TCP 25 открыт только для диапазонов EOP (ID 10), и эти же CIDR добавлены в Forwarding Hosts. Submission (587/465) и IMAP (993) открыты только для IP MailExpert. Если пользователям нужен прямой доступ к почте, это отдельное решение.
+2. На firewall TCP 25 открыт только для диапазонов EOP (ID 10), и эти же CIDR добавлены в Forwarding Hosts (обязательно `filter_spam: 1`, иначе rspamd не проверяет их почту на спам). Submission (587/465) и IMAP (993) открыты только для IP MailExpert. Если пользователям нужен прямой доступ к почте, это отдельное решение.
 3. `SKIP_CLAMD=y`. `SKIP_FTS` включать по тому, нужен ли серверный поиск по телу. SOGo оставить, `SKIP_SOGO` не поддерживается.
 4. EOP:
-   - Relayhost `<tenant>.mail.protection.outlook.com:25` без логина, назначен каждому домену. Пример в OpenAPI mailcow записан без квадратных скобок (`mailcow.tld:25`). Без скобок Postfix сначала ищет MX у хоста, не находит его и откатывается на A-запись: работает, но лишний lookup. Примет ли валидатор mailcow форму `[host]:25`, проверить на стенде. [вывод]
-   - `tls-policy-map` на этот хост с `encrypt`/`secure`.
-   - Certificate-based inbound connector в EOP на домен из SAN сертификата ноды (hostname ноды должен быть в accepted domain тенанта).
-   - Outbound connector EOP -> нода с «Always use TLS» и проверкой сертификата.
+   - Общий `relayhost = <EOP_HOST>` в `extra.cf` (голое имя без скобок и порта; `<EOP_HOST>` — значение MX домена из тенанта, у каждого домена своё, для новых доменов в зоне `*.mx.microsoft`). `add/transport "*"` не использовать: он заворачивает в EOP и почту собственных доменов узла. Подробно — [eop-panel-requirements.md](eop-panel-requirements.md), раздел 2.
+   - Relayhost домена (`add/relayhost` с `hostname = <EOP_HOST>` без логина, затем `edit/domain` с его id) — той же строкой: `extra.cf` нужен отбивкам, relayhost домена виден и сверяется из панели ([eop-panel-requirements.md](eop-panel-requirements.md), D-12).
+   - `tls-policy-map` на тот же `<EOP_HOST>` дословно, с `active: 1`; политика (`secure`, `dane` или без записи) зависит от формы имени — эксперимент 4 там же.
+   - В терминах Microsoft: Inbound connector (узел -> EOP) по сертификату, домен из SAN сертификата узла должен быть accepted domain тенанта; Outbound connector (EOP -> узел) с обязательным TLS и проверкой сертификата. В ранних документах направления были названы наоборот.
 5. IP MailExpert в whitelist netfilter. В MailExpert: backoff при ошибке аутентификации, ограничение параллельных переподключений (imap `process_limit` 1024, лимит соединений Postfix submission 50 с одного IP).
 6. Сценарий «удалить» в MailExpert = `active:"0"` (или `"2"`, если почту нужно продолжать принимать). «Пересоздать» = `edit/mailbox` с `active:"1"` и новым паролем.
 7. Бэкапы: `backup_and_restore.sh all` по cron на отдельный том со снапшотами. Обновления в течение недели после релиза. Подписка на GitHub Security Advisories mailcow.

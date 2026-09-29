@@ -5,7 +5,13 @@ MailExpert. Выбор платформы и расчёты — в [исслед
 требования к раскладке и переезду — в [дизайне развёртывания](../superpowers/specs/2026-09-21-deployment-design.md).
 
 Плейсхолдеры: `<MAIL_HOST>` — имя почтового узла (например, `mail.example.com`), `<PANEL_IP>` —
-публичный IPv4 сервера панели, `<DOMAIN>` — почтовый домен.
+публичный IPv4 сервера панели, `<DOMAIN>` — почтовый домен, `<EOP_HOST>` — значение MX одного из ваших
+доменов в тенанте Microsoft (центр администрирования или Graph `serviceConfigurationRecords`); узел
+использует его как smart host EOP. Коннекторы названы как в командлетах Microsoft: Outbound connector —
+EOP → узел, Inbound connector — узел → EOP.
+
+Что панель должна будет делать сама вместо шагов этого документа —
+[требования](../architecture/mail-node-research/eop-panel-requirements.md).
 
 ## 1. Кто что делает
 
@@ -13,7 +19,9 @@ MailExpert. Выбор платформы и расчёты — в [исслед
 - создаёт домены и ящики через API mailcow и сразу подключает ящики по IMAP/SMTP;
 - генерирует пароль ящика и хранит его зашифрованным; пароль никто не видит;
 - при удалении ящика в MailExpert только отключает его в mailcow: почта на адрес отклоняется, письма
-  остаются на диске;
+  остаются на диске. Пока домен в тенанте в режиме Internal Relay, отказ узла приходит уже после того,
+  как EOP принял письмо, и EOP шлёт NDR отправителю, часто поддельному (бэкскаттер, ревизия EOP,
+  находка 8);
 - при повторном создании того же адреса включает ящик обратно с новым паролем, вместе со старыми
   письмами. Активный ящик, заведённый в mailcow руками, MailExpert тоже забирает себе: задаёт новый
   пароль. Старый пароль Dovecot помнит ещё до 5 минут (кэш входа `auth_cache_ttl`), а уже открытые
@@ -86,7 +94,8 @@ Caddy панели, а скрипты развёртывания не умеют
    - `SKIP_CLAMD=y` — антивирус делает EOP, экономия 1.5-3 ГБ памяти;
    - `SKIP_OLEFY=y` — макросы в офисных вложениях тоже проверяет EOP;
    - `SKIP_FTS=y` — MailExpert ищет по своей базе;
-   - `ENABLE_IPV6=false` — по умолчанию `true`, а файрвол раздела 4 фильтрует только IPv4; после
+   - `ENABLE_IPV6=false` — `generate_config.sh` сам ставит `true`, если у хоста работает IPv6, а
+     файрвол раздела 4 фильтрует только IPv4; после
      смены нужен полный `docker compose down && docker compose up -d`, перезапуска недостаточно.
      Подробности и вариант «оставить IPv6» — [ревизия EOP](../architecture/mail-node-research/eop-review.md),
      находка 4;
@@ -180,34 +189,57 @@ iptables -I DOCKER-USER -p tcp -m multiport --dports 110,143,465,995,4190 -j DRO
 
 ### Один раз на узел и тенант
 
-- **Входящий коннектор (EOP → узел) — один на все домены**, не по одному на домен: smart host
-  `<MAIL_HOST>`, не IP; «Always use TLS» включён; проверка имени сертификата (SAN/CN =
-  `<MAIL_HOST>`) включена. Список доменов коннектора пополняется при каждом новом домене (раздел
-  «На каждый домен» ниже), сам коннектор не пересоздаётся.
-- **Исходящий коннектор (узел → EOP)** — по сертификату `<MAIL_HOST>`, не по IP.
-- **Общий relayhost** в `data/conf/postfix/extra.cf`: `relayhost = <tenant>.mail.protection.outlook.com`.
-  Sender-dependent transport (следующий блок) покрывает только письма с отправителем на ваших доменах;
-  без общего relayhost отбивки, DSN и часть пересылки уходят в интернет напрямую, минуя EOP.
-- **TLS Policy Map в mailcow** (обязательно, иначе TLS к EOP не проверяется — mailcow по умолчанию
-  использует DANE, а Microsoft TLSA не публикует): «Configuration → Routing → TLS Policy Maps» или
-  API `add/tls-policy-map`, `dest=<tenant>.mail.protection.outlook.com`, `policy=secure` (или
-  `encrypt`). `dest` должен быть **буквально той же строкой**, что next-hop в `relayhost` и в
-  sender-dependent transport (следующий блок) — Postfix берёт ключ TLS policy map из next-hop дословно,
+Порядок: сначала домен сертификата и коннекторы; relayhost и TLS Policy Map — только когда есть
+`<EOP_HOST>`, то есть после шага 2 «На каждый домен» для первого домена (его MX и есть `<EOP_HOST>`).
+Для первого домена это значит: шаги 1-2 ниже, затем пункты «Общий relayhost» и «TLS Policy Map»
+отсюда, затем шаги 3-6 (шаг 3 — relayhost домена на тот же `<EOP_HOST>`). Остальные пункты блока от
+`<EOP_HOST>` не зависят.
+
+- **Домен сертификата `<MAIL_HOST>` — accepted domain в тенанте.** Нужен до Inbound connector: коннектор
+  по сертификату атрибутирует письма по этому домену. Он же нужен для отбивок с пустым
+  отправителем (`MAIL FROM:<>`): у них нет домена, по которому EOP мог бы атрибутировать письмо через
+  accepted-domain отправителя, работает только атрибуция по сертификату. Без этого такие отбивки
+  получают отказ EOP (`550 5.7.64 ... ATTR36`). **Проверить на первом узле.**
+- **Outbound connector (EOP → узел) — один на все домены**, не по одному на домен (мастер EAC «From
+  Office 365 to your organization's email server»): smart host `<MAIL_HOST>`, не IP; «Always use TLS»
+  включён; проверка имени сертификата (SAN/CN = `<MAIL_HOST>`) включена. Список доменов коннектора
+  пополняется при каждом новом домене (раздел «На каждый домен» ниже), сам коннектор не пересоздаётся.
+- **Inbound connector (узел → EOP)** — по сертификату `<MAIL_HOST>`, не по IP (мастер EAC «From your
+  organization's email server to Office 365»). После создания сохранить вывод
+  `Get-InboundConnector | Format-List` и `Get-OutboundConnector | Format-List`: точный набор свойств
+  мастера Microsoft не документирует, это эталон для будущей проверки из панели.
+- **Общий relayhost** (после шага 2 первого домена) в `data/conf/postfix/extra.cf`:
+  `relayhost = <EOP_HOST>`, затем `docker compose restart postfix-mailcow`. Relayhost домена (шаг 3 ниже)
+  покрывает только письма с отправителем на ваших доменах; без общего relayhost отбивки, DSN и часть
+  пересылки уходят в интернет напрямую, минуя EOP. Заменять его транспортом `*` (`add/transport`) нельзя:
+  транспорт перехватит и почту на собственные домены узла и отправит её в EOP (ревизия EOP, находка 2).
+- **TLS Policy Map в mailcow** (после шага 2 первого домена): «Configuration → Routing → TLS Policy
+  Maps» или API `add/tls-policy-map`, `dest=<EOP_HOST>`, через API — обязательно с `"active": 1`, иначе
+  запись создаётся выключенной. mailcow по умолчанию использует DANE. Для
+  `<EOP_HOST>` вида `*.mail.protection.outlook.com` TLSA нет, TLS без записи не проверяется — нужна
+  запись с `policy=secure` (или хотя бы `encrypt`). Для `<EOP_HOST>` под `mx.microsoft` Microsoft объявила
+  DNSSEC и TLSA: штатный `dane` может уже проверять сертификат, а `secure` — упасть на несовпадении имени;
+  что ставить, решает эксперимент 4 ([требования, раздел 6](../architecture/mail-node-research/eop-panel-requirements.md)).
+  `dest` должен быть **буквально той же строкой**, что next-hop в `relayhost` и в relayhost домена
+  (шаг 3 ниже) — Postfix берёт ключ TLS policy map из next-hop дословно,
   вместе со скобками и портом, если они там есть, поэтому все три места держат одно и то же написание
   (здесь — голое имя без скобок и порта). **Проверить на первом узле**: резолвится ли имя без скобок
   (обычно у него нет MX, только A) и что `mail.log` показывает «Verified TLS connection established
   to...», а не «Untrusted»/«Anonymous».
-- **Домен сертификата `<MAIL_HOST>` — accepted domain в тенанте.** Нужен для отбивок с пустым
-  отправителем (`MAIL FROM:<>`): у них нет домена, по которому EOP мог бы атрибутировать письмо через
-  accepted-domain отправителя, работает только атрибуция по сертификату. Без этого такие отбивки
-  получают отказ EOP (`550 5.7.64 ... ATTR36`). **Проверить на первом узле.**
 - **Глобальный спам-фильтр** под заголовок EOP: API `add/global-filter`,
-  `filter_type: "prefilter"` (не `postfilter` — он целиком перезаписывает файл и стирает штатное
-  правило `X-Spam-Flag` → Junk). Правило и точные значения `SFV`/`CAT` — ревизия EOP, находка 5.
+  `filter_type: "prefilter"` (не `postfilter` — он целиком перезаписывает файл и стирает штатные
+  правила: `X-Spam-Flag` → Junk, плюс-адресация, дубликаты). Каждый вызов перезапускает
+  `dovecot-mailcow`, и IMAP-сессии панели рвутся — делать вне рабочего времени. Правило и точные
+  значения `SFV`/`CAT` — ревизия EOP, находка 5.
+- **Forwarding hosts для диапазонов EOP** — по решению владельца
+  ([требования](../architecture/mail-node-research/eop-panel-requirements.md), D-3, рекомендовано):
+  forwarding hosts в админке mailcow или API `add/fwdhost`, каждый диапазон EOP с **`filter_spam: 1`**
+  (по умолчанию 0 — тогда rspamd такую почту не проверяет вовсе). Без этого rspamd оценивает SPF
+  отправителя по адресу EOP (ревизия EOP, находка 13).
 - **Явный фишинг (high confidence phish):** по умолчанию EOP кладёт такую почту в карантин, доступный
-  только администратору, — заголовков на узел не приходит. Решение (оставить карантин администратору
-  или переключить `HighConfidencePhishAction` на `MoveToJmf`, чтобы почта доходила как обычный спам) —
-  за владельцем, подробности и как менять — ревизия EOP, находка 6. **Проверить на первом узле**,
+  только администратору, — заголовков на узел не приходит. `HighConfidencePhishAction` принимает только
+  `Quarantine` и `Redirect`, переключить его на `MoveToJmf` нельзя. Решение (карантин администратору или
+  `Redirect` на отдельный адрес) — за владельцем, ревизия EOP, находка 6. **Проверить на первом узле**,
   какая политика фактически действует в тенанте.
 
 ### На каждый домен
@@ -216,20 +248,30 @@ iptables -I DOCKER-USER -p tcp -m multiport --dports 110,143,465,995,4190 -j DRO
    MailExpert ставит с запасом (лимит × 100 ГБ), поэтому в неё ни создание ящика, ни увеличение квоты
    не упрутся; диск она не резервирует.
 2. **Microsoft EOP:**
-   - принятый домен `<DOMAIN>` в режиме **Internal Relay** (перевод в Authoritative с DBEB —
-     решение владельца, ревизия EOP, находка 9);
-   - домен добавлен в список входящего коннектора (см. выше — коннектор один, не создаётся заново).
-3. **Sender-dependent transport в mailcow:** «Configuration → Routing → Sender-dependent transports»
-   → транспорт на smart host EOP вашего тенанта, той же строкой, что и общий relayhost
-   (`<tenant>.mail.protection.outlook.com`, см. «Один раз на узел и тенант» — TLS Policy Map совпадает
-   по этой строке дословно), затем в настройках домена выбрать этот relayhost. Общий relayhost из
-   предыдущего блока остаётся резервным путём для того, что sender-dependent transport не покрывает.
+   - домен `<DOMAIN>` добавлен в центре администрирования Microsoft 365 (или Graph `POST /domains`;
+     команды `New-AcceptedDomain` в облаке нет), TXT-запись верификации опубликована у DNS-провайдера
+     (шаг 5) и домен подтверждён (`verify`). Сразу, до смены MX,
+     перевести его в режим **Internal Relay**: `Set-AcceptedDomain -Identity <DOMAIN> -DomainType
+     InternalRelay` (перевод в Authoritative с DBEB — решение владельца, ревизия EOP, находка 9);
+   - значение MX домена записать из центра администрирования (оно понадобится в шаге 5; MX первого
+     домена — это `<EOP_HOST>` для общего relayhost и TLS Policy Map, см. «Один раз на узел и тенант»);
+   - домен добавлен в список Outbound connector (см. выше — коннектор один, не создаётся заново),
+     например `Set-OutboundConnector -Identity <имя> -RecipientDomains @{Add="<DOMAIN>"}`.
+3. **Relayhost домена в mailcow:** «Configuration → Routing → Sender-dependent transports» (это
+   relayhost, API `add/relayhost`, не Transport Maps и не `add/transport`) → relayhost `<EOP_HOST>`
+   без логина и пароля, той же строкой, что и общий relayhost (см. «Один раз на узел и тенант» — TLS
+   Policy Map совпадает по этой строке дословно); relayhost заводится один раз, при первом домене после
+   шага 2, затем в настройках каждого домена выбрать его (API `edit/domain`, `relayhost=<id>`). Общий
+   relayhost из предыдущего блока остаётся путём для того, что relayhost домена не покрывает.
 4. **Лимиты отправки:** `edit/rl-domain` и/или `edit/rl-mbox` — mailcow не ставит их по умолчанию.
    Без лимита один скомпрометированный или агрессивно рассылающий ящик может заблокировать общий
-   исходящий коннектор всем доменам узла (ревизия EOP, находка 7). Пока панель не делает это сама —
+   коннектор узел → EOP (Inbound connector) всем доменам узла (ревизия EOP, находка 7). Пока панель не делает это сама —
    выставлять руками при заведении домена.
 5. **DNS домена:**
-   - MX → `<tenant>.mail.protection.outlook.com`;
+   - TXT верификации тенанта (значение `MS=...` из центра администрирования или Graph
+     `verificationDnsRecords`) — публикуется во время шага 2, до `verify`; удалять не нужно;
+   - MX → значение из шага 2 (`<token>.mail.protection.outlook.com`, у доменов, добавленных в тенант
+     после июля 2026, — имя под `mx.microsoft`; из имени домена его не выводить);
    - SPF: `v=spf1 include:spf.protection.outlook.com -all`;
    - DKIM: mailcow создаёт ключ на домен автоматически (раздел 3). Опубликовать
      `dkim._domainkey.<DOMAIN>` из «Configuration → ARC/DKIM keys» (или `get/dkim`) сразу, не оставлять
@@ -520,3 +562,6 @@ MSYS_NO_PATHCONV=1 scripts/deploy/test/e2e-mailcow.sh --image ghcr.io/wyrtensi/m
 2. Ссылка проверки диска получает пинги раз в 10 минут.
 3. Настоящий сертификат `<MAIL_HOST>` от Let's Encrypt (в тесте — свой тестовый CA).
 4. Белый список fail2ban для `<PANEL_IP>` (раздел 3, шаг 7).
+
+Эксперименты на тенанте Microsoft (коннекторы, отбивки, DKIM EOP, DBEB, заголовки, лимиты) с тем, как
+проверить каждый, — [требования, раздел 6](../architecture/mail-node-research/eop-panel-requirements.md).
