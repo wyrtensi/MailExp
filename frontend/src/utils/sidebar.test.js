@@ -213,6 +213,38 @@ describe('folder ordering', () => {
     assert.equal(reorderFolderPaths(folders, [], 'INBOX', 'Archive', 'middle'), null);
   });
 
+  describe('special-use folders at the root', () => {
+    const gmail = [
+      { path: 'INBOX', name: 'INBOX', delimiter: '/', special_use: '\\Inbox' },
+      { path: '[Gmail]', name: '[Gmail]', delimiter: '/', special_use: null },
+      { path: '[Gmail]/All Mail', name: 'All Mail', delimiter: '/', special_use: '\\All' },
+      { path: '[Gmail]/Drafts', name: 'Drafts', delimiter: '/', special_use: '\\Drafts' },
+      { path: '[Gmail]/Sent Mail', name: 'Sent Mail', delimiter: '/', special_use: '\\Sent' },
+      { path: '[Gmail]/Spam', name: 'Spam', delimiter: '/', special_use: '\\Junk' },
+      { path: '[Gmail]/Trash', name: 'Trash', delimiter: '/', special_use: '\\Trash' },
+      { path: 'Work', name: 'Work', delimiter: '/', special_use: null },
+      { path: 'Work/Archive', name: 'Archive', delimiter: '/', special_use: '\\Archive' },
+    ];
+
+    it('shows Sent, Drafts, Trash, Junk and Archive beside Inbox whatever their path', () => {
+      const tree = buildFolderTree(gmail);
+      assert.deepEqual(tree.map(node => node.path), [
+        'INBOX', 'Work/Archive', '[Gmail]', '[Gmail]/Drafts', '[Gmail]/Sent Mail', '[Gmail]/Spam', '[Gmail]/Trash', 'Work',
+      ].sort((a, b) => a.localeCompare(b)));
+      const container = tree.find(node => node.path === '[Gmail]');
+      assert.deepEqual(container.children.map(node => node.path), ['[Gmail]/All Mail']);
+      assert.deepEqual(tree.find(node => node.path === 'Work').children, []);
+    });
+
+    it('reorders a lifted folder among the root folders it is shown with', () => {
+      const next = reorderFolderPaths(gmail, [], '[Gmail]/Sent Mail', 'INBOX', 'after');
+      assert.ok(next, 'a root-level drop is accepted');
+      assert.equal(next.indexOf('[Gmail]/Sent Mail'), next.indexOf('INBOX') + 1);
+      assert.equal(reorderFolderPaths(gmail, [], '[Gmail]/Sent Mail', '[Gmail]/All Mail', 'before'), null);
+      assert.equal(reorderFolderPaths(gmail, [], '[Gmail]/All Mail', '[Gmail]/Sent Mail', 'before'), null);
+    });
+  });
+
   it('selects a before or after drop edge from the row midpoint', () => {
     assert.equal(folderDropPosition(110, { top: 100, height: 40 }), 'before');
     assert.equal(folderDropPosition(130, { top: 100, height: 40 }), 'after');

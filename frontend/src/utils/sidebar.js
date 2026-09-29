@@ -38,6 +38,21 @@ function delimiterFor(folders) {
   )));
 }
 
+// Special-use folders sit at the root of the tree whatever their path, so Gmail's
+// "[Gmail]/Sent Mail" or a Courier-style "INBOX.Trash" shows beside Inbox rather than inside
+// another folder (ported from upstream mailflow ea1a9194).
+const ROOT_SPECIAL_USES = new Set(['\\archive', '\\drafts', '\\inbox', '\\junk', '\\sent', '\\trash']);
+
+function isRootSpecialUse(folder) {
+  return ROOT_SPECIAL_USES.has(String(folder?.special_use || '').toLowerCase());
+}
+
+// The path a folder hangs under in the tree: null at the root. The tree and folder reordering
+// both go through this, so a folder can only be dragged among the siblings it is shown with.
+function treeParentPath(folder, delimiter) {
+  return isRootSpecialUse(folder) ? null : folderParent(folder.path, delimiter);
+}
+
 function folderPathsWithAncestors(folders) {
   const delimiter = delimiterFor(folders);
   const paths = new Set();
@@ -116,7 +131,7 @@ export function buildFolderTree(folders, savedOrder = []) {
   const roots = [];
   const nodes = Object.values(map).sort((a, b) => a.path.localeCompare(b.path));
   for (const node of nodes) {
-    const parentPath = folderParent(node.path, delimiter);
+    const parentPath = treeParentPath(node, delimiter);
     if (parentPath && map[parentPath] && parentPath !== node.path) {
       map[parentPath].children.push(node);
     } else {
@@ -155,11 +170,13 @@ export function reorderFolderPaths(
   const delimiter = delimiterFor(safeFolders);
   const current = normalizeFolderOrder(safeFolders, savedOrder);
   const known = new Set(current);
+  const byPath = new Map(safeFolders.map(folder => [folder?.path, folder]));
+  const parentOf = folderPath => treeParentPath(byPath.get(folderPath) ?? { path: folderPath }, delimiter);
   if (
     draggedPath === targetPath
     || !known.has(draggedPath)
     || !known.has(targetPath)
-    || folderParent(draggedPath, delimiter) !== folderParent(targetPath, delimiter)
+    || parentOf(draggedPath) !== parentOf(targetPath)
   ) return null;
 
   const next = current.filter(folderPath => folderPath !== draggedPath);
