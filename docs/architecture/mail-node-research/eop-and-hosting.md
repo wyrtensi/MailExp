@@ -68,6 +68,11 @@ https://www.microsoft.com/en-us/microsoft-365/exchange/exchange-email-security-s
 защищать сервис, и лицензии затем привязываются к этим объектам.
 https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-service
 
+> **Ревизия 2026-09-30.** Технически mail user лицензии не требует: «Mail users don't require licenses in
+> Exchange Online» (https://learn.microsoft.com/en-us/exchange/recipients-in-exchange-online/manage-mail-users).
+> Сколько лицензий add-on нужно на защищаемых получателей и считаются ли ими mail contacts — коммерческие
+> условия, уточнять у партнёра.
+
 Из этого следует **[инференс, логический вывод из механики]**: для 500 почтовых ящиков на вашем узле,
 если ни один из этих 500 адресов не покрыт другой M365-лицензией с включённым EOP (E1/E3/E5/Business*),
 потребуются 500 отдельных EOP-лицензий — то есть по сути "на все 500 ящиков", а не на какое-то
@@ -107,10 +112,13 @@ Microsoft чётко разграничивает два сценария в д�
 
 Нужен обычный Microsoft 365 / Exchange Online тенант (даже без единой облачной почтовой лицензии),
 в котором:
-- домены добавлены и верифицированы через DNS (Microsoft 365 admin center);
-- заведены получатели (mail users) — вручную/через PowerShell, поскольку каталог-синхронизации из AD у
+- домены добавлены и верифицированы через DNS (Microsoft 365 admin center или Graph `POST /domains` +
+  `verify`; `New-AcceptedDomain` в облаке нет, он только для on-prem Exchange — ревизия 2026-09-30);
+- заведены получатели (mail users или mail contacts, см. [eop-panel-requirements.md](eop-panel-requirements.md),
+  раздел 2.8) — вручную/через PowerShell, поскольку каталог-синхронизации из AD у
   вас, вероятно, не будет (нет локального Active Directory/Exchange — ящики живут в Postfix/Dovecot);
-- настроены 2 коннектора (входящий и исходящий, см. раздел 2);
+- настроены 2 коннектора (в терминах Microsoft: Outbound connector EOP → узел и Inbound connector
+  узел → EOP, см. раздел 2);
 - при необходимости включён DBEB (см. раздел 3).
 https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-service
 
@@ -125,7 +133,14 @@ https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-servic
 коннектор "ваш сервер → Office 365" (для исходящей, ваш сервер использует M365 как smarthost).
 https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/set-up-connectors-to-route-mail
 
-### 2.2. Inbound-коннектор (EOP → наш сервер): сертификат vs IP
+> **Ревизия 2026-09-30: названия.** Заголовки 2.2 и 2.3 ниже изначально называли «inbound» коннектор
+> EOP → сервер, а «outbound» — сервер → EOP. В командлетах Microsoft наоборот: направление считается
+> относительно тенанта. EOP → наш сервер — **Outbound connector** (`New-OutboundConnector`, `SmartHosts`,
+> `TlsSettings`, `TlsDomain`), наш сервер → EOP — **Inbound connector** (`New-InboundConnector`,
+> `TlsSenderCertificateName`). Заголовки исправлены; подробнее —
+> [eop-panel-requirements.md](eop-panel-requirements.md), раздел 2.2.
+
+### 2.2. Outbound connector в терминах Microsoft (EOP → наш сервер): сертификат vs IP
 
 При создании исходящего от Microsoft 365 коннектора ("Connection from: Office 365, Connection to: Your
 organization's email server") нужно указать smart host (домен/IP вашего сервера) и опционально включить
@@ -133,7 +148,7 @@ organization's email server") нужно указать smart host (домен/I
 доменом в CN/SAN, совпадающим с указанным). Пошагово это шаги 8–14 мастера.
 https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/set-up-connectors-to-route-mail
 
-### 2.3. Outbound-коннектор (наш сервер → EOP): сертификат vs IP — это выбор именно здесь
+### 2.3. Inbound connector в терминах Microsoft (наш сервер → EOP): сертификат vs IP — это выбор именно здесь
 
 Для коннектора "ваш сервер → Microsoft 365" мастер прямо предлагает два взаимоисключающих способа
 аутентификации отправителя:
@@ -227,6 +242,12 @@ https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/how-to-set-u
 пиковая пропускная способность.
 https://learn.microsoft.com/en-us/defender-office-365/outbound-spam-sending-limits-troubleshoot
 
+> **Ревизия 2026-09-30: вопрос закрыт.** Страница лимитов EOP прямо говорит: «recipient rate and message
+> rate limits for Exchange Online don't apply to add-ons for on-premises mailbox users». Лимиты на ящик
+> (10 000 получателей в сутки, 30 писем в минуту) к нашей схеме не применяются; действуют TERRL (2.7) и
+> лимиты политики исходящего спама. Лимит на ящик держит сам mailcow (`rl_value`).
+> https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-protection-service-description/exchange-online-protection-limits
+
 ### 2.7. Tenant Outbound Email Limit / TERRL — детально
 
 Это как раз тот "Tenant Outbound Email Limit / external recipient rate limit", введённый в 2025 году, о
@@ -247,8 +268,14 @@ https://practical365.com/tenant-wide-external-recipient-rate-limit/
 licenses" для этой формулы (прямого подтверждения, что EOP-лицензии в частности учитываются в этой
 формуле, найти не удалось — формула была анонсирована в контексте Exchange Online/M365-лицензий, но по
 смыслу продукта логично, что лицензии, дающие почтовый ящик/адрес в тенанте, тоже считаются):
-`500 × 500^0.7 + 9500 ≈ 500 × 74.15 + 9500 ≈ 46 575` внешних получателей в сутки на весь тенант. Много
+`500 × 500^0.7 + 9500 ≈ 500 × 77.5 + 9500 ≈ 48 248` внешних получателей в сутки на весь тенант (исправлено
+2026-09-30: в первой версии было 74.15 и ≈ 46 575 — арифметическая ошибка). Много
 для 500 ящиков среднего SMB, но при рассылках/маркетинге может стать узким местом — стоит мониторить.
+
+> **Ревизия 2026-09-30 (вторичный источник, на Learn пока нет).** С 2026-09-14 тенант младше 31 дня
+> получает 10% расчётного лимита (~4 825 для 500 лицензий), 31-60 дней — 25% (~12 062); пробный тенант —
+> 500 в сутки вместо 5 000 (`5.7.232`). Для свежего тенанта первого узла это важно.
+> https://lazyadmin.nl/office-365/exchange-online-tightens-outbound-limits-for-new-trial-and-edu-tenants/
 
 **Применимость к вашей схеме (ключевой вопрос из задания).** Несколько независимых источников (включая
 резюме официальной техкоммьюнити-статьи Microsoft) сходятся на формулировке: **"All messages sent
@@ -328,6 +355,11 @@ Postfix (что тоже рабочий, просто менее выгодны�
 > отвечает `250 OK` исходному отправителю до отказа на узле, поэтому отклонение Postfix'ом даёт
 > NDR-бэкскаттер от EOP, а не просто лишнюю нагрузку на антиспам. Подробности и порядок перехода —
 > [eop-review.md](eop-review.md), находки 8 и 9.
+>
+> **Ревизия 2026-09-30.** Graph получателей для DBEB не создаёт — только EXO PowerShell. Вместо mail user
+> (учётная запись входа с паролем) достаточно, по выводу из статьи DBEB, mail contact (`New-MailContact`);
+> каждый алиас узла тоже должен быть адресом получателя; `ExternalEmailAddress` в том же домене рискует
+> петлёй `5.4.14`. Подробно — [eop-panel-requirements.md](eop-panel-requirements.md), раздел 2.8 и R-29.
 
 ### 3.3. Ограничения по числу accepted domains
 
@@ -340,9 +372,17 @@ https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-
 
 ### 4.1. MX
 
-MX домена указывает на `<tenant>-<domain-через-дефисы>.mail.protection.outlook.com` (пример из
+MX домена указывает на `<domain-через-дефисы>.mail.protection.outlook.com` (пример из
 официальной документации: `contoso-com.mail.protection.outlook.com` для домена `contoso.com`).
 https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/set-up-connectors-to-route-mail
+
+> **Ревизия 2026-09-30.** Имя MX — токен на домен (`<MX token>.mail.protection.outlook.com`, токен из
+> центра администрирования), а не имя тенанта, и выводить его из имени домена нельзя: для доменов,
+> добавленных после 2026-07-01, MX создаётся под `mx.microsoft`, и единственный источник значения —
+> Graph `serviceConfigurationRecords` (Message Center MC1048624, вторичный источник). Существующие домены
+> не затронуты.
+> https://learn.microsoft.com/en-us/microsoft-365/enterprise/external-domain-name-system-records ,
+> https://mc.merill.net/message/MC1048624
 Отдельно подтверждается в инструкции по настройке standalone EOP — "Be sure to point your MX record
 directly to Microsoft 365 instead of a non-Microsoft service."
 https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-service
@@ -370,7 +410,7 @@ https://learn.microsoft.com/en-us/defender-office-365/email-authentication-dkim-
 По сути механики (см. также раздел 2.5 про relay pool, где Microsoft прямо пишет "To improve
 authentication of forwarded mail, make sure DKIM is enabled for the sending domain" применительно к
 домену, определённому как accepted domain): если у вас accepted domain и включён DKIM для него в EOP,
-письма, проходящие через EOP по вашему outbound-коннектору, будут подписаны EOP автоматически — отдельный
+письма, проходящие через EOP по вашему коннектору узел → EOP (Inbound connector в терминах Microsoft), будут подписаны EOP автоматически — отдельный
 DKIM-signing agent на Postfix не обязателен.
 https://learn.microsoft.com/en-us/defender-office-365/outbound-spam-high-risk-delivery-pool-about
 
@@ -455,7 +495,7 @@ https://techcommunity.microsoft.com/blog/exchange/introducing-mta-sts-for-exchan
   адресов — отдельная страница "Microsoft 365 URLs and IP address ranges"); Microsoft прямо просит
   ограничить входящий 25 только этими диапазонами.
   https://learn.microsoft.com/en-us/exchange/standalone-eop/set-up-your-eop-service
-- CA-подписанный TLS-сертификат на приёмной стороне (для inbound-коннектора EOP → вы) — самоподписанный
+- CA-подписанный TLS-сертификат на приёмной стороне (для коннектора EOP → вы, Outbound connector в терминах Microsoft) — самоподписанный
   не годится, Microsoft явно рекомендует сертификат от публичного CA с CN/SAN, совпадающим с основным
   почтовым доменом.
   https://learn.microsoft.com/en-us/exchange/mail-flow-best-practices/use-connectors-to-configure-mail-flow/set-up-connectors-to-route-mail
@@ -639,11 +679,12 @@ https://www.hornetsecurity.com/en/blog/retention-archiving-email-security/
    выполняется по построению схемы.
 4. **TERRL применяется и к вашему сценарию** — весь исходящий на внешние адреса трафик тенанта считается
    в лимит, независимо от происхождения (облачный ящик или локальный сервер через коннектор). Для 500
-   лицензий ориентировочный лимит ≈ 46 500 внешних получателей/сутки на тенант **[инференс]** — стоит
+   лицензий ориентировочный лимит ≈ 48 248 внешних получателей/сутки на тенант (исправлено 2026-09-30,
+   было ≈ 46 500; первые 60 дней тенанта — 10-25% от этого, 2.7) **[инференс]** — стоит
    подтвердить у Microsoft/CSP, что именно EOP standalone-лицензии считаются в формуле.
-5. Открытый вопрос: применяется ли лимит "10 000 получателей/сутки на ящик" к гибридному
-   сертификат/IP-based коннектору без привязки к конкретному EXO-ящику — прямого источника нет,
-   рекомендуется уточнить у поддержки Microsoft перед продакшном.
+5. ~~Открытый вопрос: применяется ли лимит "10 000 получателей/сутки на ящик" к гибридному
+   сертификат/IP-based коннектору без привязки к конкретному EXO-ящику.~~ Закрыт 2026-09-30: к add-on
+   для локальных ящиков лимиты на ящик не применяются (2.6).
 6. Для DBEB и корректного отклонения писем на несуществующие адреса вам придётся программно зеркалить
    каждый созданный в Postfix/Dovecot ящик как mail user в M365-тенанте (нет AD/Entra Connect для
    автосинхронизации) — это отдельная интеграционная задача для MailExpert. (Ревизия 2026-09-28:

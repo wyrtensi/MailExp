@@ -49,10 +49,14 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 - Gmail scale test in waves of 10 → 25 → 50 → 100 mailboxes: memory, CPU, IMAP connections, provider errors and UI latency on the target server.
 - 24-hour stability run, controlled restart and restore.
-- Mail node domain setup through the mailcow API instead of hand-run steps: apply the DKIM decision (publish or skip the key), set the relayhost, TLS policy map and rate limits, and show/check the DNS records the owner needs to publish. Findings and open decisions: [docs/architecture/mail-node-research/eop-review.md](docs/architecture/mail-node-research/eop-review.md).
-- A timer script that keeps the node firewall's EOP ranges current from the Microsoft web service (IPv4 and IPv6), instead of the monthly manual check.
-- A global mailcow spam filter that files mail on EOP's `X-Forefront-Antispam-Report` header into Junk.
-- Mirror mail node mailboxes as mail users in the Microsoft tenant (Internal Relay while syncing, Authoritative once synced) so EOP's own directory blocks invalid recipients instead of the node generating backscatter NDRs.
+- Mail node behind EOP, built and tested on the local stand without a tenant; requirements, stages and owner decisions: [docs/architecture/mail-node-research/eop-panel-requirements.md](docs/architecture/mail-node-research/eop-panel-requirements.md).
+  - Stand: a fake-EOP SMTP relay (client certificate check, EOP error codes, header injection), DNS fixtures, `extra.cf` relayhost, `ENABLE_IPV6=false`.
+  - Foundation: node settings saved without overwriting, a domain table with onboarding state, node mailboxes only on ready domains, audit entries for node actions.
+  - Node setup through the mailcow API: TLS policy map, relayhost, the DKIM decision, rate limits, the EOP-header Junk filter (prefilter), EOP ranges as forwarding hosts with `filter_spam`, sender ACL for aliases.
+  - DNS and certificate checks for each domain and the node.
+  - Operations: node queue, delivery status and bounces with EOP codes, alerts (blocked connector, bypassed EOP, certificate), mailcow quarantine, TERRL budget.
+  - Node scripts: install/config script (`mailcow.conf`, `extra.cf`, firewall) and a timer that keeps EOP ranges current from the Microsoft web service.
+- Tenant automation behind a `TenantDriver` (Graph plus an EXO PowerShell worker), first on mocks, then against a live tenant: domain verification, accepted domain type, connector checks, EOP DKIM, blocked connector polling, message trace, and DBEB mirroring of node addresses and aliases (Internal Relay while syncing, Authoritative once synced).
 - Optional: report spam/phishing from the panel to Microsoft through the Graph beta threat-submission API.
 
 ## Later
