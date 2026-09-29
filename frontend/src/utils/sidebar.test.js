@@ -142,9 +142,9 @@ describe('folder ordering', () => {
     assert.deepEqual(sanitizeFolderOrder([]), {});
   });
 
-  it('keeps the legacy alphabetical order without a saved preference', () => {
+  it('puts Inbox first and the rest alphabetically without a saved preference', () => {
     const tree = buildFolderTree(folders);
-    assert.deepEqual(tree.map(node => node.path), ['Archive', 'INBOX', 'Projects']);
+    assert.deepEqual(tree.map(node => node.path), ['INBOX', 'Archive', 'Projects']);
     assert.deepEqual(tree[2].children.map(node => node.path), [
       'Projects/Alpha',
       'Projects/Beta',
@@ -192,14 +192,14 @@ describe('folder ordering', () => {
     );
     assert.deepEqual(
       reorderFolderPaths(folders, [], 'Projects', 'Archive', 'before'),
-      ['Projects', 'Archive', 'INBOX', 'Projects/Alpha', 'Projects/Beta'],
+      ['INBOX', 'Projects', 'Archive', 'Projects/Alpha', 'Projects/Beta'],
     );
   });
 
   it('moves nested siblings without changing the parent hierarchy', () => {
     assert.deepEqual(
       reorderFolderPaths(folders, [], 'Projects/Beta', 'Projects/Alpha', 'before'),
-      ['Archive', 'INBOX', 'Projects', 'Projects/Beta', 'Projects/Alpha'],
+      ['INBOX', 'Archive', 'Projects', 'Projects/Beta', 'Projects/Alpha'],
     );
   });
 
@@ -226,14 +226,47 @@ describe('folder ordering', () => {
       { path: 'Work/Archive', name: 'Archive', delimiter: '/', special_use: '\\Archive' },
     ];
 
-    it('shows Sent, Drafts, Trash, Junk and Archive beside Inbox whatever their path', () => {
+    it('lifts Sent, Drafts, Trash, Junk and Archive to the root, led by Inbox, whatever their path', () => {
       const tree = buildFolderTree(gmail);
       assert.deepEqual(tree.map(node => node.path), [
-        'INBOX', 'Work/Archive', '[Gmail]', '[Gmail]/Drafts', '[Gmail]/Sent Mail', '[Gmail]/Spam', '[Gmail]/Trash', 'Work',
-      ].sort((a, b) => a.localeCompare(b)));
+        'INBOX', '[Gmail]/Drafts', '[Gmail]/Sent Mail', 'Work/Archive', '[Gmail]/Spam', '[Gmail]/Trash',
+        '[Gmail]', 'Work',
+      ]);
       const container = tree.find(node => node.path === '[Gmail]');
       assert.deepEqual(container.children.map(node => node.path), ['[Gmail]/All Mail']);
       assert.deepEqual(tree.find(node => node.path === 'Work').children, []);
+    });
+
+    it('keeps a saved order over the default one', () => {
+      const tree = buildFolderTree(gmail, ['Work', '[Gmail]/Trash']);
+      assert.deepEqual(tree.slice(0, 3).map(node => node.path), ['Work', '[Gmail]/Trash', 'INBOX']);
+    });
+
+    it('drops a container left empty by the lift, but keeps an empty real folder', () => {
+      const withoutAllMail = gmail
+        .filter(folder => folder.path !== '[Gmail]/All Mail')
+        .map(folder => (folder.path === '[Gmail]' ? { ...folder, no_select: true } : folder));
+      const paths = buildFolderTree(withoutAllMail).map(node => node.path);
+      assert.ok(!paths.includes('[Gmail]'), 'the no-select container is gone');
+      assert.ok(paths.includes('Work'), 'an empty selectable folder stays');
+
+      const syntheticParent = buildFolderTree([
+        { path: 'INBOX', name: 'INBOX', delimiter: '/' },
+        { path: 'Mail/Sent', name: 'Sent', delimiter: '/', special_use: '\\Sent' },
+      ]);
+      assert.deepEqual(syntheticParent.map(node => node.path), ['INBOX', 'Mail/Sent']);
+    });
+
+    it('lifts with a dot delimiter and a special-use flag in any case, keeping its own children', () => {
+      const tree = buildFolderTree([
+        { path: 'INBOX', name: 'INBOX', delimiter: '.' },
+        { path: 'INBOX.Trash', name: 'Trash', delimiter: '.', special_use: '\\TRASH' },
+        { path: 'INBOX.Trash.Old', name: 'Old', delimiter: '.' },
+        { path: 'INBOX.Work', name: 'Work', delimiter: '.' },
+      ]);
+      assert.deepEqual(tree.map(node => node.path), ['INBOX', 'INBOX.Trash']);
+      assert.deepEqual(tree[0].children.map(node => node.path), ['INBOX.Work']);
+      assert.deepEqual(tree[1].children.map(node => node.path), ['INBOX.Trash.Old']);
     });
 
     it('reorders a lifted folder among the root folders it is shown with', () => {
@@ -242,6 +275,7 @@ describe('folder ordering', () => {
       assert.equal(next.indexOf('[Gmail]/Sent Mail'), next.indexOf('INBOX') + 1);
       assert.equal(reorderFolderPaths(gmail, [], '[Gmail]/Sent Mail', '[Gmail]/All Mail', 'before'), null);
       assert.equal(reorderFolderPaths(gmail, [], '[Gmail]/All Mail', '[Gmail]/Sent Mail', 'before'), null);
+      assert.ok(reorderFolderPaths(gmail, [], '[Gmail]/Trash', 'Work', 'after'), 'onto a plain root folder too');
     });
   });
 
@@ -252,7 +286,7 @@ describe('folder ordering', () => {
 
   it('does not persist a drop that leaves the normalized order unchanged', () => {
     assert.equal(
-      reorderFolderPaths(folders, [], 'Archive', 'INBOX', 'before'),
+      reorderFolderPaths(folders, [], 'Archive', 'INBOX', 'after'),
       null,
     );
   });

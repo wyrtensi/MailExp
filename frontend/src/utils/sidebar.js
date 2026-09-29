@@ -40,11 +40,19 @@ function delimiterFor(folders) {
 
 // Special-use folders sit at the root of the tree whatever their path, so Gmail's
 // "[Gmail]/Sent Mail" or a Courier-style "INBOX.Trash" shows beside Inbox rather than inside
-// another folder (ported from upstream mailflow ea1a9194).
-const ROOT_SPECIAL_USES = new Set(['\\archive', '\\drafts', '\\inbox', '\\junk', '\\sent', '\\trash']);
+// another folder (ported from upstream mailflow ea1a9194). Listed in their default order: with
+// no saved order they lead the root in this order, Inbox first, and the rest follow by path.
+const ROOT_SPECIAL_USES = ['\\inbox', '\\drafts', '\\sent', '\\archive', '\\junk', '\\trash'];
+
+function specialUseRank(folder) {
+  const rank = ROOT_SPECIAL_USES.indexOf(String(folder?.special_use || '').toLowerCase());
+  if (rank !== -1) return rank;
+  // Not every server flags INBOX \Inbox; it leads either way.
+  return String(folder?.path || '').toUpperCase() === 'INBOX' ? 0 : -1;
+}
 
 function isRootSpecialUse(folder) {
-  return ROOT_SPECIAL_USES.has(String(folder?.special_use || '').toLowerCase());
+  return specialUseRank(folder) !== -1;
 }
 
 // The path a folder hangs under in the tree: null at the root. The tree and folder reordering
@@ -56,14 +64,18 @@ function treeParentPath(folder, delimiter) {
 function folderPathsWithAncestors(folders) {
   const delimiter = delimiterFor(folders);
   const paths = new Set();
+  const rankOf = new Map();
   for (const folder of folders) {
     if (typeof folder?.path !== 'string' || !folder.path) continue;
     const parts = folder.path.split(delimiter);
     for (let depth = 1; depth <= parts.length; depth += 1) {
       paths.add(parts.slice(0, depth).join(delimiter));
     }
+    const rank = specialUseRank(folder);
+    if (rank !== -1) rankOf.set(folder.path, rank);
   }
-  return [...paths].sort((a, b) => a.localeCompare(b));
+  const defaultRank = folderPath => rankOf.get(folderPath) ?? ROOT_SPECIAL_USES.length;
+  return [...paths].sort((a, b) => defaultRank(a) - defaultRank(b) || a.localeCompare(b));
 }
 
 export function sanitizeFolderOrder(value) {
@@ -105,6 +117,7 @@ export function buildFolderTree(folders, savedOrder = []) {
   const safeFolders = Array.isArray(folders) ? folders : [];
   const delimiter = delimiterFor(safeFolders);
   const map = {};
+  const synthetic = new Set();
   for (const folder of safeFolders) {
     if (typeof folder?.path !== 'string' || !folder.path) continue;
     map[folder.path] = { ...folder, children: [] };
@@ -116,6 +129,7 @@ export function buildFolderTree(folders, savedOrder = []) {
     for (let depth = 1; depth < parts.length; depth += 1) {
       const folderPath = parts.slice(0, depth).join(delimiter);
       if (!map[folderPath]) {
+        synthetic.add(folderPath);
         map[folderPath] = {
           path: folderPath,
           name: parts[depth - 1],
@@ -155,7 +169,17 @@ export function buildFolderTree(folders, savedOrder = []) {
     group.forEach(node => sortGroup(node.children));
   };
   sortGroup(roots);
-  return roots;
+  return withoutEmptyContainers(roots, synthetic);
+}
+
+// A container that only held special-use folders ("[Gmail]" once Sent, Drafts, Spam and Trash
+// moved to the root, with All Mail and the rest hidden from IMAP) is left with nothing to show
+// and cannot be opened itself, so it is dropped rather than shown as an empty row.
+function withoutEmptyContainers(group, synthetic) {
+  return group.filter(node => {
+    node.children = withoutEmptyContainers(node.children, synthetic);
+    return node.children.length > 0 || !(node.no_select || synthetic.has(node.path));
+  });
 }
 
 export function reorderFolderPaths(
