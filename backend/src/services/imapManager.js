@@ -134,7 +134,7 @@ async function connectImapClientOnce(account, resolved, cfgOpts, timeoutMs, labe
         if (isConnectionRefusal(extractImapError(err))) sawRefusal = true;
         if (abandoned) return;
         recordWarning('imap_error', account?.id);
-        console.error(`IMAP error for ${logAccount(account)}:`, err.message);
+        console.error(`IMAP error for ${logAccount(account)}:`, extractImapError(err));
       });
       await raceTimeout(client.connect(), timeoutMs, tag);
       recordImapLogin(host, tag);
@@ -976,6 +976,14 @@ function redactImapSecrets(text, authStage) {
 // `executedCommand`, which holds the (masked, but still) client request.
 export function extractImapError(err) {
   if (!err || typeof err !== 'object') return String(err);
+  // A connect that fails on every address the host resolves to (IPv6 and IPv4 under
+  // autoSelectFamily) rejects with an AggregateError whose message is empty; the reasons are on
+  // .errors, one per address. Unwrapped, it read only "AggregateError" in the log and the UI.
+  if (err.name === 'AggregateError' && Array.isArray(err.errors) && err.errors.length) {
+    const reasons = [...new Set(err.errors.map(e => e?.message || e?.code).filter(Boolean))];
+    if (reasons.length) return redactImapSecrets(reasons.join('; '), false);
+    if (err.code) return String(err.code);
+  }
   let text = typeof err.responseText === 'string' ? err.responseText.trim() : '';
   if (!text && err.response && typeof err.response === 'object') {
     text = err.response.attributes?.find(a => a.type === 'TEXT')?.value || '';
