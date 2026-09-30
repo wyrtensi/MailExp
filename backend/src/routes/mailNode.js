@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { uuidParam } from '../utils/uuid.js';
+import { recordAudit } from '../services/auditLog.js';
 import { DISK_WARN_PERCENT, checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
 import {
   DEFAULT_DOMAIN_MAILBOXES,
@@ -20,10 +21,29 @@ import {
   saveMailNodeConfig,
   setMailboxQuota,
 } from '../services/mailNode/mailcow.js';
+import {
+  adoptDomain,
+  canCreateMailboxes,
+  confirmStep,
+  listDomainRows,
+  markReady,
+  mergeDomains,
+  recordCreatedDomain,
+} from '../services/mailNode/domains.js';
+import {
+  EOP_FIELDS,
+  MAX_SEND_LIMIT_PER_HOUR,
+  MAX_TERRL,
+  getEopSettings,
+  parseEopSettings,
+  saveEopSettings,
+  tenantConfigured,
+} from '../services/mailNode/eopSettings.js';
 
-// The mail node (mailcow) settings, its domains and the quotas of the mailboxes MailExpert made
-// there. Mounted at /api/mail-node. Everyone signed in may list domains (the add-mailbox form
-// offers them); everything else is for administrators.
+// The mail node (mailcow) settings, its domains with their onboarding, the EOP settings and the
+// quotas of the mailboxes MailExpert made there. Mounted at /api/mail-node. Everyone signed in may
+// list the domains a mailbox can be created on (the add-mailbox form offers them); everything else
+// is for administrators.
 const router = Router();
 router.param('id', uuidParam('id'));
 
@@ -39,6 +59,21 @@ const ERRORS = {
   mailboxes_invalid: [400, `Mailbox limit must be a whole number from 1 to ${MAX_DOMAIN_MAILBOXES}`],
   mail_node_not_configured: [409, 'The mail node is not set up'],
   mailbox_not_found: [404, 'Mail node mailbox not found'],
+  domain_not_ready: [400, 'Mailboxes can be created only on a domain that finished its onboarding'],
+  domain_not_on_node: [404, 'The mail node has no such domain'],
+  domain_not_found: [404, 'The panel does not know this domain'],
+  domain_known: [409, 'The panel knows this domain already'],
+  domain_already_ready: [409, 'The domain is ready already'],
+  step_invalid: [400, 'No such onboarding step'],
+  step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
+  eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
+  certificate_host_invalid: [400, 'Certificate host must be a host name such as mail.example.com'],
+  dkim_mode_invalid: [400, 'DKIM mode must be mailcow or eop'],
+  send_limit_invalid: [400, `Send limit must be a whole number of messages per hour from 1 to ${MAX_SEND_LIMIT_PER_HOUR}`],
+  terrl_invalid: [400, `TERRL must be a whole number of recipients from 1 to ${MAX_TERRL}`],
+  tenant_id_invalid: [400, 'Tenant ID must be a GUID'],
+  app_id_invalid: [400, 'Application ID must be a GUID'],
+  thumbprint_invalid: [400, 'Certificate thumbprint must be 40 hexadecimal characters'],
 };
 
 export function refuse(res, code) {
@@ -53,6 +88,17 @@ export function mailNodeFailure(res, err) {
 }
 
 router.use(requireAuth);
+
+async function isAdmin(req) {
+  const { rows } = await query('SELECT is_admin FROM users WHERE id = $1', [req.session.userId]);
+  return !!rows[0]?.is_admin;
+}
+
+// A settings change is journaled by the names of the fields that changed, never their values.
+function configAudit(req, settings, fields) {
+  if (!fields.length) return;
+  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.config_changed', details: { settings, fields } });
+}
 
 router.get('/config', requireAdmin, async (req, res) => {
   const cfg = await getMailNodeConfig();
@@ -75,10 +121,10 @@ router.put('/config', requireAdmin, async (req, res) => {
   const diskPingUrl = rawPing ? parsePingUrl(rawPing) : null;
   if (rawPing && !diskPingUrl) return refuse(res, 'ping_url_invalid');
   const sent = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+  const current = await getMailNodeConfig();
   let apiKey = sent;
   if (!sent || sent === REDACTED_SECRET) {
     // The stored key goes only to the host it was entered for: a new host needs the key again.
-    const current = await getMailNodeConfig();
     if (!current?.apiKey || current.mailHost !== mailHost) return refuse(res, 'api_key_required');
     apiKey = current.apiKey;
   }
@@ -89,22 +135,35 @@ router.put('/config', requireAdmin, async (req, res) => {
     return mailNodeFailure(res, err);
   }
   await saveMailNodeConfig(cfg);
+  configAudit(req, 'node', Object.keys(cfg).filter((field) => current?.[field] !== cfg[field]));
   // Read the disk (and ping) right away instead of at the next scheduled run.
   checkMailNodeDisk().catch((err) => console.error('Mail node disk check failed:', err.message));
   res.json({ ok: true });
 });
 
+// The node's domains with the panel's onboarding state of each ('unknown' for a domain the panel
+// has no record of). An administrator sees them all; everyone else only those a mailbox can be
+// created on.
 router.get('/domains', async (req, res) => {
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
+  let onNode;
   try {
-    res.json({ domains: await listDomains(cfg) });
+    onNode = await listDomains(cfg);
   } catch (err) {
     return mailNodeFailure(res, err);
   }
+  const domains = mergeDomains(onNode, await listDomainRows());
+  if (await isAdmin(req)) return res.json({ domains });
+  res.json({
+    domains: domains
+      .filter((d) => d.onNode && d.active && canCreateMailboxes(d.state))
+      .map(({ domain, active, state }) => ({ domain, active, state })),
+  });
 });
 
-// Creates the domain on the node. DNS, the EOP connectors and DKIM stay manual (runbook).
+// Creates the domain on the node; its onboarding starts at node_created. DNS, the EOP connectors
+// and DKIM stay manual (runbook) and are confirmed step by step.
 router.post('/domains', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.body?.domain);
   if (!domain) return refuse(res, 'domain_invalid');
@@ -117,7 +176,69 @@ router.post('/domains', requireAdmin, async (req, res) => {
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  res.json({ ok: true, domain });
+  await recordCreatedDomain({ domain, userId: req.session.userId, maxMailboxes: mailboxes });
+  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.domain_added', details: { domain, mailboxes } });
+  res.json({ ok: true, domain, state: 'node_created' });
+});
+
+// Takes in a domain made on the node by hand: it starts at node_created like a new one.
+router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return refuse(res, 'mail_node_not_configured');
+  try {
+    if (!(await listDomains(cfg)).some((d) => d.domain === domain)) return refuse(res, 'domain_not_on_node');
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  if (!(await adoptDomain({ domain, userId: req.session.userId }))) return refuse(res, 'domain_known');
+  recordAudit({
+    actorUserId: req.session.userId, action: 'mail_node.domain_adopted',
+    details: { domain, state: 'node_created', origin: 'adopted' },
+  });
+  res.json({ ok: true, domain, state: 'node_created' });
+});
+
+function stateChanged(req, res, domain, result, how) {
+  if (result.error) return refuse(res, result.error);
+  recordAudit({
+    actorUserId: req.session.userId, action: 'mail_node.domain_state_changed',
+    details: { domain, from: result.from, to: result.to, how },
+  });
+  return res.json({ ok: true, domain, state: result.to });
+}
+
+// "Done": a person confirms the domain's next onboarding step.
+router.post('/domains/:domain/steps/:step', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  const result = await confirmStep({ domain, step: req.params.step, userId: req.session.userId });
+  return stateChanged(req, res, domain, result, 'step_confirmed');
+});
+
+// A pilot or a test stand without a tenant: the domain takes mailboxes without the other steps.
+router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  const result = await markReady({ domain, userId: req.session.userId });
+  return stateChanged(req, res, domain, result, 'marked_ready');
+});
+
+router.get('/eop', requireAdmin, async (req, res) => {
+  const settings = await getEopSettings();
+  res.json({ ...settings, tenantConfigured: tenantConfigured(settings) });
+});
+
+// Only checked and kept for now: later stages apply them to the node and the tenant.
+router.put('/eop', requireAdmin, async (req, res) => {
+  const { settings, error } = parseEopSettings(req.body);
+  if (error) return refuse(res, error);
+  const current = await getEopSettings();
+  await saveEopSettings(settings);
+  configAudit(req, 'eop', EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]));
+  const saved = { ...current, ...settings };
+  res.json({ ...saved, tenantConfigured: tenantConfigured(saved) });
 });
 
 // The node mailboxes MailExpert knows, with quota and usage as the node reports them.

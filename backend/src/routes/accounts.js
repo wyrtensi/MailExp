@@ -22,6 +22,7 @@ import { providerThreadIndexState } from '../services/threading/providerThreadIn
 import {
   MailNodeError, disableMailbox, getMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart, provisionMailbox,
 } from '../services/mailNode/mailcow.js';
+import { canCreateMailboxes, getDomainState } from '../services/mailNode/domains.js';
 import { mailNodeFailure, refuse as refuseMailNode } from './mailNode.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
@@ -179,6 +180,8 @@ async function createDomainMailboxNow(req, res) {
 
   const taken = await query('SELECT 1 FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
   if (taken.rows.length) return res.status(409).json({ error: 'This mailbox is already in MailExpert', code: 'mailbox_exists' });
+  // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does.
+  if (!canCreateMailboxes(await getDomainState(domain))) return refuseMailNode(res, 'domain_not_ready');
 
   let created;
   try {
