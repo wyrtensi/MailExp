@@ -1935,7 +1935,6 @@
       "errorPingUrl": "Ссылка должна начинаться с https://.",
       "errorDomain": "Введите имя домена, например example.ru.",
       "errorMailboxes": "Лимит ящиков — целое число от 1 до 10000.",
-      "onboardingColumn": "Подключение",
       "showDetails": "Подробно",
       "hideDetails": "Скрыть",
       "stateUnknown": "Неизвестный",

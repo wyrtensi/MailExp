@@ -198,7 +198,6 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                   <th style={headCellStyle}>{t('admin.mailNode.domainColumn')}</th>
                   <th style={headCellStyle}>{t('admin.mailNode.mailboxesColumn')}</th>
                   <th style={headCellStyle}>{t('admin.mailNode.stateColumn')}</th>
-                  <th style={headCellStyle}>{t('admin.mailNode.onboardingColumn')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -208,11 +207,10 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                       <td style={cellStyle}>{d.domain}</td>
                       <td style={cellStyle}>{t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}</td>
                       <td style={cellStyle}>
+                        {/* The node's own flag, then how far the panel's onboarding of the domain got. */}
                         {!d.onNode && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
                         {d.onNode && (d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive'))}
-                      </td>
-                      <td style={cellStyle}>
-                        <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
                           <span data-domain-state={d.state} style={{ color: d.state === 'unknown' ? 'var(--red)' : 'var(--text-primary)' }}>
                             {t(domainStateKey(d.state))}
                           </span>
@@ -229,7 +227,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                     </tr>
                     {openDomain === d.domain && (
                       <tr>
-                        <td colSpan={4} style={{ ...cellStyle, background: 'var(--bg-secondary)' }}>
+                        <td colSpan={3} style={{ ...cellStyle, background: 'var(--bg-secondary)' }}>
                           <MailNodeDomainOnboarding domain={d} onChanged={refreshDomains} />
                         </td>
                       </tr>

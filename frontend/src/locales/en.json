@@ -1901,7 +1901,6 @@
       "errorPingUrl": "The ping URL must start with https://.",
       "errorDomain": "Enter a domain name such as example.com.",
       "errorMailboxes": "The mailbox limit must be a whole number from 1 to 10000.",
-      "onboardingColumn": "Onboarding",
       "showDetails": "Details",
       "hideDetails": "Hide",
       "stateUnknown": "Unknown",

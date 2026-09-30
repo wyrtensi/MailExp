@@ -138,7 +138,6 @@ describe('MailNodeSection — domain onboarding', () => {
       ['dns_ok', 'admin.mailNode.stateDnsOk'],
       ['unknown', 'admin.mailNode.stateUnknown'],
     ]);
-    assert.ok(host.textContent.includes('admin.mailNode.onboardingColumn'));
   });
 
   test('opens a domain\'s checklist and confirms its next step with Done', async () => {
