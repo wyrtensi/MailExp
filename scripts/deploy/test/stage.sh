@@ -11,6 +11,10 @@
 #   scripts/deploy/test/stage.sh panel [--version sha-<12>] update the panel to another build
 #   scripts/deploy/test/stage.sh status
 #   scripts/deploy/test/stage.sh down [--purge]             remove the server (--purge: and its data)
+#   scripts/deploy/test/stage.sh eop up|down|status|mode|connector|list|inject|logs|queue
+#                                   fake Exchange Online Protection as mailcow's relayhost (see below)
+#   scripts/deploy/test/stage.sh dns up|down|status|variant <name>|query <type> <name>
+#                                   DNS fixtures for the zone stage.test (opt-in, see below)
 #
 # Secrets live in data/stage.env (ignored by git), written on the first run: the panel's
 # SESSION_SECRET, ENCRYPTION_KEY and DB_PASSWORD, the mailcow API key, and the panel's first
@@ -18,6 +22,13 @@
 # to mailcow and adds the domain stage.test. Mail from outside never reaches the stand.
 # --version defaults to the checked-out commit, whose images CI publishes after a merge to main.
 # Needs about 8 GB of memory for Docker. From Git Bash on Windows it runs as is.
+#
+# eop and dns work on a stand that is already running and change nothing of it that another command
+# needs: eop up starts the container fake-eop (scripts/deploy/test/fake-eop) on mailcow's network as
+# eop.test.local and sets relayhost = eop.test.local in mailcow's extra.cf, so all outgoing mail goes
+# to it like to EOP; eop down takes the relayhost out again and removes the container. dns starts
+# the container stage-dns with the zone stage.test. Both take their files from the repository this
+# script is in (a worktree works), and neither reads data/stage.env.
 set -euo pipefail
 
 TEST_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -34,6 +45,14 @@ MAIL_HOST=mail.test.local
 DOMAIN=stage.test
 URL=https://localhost
 STAGE_ENV=$REPO_DIR/data/stage.env
+MAILCOW_DIR=/opt/mailcow
+MAILCOW_NET=mailcowdockerized_mailcow-network
+POSTFIX=mailcowdockerized-postfix-mailcow-1
+EOP_NAME=fake-eop
+EOP_HOST=eop.test.local
+EOP_IMAGE=node:22.20-alpine
+DNS_NAME=stage-dns
+DNS_IMAGE=alpine:3.22
 
 # Git Bash would rewrite container paths such as /opt for docker.exe; git.exe needs them rewritten.
 dk() { MSYS_NO_PATHCONV=1 docker "$@"; }
@@ -75,12 +94,16 @@ start_mailcow() {
   inner "git clone -q --depth 1 -c advice.detachedHead=false -b $MAILCOW_REF https://github.com/mailcow/mailcow-dockerized /opt/mailcow"
   inner "cd /opt/mailcow && ln -sf mailcow.conf .env && MAILCOW_HOSTNAME=$MAIL_HOST MAILCOW_TZ=UTC SKIP_CLAMD=y ./generate_config.sh --dev </dev/null >/dev/null 2>&1"
   # The recursive resolver cannot reach the root servers from inside Docker Desktop; delivery
-  # between the stand's own mailboxes needs no outside DNS.
+  # between the stand's own mailboxes needs no outside DNS. ENABLE_IPV6=false as the runbook
+  # (docs/operations/mail-node.md, section 3) sets it: generate_config.sh turns IPv6 on whenever the
+  # host has it, and the node's firewall rules are IPv4 only.
   inner "cd /opt/mailcow && sed -i \
     -e 's/^SKIP_LETS_ENCRYPT=n/SKIP_LETS_ENCRYPT=y/' -e 's/^SKIP_FTS=n/SKIP_FTS=y/' -e 's/^SKIP_OLEFY=n/SKIP_OLEFY=y/' \
     -e 's/^SKIP_CLAMD=n/SKIP_CLAMD=y/' -e 's/^SKIP_UNBOUND_HEALTHCHECK=n/SKIP_UNBOUND_HEALTHCHECK=y/' \
+    -e 's/^ENABLE_IPV6=.*/ENABLE_IPV6=false/' \
     -e 's|^#API_KEY=\$|API_KEY=$MAILCOW_API_KEY|' -e 's|^#API_ALLOW_FROM=.*|API_ALLOW_FROM=172.16.0.0/12,127.0.0.1|' mailcow.conf"
   inner "grep -q '^API_KEY=$MAILCOW_API_KEY\$' /opt/mailcow/mailcow.conf" || die "mailcow.conf has no API_KEY line to set"
+  inner "grep -q '^ENABLE_IPV6=false\$' /opt/mailcow/mailcow.conf" || die "mailcow.conf has no ENABLE_IPV6 line to set"
   log "issuing the stand CA and a certificate for $MAIL_HOST"
   inner "mkdir -p /opt/testca && cd /opt/testca \
     && openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 3650 -subj '/CN=MailExpert stand CA' 2>/dev/null \
@@ -189,6 +212,180 @@ SETUP
   log "signed in as $PANEL_ADMIN_USER; mail node $MAIL_HOST with the domain $DOMAIN"
 }
 
+# --- fake EOP as mailcow's relayhost -------------------------------------------------------------
+# A container in mailcow's compose network that accepts mail the way Exchange Online Protection
+# does for an on-premises connector (see fake-eop/eop.mjs), and the relayhost line that sends
+# mailcow's outgoing mail to it. Nothing here touches mailcow's data beyond extra.cf.
+
+EXTRA_CF=$MAILCOW_DIR/data/conf/postfix/extra.cf
+# extra-cf.sh runs inside the server, fed on stdin: the script keeps every other line of the file.
+extra_cf() { dk exec -i "$NAME" sh -s -- "$@" <"$TEST_DIR/fake-eop/extra-cf.sh"; }
+eop_ctl() { dk exec "$NAME" docker exec "$EOP_NAME" node /app/eop.mjs "$@"; }
+postfix_relayhost() { inner "docker exec $POSTFIX postconf -h relayhost 2>/dev/null" | tr -d '\r'; }
+
+# relayhost_apply <host>: sets relayhost in extra.cf ("" removes it) and restarts postfix-mailcow
+# unless it already runs with that value. Other lines of extra.cf stay as they are.
+relayhost_apply() {
+  local want=$1 live=''
+  if [ -n "$want" ]; then extra_cf set "$EXTRA_CF" relayhost "$want"; else extra_cf unset "$EXTRA_CF" relayhost; fi
+  if [ "$(postfix_relayhost)" = "$want" ]; then
+    log "postfix-mailcow already runs with relayhost '$want'"
+    return 0
+  fi
+  log "restarting postfix-mailcow with relayhost '$want'"
+  inner "cd $MAILCOW_DIR && docker compose restart postfix-mailcow >/dev/null 2>&1" || die "postfix-mailcow did not restart"
+  for _ in $(seq 30); do
+    live=$(postfix_relayhost 2>/dev/null || true)
+    if [ "$live" = "$want" ] && inner "docker exec $POSTFIX postfix status >/dev/null 2>&1"; then return 0; fi
+    sleep 2
+  done
+  die "postfix-mailcow did not come back with relayhost '$want' (it has '$live')"
+}
+
+eop_up() {
+  inner "docker network inspect $MAILCOW_NET >/dev/null 2>&1" || die "mailcow's network $MAILCOW_NET does not exist; is the stand up? ($0 status)"
+  log "copying fake-EOP into $NAME:/opt/fake-eop"
+  inner 'rm -rf /opt/fake-eop && mkdir -p /opt/fake-eop /opt/fake-eop-data/tls'
+  tar -C "$TEST_DIR/fake-eop" -c eop.mjs lib.mjs server.mjs | dk exec -i "$NAME" tar -x -C /opt/fake-eop
+  # A certificate for eop.test.local from the stand CA; the CA key never leaves /opt/testca.
+  inner "cd /opt/testca && { [ -f eop.crt ] || { openssl req -newkey rsa:2048 -nodes -keyout eop.key -out eop.csr -subj '/CN=$EOP_HOST' 2>/dev/null \
+    && printf 'subjectAltName=DNS:$EOP_HOST\nextendedKeyUsage=serverAuth\n' > eop.cnf \
+    && openssl x509 -req -in eop.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out eop.crt -days 825 -extfile eop.cnf 2>/dev/null; }; } \
+    && cp eop.crt eop.key ca.pem /opt/fake-eop-data/tls/" || die "could not issue the certificate of $EOP_HOST"
+  log "starting $EOP_NAME ($EOP_IMAGE) as $EOP_HOST in $MAILCOW_NET"
+  inner "docker pull -q $EOP_IMAGE >/dev/null && { docker rm -f $EOP_NAME >/dev/null 2>&1 || true; } \
+    && docker run -d --name $EOP_NAME --restart unless-stopped --network $MAILCOW_NET --network-alias $EOP_HOST --memory 128m \
+      -e EOP_CONNECTOR=$MAIL_HOST -v /opt/fake-eop:/app:ro -v /opt/fake-eop-data:/data $EOP_IMAGE node /app/eop.mjs serve >/dev/null" \
+    || die "could not start $EOP_NAME"
+  for _ in $(seq 20); do
+    if inner "docker logs $EOP_NAME 2>&1 | grep -q event=listen"; then break; fi
+    sleep 1
+  done
+  inner "docker logs $EOP_NAME 2>&1 | grep -q event=listen" || die "$EOP_NAME did not start listening; see: $0 eop logs"
+  relayhost_apply "$EOP_HOST"
+  log "outgoing mail of the stand now goes to $EOP_NAME; try: $0 eop send, then $0 eop logs and $0 eop relaylog"
+}
+
+eop_down() {
+  relayhost_apply ''
+  inner "docker rm -f $EOP_NAME >/dev/null 2>&1 || true"
+  log "removed $EOP_NAME and the relayhost; its spool stays in $NAME:/opt/fake-eop-data"
+}
+
+eop_status() {
+  local state
+  state=$(inner "docker inspect -f '{{.State.Status}}' $EOP_NAME 2>/dev/null" | tr -d '\r\n' || true)
+  printf 'fake-EOP: %s\n' "${state:-not created}"
+  if [ "$state" = running ]; then eop_ctl status; fi
+  printf 'extra.cf relayhost: %s\n' "$(extra_cf get "$EXTRA_CF" relayhost 2>/dev/null || echo '(none)')"
+  printf 'postfix-mailcow relayhost: %s\n' "$(postfix_relayhost)"
+}
+
+eop_main() {
+  running || die "$NAME is not running; start it with: $0 up" 2
+  local sub=${1:-}
+  [ $# -gt 0 ] && shift
+  case $sub in
+    up) eop_up ;;
+    down) eop_down ;;
+    status) eop_status ;;
+    # mode <accept|tempfail|blocked-connector|tenant-limit|recipient-denied|drop> [--stage mail|rcpt|data]
+    mode) [ $# -ge 1 ] || die "usage: $0 eop mode <mode> [--stage mail|rcpt|data]" 2; eop_ctl mode "$@" ;;
+    connector) [ $# -eq 1 ] || die "usage: $0 eop connector <name the client certificate must carry>" 2; eop_ctl connector "$1" ;;
+    list) eop_ctl list ;;
+    show) eop_ctl show "${1:-latest}" ;;
+    clear) eop_ctl clear ;;
+    # inject <id|latest> [verdict] [--to a@b] [--auth pass|fail] [--folded]
+    inject)
+      local id=${1:-latest} verdict=spam
+      [ $# -gt 0 ] && shift
+      if [ $# -gt 0 ] && [[ $1 != --* ]]; then verdict=$1 && shift; fi
+      eop_ctl inject "$id" --verdict "$verdict" "$@"
+      ;;
+    # send [from] [to]: one message from inside postfix-mailcow, the way a mailbox's mail arrives there.
+    send)
+      local from=${1:-someone@$DOMAIN} to=${2:-test@example.com}
+      printf 'From: %s\nTo: %s\nSubject: stage eop test %s\n\nSent by stage.sh eop send.\n' "$from" "$to" "$(date +%H:%M:%S)" |
+        dk exec -i "$NAME" docker exec -i "$POSTFIX" sendmail -f "$from" "$to"
+      log "submitted $from -> $to"
+      ;;
+    logs) inner "docker logs --tail ${1:-50} $EOP_NAME 2>&1" ;;
+    relaylog) inner "docker logs --tail ${1:-300} $POSTFIX 2>&1 | grep -E 'relay=|status=|TLS connection|TLS connection established' | tail -n 30" ;;
+    queue) inner "docker exec $POSTFIX postqueue -p" ;;
+    *) die "usage: $0 eop up|down|status|mode <mode> [--stage s]|connector <name>|list|show [id]|clear|inject <id> [verdict] [--to a@b]|send [from] [to]|logs [n]|relaylog [n]|queue" 2 ;;
+  esac
+}
+
+# --- DNS fixtures for the zone stage.test ---------------------------------------------------------
+# dnsmasq in the container stage-dns answers for stage.test (MX, SPF, DKIM, DMARC, MS=, and the node's
+# A and PTR) from stand-dns/zone.sh, in a good variant and several broken ones. It is opt-in: nothing
+# uses it until a client is pointed at its address (`dns status`), so the panel and mailcow keep
+# resolving real hosts as before. The panel's DNS check (R-14) takes the address as its resolver.
+
+dns_running() { [ "$(inner "docker inspect -f '{{.State.Running}}' $DNS_NAME 2>/dev/null" | tr -d '\r')" = true ]; }
+dns_ip() { inner "docker inspect -f '{{.NetworkSettings.Networks.stage_mailexpert.IPAddress}}' $DNS_NAME" | tr -d '\r'; }
+
+dns_variant() {
+  local variant=$1 key
+  inner 'mkdir -p /opt/stage-dns && { [ -s /opt/stage-dns/dkim.pub ] || openssl genrsa 2048 2>/dev/null | openssl rsa -pubout -outform DER 2>/dev/null | base64 -w0 > /opt/stage-dns/dkim.pub; }'
+  key=$(inner 'cat /opt/stage-dns/dkim.pub' | tr -d '\r')
+  sh "$TEST_DIR/stand-dns/zone.sh" "$variant" "$key" | dk exec -i "$NAME" sh -c 'cat > /opt/stage-dns/stage.conf'
+  if dns_running; then
+    inner "docker restart $DNS_NAME >/dev/null"
+    dns_wait
+  fi
+  log "stage.test zone: variant $variant"
+}
+
+# dns_wait: until dnsmasq answers (the container installs it on each start, which takes a moment).
+dns_wait() {
+  for _ in $(seq 30); do
+    if inner "docker exec $DNS_NAME nslookup -type=MX $DOMAIN 127.0.0.1 2>/dev/null | grep -q -e 'mail exchanger' -e 'NXDOMAIN' -e 'No answer'"; then return 0; fi
+    sleep 1
+  done
+  die "$DNS_NAME did not answer; see: docker exec $NAME docker logs $DNS_NAME"
+}
+
+dns_up() {
+  local variant=${1:-ok}
+  dns_variant "$variant"
+  log "starting $DNS_NAME ($DNS_IMAGE with dnsmasq)"
+  inner "{ docker rm -f $DNS_NAME >/dev/null 2>&1 || true; } && docker run -d --name $DNS_NAME --restart unless-stopped --network stage_mailexpert --memory 64m \
+    -v /opt/stage-dns:/etc/stage-dns:ro $DNS_IMAGE sh -c 'apk add -q --no-cache dnsmasq >/dev/null && exec dnsmasq -k -C /etc/stage-dns/stage.conf' >/dev/null \
+    && docker network connect $MAILCOW_NET $DNS_NAME" || die "could not start $DNS_NAME"
+  dns_wait
+  log "$DNS_NAME answers for $DOMAIN on $(dns_ip):53 (stage_mailexpert network, name $DNS_NAME)"
+}
+
+dns_main() {
+  running || die "$NAME is not running; start it with: $0 up" 2
+  local sub=${1:-}
+  [ $# -gt 0 ] && shift
+  case $sub in
+    up) dns_up "${1:-ok}" ;;
+    down) inner "docker rm -f $DNS_NAME >/dev/null 2>&1 || true"; log "removed $DNS_NAME" ;;
+    variant)
+      [ $# -eq 1 ] || die "usage: $0 dns variant <name>; one of: $(sh "$TEST_DIR/stand-dns/zone.sh" variants)" 2
+      dns_running || die "$DNS_NAME is not running; start it with: $0 dns up" 2
+      dns_variant "$1"
+      ;;
+    status)
+      if dns_running; then
+        printf 'stage-dns: running, %s:53\n' "$(dns_ip)"
+        inner 'head -n 1 /opt/stage-dns/stage.conf'
+      else
+        echo 'stage-dns: not running'
+      fi
+      ;;
+    query)
+      [ $# -eq 2 ] || die "usage: $0 dns query <type> <name>" 2
+      [[ $1 =~ ^[A-Za-z]+$ && $2 =~ ^[A-Za-z0-9._-]+$ ]] || die "bad type or name" 2
+      inner "docker exec $DNS_NAME nslookup -type=$1 $2 127.0.0.1"
+      ;;
+    *) die "usage: $0 dns up [variant]|down|status|variant <name>|query <type> <name>" 2 ;;
+  esac
+}
+
 status() {
   running || { log "$NAME is not running"; return 0; }
   dk stats --no-stream --format 'server: {{.MemUsage}} memory, {{.CPUPerc}} CPU' "$NAME"
@@ -199,6 +396,11 @@ status() {
 main() {
   local command=${1:-} version='' purge=0
   [ $# -gt 0 ] && shift
+  # eop and dns have subcommands of their own and need neither the secrets nor a build to name.
+  case $command in
+    eop) eop_main "$@"; return ;;
+    dns) dns_main "$@"; return ;;
+  esac
   while [ $# -gt 0 ]; do
     case $1 in
       --version) version=${2:-} && shift 2 ;;
@@ -227,7 +429,7 @@ main() {
       if [ "$purge" = 1 ]; then dk volume rm "$VOLUME" >/dev/null 2>&1 || true; fi
       log "removed $NAME$([ "$purge" = 1 ] && echo " and $VOLUME")"
       ;;
-    *) die "usage: $0 up|panel|status|down [--version sha-<12>] [--purge]" 2 ;;
+    *) die "usage: $0 up|panel|status|down [--version sha-<12>] [--purge] | eop ... | dns ..." 2 ;;
   esac
 }
 

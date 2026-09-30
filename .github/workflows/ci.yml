@@ -103,6 +103,13 @@ jobs:
       - name: Deploy script unit tests
         run: docker run --rm -v "$PWD:/code:ro" -w /code bats/bats:1.14.0 scripts/deploy/test
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Stand fake-EOP unit tests
+        run: node --test scripts/deploy/test/fake-eop/eop.test.mjs
+
   deploy-e2e:
     name: Deploy e2e
     needs: [shellcheck, bats]
