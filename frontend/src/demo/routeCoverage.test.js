@@ -67,6 +67,7 @@ const CONCRETE_PATH = {
   '/mail-node/config': '/mail-node/config',
   '/mail-node/domains': '/mail-node/domains',
   '/mail-node/mailboxes': '/mail-node/mailboxes',
+  '/mail-node/eop': '/mail-node/eop',
   '/accounts/:param/folders': '/accounts/demo-sales/folders',
   '/accounts/:param/aliases': '/accounts/demo-sales/aliases',
   '/mail/messages': '/mail/messages?accountId=demo-sales&folder=INBOX',
@@ -430,6 +431,14 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   await answer('/admin/access-sync/run', 'POST', '/admin/access-sync/run');
   await answer('/mail-node/config', 'PUT', '/mail-node/config', {});
   await answer('/mail-node/domains', 'POST', '/mail-node/domains', { domain: 'coverage.demo.mailexpert.local' });
+  const step = await answer('/mail-node/domains/:param/steps/:param', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/steps/node_configured');
+  assert.equal(step.state, 'node_configured');
+  const ready = await answer('/mail-node/domains/:param/ready', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/ready');
+  assert.equal(ready.state, 'ready');
+  const adopted = await answer('/mail-node/domains/:param/adopt', 'POST', '/mail-node/domains/legacy.demo.mailexpert.local/adopt');
+  assert.equal(adopted.state, 'node_created');
+  const eop = await answer('/mail-node/eop', 'PUT', '/mail-node/eop', { terrl: 48248 });
+  assert.equal(eop.terrl, 48248);
   const mailboxes = await demoRequest('GET', '/mail-node/mailboxes');
   if (mailboxes.mailboxes[0]) {
     await answer('/mail-node/mailboxes/:param/quota', 'PUT', `/mail-node/mailboxes/${mailboxes.mailboxes[0].accountId}/quota`, { quotaMb: 8192 });

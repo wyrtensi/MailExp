@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
+import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
 import {
   DEFAULT_DOMAIN_MAILBOXES,
   DEFAULT_QUOTA_MB,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
+  domainStateKey,
   mailNodeConfigError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
@@ -34,8 +36,10 @@ const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var
 const EMPTY_FORM = { mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '' };
 
 // Settings -> Integrations -> "Mail node" (admins only): the mailcow server MailExpert creates
-// domain mailboxes on, its domains, the mail disk and the quota of every mailbox made there.
-export default function MailNodeSection() {
+// domain mailboxes on, its domains with their onboarding, the mail disk and the quota of every
+// mailbox made there. The EOP section next to it changes domains too: `revision` goes up after any
+// such change, and this section tells it about its own through `onDomainsChanged`.
+export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
   const [stored, setStored] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -43,6 +47,7 @@ export default function MailNodeSection() {
   const [overview, setOverview] = useState(null);
   const [newDomain, setNewDomain] = useState({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
   const [quotaEdits, setQuotaEdits] = useState({});
+  const [openDomain, setOpenDomain] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -63,10 +68,16 @@ export default function MailNodeSection() {
       .then((cfg) => {
         setStored(cfg);
         setForm({ mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl });
-        if (cfg.configured) loadNode();
       })
       .catch(fail);
-  }, [loadNode]);
+  }, []);
+
+  const configured = !!stored?.configured;
+  // A domain change reloads both sections through `revision` when the panel shares it.
+  const refreshDomains = () => (onDomainsChanged ? onDomainsChanged() : loadNode());
+  useEffect(() => {
+    if (configured) loadNode();
+  }, [configured, loadNode, revision]);
 
   const run = async (action, noticeKey) => {
     setBusy(true);
@@ -90,14 +101,14 @@ export default function MailNodeSection() {
     const cfg = await api.mailNode.getConfig();
     setStored(cfg);
     setForm((f) => ({ ...f, apiKey: cfg.apiKey }));
-    await loadNode();
+    await refreshDomains();
   }, 'admin.mailNode.saved');
 
   const domainMailboxes = parseWholeNumber(newDomain.mailboxes, 1, MAX_DOMAIN_MAILBOXES);
   const addDomain = () => run(async () => {
     await api.mailNode.addDomain({ domain: newDomain.domain.trim().toLowerCase(), mailboxes: domainMailboxes });
     setNewDomain({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
-    await loadNode();
+    await refreshDomains();
   }, 'admin.mailNode.domainAdded');
 
   const saveQuota = (accountId) => run(async () => {
@@ -187,15 +198,43 @@ export default function MailNodeSection() {
                   <th style={headCellStyle}>{t('admin.mailNode.domainColumn')}</th>
                   <th style={headCellStyle}>{t('admin.mailNode.mailboxesColumn')}</th>
                   <th style={headCellStyle}>{t('admin.mailNode.stateColumn')}</th>
+                  <th style={headCellStyle}>{t('admin.mailNode.onboardingColumn')}</th>
                 </tr>
               </thead>
               <tbody>
                 {domains.map((d) => (
-                  <tr key={d.domain}>
-                    <td style={cellStyle}>{d.domain}</td>
-                    <td style={cellStyle}>{t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}</td>
-                    <td style={cellStyle}>{d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive')}</td>
-                  </tr>
+                  <Fragment key={d.domain}>
+                    <tr>
+                      <td style={cellStyle}>{d.domain}</td>
+                      <td style={cellStyle}>{t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}</td>
+                      <td style={cellStyle}>
+                        {!d.onNode && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
+                        {d.onNode && (d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive'))}
+                      </td>
+                      <td style={cellStyle}>
+                        <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <span data-domain-state={d.state} style={{ color: d.state === 'unknown' ? 'var(--red)' : 'var(--text-primary)' }}>
+                            {t(domainStateKey(d.state))}
+                          </span>
+                          <button
+                            type="button"
+                            aria-expanded={openDomain === d.domain}
+                            onClick={() => setOpenDomain(openDomain === d.domain ? null : d.domain)}
+                            style={{ ...buttonStyle, padding: '4px 8px' }}
+                          >
+                            {openDomain === d.domain ? t('admin.mailNode.hideDetails') : t('admin.mailNode.showDetails')}
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                    {openDomain === d.domain && (
+                      <tr>
+                        <td colSpan={4} style={{ ...cellStyle, background: 'var(--bg-secondary)' }}>
+                          <MailNodeDomainOnboarding domain={d} onChanged={refreshDomains} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

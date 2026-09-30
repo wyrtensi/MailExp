@@ -1,3 +1,5 @@
+import { domainStateKey } from './mailNode.js';
+
 // Helpers for the admin audit log screen. Actions and details mirror
 // backend/src/services/auditLog.js and the entries GET /api/admin/audit returns.
 
@@ -18,6 +20,10 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'user.disabled': 'admin.audit.actionUserDisabled',
   'user.admin_changed': 'admin.audit.actionUserAdminChanged',
   'access.sync_aborted': 'admin.audit.actionAccessSyncAborted',
+  'mail_node.config_changed': 'admin.audit.actionMailNodeConfigChanged',
+  'mail_node.domain_added': 'admin.audit.actionMailNodeDomainAdded',
+  'mail_node.domain_adopted': 'admin.audit.actionMailNodeDomainAdopted',
+  'mail_node.domain_state_changed': 'admin.audit.actionMailNodeDomainStateChanged',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -58,7 +64,8 @@ export function auditQuery({ account, user, action, fromDate, toDate, before } =
 }
 
 // What the details column shows for an entry: a translation key with its values, plain text,
-// or null when there is nothing to add.
+// or null when there is nothing to add. `valueKeys` are values that are translation keys
+// themselves (a domain's onboarding state).
 export function auditDetail(entry) {
   const details = entry?.details ?? {};
   switch (entry?.action) {
@@ -114,6 +121,26 @@ export function auditDetail(entry) {
         values: { wouldDisable: candidates.length, emails: candidates.join(', ') },
       };
     }
+    case 'mail_node.config_changed':
+      return Array.isArray(details.fields) && details.fields.length
+        ? {
+          key: details.settings === 'eop' ? 'admin.audit.detailEopSettingsChanged' : 'admin.audit.detailMailNodeSettingsChanged',
+          values: { fields: details.fields.join(', ') },
+        }
+        : null;
+    case 'mail_node.domain_added':
+      return { key: 'admin.audit.detailDomainAdded', values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' } };
+    case 'mail_node.domain_adopted':
+      return {
+        key: details.origin === 'existing_mailboxes' ? 'admin.audit.detailDomainAdoptedWithMailboxes' : 'admin.audit.detailDomainAdopted',
+        values: { domain: details.domain ?? '' },
+      };
+    case 'mail_node.domain_state_changed':
+      return {
+        key: details.how === 'marked_ready' ? 'admin.audit.detailDomainMarkedReady' : 'admin.audit.detailDomainStepConfirmed',
+        values: { domain: details.domain ?? '' },
+        valueKeys: { from: domainStateKey(details.from), to: domainStateKey(details.to) },
+      };
     default:
       return null;
   }

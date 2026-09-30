@@ -176,6 +176,65 @@ test('the demo mail node creates a domain mailbox and lists it with its quota', 
   assert.equal((await demoRequest('GET', '/mail-node/mailboxes')).mailboxes.find(m => m.accountId === account.id).quotaMb, 10240);
 });
 
+test('the demo mail node domains show every onboarding state, and only ready ones take mailboxes', async () => {
+  const { domains } = await demoRequest('GET', '/mail-node/domains');
+  const byName = new Map(domains.map(d => [d.domain, d]));
+  assert.equal(byName.get('demo.mailexpert.local').state, 'ready');
+  assert.equal(byName.get('demo.mailexpert.local').origin, 'existing_mailboxes');
+  assert.equal(byName.get('pilot.demo.mailexpert.local').state, 'dns_ok');
+  assert.equal(byName.get('pilot.demo.mailexpert.local').nextStep, 'tenant_verified');
+  assert.equal(byName.get('pilot.demo.mailexpert.local').steps.dns_ok.email, 'demo@mailexpert.local');
+  assert.equal(byName.get('legacy.demo.mailexpert.local').state, 'unknown');
+  for (const domain of ['pilot.demo.mailexpert.local', 'legacy.demo.mailexpert.local']) {
+    await assert.rejects(
+      () => demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'info', domain, name: '' }),
+      err => err.code === 'domain_not_ready',
+    );
+  }
+});
+
+test('the demo walks a domain through its onboarding with the server refusals', async () => {
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/steps/ready'), err => err.code === 'step_out_of_order');
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/adopt'), err => err.code === 'domain_known');
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/legacy.demo.mailexpert.local/ready'), err => err.code === 'domain_not_found');
+  const confirmed = await demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/steps/tenant_verified');
+  assert.equal(confirmed.state, 'tenant_verified');
+  const ready = await demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/ready');
+  assert.equal(ready.state, 'ready');
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/ready'), err => err.code === 'domain_already_ready');
+  const adopted = await demoRequest('POST', '/mail-node/domains/legacy.demo.mailexpert.local/adopt');
+  assert.equal(adopted.state, 'node_created');
+  const pilot = (await demoRequest('GET', '/mail-node/domains')).domains.find(d => d.domain === 'pilot.demo.mailexpert.local');
+  assert.equal(pilot.steps.ready.markedReady, true);
+  const account = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'pilot', domain: 'pilot.demo.mailexpert.local', name: '' });
+  assert.equal(account.email_address, 'pilot@pilot.demo.mailexpert.local');
+});
+
+test('the demo EOP settings start at mailcow signing and 50 messages an hour, and keep a save', async () => {
+  const initial = await demoRequest('GET', '/mail-node/eop');
+  assert.equal(initial.dkimMode, 'mailcow');
+  assert.equal(initial.sendLimitPerHour, 50);
+  assert.equal(initial.tenantConfigured, false);
+  const saved = await demoRequest('PUT', '/mail-node/eop', {
+    tenantId: '11111111-2222-4333-8444-555555555555', appId: '22222222-3333-4444-8555-666666666666', certThumbprint: 'A'.repeat(40),
+  });
+  assert.equal(saved.tenantConfigured, true);
+  assert.equal((await demoRequest('GET', '/mail-node/eop')).appId, '22222222-3333-4444-8555-666666666666');
+});
+
+test('an ordinary demo user is offered only the ready domains', async () => {
+  const originalStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: () => 'user', setItem: () => {} };
+  try {
+    const { domains } = await demoRequest('GET', '/mail-node/domains');
+    assert.ok(domains.length > 0);
+    assert.ok(domains.every(d => d.active && ['ready', 'authoritative'].includes(d.state)));
+    assert.equal(domains.some(d => d.domain === 'legacy.demo.mailexpert.local'), false);
+  } finally {
+    globalThis.localStorage = originalStorage;
+  }
+});
+
 test('the demo sender history lists earlier letters with their direction, and from: search finds them', async () => {
   const history = await demoRequest('GET', '/mail/messages/demo-001/sender-history?limit=5');
   assert.equal(history.correspondent, 'maya@northstar.example');

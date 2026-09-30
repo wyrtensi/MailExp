@@ -10,6 +10,41 @@ export const DEFAULT_DOMAIN_MAILBOXES = 500;
 export const MAX_DOMAIN_MAILBOXES = 10000;
 // The disk share at which the panel pings /fail (backend services/mailNode/diskWatch.js).
 export const DISK_WARN_PERCENT = 85;
+// EOP settings limits (backend services/mailNode/eopSettings.js).
+export const DKIM_MODES = ['mailcow', 'eop'];
+export const DEFAULT_SEND_LIMIT_PER_HOUR = 50;
+export const MAX_SEND_LIMIT_PER_HOUR = 10000;
+export const MAX_TERRL = 10000000;
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Onboarding of a mail node domain, in order (backend services/mailNode/domains.js). 'unknown' is a
+// node domain the panel has no record of. Mailboxes are created only in 'ready' and 'authoritative'.
+export const DOMAIN_STATES = [
+  'node_created', 'node_configured', 'dns_ok', 'tenant_verified', 'internal_relay',
+  'connector_ready', 'ready', 'authoritative',
+];
+export const MAILBOX_READY_STATES = ['ready', 'authoritative'];
+const READY_INDEX = DOMAIN_STATES.indexOf('ready');
+const DOMAIN_STATE_KEYS = {
+  unknown: 'admin.mailNode.stateUnknown',
+  node_created: 'admin.mailNode.stateNodeCreated',
+  node_configured: 'admin.mailNode.stateNodeConfigured',
+  dns_ok: 'admin.mailNode.stateDnsOk',
+  tenant_verified: 'admin.mailNode.stateTenantVerified',
+  internal_relay: 'admin.mailNode.stateInternalRelay',
+  connector_ready: 'admin.mailNode.stateConnectorReady',
+  ready: 'admin.mailNode.stateReady',
+  authoritative: 'admin.mailNode.stateAuthoritative',
+};
+// What a person does to finish each step, the line of the onboarding checklist.
+const STEP_KEYS = {
+  node_configured: 'admin.mailNode.stepNodeConfigured',
+  dns_ok: 'admin.mailNode.stepDnsOk',
+  tenant_verified: 'admin.mailNode.stepTenantVerified',
+  internal_relay: 'admin.mailNode.stepInternalRelay',
+  connector_ready: 'admin.mailNode.stepConnectorReady',
+  ready: 'admin.mailNode.stepReady',
+};
 
 // Spelled out literally so the i18n coverage test finds them.
 const ERROR_KEYS = {
@@ -28,6 +63,21 @@ const ERROR_KEYS = {
   domain_unknown: 'admin.accounts.add.domainErrorUnknown',
   mailbox_exists: 'admin.accounts.add.domainErrorExists',
   sender_name_invalid: 'admin.accounts.add.senderNameInvalid',
+  domain_not_ready: 'admin.accounts.add.domainErrorNotReady',
+  domain_not_on_node: 'admin.mailNode.errorDomainNotOnNode',
+  domain_not_found: 'admin.mailNode.errorDomainNotFound',
+  domain_known: 'admin.mailNode.errorDomainKnown',
+  domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
+  step_invalid: 'admin.mailNode.errorStepOutOfOrder',
+  step_out_of_order: 'admin.mailNode.errorStepOutOfOrder',
+  eop_host_invalid: 'admin.eop.errorEopHost',
+  certificate_host_invalid: 'admin.eop.errorCertificateHost',
+  dkim_mode_invalid: 'admin.eop.errorDkimMode',
+  send_limit_invalid: 'admin.eop.errorSendLimit',
+  terrl_invalid: 'admin.eop.errorTerrl',
+  tenant_id_invalid: 'admin.eop.errorTenantId',
+  app_id_invalid: 'admin.eop.errorAppId',
+  thumbprint_invalid: 'admin.eop.errorThumbprint',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -79,9 +129,37 @@ export function domainMailboxTaken({ localPart, domain }, accounts = []) {
   return accounts.some((account) => String(account?.email_address ?? '').trim().toLowerCase() === email);
 }
 
-// Domains a mailbox can be created on: active ones, by name.
+// Domains a mailbox can be created on: active ones whose onboarding is done, by name.
 export function selectableDomains(domains) {
-  return (domains ?? []).filter((d) => d.active).map((d) => d.domain).sort();
+  return (domains ?? []).filter((d) => d.active && MAILBOX_READY_STATES.includes(d.state)).map((d) => d.domain).sort();
+}
+
+export function domainStateKey(state) {
+  return DOMAIN_STATE_KEYS[state] ?? DOMAIN_STATE_KEYS.unknown;
+}
+
+// The checklist of a domain the panel knows: each manual step up to 'ready' with its status:
+// 'confirmed' (someone pressed Done; `by` and `at` say who and when), 'skipped' (the domain was
+// marked ready past it), 'next' (the one Done confirms now) or 'pending'.
+export function onboardingSteps(domain) {
+  const reached = DOMAIN_STATES.indexOf(domain?.state);
+  return DOMAIN_STATES.slice(1, READY_INDEX + 1).map((state) => {
+    const confirmed = domain?.steps?.[state] ?? null;
+    let status = 'pending';
+    if (confirmed && !(state === 'ready' && confirmed.markedReady)) status = 'confirmed';
+    else if (DOMAIN_STATES.indexOf(state) <= reached) status = state === 'ready' ? 'confirmed' : 'skipped';
+    else if (domain?.nextStep === state) status = 'next';
+    return {
+      state, labelKey: STEP_KEYS[state], status,
+      by: confirmed?.email ?? null, at: confirmed?.at ?? null, markedReady: !!confirmed?.markedReady,
+    };
+  });
+}
+
+// A domain the panel knows that has not reached 'ready' yet: an administrator may mark it ready.
+export function canMarkReady(domain) {
+  const index = DOMAIN_STATES.indexOf(domain?.state);
+  return index >= 0 && index < READY_INDEX;
 }
 
 export function parseWholeNumber(value, min, max) {
@@ -98,6 +176,28 @@ export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl }, 
   if (parseWholeNumber(quotaMb, 1, MAX_QUOTA_MB) == null) return 'admin.mailNode.errorQuota';
   const ping = String(diskPingUrl ?? '').trim();
   if (ping && !/^https:\/\/\S+$/.test(ping)) return 'admin.mailNode.errorPingUrl';
+  return null;
+}
+
+// The error key for the EOP settings form, or null. Empty optional fields are fine.
+export function eopSettingsError({ eopHost, certificateHost, dkimMode, sendLimitPerHour, terrl, tenantId, appId, certThumbprint }) {
+  const host = (value) => {
+    const text = String(value ?? '').trim().toLowerCase();
+    return !text || HOST_PATTERN.test(text);
+  };
+  const guid = (value) => {
+    const text = String(value ?? '').trim();
+    return !text || GUID_PATTERN.test(text);
+  };
+  if (!host(eopHost)) return 'admin.eop.errorEopHost';
+  if (!host(certificateHost)) return 'admin.eop.errorCertificateHost';
+  if (!DKIM_MODES.includes(dkimMode)) return 'admin.eop.errorDkimMode';
+  if (parseWholeNumber(sendLimitPerHour, 1, MAX_SEND_LIMIT_PER_HOUR) == null) return 'admin.eop.errorSendLimit';
+  if (String(terrl ?? '').trim() && parseWholeNumber(terrl, 1, MAX_TERRL) == null) return 'admin.eop.errorTerrl';
+  if (!guid(tenantId)) return 'admin.eop.errorTenantId';
+  if (!guid(appId)) return 'admin.eop.errorAppId';
+  const thumbprint = String(certThumbprint ?? '').replace(/[\s:]/g, '');
+  if (thumbprint && !/^[0-9a-f]{40}$/i.test(thumbprint)) return 'admin.eop.errorThumbprint';
   return null;
 }
 

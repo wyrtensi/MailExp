@@ -9,7 +9,9 @@ describe('AUDIT_ACTIONS', () => {
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'message.sent', 'message.deleted',
       'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
+      'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
     ]);
+    assert.equal(auditActionLabelKey('mail_node.domain_state_changed'), 'admin.audit.actionMailNodeDomainStateChanged');
     assert.equal(auditActionLabelKey('message.sent'), 'admin.audit.actionMessageSent');
     assert.equal(auditActionLabelKey('mailbox.password_restored'), 'admin.audit.actionMailboxPasswordRestored');
     assert.equal(auditActionLabelKey('user.admin_changed'), 'admin.audit.actionUserAdminChanged');
@@ -120,6 +122,44 @@ describe('auditDetail', () => {
     assert.deepEqual(
       auditDetail({ action: 'access.sync_aborted', details: {} }),
       { key: 'admin.audit.detailAccessSyncAborted', values: { wouldDisable: 0, emails: '' } },
+    );
+  });
+
+  it('describes mail node settings changes by the names of the fields', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'node', fields: ['apiKey', 'quotaMb'] } }),
+      { key: 'admin.audit.detailMailNodeSettingsChanged', values: { fields: 'apiKey, quotaMb' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['terrl'] } }),
+      { key: 'admin.audit.detailEopSettingsChanged', values: { fields: 'terrl' } },
+    );
+    assert.equal(auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: [] } }), null);
+  });
+
+  it('names the domain added, adopted or moved on, with its states translated', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.domain_added', details: { domain: 'new.example', mailboxes: 50 } }),
+      { key: 'admin.audit.detailDomainAdded', values: { domain: 'new.example', mailboxes: 50 } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.domain_adopted', details: { domain: 'stage.test', state: 'ready', origin: 'existing_mailboxes' } }),
+      { key: 'admin.audit.detailDomainAdoptedWithMailboxes', values: { domain: 'stage.test' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.domain_adopted', details: { domain: 'manual.example', state: 'node_created', origin: 'adopted' } }),
+      { key: 'admin.audit.detailDomainAdopted', values: { domain: 'manual.example' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.domain_state_changed', details: { domain: 'a.example', from: 'dns_ok', to: 'tenant_verified', how: 'step_confirmed' } }),
+      {
+        key: 'admin.audit.detailDomainStepConfirmed', values: { domain: 'a.example' },
+        valueKeys: { from: 'admin.mailNode.stateDnsOk', to: 'admin.mailNode.stateTenantVerified' },
+      },
+    );
+    assert.equal(
+      auditDetail({ action: 'mail_node.domain_state_changed', details: { domain: 'a.example', from: 'node_created', to: 'ready', how: 'marked_ready' } }).key,
+      'admin.audit.detailDomainMarkedReady',
     );
   });
 
