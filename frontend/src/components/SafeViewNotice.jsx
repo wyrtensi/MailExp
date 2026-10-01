@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { EOP_CATEGORY_LABEL_KEYS } from '../utils/safeView.js';
 
 // The bar's title for each reason safeViewState() gives.
 const TITLES = {
@@ -6,28 +7,6 @@ const TITLES = {
   phishing: 'message.safeView.title.phishing',
   malware: 'message.safeView.title.malware',
   spoof: 'message.safeView.title.spoof',
-};
-
-// EOP categories in words (Microsoft's "Anti-spam message headers"); the code itself stays in the
-// line's tooltip. A code not listed here is shown as it is.
-const CATEGORY_LABELS = {
-  SPM: 'message.safeView.categories.spam',
-  HSPM: 'message.safeView.categories.highSpam',
-  BULK: 'message.safeView.categories.bulk',
-  OSPM: 'message.safeView.categories.outboundSpam',
-  PHSH: 'message.safeView.categories.phishing',
-  HPHSH: 'message.safeView.categories.highPhishing',
-  HPHISH: 'message.safeView.categories.highPhishing',
-  INTOS: 'message.safeView.categories.intraOrgPhishing',
-  DIMP: 'message.safeView.categories.domainImpersonation',
-  UIMP: 'message.safeView.categories.userImpersonation',
-  GIMP: 'message.safeView.categories.mailboxImpersonation',
-  BIMP: 'message.safeView.categories.brandImpersonation',
-  SPOOF: 'message.safeView.categories.spoof',
-  MALW: 'message.safeView.categories.malware',
-  AMP: 'message.safeView.categories.antiMalware',
-  SAP: 'message.safeView.categories.safeAttachments',
-  FTBP: 'message.safeView.categories.fileType',
 };
 
 // The bar above a letter in safe view (utils/safeView.js): why it is shown as text, and the button
@@ -70,7 +49,7 @@ export default function SafeViewNotice({ reason, eopCategory = null, onShowFull 
         )}
         {category && (
           <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }} title={`CAT:${category}`}>
-            {t('message.safeView.category', { category: CATEGORY_LABELS[category] ? t(CATEGORY_LABELS[category]) : category })}
+            {t('message.safeView.category', { category: EOP_CATEGORY_LABEL_KEYS[category] ? t(EOP_CATEGORY_LABEL_KEYS[category]) : category })}
           </div>
         )}
       </div>

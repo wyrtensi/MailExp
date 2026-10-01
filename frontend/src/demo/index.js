@@ -1097,6 +1097,117 @@ demoCheckAll('schedule');
 // offers them as "Connected before".
 const KNOWN_GOOGLE_EMAILS = ['acme.archive.demo@gmail.com', 'acme.legacy.demo@gmail.com', 'acme.interns.demo@gmail.com'];
 
+// The node's quarantine (R-20; backend routes/mailNodeQuarantine.js): two letters the node
+// refused and one it delivered to Spam (a newsletter whose sender's SPF failed against EOP's
+// address, docs section 2.5), plus one for a mailbox the panel does not have, which only an
+// administrator sees. Letters come parsed as the server parses them; the screen shows them only
+// as safe text.
+const [quarantineBox, quarantineBox2] = FLEET_ACCOUNTS.filter(account => account.mail_node).map(account => account.email_address);
+const quarantineSymbols = (...pairs) => pairs.map(([name, score, options = []]) => ({ name, score, options, description: null }));
+const quarantineLetter = ({ from, to, subject, html, text, attachments = [], eop = null }) => ({
+  headers: [
+    { name: 'From', value: from }, { name: 'To', value: to }, { name: 'Subject', value: subject },
+    { name: 'Date', value: 'Wed, 30 Sep 2026 07:12:00 +0000' }, { name: 'Message-ID', value: `<${subject.length}.demo@quarantine.example>` },
+    ...(eop ? [{ name: 'X-Forefront-Antispam-Report', value: `CIP:198.51.100.7;CTRY:;LANG:en;SCL:5;SFV:${eop.verdict};CAT:${eop.category};DIR:INB;` }] : []),
+  ],
+  from, to, cc: null, subject, date: 'Wed, 30 Sep 2026 07:12:00 +0000', messageId: `<${subject.length}.demo@quarantine.example>`,
+  eop, html, text, attachments, truncated: false,
+});
+let demoQuarantineUserView = false;
+let demoQuarantine = [
+  {
+    id: 41, qid: '4F1A21C3B9', subject: 'Overdue invoice #4471', score: 16.1, sender: 'billing@invoice-alerts.example', rcpt: quarantineBox,
+    action: 'reject', created: '2026-09-30T07:12:04.000Z', notified: false, virus: false, ip: '198.51.100.7',
+    symbols: quarantineSymbols(['MIME_BAD_EXTENSION', 10.1, ['exe']], ['MICROSOFT_SPAM', 4], ['URL_NO_TLD', 2, ['invoice-alerts']], ['MIME_GOOD', -0.1]),
+    letter: quarantineLetter({
+      from: 'Billing <billing@invoice-alerts.example>', to: quarantineBox, subject: 'Overdue invoice #4471',
+      html: '<p>Your invoice <b>#4471</b> is overdue.</p><img src="https://tracker.invoice-alerts.example/open.gif">'
+        + '<p><a href="https://pay.invoice-alerts.example/login?inv=4471">Pay now</a></p>',
+      text: null, attachments: [{ filename: 'invoice-4471.exe', type: 'application/octet-stream', size: 48213 }],
+      eop: { verdict: 'SPM', category: 'SPM' },
+    }),
+  },
+  {
+    id: 40, qid: '2B7E0C11A4', subject: 'Partner newsletter: October', score: 9.2, sender: 'news@partner.example', rcpt: quarantineBox2,
+    action: 'add header', created: '2026-09-29T15:40:11.000Z', notified: false, virus: false, ip: '40.107.22.31',
+    symbols: quarantineSymbols(['R_SPF_FAIL', 8, ['-all']], ['MIME_HTML_ONLY', 0.2], ['MID_RHS_MATCH_FROM', 0], ['DMARC_POLICY_ALLOW', -0.5, ['partner.example', 'none']]),
+    letter: quarantineLetter({
+      from: 'Partner news <news@partner.example>', to: quarantineBox2, subject: 'Partner newsletter: October',
+      html: '<h2>October at Partner</h2><p>New price list and the trade fair dates. <a href="https://partner.example/october">Read online</a></p>',
+      text: null, eop: { verdict: 'NSPM', category: 'NONE' },
+    }),
+  },
+  {
+    id: 38, qid: '9C44D07E21', subject: 'Re: your account', score: 15.4, sender: 'noreply@account-check.example', rcpt: 'postmaster@example.com',
+    action: 'reject', created: '2026-09-28T22:03:50.000Z', notified: false, virus: false, ip: '203.0.113.45',
+    symbols: quarantineSymbols(['PHISHING', 7, ['account-check.example->example.com']], ['HFILTER_HOSTNAME_UNKNOWN', 2.5], ['URL_NO_TLD', 2]),
+    letter: quarantineLetter({
+      from: 'Account team <noreply@account-check.example>', to: 'postmaster@example.com', subject: 'Re: your account',
+      html: null, text: 'Confirm your password at https://account-check.example/verify within 24 hours.',
+    }),
+  },
+];
+const demoPanelBoxes = () => new Map(FLEET_ACCOUNTS.filter(account => account.mail_node).map(account => [account.email_address, account.id]));
+const quarantineTop = item => item.symbols.filter(s => s.score > 0).slice(0, 3).map(({ name, score }) => ({ name, score }));
+
+function demoQuarantineRequest(verb, pathname, body) {
+  if (verb === 'GET' && pathname === '/mail-node/quarantine/settings') return { userView: demoQuarantineUserView };
+  if (verb === 'PUT' && pathname === '/mail-node/quarantine/settings') {
+    if (typeof body?.userView !== 'boolean') throw demoError('userView must be true or false', 'quarantine_user_view_invalid');
+    demoQuarantineUserView = body.userView;
+    return { ok: true, userView: demoQuarantineUserView };
+  }
+  const admin = demoRole() !== 'user';
+  const boxes = demoPanelBoxes();
+  const visible = () => {
+    if (!admin && !demoQuarantineUserView) throw demoError('Only administrators see the quarantine', 'quarantine_admin_only');
+    return demoQuarantine.filter(item => admin || boxes.has(item.rcpt));
+  };
+  if (verb === 'GET' && pathname === '/mail-node/quarantine') {
+    const items = visible();
+    return clone({
+      admin, total: items.length, truncated: false, historyRead: true,
+      // The listing carries no letter, IP or full symbol list, as on the server.
+      items: items.map(item => ({
+        id: item.id, qid: item.qid, subject: item.subject, score: item.score, sender: item.sender, rcpt: item.rcpt,
+        action: item.action, created: item.created, notified: item.notified, virus: item.virus,
+        accountId: boxes.get(item.rcpt) ?? null, topSymbols: quarantineTop(item),
+      })),
+    });
+  }
+  const entryMatch = pathname.match(/^\/mail-node\/quarantine\/([^/]+)(\/release)?$/);
+  if (entryMatch && (verb === 'GET' || verb === 'DELETE' || (verb === 'POST' && entryMatch[2]))) {
+    const id = Number(decodeURIComponent(entryMatch[1]));
+    if (verb !== 'GET' && !admin) throw demoError('Admin access required', 'admin_required');
+    const item = (verb === 'GET' ? visible() : demoQuarantine).find(entry => entry.id === id);
+    if (!item) throw demoError('No such quarantine entry', 'quarantine_item_not_found');
+    if (verb === 'GET') return clone({ ...item, user: null, created: item.created.replace('T', ' ').slice(0, 19), accountId: boxes.get(item.rcpt) ?? null, admin });
+    demoQuarantine = demoQuarantine.filter(entry => entry.id !== id);
+    return verb === 'DELETE' ? { ok: true } : { ok: true, learned: true, warnings: [] };
+  }
+  const verdictMatch = pathname.match(/^\/mail-node\/messages\/([^/]+)\/spam-verdict$/);
+  if (verb === 'GET' && verdictMatch) {
+    const item = messageById(decodeURIComponent(verdictMatch[1]));
+    if (!item) throw demoError('Message not found', 'message_not_found');
+    if (!accountFor(item.account_id)?.mail_node) throw demoError('The letter is not in a mail node mailbox', 'message_not_mail_node');
+    // As a node would see a prize scam: rspamd marked it as spam on its own.
+    return clone({
+      eopCategory: item.eop_category ?? null, historyRows: 1000, historyDepth: 1000,
+      rspamd: {
+        matchedBy: 'message_id', time: item.date, score: 11.3, spamScore: 8, rejectScore: 15, action: 'add header', skipped: false,
+        symbols: [
+          { name: 'BAYES_SPAM', score: 5.1, description: 'Message probably spam, probability: 99%' },
+          { name: 'FREEMAIL_FROM', score: 3, description: 'From is a freemail address' },
+          { name: 'URI_COUNT_ODD', score: 1.5, description: 'Odd number of URIs in multipart/alternative message' },
+          { name: 'SUBJ_ALL_CAPS', score: 1.7, description: 'Subject contains mostly capital letters' },
+          { name: 'MIME_GOOD', score: -0.1, description: 'Known content-type' },
+        ],
+      },
+    });
+  }
+  return undefined;
+}
+
 function demoError(message, code) {
   return Object.assign(new Error(message), { code });
 }
@@ -2078,6 +2189,8 @@ export async function demoRequest(method, path, body = {}) {
       : m));
     return { ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit };
   }
+  const quarantineAnswer = demoQuarantineRequest(verb, pathname, body);
+  if (quarantineAnswer !== undefined) return quarantineAnswer;
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
   if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
   if ((verb === 'POST' && pathname === '/oauth/microsoft/device')

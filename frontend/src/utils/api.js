@@ -402,6 +402,16 @@ export const api = {
     checkDns: () => request('POST', '/mail-node/dns-check'),
     checkDomainDns: (domain) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/dns-check`),
     setDnsExpected: (domain, values) => request('PUT', `/mail-node/domains/${encodeURIComponent(domain)}/dns-expected`, values),
+    // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
+    // release and delete (administrators), and whether users see it too.
+    listQuarantine: () => request('GET', '/mail-node/quarantine'),
+    getQuarantineItem: (id) => request('GET', `/mail-node/quarantine/${encodeURIComponent(id)}`),
+    releaseQuarantineItem: (id) => request('POST', `/mail-node/quarantine/${encodeURIComponent(id)}/release`),
+    deleteQuarantineItem: (id) => request('DELETE', `/mail-node/quarantine/${encodeURIComponent(id)}`),
+    getQuarantineSettings: () => request('GET', '/mail-node/quarantine/settings'),
+    saveQuarantineSettings: (data) => request('PUT', '/mail-node/quarantine/settings', data),
+    // "Why is this letter in Spam": rspamd's verdict on a letter of a node mailbox.
+    spamVerdict: (messageId) => request('GET', `/mail-node/messages/${encodeURIComponent(messageId)}/spam-verdict`),
   },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),

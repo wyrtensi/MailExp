@@ -38,6 +38,7 @@ import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
+import MailNodeQuarantine from './MailNodeQuarantine.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
@@ -1325,6 +1326,9 @@ function AccountsTab() {
           </div>
         </div>
       ))}
+      {/* A user sees the node's quarantine here once an administrator allowed it (R-20); the
+          section hides itself otherwise. Administrators have it under Integrations. */}
+      {!isAdmin && <MailNodeQuarantine />}
       <ConfirmOverlay dialog={confirmDialog} onClose={() => setConfirmDialog(null)} />
     </div>
     </>
@@ -2941,6 +2945,7 @@ function IntegrationsTab() {
           {isAdmin && <GoogleAppsSection />}
           {isAdmin && <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
           {isAdmin && <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
+          {isAdmin && <MailNodeQuarantine admin />}
         </div>
       )}
         </div>

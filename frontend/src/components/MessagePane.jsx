@@ -29,6 +29,7 @@ import {
 } from '../utils/safeView.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import SafeViewNotice from './SafeViewNotice.jsx';
+import SpamVerdict from './SpamVerdict.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailexpert:message-opening';
 // riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
@@ -2790,6 +2791,9 @@ ${bodyContent}
             label={`${t('message.safeView.label')}: ${resolvedSubject || message.subject || t('message.noSubject')}`}
           />
         )}
+
+        {/* A letter in Spam of a mail node mailbox: rspamd's verdict on request (R-20). */}
+        {inSpamFolder && account?.mail_node === true && <SpamVerdict messageId={message.id} eopCategory={eopCategory} />}
 
         {/* Attachments in safe view: named, never fetched. "Show in full" brings the buttons back. */}
         {safeView && attachments.length > 0 && (

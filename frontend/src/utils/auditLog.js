@@ -32,6 +32,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.domain_identity_acknowledged': 'admin.audit.actionMailNodeDomainIdentityAcknowledged',
   'mail_node.applied': 'admin.audit.actionMailNodeApplied',
   'mail_node.dns_checked': 'admin.audit.actionMailNodeDnsChecked',
+  'mail_node.quarantine_released': 'admin.audit.actionMailNodeQuarantineReleased',
+  'mail_node.quarantine_deleted': 'admin.audit.actionMailNodeQuarantineDeleted',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -76,6 +78,8 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   tenantTxt: 'admin.audit.fieldTenantTxt',
   dkimSelector1Cname: 'admin.audit.fieldDkimSelector1Cname',
   dkimSelector2Cname: 'admin.audit.fieldDkimSelector2Cname',
+  // Who sees the node's quarantine (settings 'quarantine').
+  userView: 'admin.audit.fieldQuarantineUserView',
 });
 
 // The settings a mail_node.config_changed entry is about.
@@ -83,6 +87,7 @@ const SETTINGS_DETAIL_KEYS = Object.freeze({
   node: 'admin.audit.detailMailNodeSettingsChanged',
   eop: 'admin.audit.detailEopSettingsChanged',
   domain_dns: 'admin.audit.detailDomainDnsExpectedChanged',
+  quarantine: 'admin.audit.detailQuarantineSettingsChanged',
 });
 
 // A mail_node.dns_checked entry: an administrator's check of everything (the node's status and how
@@ -306,6 +311,17 @@ export function auditDetail(entry) {
         values: { domain: details.domain ?? '' },
         valueKeys: { from: domainStateKey(details.from), to: domainStateKey(details.to) },
       };
+    // A letter of the node's quarantine an administrator released (delivered to its mailbox and
+    // trained as ham; warnings: what the node said went wrong after it went out) or deleted.
+    case 'mail_node.quarantine_released':
+    case 'mail_node.quarantine_deleted': {
+      const values = { sender: details.sender ?? '', rcpt: details.rcpt ?? '', score: details.score ?? '' };
+      if (entry.action === 'mail_node.quarantine_deleted') return { key: 'admin.audit.detailQuarantineDeleted', values };
+      const warnings = Array.isArray(details.warnings) && details.warnings.length ? details.warnings.join('; ') : '';
+      return warnings
+        ? { key: 'admin.audit.detailQuarantineReleasedWarnings', values: { ...values, warnings } }
+        : { key: 'admin.audit.detailQuarantineReleased', values };
+    }
     case 'mail_node.domain_identity_acknowledged':
       return {
         key: 'admin.audit.detailDomainIdentityAcknowledged',
