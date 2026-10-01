@@ -110,12 +110,17 @@ describe('GOOGLE_REDIRECT_URI as the fallback callback URL', () => {
       { provider: 'microsoft', config: { clientId: 'ms-client', clientSecret: 'enc:ms' }, updated_at: 't' },
       { provider: 'mail_node', config: { mailHost: 'mail.example.com', apiKey: 'enc:node-key' }, updated_at: 't' },
       { provider: 'mail_node_eop', config: { eopHost: 'contoso-com.mail.protection.outlook.com' }, updated_at: 't' },
+      { provider: 'mail_node_alerts', config: { pingUrl: 'https://hc.example.com/p/alerts' }, updated_at: 't' },
+      { provider: 'mail_node_alert_state', config: { alerts: [{ key: 'eop_bypass', details: { samples: [{ to: 'x@example.org' }] } }] }, updated_at: 't' },
+      { provider: 'mail_node_dns_check', config: { overall: 'ok' }, updated_at: 't' },
+      { provider: 'mail_node_apply', config: { items: [] }, updated_at: 't' },
     ];
     await withApp(router, async (base) => {
       const body = await (await fetch(`${base}/api/integrations`)).json();
       expect(Object.keys(body).sort()).toEqual(['google', 'microsoft']);
       expect(body.microsoft.clientSecret).toBe('••••••••');
       expect(JSON.stringify(body)).not.toContain('node-key');
+      expect(JSON.stringify(body)).not.toContain('x@example.org');
     });
   });
 
