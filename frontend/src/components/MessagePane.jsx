@@ -24,16 +24,15 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
-import { safeTextMarkup, safeViewReason, safeViewText } from '../utils/safeView.js';
+import {
+  safeQuoteSource, safeViewMarkup, safeViewPlainText, safeViewState, spamFolderPaths as spamFolderPathsFor,
+} from '../utils/safeView.js';
+import ConfirmOverlay from './ConfirmOverlay.jsx';
 import SafeViewNotice from './SafeViewNotice.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailexpert:message-opening';
 // riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
 const DOWNLOAD_ALL = 'all';
-
-// Module-level regex so the spam-name heuristic isn't recompiled on every
-// render — same heuristic as ContextMenu.jsx, both files read this constant.
-const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|posta\s*indesiderata)/i;
 
 // Lazy-load the div-renderer utilities so PostCSS is excluded from the flag-off
 // bundle. Rollup treats the import() calls inside this block as dead code when
@@ -253,13 +252,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Mirrors the heuristic in ContextMenu.jsx so the toolbar matches the menu.
   const account = accounts.find(a => a.id === message?.account_id);
   const accountFolders = useStore(s => selectAccountFolders(s, message?.account_id));
-  const spamFolderPaths = (() => {
-    const mapped = account?.folder_mappings?.spam;
-    if (mapped) return new Set([mapped]);
-    return new Set(accountFolders.filter(f =>
-      f.special_use === '\\Junk' || SPAM_NAME_RE.test(f.name || '')
-    ).map(f => f.path));
-  })();
+  const spamFolderPaths = spamFolderPathsFor(account, accountFolders);
   const inSpamFolder = message ? spamFolderPaths.has(message.folder) : false;
   const hasSpamFolder = spamFolderPaths.size > 0;
 
@@ -314,10 +307,26 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // holds the letter's id for this view only: opening another letter forgets it.
   const [fullViewId, setFullViewId] = useState(null);
   useEffect(() => { setFullViewId(null); }, [selectedMessageId]);
-  const safeReason = message ? safeViewReason({ inSpamFolder, eopCategory: body?.eopCategory }) : null;
-  const safeView = Boolean(safeReason) && fullViewId !== message?.id;
+  // The list row carries the EOP category, so the decision does not wait for the body.
+  const eopCategory = message?.eop_category || body?.eopCategory || null;
+  const safeState = message ? safeViewState({ inSpamFolder, eopCategory }) : null;
+  const safeView = Boolean(safeState?.locked) && fullViewId !== message?.id;
+  // Words that introduce a link's target in the safe text, the print and the quote.
+  const safeLabels = useMemo(() => ({ link: t('message.safeView.linkTo'), form: t('message.safeView.formTo') }), [t]);
   // Converted only while the safe view is on, so a normal letter costs nothing.
-  const safeMarkup = useMemo(() => (safeView && body ? safeTextMarkup(safeViewText(body)) : ''), [safeView, body]);
+  const safeMarkup = useMemo(() => (safeView && body ? safeViewMarkup(body, safeLabels) : ''), [safeView, body, safeLabels]);
+  // "Show in full" moves focus to the letter it reveals (bodyFocusRef: the body's container).
+  const bodyFocusRef = useRef(null);
+  const focusBodyRef = useRef(false);
+  const showInFull = useCallback(() => {
+    focusBodyRef.current = true;
+    setFullViewId(message?.id ?? null);
+  }, [message?.id]);
+  useEffect(() => {
+    if (!focusBodyRef.current || safeView || !bodyFocusRef.current) return;
+    focusBodyRef.current = false;
+    bodyFocusRef.current.focus({ preventScroll: true });
+  }, [safeView, fullViewId]);
   const [showReplyMenu, setShowReplyMenu] = useState(false);
   const [savingAllow, setSavingAllow] = useState(false);
   const [paneScrolled, setPaneScrolled] = useState(false);
@@ -1180,7 +1189,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     });
     // The quote header speaks the language of the name the reply goes out under.
     const quoteLang = senderLanguage(identityName(myAccount, replyAliasId));
-    const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, { text: body?.text, html: body?.html });
+    // A letter in safe view is quoted as its safe text, never its HTML (utils/safeView.js).
+    const quoteSource = safeView ? safeQuoteSource(body, safeLabels) : { text: body?.text, html: body?.html };
+    const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, quoteSource);
 
     const myAddresses = new Set([
       myEmail.toLowerCase(),
@@ -1233,7 +1244,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const quoteExtra = { to: parseAddressField(message.to_addresses), cc: parseAddressField(message.cc_addresses) };
     const quoteMeta = quoteMetaFor(message, 'forward');
     const quoteLang = senderLanguage(identityName(accounts.find(a => a.id === message.account_id)));
-    const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { text: body?.text, html: body?.html, ...quoteExtra });
+    const quoteSource = safeView ? safeQuoteSource(body, safeLabels) : { text: body?.text, html: body?.html };
+    const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { ...quoteSource, ...quoteExtra });
     openCompose({
       subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject}`,
       body: '',
@@ -1268,7 +1280,21 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // an astral character (an emoji) never splits a surrogate pair into the filename.
   const emlFilename = (subject) => `${[...(subject || 'message')].slice(0, 80).join('')}.eml`;
 
-  const handleDownloadEml = async () => {
+  // A letter in safe view asks first: the .eml holds it whole, and whatever opens the file shows
+  // its images, links and attachments.
+  const [emlConfirm, setEmlConfirm] = useState(null);
+  const handleDownloadEml = () => {
+    if (!message) return;
+    if (!safeView) { downloadEml(); return; }
+    setEmlConfirm({
+      title: t('message.downloadEml'),
+      message: t('message.safeView.emlConfirm'),
+      confirmLabel: t('message.safeView.emlConfirmButton'),
+      onConfirm: downloadEml,
+    });
+  };
+
+  const downloadEml = async () => {
     if (!message) return;
     try {
       const blob = await api.downloadRawEml(message.id);
@@ -1305,7 +1331,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
 
     // A letter in safe view prints as the text on screen: printing must not load what it holds back.
     const bodyContent = safeView
-      ? `<pre style="white-space:pre-wrap;font-family:sans-serif;font-size:14px">${esc(safeViewText(body))}</pre>`
+      ? `<pre style="white-space:pre-wrap;font-family:sans-serif;font-size:14px">${esc(safeViewPlainText(body, safeLabels))}</pre>`
       : body?.html
       ? DOMPurify.sanitize(body.html, { ADD_ATTR: ['target'] })
       : body?.text
@@ -2754,11 +2780,14 @@ ${bodyContent}
           onToggleThread={setShowThread}
         />
 
-        {safeView && (
+        {/* Locked: the bar until "Show in full". Not locked (a spoofed sender outside Spam): a
+            warning only, the letter shows as usual. */}
+        {safeState && (safeView || !safeState.locked) && (
           <SafeViewNotice
-            reason={safeReason}
-            eopCategory={body?.eopCategory}
-            onShowFull={() => setFullViewId(message.id)}
+            reason={safeState.reason}
+            eopCategory={eopCategory}
+            onShowFull={safeView ? showInFull : null}
+            label={`${t('message.safeView.label')}: ${resolvedSubject || message.subject || t('message.noSubject')}`}
           />
         )}
 
@@ -2900,6 +2929,7 @@ ${bodyContent}
                   canRegen={!!action}
                   onRegen={() => action && runAiAction(action, { force: true })}
                   onDismiss={() => dismissAiResult(key)}
+                  plain={safeView}
                 />
               );
             })}
@@ -2996,7 +3026,7 @@ ${bodyContent}
 
       {/* HTML email — iframe sized to full content height; outer container scrolls */}
       {!loadingBody && !bodyError && !safeView && body?.html && (
-        <div style={{ padding: isMobile ? '0 0 16px' : '0 28px 24px' }}>
+        <div ref={bodyFocusRef} tabIndex={-1} data-letter-body="" style={{ padding: isMobile ? '0 0 16px' : '0 28px 24px' }}>
           {/* Unsubscribe banner — shown for newsletter messages that have a List-Unsubscribe header */}
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
             <div className="msg-notice" style={{
@@ -3187,7 +3217,7 @@ ${bodyContent}
 
       {/* Plain-text email — no internal scroll, outer container handles it */}
       {!loadingBody && !bodyError && !safeView && body?.text && !body?.html && (
-        <div style={{
+        <div ref={bodyFocusRef} tabIndex={-1} data-letter-body="" style={{
           padding: isMobile ? '0 0px 16px' : '0 28px 24px',
         }}>
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
@@ -3253,6 +3283,8 @@ ${bodyContent}
         <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} spamFolderPaths={spamFolderPaths} />
       )}
       </div>{/* end single scroll container */}
+
+      <ConfirmOverlay dialog={emlConfirm} onClose={() => setEmlConfirm(null)} />
 
       {/* Mobile move-to-folder bottom sheet */}
       {showMovePicker && isMobile && (
@@ -3557,14 +3589,16 @@ function PaneBtn({ children, onClick, title, danger, label, kind, style: extraSt
 
 // A pinned AI result box shown above the message (#204). Collapsible to keep
 // multiple results from crowding the view; offers regenerate and dismiss.
-function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
+// plain: the letter is in safe view (utils/safeView.js). The output can repeat the letter's links,
+// so it shows as its source text: every address readable, none clickable.
+function AiResultBox({ result, canRegen, onRegen, onDismiss, plain = false }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const loading = result.status === 'loading';
   const error = result.status === 'error';
   // Render the (markdown) AI output to sanitized HTML. Memoized on the text so toggling
   // expand/collapse doesn't re-parse; re-runs as text streams in during generation (#215).
-  const html = useMemo(() => renderMarkdown(result.text || ''), [result.text]);
+  const html = useMemo(() => (plain ? '' : renderMarkdown(result.text || '')), [result.text, plain]);
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef(null);
   useEffect(() => () => clearTimeout(copyTimerRef.current), []);
@@ -3580,7 +3614,7 @@ function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
       copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
     };
     try {
-      if (navigator.clipboard?.write && window.ClipboardItem) {
+      if (!plain && navigator.clipboard?.write && window.ClipboardItem) {
         await navigator.clipboard.write([new window.ClipboardItem({
           'text/html': new Blob([html], { type: 'text/html' }),
           'text/plain': new Blob([source], { type: 'text/plain' }),
@@ -3658,6 +3692,13 @@ function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
         <span style={{ color: 'var(--text-tertiary)', fontStyle: 'italic' }}>{t('compose.toolbar.aiGenerating')}</span>
       ) : error ? (
         <span style={{ color: 'var(--red)' }}>{t('compose.toolbar.aiError', { message: result.text })}</span>
+      ) : plain ? (
+        <div
+          data-ai-plain=""
+          style={{ maxHeight: expanded ? 'none' : 220, overflowY: expanded ? 'visible' : 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+        >
+          {result.text}
+        </div>
       ) : (
         <div
           className="ai-markdown"

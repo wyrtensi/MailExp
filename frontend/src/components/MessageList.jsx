@@ -26,7 +26,7 @@ import {
 } from '../utils/gtd.js';
 import { formatDate } from '../utils/formatDate.js';
 import { advanceSelectionAfterRemoval } from '../utils/listSelection.js';
-import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFromMessage.js';
+import { openReplyFromMessage, openForwardFromMessage, safeQuoteOptions } from '../utils/composeFromMessage.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
@@ -2202,6 +2202,7 @@ export default function MessageList() {
           openCompose,
           getMessageBody: api.getMessageBody,
           replyAll: action === 'replyAll',
+          ...safeQuoteOptions(t, useStore.getState().folders[message.account_id]),
         });
         break;
       case 'forward':
@@ -2209,6 +2210,7 @@ export default function MessageList() {
           accounts,
           openCompose,
           getMessageBody: api.getMessageBody,
+          ...safeQuoteOptions(t, useStore.getState().folders[message.account_id]),
         });
         break;
       case 'bulkSelect':

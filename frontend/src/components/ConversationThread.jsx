@@ -7,7 +7,7 @@ import { createHeightController, forceEagerImages, measureContentHeight } from '
 import { conversationSrcDoc, htmlHasQuote, personLabel, recipientsLine, splitTextQuote } from '../utils/conversationView.js';
 import DirectionBadge from './DirectionBadge.jsx';
 import { useMobile } from '../hooks/useMobile.js';
-import { safeTextMarkup, safeViewReason, safeViewText } from '../utils/safeView.js';
+import { safeViewMarkup, safeViewState } from '../utils/safeView.js';
 import SafeViewNotice from './SafeViewNotice.jsx';
 
 // The whole conversation stacked under an open letter, the way Gmail shows it: every letter of
@@ -168,6 +168,24 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
     return () => { live = false; };
   }, [id]);
 
+  // Safe view (utils/safeView.js), decided once the body brings the EOP category.
+  const safeState = body ? safeViewState({ inSpamFolder, eopCategory: body.eopCategory }) : null;
+  const locked = Boolean(safeState?.locked) && !full;
+  const safeLabels = useMemo(() => ({ link: t('message.safeView.linkTo'), form: t('message.safeView.formTo') }), [t]);
+  const safeMarkup = useMemo(() => (locked ? safeViewMarkup(body, safeLabels) : ''), [locked, body, safeLabels]);
+  // "Show in full" moves focus to the letter it reveals.
+  const contentRef = useRef(null);
+  const focusContentRef = useRef(false);
+  useEffect(() => {
+    if (!focusContentRef.current || locked || !contentRef.current) return;
+    focusContentRef.current = false;
+    contentRef.current.focus({ preventScroll: true });
+  }, [locked]);
+  const showInFull = () => {
+    focusContentRef.current = true;
+    setFull(true);
+  };
+
   const footer = (hasQuote) => (
     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', padding: '8px 14px 12px', fontSize: 13 }}>
       {hasQuote && (
@@ -185,31 +203,40 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
   if (!body) {
     return <div style={{ padding: '0 14px 12px', fontSize: 13, color: 'var(--text-tertiary)' }}>{t('message.senderHistory.threadLoading')}</div>;
   }
-  const safeReason = full ? null : safeViewReason({ inSpamFolder, eopCategory: body.eopCategory });
-  if (safeReason && (body.html || body.text)) {
+  if (locked) {
+    // A letter with attachments only still shows why it is held back.
     return (
       <>
         <div style={{ padding: '0 14px' }}>
-          <SafeViewNotice reason={safeReason} eopCategory={body.eopCategory} onShowFull={() => setFull(true)} compact />
+          <SafeViewNotice reason={safeState.reason} eopCategory={body.eopCategory} onShowFull={showInFull} compact />
         </div>
-        <div
-          data-safe-view-body=""
-          style={{
-            padding: '0 14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14, lineHeight: 1.6,
-            color: '#1a1a1a', background: 'white', fontFamily: 'var(--font-sans, sans-serif)',
-          }}
-          // One innerHTML write, opted back into translation, as in the open letter's safe view.
-          translate="yes"
-          dangerouslySetInnerHTML={{ __html: safeTextMarkup(safeViewText(body)) }}
-        />
+        {(body.html || body.text) && (
+          <div
+            data-safe-view-body=""
+            style={{
+              padding: '0 14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14, lineHeight: 1.6,
+              color: '#1a1a1a', background: 'white', fontFamily: 'var(--font-sans, sans-serif)',
+            }}
+            // One innerHTML write, opted back into translation, as in the open letter's safe view.
+            translate="yes"
+            dangerouslySetInnerHTML={{ __html: safeMarkup }}
+          />
+        )}
         {footer(false)}
       </>
     );
   }
+  // A spoofed sender outside Spam: a warning over the letter shown as usual.
+  const warning = safeState && !safeState.locked && (
+    <div style={{ padding: '0 14px' }}>
+      <SafeViewNotice reason={safeState.reason} eopCategory={body.eopCategory} compact />
+    </div>
+  );
   if (body.html) {
     return (
       <>
-        <div style={{ padding: '0 14px', background: 'white' }}>
+        {warning}
+        <div ref={contentRef} tabIndex={-1} style={{ padding: '0 14px', background: 'white' }}>
           <LetterFrame html={body.html} showQuote={showQuote} title={t('message.emailFrameTitle')} />
         </div>
         {footer(htmlHasQuote(body.html))}
@@ -219,7 +246,8 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
   const { main, quote } = splitTextQuote(body.text || '');
   return (
     <>
-      <div style={{
+      {warning}
+      <div ref={contentRef} tabIndex={-1} style={{
         padding: '0 14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14, lineHeight: 1.6,
         color: '#1a1a1a', background: 'white', fontFamily: 'var(--font-sans, sans-serif)',
       }}>

@@ -65,6 +65,7 @@ const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
 const MessagePane = (await import('./MessagePane.jsx')).default;
+const { saveResult } = await import('../aiResults.js');
 
 const MSG_A = { id: 'a1', account_id: 'acct', folder: 'INBOX', uid: 1, subject: 'First', from_email: 'x@y.z', from_name: 'X', date: new Date().toISOString(), is_read: true, to_addresses: [], cc_addresses: [] };
 const MSG_B = { ...MSG_A, id: 'b2', uid: 2, subject: 'Second' };
@@ -412,26 +413,32 @@ describe('A plain-text body stays translatable under the translate="no" UI', () 
 });
 
 describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
-  // A letter in the account's Spam folder, or one EOP marked as phishing, malware or spoofed in
-  // any folder, opens as text until "Show in full": no images, no links, no attachment downloads,
-  // none of the active banners. The header and toolbar stay. Showing in full is for this view only.
+  // A letter in the account's Spam folder, or one EOP marked as phishing or malware in any folder,
+  // opens as text until "Show in full": no images, no links, no attachment downloads, none of the
+  // active banners, and replies, forwards and prints quote the safe text. The header and toolbar
+  // stay. Showing in full is for this view only. A spoofed sender outside Spam only warns.
   const PHISH_HTML = '<p>Please <a href="https://evil.example/login">verify your account</a></p>'
     + '<img src="https://tracker.example/p.gif" alt="">';
   const MSG_SPAM = { ...MSG_A, id: 's1', uid: 11, folder: 'Junk', subject: 'You won', list_unsubscribe: '<https://unsub.example/x>' };
-  const MSG_PHISH = { ...MSG_A, id: 'p1', uid: 12, folder: 'INBOX', subject: 'Verify' };
+  // The category comes with the list row: the decision does not wait for the body.
+  const MSG_PHISH = { ...MSG_A, id: 'p1', uid: 12, folder: 'INBOX', subject: 'Verify', eop_category: 'PHSH' };
+  const MSG_SPOOF = { ...MSG_A, id: 'o1', uid: 14, folder: 'INBOX', subject: 'From the CEO', eop_category: 'SPOOF' };
   const MSG_NORMAL = { ...MSG_A, id: 'n1', uid: 13, folder: 'INBOX', subject: 'Hello' };
   const BODIES = {
     s1: {
-      html: PHISH_HTML, text: '', eopCategory: null,
+      html: PHISH_HTML, text: 'A harmless text part', eopCategory: null,
       attachments: [
         { filename: 'prize.pdf', type: 'application/pdf', part: '2', size: 10 },
         { filename: 'claim.pdf', type: 'application/pdf', part: '3', size: 10 },
       ],
     },
-    p1: { html: PHISH_HTML, text: '', attachments: [], eopCategory: 'PHSH' },
+    p1: { html: PHISH_HTML, text: '', attachments: [], eopCategory: null },
+    o1: { html: '<p>Wire the money today</p>', text: '', attachments: [], eopCategory: 'SPOOF' },
     n1: { html: '<p>Hello there</p>', text: 'Hello there', attachments: [], eopCategory: null },
   };
-  let originalFetch;
+  let originalFetch, originalOpenCompose, originalDownloadRawEml, originalOpen;
+  const composed = [];
+  const emls = [];
   before(() => {
     globalThis.requestAnimationFrame ??= cb => setTimeout(() => cb(Date.now()), 0);
     globalThis.cancelAnimationFrame ??= id => clearTimeout(id);
@@ -442,15 +449,27 @@ describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
       { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
       { path: 'Junk', name: 'Junk E-mail', special_use: '\\Junk' },
     ]);
-    useStore.getState().setMessages?.([MSG_A, MSG_SPAM, MSG_PHISH, MSG_NORMAL]);
+    useStore.getState().setMessages?.([MSG_A, MSG_SPAM, MSG_PHISH, MSG_SPOOF, MSG_NORMAL]);
     originalFetch = globalThis.fetch;
     globalThis.fetch = async (url) => {
       const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
       const json = BODIES[id] || {};
       return { ok: true, status: 200, json: async () => json, text: async () => '' };
     };
+    originalOpenCompose = useStore.getState().openCompose;
+    useStore.setState({ openCompose: (data) => { composed.push(data); } });
+    originalDownloadRawEml = api.downloadRawEml;
+    api.downloadRawEml = async (id) => { emls.push(id); return new Blob(['x']); };
+    globalThis.URL.createObjectURL ??= () => 'blob:x';
+    globalThis.URL.revokeObjectURL ??= () => {};
+    originalOpen = dom.window.open;
   });
-  after(() => { globalThis.fetch = originalFetch; });
+  after(() => {
+    globalThis.fetch = originalFetch;
+    useStore.setState({ openCompose: originalOpenCompose });
+    api.downloadRawEml = originalDownloadRawEml;
+    dom.window.open = originalOpen;
+  });
 
   async function open(id) {
     await React.act(async () => {
@@ -460,18 +479,28 @@ describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
     await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
   }
   const pane = () => document.getElementById('root');
-  const notice = () => pane().querySelector('[role="region"][aria-label="message.safeView.label"]');
+  const notice = () => pane().querySelector('[role="region"].safe-view-notice');
+  const warning = () => pane().querySelector('.safe-view-notice');
+  const button = (re) => [...pane().querySelectorAll('button')].find(b => re.test(b.getAttribute('title') || b.textContent));
   const showFull = () => [...pane().querySelectorAll('button')].find(b => b.textContent === 'message.safeView.showFull');
+  const click = async (el) => {
+    await React.act(async () => { el.click(); });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  };
 
-  test('a letter in Spam opens as text with its link targets visible and nothing clickable or loaded', async () => {
+  test('a letter in Spam opens as the text of its HTML, link targets written out, nothing clickable or loaded', async () => {
     await open('s1');
-    assert.ok(notice(), 'the warning bar is shown');
+    assert.ok(notice(), 'the warning bar is a region');
+    assert.match(notice().getAttribute('aria-label'), /^message\.safeView\.label: You won$/, 'named after the letter');
     assert.match(notice().textContent, /message\.safeView\.title\.spam/);
     assert.equal(pane().querySelector('iframe'), null, 'the HTML body is not rendered');
     const body = pane().querySelector('[data-safe-view-body]');
     assert.ok(body, 'the safe text body is rendered');
     assert.equal(body.getAttribute('translate'), 'yes', 'the text stays translatable');
-    assert.match(body.textContent, /verify your account <https:\/\/evil\.example\/login>/);
+    // The HTML, not the harmless text part, is what the letter shows.
+    assert.doesNotMatch(body.textContent, /harmless text part/);
+    assert.match(body.textContent, /verify your account message\.safeView\.linkTo evil\.example https:\/\/evil\.example\/login/);
+    assert.equal(body.querySelector('strong.safe-view-host').textContent, 'evil.example');
     assert.equal(pane().querySelector('a[href*="evil.example"]'), null, 'no link to the target');
     assert.equal(pane().querySelector('img[src*="tracker.example"]'), null, 'no remote image');
     // The header stays as usual.
@@ -489,17 +518,63 @@ describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
     assert.doesNotMatch(pane().textContent, /message\.unsubscribe\.button/);
   });
 
-  test('Show in full renders the letter normally for this view only', async () => {
+  test('reply and forward quote the safe text, never the HTML', async () => {
     await open('s1');
-    const button = showFull();
-    assert.ok(button, 'the Show in full button is rendered');
-    await React.act(async () => { button.click(); });
+    composed.length = 0;
+    await click(button(/^message\.reply( |$)/));
+    await click(button(/^message\.forward/));
+    assert.equal(composed.length, 2);
+    for (const data of composed) {
+      assert.match(data.quotedBody, /verify your account \[message\.safeView\.linkTo evil\.example: https:\/\/evil\.example\/login\]/);
+      assert.match(data.quotedBodyHtml, /<pre style="white-space:pre-wrap;font-family:inherit;margin:0">/);
+      assert.doesNotMatch(data.quotedBodyHtml, /<a |<img |tracker\.example/);
+    }
+  });
+
+  test('print prints the safe text', async () => {
+    await open('s1');
+    let written = '';
+    dom.window.open = () => ({ document: { write: (html) => { written += html; }, close() {} }, focus() {}, print() {} });
+    await click(button(/^message\.print/));
+    assert.match(written, /verify your account \[message\.safeView\.linkTo evil\.example: https:\/\/evil\.example\/login\]/);
+    assert.doesNotMatch(written, /<a |<img |tracker\.example/);
+  });
+
+  test('an AI result shows as text without links', async () => {
+    saveResult('s1', 'safe-view-test', 'Summary: [claim it](https://evil.example/x)', 'Summary');
+    // Results are read when a letter opens.
+    await open('n1');
+    await open('s1');
+    const plain = pane().querySelector('[data-ai-plain]');
+    assert.ok(plain, 'the AI result is plain text');
+    assert.match(plain.textContent, /\(https:\/\/evil\.example\/x\)/);
+    assert.equal(pane().querySelector('.ai-markdown a'), null);
+  });
+
+  test('the .eml download asks first and explains why', async () => {
+    await open('s1');
+    emls.length = 0;
+    await click(button(/^message\.downloadEml$/));
+    assert.deepEqual(emls, [], 'nothing is downloaded on the first click');
+    assert.match(pane().textContent, /message\.safeView\.emlConfirm/);
+    const confirm = [...pane().querySelectorAll('button')].find(b => b.textContent === 'message.safeView.emlConfirmButton');
+    await click(confirm);
+    assert.deepEqual(emls, ['s1']);
+  });
+
+  test('Show in full renders the letter normally for this view only, and focuses it', async () => {
+    await open('s1');
+    await click(showFull());
     assert.equal(notice(), null, 'the warning bar goes');
     const frame = pane().querySelector('iframe');
     assert.ok(frame, 'the HTML body is rendered');
     assert.match(frame.getAttribute('srcdoc'), /evil\.example\/login/);
+    assert.equal(document.activeElement, pane().querySelector('[data-letter-body]'), 'focus moves to the letter');
     assert.ok([...pane().querySelectorAll('button')].find(b => /prize\.pdf/.test(b.textContent)), 'attachments download again');
     assert.match(pane().textContent, /message\.unsubscribe\.button/);
+    composed.length = 0;
+    await click(button(/^message\.reply( |$)/));
+    assert.match(composed[0].quotedBodyHtml, /href="https:\/\/evil\.example\/login"/, 'shown in full, a reply quotes the letter as it is');
 
     // Not remembered: another letter and back, and it is safe again.
     await open('n1');
@@ -508,7 +583,7 @@ describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
     assert.equal(pane().querySelector('iframe'), null);
   });
 
-  test('a letter EOP marked as phishing is safe in any folder and says why', async () => {
+  test('a letter EOP marked as phishing is safe in any folder and says why in words', async () => {
     await open('p1');
     assert.ok(notice());
     assert.match(notice().textContent, /message\.safeView\.title\.phishing/);
@@ -516,9 +591,18 @@ describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
     assert.equal(pane().querySelector('iframe'), null);
   });
 
+  test('a spoofed sender outside Spam is a warning over a letter shown as usual', async () => {
+    await open('o1');
+    assert.ok(warning(), 'the warning is shown');
+    assert.match(warning().textContent, /message\.safeView\.title\.spoof/);
+    assert.match(warning().textContent, /message\.safeView\.explainWarn/);
+    assert.equal(showFull(), undefined, 'nothing to show in full');
+    assert.ok(pane().querySelector('iframe'), 'the letter renders as usual');
+  });
+
   test('a normal letter renders as before', async () => {
     await open('n1');
-    assert.equal(notice(), null);
+    assert.equal(warning(), null);
     assert.equal(pane().querySelector('[data-safe-view-body]'), null);
     assert.ok(pane().querySelector('iframe'), 'the HTML body is rendered');
   });

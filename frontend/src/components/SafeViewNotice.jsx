@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
 
-// The bar's title for each reason safeViewReason() gives.
+// The bar's title for each reason safeViewState() gives.
 const TITLES = {
   spam: 'message.safeView.title.spam',
   phishing: 'message.safeView.title.phishing',
@@ -8,17 +8,41 @@ const TITLES = {
   spoof: 'message.safeView.title.spoof',
 };
 
-// The bar above a letter shown in safe view (utils/safeView.js): why it is shown as text, and the
-// button that shows it in full for this view only. A region with its own name, so a screen reader
-// lists it among the landmarks; the button is a real button, reachable by Tab and Enter.
-// compact: the shorter bar of a letter stacked in the conversation under the open one.
-export default function SafeViewNotice({ reason, eopCategory = null, onShowFull, compact = false }) {
+// EOP categories in words (Microsoft's "Anti-spam message headers"); the code itself stays in the
+// line's tooltip. A code not listed here is shown as it is.
+const CATEGORY_LABELS = {
+  SPM: 'message.safeView.categories.spam',
+  HSPM: 'message.safeView.categories.highSpam',
+  BULK: 'message.safeView.categories.bulk',
+  OSPM: 'message.safeView.categories.outboundSpam',
+  PHSH: 'message.safeView.categories.phishing',
+  HPHSH: 'message.safeView.categories.highPhishing',
+  HPHISH: 'message.safeView.categories.highPhishing',
+  INTOS: 'message.safeView.categories.intraOrgPhishing',
+  DIMP: 'message.safeView.categories.domainImpersonation',
+  UIMP: 'message.safeView.categories.userImpersonation',
+  GIMP: 'message.safeView.categories.mailboxImpersonation',
+  BIMP: 'message.safeView.categories.brandImpersonation',
+  SPOOF: 'message.safeView.categories.spoof',
+  MALW: 'message.safeView.categories.malware',
+  AMP: 'message.safeView.categories.antiMalware',
+  SAP: 'message.safeView.categories.safeAttachments',
+  FTBP: 'message.safeView.categories.fileType',
+};
+
+// The bar above a letter in safe view (utils/safeView.js): why it is shown as text, and the button
+// that shows it in full for this view only. Without onShowFull it is a warning over a letter shown
+// as usual (a spoofed sender outside Spam). The open letter's bar is a region named after the
+// letter (label), so a screen reader lists it among the landmarks; the stacked letters' compact
+// bars are not, or a long conversation would fill the landmark list. The button is a real button.
+export default function SafeViewNotice({ reason, eopCategory = null, onShowFull = null, compact = false, label = null }) {
   const { t } = useTranslation();
   const color = reason === 'spam' ? 'var(--amber)' : 'var(--red)';
+  const category = eopCategory ? String(eopCategory).toUpperCase() : null;
+  const regionProps = compact ? {} : { role: 'region', 'aria-label': label || t('message.safeView.label') };
   return (
     <div
-      role="region"
-      aria-label={t('message.safeView.label')}
+      {...regionProps}
       className="msg-notice safe-view-notice"
       style={{
         marginBottom: compact ? 8 : 12,
@@ -41,27 +65,29 @@ export default function SafeViewNotice({ reason, eopCategory = null, onShowFull,
         </div>
         {!compact && (
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.45 }}>
-            {t('message.safeView.explain')}
+            {onShowFull ? t('message.safeView.explain') : t('message.safeView.explainWarn')}
           </div>
         )}
-        {eopCategory && (
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
-            {t('message.safeView.category', { category: eopCategory })}
+        {category && (
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }} title={`CAT:${category}`}>
+            {t('message.safeView.category', { category: CATEGORY_LABELS[category] ? t(CATEGORY_LABELS[category]) : category })}
           </div>
         )}
       </div>
-      <button
-        type="button"
-        onClick={onShowFull}
-        style={{
-          background: 'var(--bg-primary)', color: 'var(--text-primary)',
-          border: `1px solid ${color}`, borderRadius: 6,
-          padding: compact ? '4px 10px' : '6px 12px',
-          fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
-        }}
-      >
-        {t('message.safeView.showFull')}
-      </button>
+      {onShowFull && (
+        <button
+          type="button"
+          onClick={onShowFull}
+          style={{
+            background: 'var(--bg-primary)', color: 'var(--text-primary)',
+            border: `1px solid ${color}`, borderRadius: 6,
+            padding: compact ? '4px 10px' : '6px 12px',
+            fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+          }}
+        >
+          {t('message.safeView.showFull')}
+        </button>
+      )}
     </div>
   );
 }

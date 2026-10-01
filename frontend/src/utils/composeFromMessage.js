@@ -1,5 +1,6 @@
 import { pickReplyAlias } from './replyAlias.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from './quoteHeader.js';
+import { safeQuoteSource, safeViewState, spamFolderPaths } from './safeView.js';
 
 function parseAddressField(raw) {
   try {
@@ -8,7 +9,30 @@ function parseAddressField(raw) {
   } catch { return ''; }
 }
 
-export async function openReplyFromMessage(message, { accounts, openCompose, getMessageBody, replyAll = false }) {
+// What a reply or forward quotes. A letter that opens in safe view (utils/safeView.js: in the
+// account's Spam folder, or marked by EOP as phishing or malware) is quoted as its safe text, never
+// its HTML, whose images would load in the composer. From the list there is no "Show in full", so
+// such a letter is always quoted this way. folders: the account's folder list; safeLabels: the
+// words that introduce a link's target, in the reader's language.
+function quoteSource(message, body, { accounts = [], folders = [], safeLabels } = {}) {
+  const account = accounts.find(a => a.id === message.account_id);
+  const state = safeViewState({
+    inSpamFolder: spamFolderPaths(account, folders).has(message.folder),
+    eopCategory: message.eop_category || body?.eopCategory || null,
+  });
+  if (state?.locked) return safeQuoteSource(body, safeLabels);
+  return { text: body?.text, html: body?.html };
+}
+
+// The options a caller with t() and the account's folders passes to the two helpers below.
+export function safeQuoteOptions(t, folders) {
+  return {
+    folders: folders || [],
+    safeLabels: { link: t('message.safeView.linkTo'), form: t('message.safeView.formTo') },
+  };
+}
+
+export async function openReplyFromMessage(message, { accounts, openCompose, getMessageBody, replyAll = false, folders = [], safeLabels }) {
   const replyToArr = Array.isArray(message.reply_to)
     ? message.reply_to
     : (() => { try { return JSON.parse(message.reply_to || '[]'); } catch { return []; } })();
@@ -57,7 +81,7 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
   // The quote header speaks the language of the name the reply goes out under.
   const quoteMeta = quoteMetaFor(message, 'reply');
   const quoteLang = senderLanguage(identityName(myAccount, replyAliasId));
-  const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, { text: replyBody?.text, html: replyBody?.html });
+  const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, quoteSource(message, replyBody, { accounts, folders, safeLabels }));
 
   openCompose({
     to: sender,
@@ -81,12 +105,13 @@ export async function openReplyFromMessage(message, { accounts, openCompose, get
   });
 }
 
-export async function openForwardFromMessage(message, { openCompose, getMessageBody, accounts = [] }) {
+export async function openForwardFromMessage(message, { openCompose, getMessageBody, accounts = [], folders = [], safeLabels }) {
   const fwdBody = await getMessageBody(message.id).catch(() => null);
   const quoteExtra = { to: parseAddressField(message.to_addresses), cc: parseAddressField(message.cc_addresses) };
   const quoteMeta = quoteMetaFor(message, 'forward');
   const quoteLang = senderLanguage(identityName(accounts.find(a => a.id === message.account_id)));
-  const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { text: fwdBody?.text, html: fwdBody?.html, ...quoteExtra });
+  const source = quoteSource(message, fwdBody, { accounts, folders, safeLabels });
+  const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { ...source, ...quoteExtra });
 
   openCompose({
     subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject}`,

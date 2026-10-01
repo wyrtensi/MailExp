@@ -6,7 +6,7 @@ import {
   openDeepLinkMessage, collectThreadReadIds, openGtdThreadWithAutoRead,
   classifyThread, unclassifyThread,
 } from '../utils/gtd.js';
-import { openReplyFromMessage, openForwardFromMessage } from '../utils/composeFromMessage.js';
+import { openReplyFromMessage, openForwardFromMessage, safeQuoteOptions } from '../utils/composeFromMessage.js';
 import { resolveContextMenuMessage } from '../utils/contextMenuPolicy.js';
 import { doneGtdRow } from '../utils/gtdDone.js';
 
@@ -222,6 +222,7 @@ export function useGtdTriage() {
               accounts,
               openCompose,
               getMessageBody: api.getMessageBody,
+              ...safeQuoteOptions(t, useStore.getState().folders[message.account_id]),
             });
           } else {
             await openReplyFromMessage(message, {
@@ -229,6 +230,7 @@ export function useGtdTriage() {
               openCompose,
               getMessageBody: api.getMessageBody,
               replyAll: action === 'replyAll',
+              ...safeQuoteOptions(t, useStore.getState().folders[message.account_id]),
             });
           }
         } catch (err) {

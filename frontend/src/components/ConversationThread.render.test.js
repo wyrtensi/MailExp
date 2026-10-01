@@ -57,6 +57,8 @@ const BODIES = {
   phish: { html: PHISH_HTML, text: '', attachments: [], eopCategory: 'HPHISH' },
   junk: { html: '<p>Cheap <a href="https://shop.example/">pills</a></p>', text: '', attachments: [], eopCategory: null },
   plain: { html: '<p>See you at ten</p>', text: 'See you at ten', attachments: [], eopCategory: null },
+  attachonly: { html: null, text: null, attachments: [{ filename: 'invoice.zip', part: '2' }], eopCategory: 'MALW' },
+  spoofed: { html: '<p>Wire the money</p>', text: '', attachments: [], eopCategory: 'SPOOF' },
 };
 globalThis.fetch = async (url) => {
   const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
@@ -71,7 +73,9 @@ const item = (id, folder = 'INBOX') => ({
   id, folder, subject: id, snippet: id, date: '2026-10-01T10:00:00Z', from_name: id, from_email: `${id}@example.com`,
   to_addresses: [], cc_addresses: [], has_attachments: false, direction: 'in',
 });
-const CONVERSATION = { threadKey: 't', total: 4, items: [item('open'), item('phish'), item('junk', 'Junk'), item('plain')] };
+const CONVERSATION = { threadKey: 't', total: 4, items: [
+  item('open'), item('phish'), item('junk', 'Junk'), item('plain'), item('attachonly'), item('spoofed'),
+] };
 
 let root;
 let host;
@@ -93,27 +97,44 @@ async function expand(id) {
   await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
   return card(id);
 }
-const notice = (el) => el.querySelector('[role="region"][aria-label="message.safeView.label"]');
+// The stacked letters' bars are not landmarks: only the open letter's bar is a region.
+const notice = (el) => el.querySelector('.safe-view-notice');
+const showFull = (el) => [...el.querySelectorAll('button')].find(b => b.textContent === 'message.safeView.showFull');
 
 describe('Stacked letters in safe view (R-41)', () => {
   test('a letter EOP marked as phishing opens as text with the link target written out', async () => {
     const el = await expand('phish');
     assert.ok(notice(el), 'the warning bar is shown');
+    assert.equal(notice(el).getAttribute('role'), null, 'not a landmark');
     assert.match(notice(el).textContent, /message\.safeView\.title\.phishing/);
     assert.equal(el.querySelector('iframe'), null);
     const body = el.querySelector('[data-safe-view-body]');
     assert.equal(body.getAttribute('translate'), 'yes');
-    assert.match(body.textContent, /verify your account <https:\/\/evil\.example\/login>/);
+    assert.match(body.textContent, /verify your account message\.safeView\.linkTo evil\.example https:\/\/evil\.example\/login/);
     assert.equal(el.querySelector('a[href]'), null, 'no link');
     assert.equal(el.querySelector('img'), null, 'no image');
   });
 
-  test('Show in full renders it normally', async () => {
-    const el = card('phish');
-    const button = [...el.querySelectorAll('button')].find(b => b.textContent === 'message.safeView.showFull');
-    await React.act(async () => { button.click(); });
+  test('Show in full renders it normally and focuses it', async () => {
+    await React.act(async () => { showFull(card('phish')).click(); });
     assert.equal(notice(card('phish')), null);
-    assert.ok(card('phish').querySelector('iframe'), 'the HTML body is rendered');
+    const frame = card('phish').querySelector('iframe');
+    assert.ok(frame, 'the HTML body is rendered');
+    assert.equal(document.activeElement, frame.parentElement, 'focus moves to the letter');
+  });
+
+  test('a letter with attachments only still shows why it is held back', async () => {
+    const el = await expand('attachonly');
+    assert.match(notice(el).textContent, /message\.safeView\.title\.malware/);
+    assert.ok(showFull(el));
+    assert.equal(el.querySelector('[data-safe-view-body]'), null, 'no text to show');
+  });
+
+  test('a spoofed sender outside Spam is a warning over the letter shown as usual', async () => {
+    const el = await expand('spoofed');
+    assert.match(notice(el).textContent, /message\.safeView\.title\.spoof/);
+    assert.equal(showFull(el), undefined);
+    assert.ok(el.querySelector('iframe'));
   });
 
   test('a letter in the Spam folder opens in safe view', async () => {
