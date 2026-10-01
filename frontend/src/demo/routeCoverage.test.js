@@ -483,6 +483,11 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   const released = await answer('/mail-node/quarantine/:param/release', 'POST', '/mail-node/quarantine/40/release');
   assert.equal(released.learned, true);
   assert.deepEqual(await answer('/mail-node/quarantine/:param', 'DELETE', '/mail-node/quarantine/38'), { ok: true });
+  const learned = await answer('/mail-node/quarantine/:param/learn-spam', 'POST', '/mail-node/quarantine/41/learn-spam');
+  assert.equal(learned.ok, true);
+  const nodeSettings = await answer('/mail-node/quarantine/node-settings', 'POST', '/mail-node/quarantine/node-settings', { confirm: true });
+  assert.equal(nodeSettings.nodeSettings.release_format, 'raw');
+  assert.ok(nodeSettings.nodeSettingsAppliedAt);
   const quarantineSettings = await answer('/mail-node/quarantine/settings', 'PUT', '/mail-node/quarantine/settings', { userView: false });
   assert.equal(quarantineSettings.userView, false);
   await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });

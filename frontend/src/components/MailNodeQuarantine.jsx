@@ -6,7 +6,7 @@ import { formatDateTime } from '../utils/formatDate.js';
 import { mailNodeErrorDetail, mailNodeErrorKey } from '../utils/mailNode.js';
 import { EOP_CATEGORY_LABEL_KEYS, safeViewMarkup } from '../utils/safeView.js';
 import {
-  eopSendsToSpam, filterQuarantine, formatScore, releaseNoteKey, rspamdActionKey, sizeLabel,
+  filterQuarantine, formatScore, releaseEopNoteShown, releaseNoteKey, rspamdActionKey, sizeLabel,
 } from '../utils/quarantine.js';
 
 const fieldStyle = {
@@ -29,15 +29,32 @@ const symbolStyle = (score) => ({
   border: `1px solid ${score > 0 ? 'var(--red)' : 'var(--border)'}`,
 });
 
-function Symbols({ symbols, label }) {
+// Symbols as chips (a list row), or with what rspamd says about each written out next to it
+// (detailed: an opened entry), never only in a tooltip.
+function Symbols({ symbols, label, detailed = false }) {
   if (!symbols?.length) return null;
+  if (!detailed) {
+    return (
+      <ul aria-label={label} style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {symbols.map((s) => (
+          <li key={s.name} data-symbol={s.name} style={symbolStyle(s.score)}>
+            {s.name} {s.score > 0 ? '+' : ''}{formatScore(s.score)}
+          </li>
+        ))}
+      </ul>
+    );
+  }
   return (
-    <ul aria-label={label} style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-      {symbols.map((s) => (
-        <li key={s.name} data-symbol={s.name} title={[s.description, ...(s.options ?? [])].filter(Boolean).join('; ') || undefined} style={symbolStyle(s.score)}>
-          {s.name} {s.score > 0 ? '+' : ''}{formatScore(s.score)}
-        </li>
-      ))}
+    <ul aria-label={label} style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 3 }}>
+      {symbols.map((s) => {
+        const details = [s.description, ...(s.options ?? [])].filter(Boolean).join('; ');
+        return (
+          <li key={s.name} data-symbol={s.name} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', fontSize: 11 }}>
+            <span style={symbolStyle(s.score)}>{s.name} {s.score > 0 ? '+' : ''}{formatScore(s.score)}</span>
+            {details && <span data-symbol-details style={{ color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>{details}</span>}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -45,8 +62,8 @@ function Symbols({ symbols, label }) {
 // One entry opened: who it came from and to, rspamd's score, action and symbols, EOP's verdict,
 // the letter in the safe text view (utils/safeView.js: no images, no clickable links, every link's
 // real target shown) with its attachments by name only, the headers on request, and for an
-// administrator "Release" and "Delete", each confirmed first.
-function QuarantineEntry({ entry, admin, onReleased, onDeleted, onClose }) {
+// administrator "Release", "Delete and train as spam" and "Delete", each confirmed first.
+function QuarantineEntry({ entry, admin, onReleased, onLearnedSpam, onDeleted, onClose }) {
   const { t } = useTranslation();
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
@@ -68,14 +85,30 @@ function QuarantineEntry({ entry, admin, onReleased, onDeleted, onClose }) {
   const actionKey = rspamdActionKey(entry.action);
   const category = letter?.eop?.category;
 
+  // Releasing cannot be taken back and teaches rspamd: the dialog says so, what happens to the
+  // letter (by rspamd's action, assuming mailcow releases the original letter, the format the
+  // panel sets), and that EOP's verdict sends a refused letter to Spam again.
   const askRelease = () => setDialog({
     title: t('admin.quarantine.releaseTitle'),
     message: t(releaseNoteKey(entry.action)),
-    note: eopSendsToSpam(letter?.eop) ? t('admin.quarantine.releaseEopNote') : null,
+    note: [
+      t('admin.quarantine.releaseTraining'),
+      releaseEopNoteShown(entry.action, letter?.eop) ? t('admin.quarantine.releaseEopNote') : null,
+      t('admin.quarantine.releaseRawNote'),
+    ].filter(Boolean).join(' '),
     confirmLabel: t('admin.quarantine.release'),
     onConfirm: async () => {
       const result = await api.mailNode.releaseQuarantineItem(entry.id);
       onReleased(entry, result);
+    },
+  });
+  const askLearnSpam = () => setDialog({
+    title: t('admin.quarantine.learnSpamTitle'),
+    message: t('admin.quarantine.learnSpamMessage', { sender: entry.sender, rcpt: entry.rcpt }),
+    confirmLabel: t('admin.quarantine.learnSpam'),
+    onConfirm: async () => {
+      const result = await api.mailNode.learnSpamQuarantineItem(entry.id);
+      onLearnedSpam(entry, result);
     },
   });
   const askDelete = () => setDialog({
@@ -128,12 +161,16 @@ function QuarantineEntry({ entry, admin, onReleased, onDeleted, onClose }) {
             )}
           </dl>
           <div style={subTitleStyle}>{t('admin.quarantine.symbols')}</div>
-          <Symbols symbols={detail.symbols} label={t('admin.quarantine.symbols')} />
+          <Symbols symbols={detail.symbols} label={t('admin.quarantine.symbols')} detailed />
           <div style={subTitleStyle}>{t('admin.quarantine.letter')}</div>
           <span style={{ ...hintStyle, marginTop: 0, marginBottom: 6 }}>{t('admin.quarantine.safeNote')}</span>
+          {/* Scrolls on its own: focusable and named, so a keyboard reaches all of it. */}
           <div
             data-safe-view-body=""
             translate="yes"
+            role="region"
+            aria-label={t('admin.quarantine.letter')}
+            tabIndex={0}
             style={{
               whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13, lineHeight: 1.6, padding: '10px 12px',
               borderRadius: 8, border: '1px solid var(--border-subtle)', background: 'var(--bg-primary)', color: 'var(--text-primary)',
@@ -160,13 +197,20 @@ function QuarantineEntry({ entry, admin, onReleased, onDeleted, onClose }) {
           )}
           <details style={{ marginTop: 10 }}>
             <summary style={{ fontSize: 12, cursor: 'pointer', color: 'var(--text-secondary)' }}>{t('admin.quarantine.headers', { number: letter.headers.length })}</summary>
-            <pre data-quarantine-headers style={{ fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: '6px 0 0', maxHeight: 260, overflow: 'auto' }}>
+            <pre
+              data-quarantine-headers
+              tabIndex={0}
+              aria-label={t('admin.quarantine.headers', { number: letter.headers.length })}
+              style={{ fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: '6px 0 0', maxHeight: 260, overflow: 'auto' }}
+            >
               {letter.headers.map((h) => `${h.name}: ${h.value}`).join('\n')}
             </pre>
+            {letter.headersTruncated && <span style={hintStyle}>{t('admin.quarantine.headersTruncated')}</span>}
           </details>
           {admin && (
             <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-              <button type="button" onClick={askRelease} style={buttonStyle}>{t('admin.quarantine.release')}</button>
+              <button type="button" onClick={askRelease} style={dangerButtonStyle}>{t('admin.quarantine.release')}</button>
+              <button type="button" onClick={askLearnSpam} style={dangerButtonStyle}>{t('admin.quarantine.learnSpam')}</button>
               <button type="button" onClick={askDelete} style={dangerButtonStyle}>{t('common.delete')}</button>
             </div>
           )}
@@ -191,6 +235,9 @@ export default function MailNodeQuarantine({ admin = false }) {
   const [filter, setFilter] = useState('');
   const [open, setOpen] = useState(null);
   const [userView, setUserView] = useState(null);
+  // The quarantine settings the panel writes to mailcow on request, and when it last did.
+  const [nodeSettings, setNodeSettings] = useState(null);
+  const [dialog, setDialog] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -210,8 +257,34 @@ export default function MailNodeQuarantine({ admin = false }) {
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (!admin) return;
-    api.mailNode.getQuarantineSettings().then((s) => setUserView(!!s.userView)).catch(() => setUserView(null));
+    api.mailNode.getQuarantineSettings()
+      .then((s) => {
+        setUserView(!!s.userView);
+        setNodeSettings({ appliedAt: s.nodeSettingsAppliedAt ?? null, values: s.nodeSettings ?? null });
+      })
+      .catch(() => setUserView(null));
   }, [admin]);
+
+  // "Enable quarantine on this node" (or "Re-apply" once done): writes every quarantine setting of
+  // mailcow, which the panel cannot read first, after a warning that says so (stronger the second
+  // time: an administrator may have changed them in mailcow since).
+  const askNodeSettings = () => {
+    const values = nodeSettings?.values;
+    const reapply = !!nodeSettings?.appliedAt;
+    setDialog({
+      title: reapply ? t('admin.quarantine.nodeSettingsReapplyTitle') : t('admin.quarantine.nodeSettingsTitle'),
+      message: reapply ? t('admin.quarantine.nodeSettingsReapplyWarning') : t('admin.quarantine.nodeSettingsWarning'),
+      note: values ? t('admin.quarantine.nodeSettingsValues', {
+        maxSize: values.max_size, retention: values.retention_size, maxAge: values.max_age, format: values.release_format,
+      }) : null,
+      confirmLabel: reapply ? t('admin.quarantine.nodeSettingsReapply') : t('admin.quarantine.nodeSettingsApply'),
+      onConfirm: async () => {
+        const answer = await api.mailNode.applyQuarantineNodeSettings();
+        setNodeSettings({ appliedAt: answer.nodeSettingsAppliedAt ?? null, values: answer.nodeSettings ?? values });
+        setNotice(t('admin.quarantine.nodeSettingsDone'));
+      },
+    });
+  };
 
   const saveUserView = async (value) => {
     const before = userView;
@@ -234,6 +307,12 @@ export default function MailNodeQuarantine({ admin = false }) {
       ? t('admin.quarantine.releasedWarnings', { warnings: result.warnings.join('; ') })
       : t('admin.quarantine.released'));
   };
+  const onLearnedSpam = (entry, result) => {
+    drop(entry);
+    setNotice(result?.warnings?.length
+      ? t('admin.quarantine.learnedSpamWarnings', { warnings: result.warnings.join('; ') })
+      : t('admin.quarantine.learnedSpam'));
+  };
   const onDeleted = (entry) => {
     drop(entry);
     setNotice(t('admin.quarantine.deleted'));
@@ -255,7 +334,19 @@ export default function MailNodeQuarantine({ admin = false }) {
             <span>{t('admin.quarantine.userView')}</span>
           </label>
           <span style={{ ...hintStyle, marginBottom: 6 }}>{t('admin.quarantine.userViewNote')}</span>
-          <span style={{ ...hintStyle, marginBottom: 10 }}>{t('admin.quarantine.settingsNote')}</span>
+          <div data-quarantine-node-settings={nodeSettings?.appliedAt ? 'applied' : 'never'} style={{ marginBottom: 10 }}>
+            <span style={{ ...hintStyle, marginBottom: 6 }}>{t('admin.quarantine.settingsNote')}</span>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)' }}>
+              <span>
+                {nodeSettings?.appliedAt
+                  ? t('admin.quarantine.nodeSettingsAppliedAt', { time: formatDateTime(nodeSettings.appliedAt) })
+                  : t('admin.quarantine.nodeSettingsNever')}
+              </span>
+              <button type="button" onClick={askNodeSettings} disabled={!nodeSettings} style={dangerButtonStyle}>
+                {nodeSettings?.appliedAt ? t('admin.quarantine.nodeSettingsReapply') : t('admin.quarantine.nodeSettingsApply')}
+              </button>
+            </div>
+          </div>
         </>
       )}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -278,7 +369,13 @@ export default function MailNodeQuarantine({ admin = false }) {
             {data.truncated ? t('admin.quarantine.countTruncated', { number: data.total, shown: data.items.length }) : t('admin.quarantine.count', { number: data.total })}
             {!data.historyRead && ` ${t('admin.quarantine.historyUnread')}`}
           </div>
-          {data.total === 0 && <span style={hintStyle}>{t('admin.quarantine.emptyNote')}</span>}
+          {/* Empty while rspamd's history shows spam for the panel's mailboxes: probably off. */}
+          {data.total === 0 && data.spamInHistory > 0 && (
+            <div role="alert" data-quarantine-probably-off style={{ marginTop: 6, fontSize: 12, color: 'var(--red)', lineHeight: 1.5 }}>
+              {t('admin.quarantine.probablyOff', { number: data.spamInHistory })}
+            </div>
+          )}
+          {data.total === 0 && !(data.spamInHistory > 0) && <span style={hintStyle}>{t('admin.quarantine.emptyNote')}</span>}
           {items.length > 0 && (
             <ul style={{ listStyle: 'none', margin: '6px 0 0', padding: 0 }}>
               {items.map((item) => {
@@ -312,6 +409,7 @@ export default function MailNodeQuarantine({ admin = false }) {
                         entry={item}
                         admin={admin && data.admin}
                         onReleased={onReleased}
+                        onLearnedSpam={onLearnedSpam}
                         onDeleted={onDeleted}
                         onClose={() => setOpen(null)}
                       />
@@ -324,6 +422,7 @@ export default function MailNodeQuarantine({ admin = false }) {
           {data.total > 0 && items.length === 0 && <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-tertiary)' }}>{t('admin.quarantine.noMatch')}</div>}
         </>
       )}
+      <ConfirmOverlay dialog={dialog} onClose={() => setDialog(null)} />
     </div>
   );
 }

@@ -3284,7 +3284,7 @@ ${bodyContent}
         </div>
       )}
       {showThread && conversation?.items?.length > 1 && (
-        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} spamFolderPaths={spamFolderPaths} />
+        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} spamFolderPaths={spamFolderPaths} nodeMailbox={account?.mail_node === true} />
       )}
       </div>{/* end single scroll container */}
 

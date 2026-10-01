@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  eopSendsToSpam, filterQuarantine, formatScore, releaseNoteKey, rspamdActionKey, sizeLabel, spamReasons,
+  eopSendsToSpam, filterQuarantine, formatScore, matchNoteKey, releaseEopNoteShown, releaseNoteKey, rspamdActionKey, sizeLabel,
+  spamReasons,
 } from './quarantine.js';
 
 describe('quarantine helpers', () => {
@@ -56,6 +57,19 @@ describe('quarantine helpers', () => {
     assert.deepEqual(spamReasons({ rspamd: { action: 'no action' }, eopCategory: null }), ['message.spamVerdict.reasonOther']);
     assert.deepEqual(spamReasons({ rspamd: null, eopCategory: null }), []);
     assert.deepEqual(spamReasons({ rspamd: null, eopCategory: 'SPOOF' }), ['message.spamVerdict.reasonEop']);
+    // A refused letter reached the mailbox only by a release: no rspamd reason.
+    assert.deepEqual(spamReasons({ rspamd: { action: 'reject' }, eopCategory: 'SPM' }), ['message.spamVerdict.reasonEop']);
+    assert.deepEqual(spamReasons({ rspamd: { action: 'reject' }, eopCategory: null }), ['message.spamVerdict.reasonOther']);
+  });
+
+  it('notes an unusual match and shows the EOP release note only for refused letters', () => {
+    assert.equal(matchNoteKey('message_id'), null);
+    assert.equal(matchNoteKey('recipient_time'), 'message.spamVerdict.matchedByTime');
+    assert.equal(matchNoteKey('message_id_other_rcpt'), 'message.spamVerdict.matchedOtherRcpt');
+    assert.equal(releaseEopNoteShown('reject', { verdict: 'SPM', category: 'SPM' }), true);
+    assert.equal(releaseEopNoteShown('add header', { verdict: 'SPM', category: 'SPM' }), false);
+    assert.equal(releaseEopNoteShown('reject', { verdict: 'NSPM', category: 'NONE' }), false);
+    assert.equal(releaseEopNoteShown('reject', null), false);
   });
 
   it('prints attachment sizes', () => {

@@ -408,6 +408,9 @@ export const api = {
     getQuarantineItem: (id) => request('GET', `/mail-node/quarantine/${encodeURIComponent(id)}`),
     releaseQuarantineItem: (id) => request('POST', `/mail-node/quarantine/${encodeURIComponent(id)}/release`),
     deleteQuarantineItem: (id) => request('DELETE', `/mail-node/quarantine/${encodeURIComponent(id)}`),
+    learnSpamQuarantineItem: (id) => request('POST', `/mail-node/quarantine/${encodeURIComponent(id)}/learn-spam`),
+    // Writes every quarantine setting of mailcow (the screen warns first).
+    applyQuarantineNodeSettings: () => request('POST', '/mail-node/quarantine/node-settings', { confirm: true }),
     getQuarantineSettings: () => request('GET', '/mail-node/quarantine/settings'),
     saveQuarantineSettings: (data) => request('PUT', '/mail-node/quarantine/settings', data),
     // "Why is this letter in Spam": rspamd's verdict on a letter of a node mailbox.

@@ -95,7 +95,7 @@ beforeEach(() => {
   calls = [];
   answers = {
     'GET /api/mail-node/quarantine': { admin: true, total: 2, truncated: false, historyRead: true, items: [ROW, OTHER] },
-    'GET /api/mail-node/quarantine/settings': { userView: false },
+    'GET /api/mail-node/quarantine/settings': { userView: false, nodeSettingsAppliedAt: null, nodeSettings: { max_size: 10, retention_size: 20, max_age: 365, release_format: 'raw' } },
     'GET /api/mail-node/quarantine/41': DETAIL,
   };
   mockFetch();
@@ -116,7 +116,9 @@ async function click(element) {
   await React.act(async () => { element.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await flush();
 }
-const dialogConfirm = () => dom.window.document.querySelector('[role="dialog"] [data-confirm-button]');
+// Earlier tests' hosts stay mounted: the dialog of this test is the last one.
+const lastDialog = () => [...dom.window.document.querySelectorAll('[role="dialog"]')].at(-1);
+const dialogConfirm = () => lastDialog().querySelector('[data-confirm-button]');
 
 describe('MailNodeQuarantine', () => {
   test('lists the entries with score, action and the main symbols', async () => {
@@ -151,7 +153,7 @@ describe('MailNodeQuarantine', () => {
     const host = await mount(React.createElement(MailNodeQuarantine, { admin: true }));
     await click(buttons(host, 'Overdue invoice')[0]);
     await click(buttons(host, 'admin.quarantine.release')[0]);
-    const dialog = dom.window.document.querySelector('[role="dialog"]');
+    const dialog = lastDialog();
     assert.ok(dialog.textContent.includes('admin.quarantine.noteRejected'));
     assert.ok(dialog.textContent.includes('admin.quarantine.releaseEopNote'), 'EOP marked it as spam: it lands in Spam again');
     assert.ok(!calls.some((c) => c.method === 'POST'), 'nothing is released before the confirmation');
@@ -167,7 +169,7 @@ describe('MailNodeQuarantine', () => {
     const host = await mount(React.createElement(MailNodeQuarantine, { admin: true }));
     await click(buttons(host, 'Overdue invoice')[0]);
     await click(buttons(host.querySelector('[data-quarantine-entry]'), 'common.delete')[0]);
-    assert.ok(dom.window.document.querySelector('[role="dialog"]').textContent.includes('admin.quarantine.deleteMessage'));
+    assert.ok(lastDialog().textContent.includes('admin.quarantine.deleteMessage'));
     await click(dialogConfirm());
     assert.ok(calls.some((c) => c.method === 'DELETE' && c.path === '/api/mail-node/quarantine/41'));
     assert.ok(host.textContent.includes('admin.quarantine.deleted'));
@@ -208,7 +210,7 @@ describe('MailNodeQuarantine', () => {
 
 describe('SpamVerdict', () => {
   const VERDICT = {
-    eopCategory: 'SPM', historyRows: 1000, historyDepth: 1000,
+    eopCategory: 'SPM', historyRows: 1000,
     rspamd: {
       matchedBy: 'message_id', time: '2026-10-01T10:00:00.000Z', score: 12.1, spamScore: 8, rejectScore: 15, action: 'add header', skipped: false,
       symbols: [{ name: 'MIME_BAD_EXTENSION', score: 10.1, description: 'Bad extension' }, { name: 'MIME_GOOD', score: -0.1, description: null }],
@@ -230,7 +232,7 @@ describe('SpamVerdict', () => {
   });
 
   test('says when the history has no entry and when the lookup failed', async () => {
-    answers['GET /api/mail-node/messages/m-2/spam-verdict'] = { eopCategory: null, historyRows: 1000, historyDepth: 1000, rspamd: null };
+    answers['GET /api/mail-node/messages/m-2/spam-verdict'] = { eopCategory: null, historyRows: 1000, rspamd: null };
     const host = await mount(React.createElement(SpamVerdict, { messageId: 'm-2' }));
     await click(buttons(host, 'message.spamVerdict.ask')[0]);
     assert.ok(host.querySelector('[data-rspamd-missing]'));
@@ -239,7 +241,89 @@ describe('SpamVerdict', () => {
     answers['GET /api/mail-node/messages/m-3/spam-verdict'] = { status: 502, body: { error: 'The mail node is unreachable', code: 'mail_node_unreachable' } };
     const failed = await mount(React.createElement(SpamVerdict, { messageId: 'm-3' }));
     await click(buttons(failed, 'message.spamVerdict.ask')[0]);
-    assert.ok(failed.textContent.includes('message.spamVerdict.failed'));
+    const alert = failed.querySelector('[role="alert"]');
+    assert.ok(alert.textContent.includes('message.spamVerdict.failed'));
     assert.equal(buttons(failed, 'message.spamVerdict.retry').length, 1);
+  });
+
+  test('shows a refused letter without the rspamd reason, and says how an unusual row was found', async () => {
+    answers['GET /api/mail-node/messages/m-6/spam-verdict'] = {
+      eopCategory: null, historyRows: 640,
+      rspamd: { ...VERDICT.rspamd, action: 'reject', matchedBy: 'message_id_other_rcpt' },
+    };
+    const host = await mount(React.createElement(SpamVerdict, { messageId: 'm-6' }));
+    await click(buttons(host, 'message.spamVerdict.ask')[0]);
+    assert.deepEqual([...host.querySelectorAll('[data-reason]')].map((r) => r.getAttribute('data-reason')), ['message.spamVerdict.reasonOther']);
+    assert.equal(host.querySelector('[data-match-note]').getAttribute('data-match-note'), 'message_id_other_rcpt');
+    assert.ok(host.textContent.includes('Bad extension'), 'a symbol\'s description is on screen, not only in a tooltip');
+  });
+
+  test('drops an answer for a letter no longer shown', async () => {
+    let resolve;
+    answers['GET /api/mail-node/messages/m-4/spam-verdict'] = () => new Promise((r) => { resolve = r; });
+    const host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    const root = createRoot(host);
+    await React.act(async () => { root.render(React.createElement(SpamVerdict, { messageId: 'm-4' })); });
+    await click(buttons(host, 'message.spamVerdict.ask')[0]);
+    await React.act(async () => { root.render(React.createElement(SpamVerdict, { messageId: 'm-5' })); });
+    resolve(VERDICT);
+    await flush();
+    assert.equal(host.querySelector('[data-spam-verdict]'), null);
+    assert.equal(buttons(host, 'message.spamVerdict.ask').length, 1);
+  });
+});
+
+describe('MailNodeQuarantine — node settings and training', () => {
+  test('warns when the history shows spam but the quarantine is empty', async () => {
+    answers['GET /api/mail-node/quarantine'] = { admin: true, total: 0, truncated: false, historyRead: true, spamInHistory: 4, items: [] };
+    const host = await mount(React.createElement(MailNodeQuarantine, { admin: true }));
+    assert.ok(host.querySelector('[data-quarantine-probably-off]'));
+    assert.ok(!host.textContent.includes('admin.quarantine.emptyNote'));
+  });
+
+  test('writes mailcow\'s quarantine settings only after a warning, then offers to re-apply', async () => {
+    answers['POST /api/mail-node/quarantine/node-settings'] = {
+      ok: true, userView: false, nodeSettingsAppliedAt: '2026-10-02T10:00:00.000Z', nodeSettings: { max_size: 10, retention_size: 20, max_age: 365, release_format: 'raw' },
+    };
+    const host = await mount(React.createElement(MailNodeQuarantine, { admin: true }));
+    assert.equal(host.querySelector('[data-quarantine-node-settings]').getAttribute('data-quarantine-node-settings'), 'never');
+    await click(buttons(host, 'admin.quarantine.nodeSettingsApply')[0]);
+    const dialog = lastDialog();
+    assert.ok(dialog.textContent.includes('admin.quarantine.nodeSettingsWarning'));
+    assert.ok(dialog.textContent.includes('admin.quarantine.nodeSettingsValues'));
+    assert.ok(!calls.some((c) => c.method === 'POST'));
+    await click(dialogConfirm());
+    assert.deepEqual(calls.find((c) => c.method === 'POST').body, { confirm: true });
+    assert.equal(host.querySelector('[data-quarantine-node-settings]').getAttribute('data-quarantine-node-settings'), 'applied');
+    await click(buttons(host, 'admin.quarantine.nodeSettingsReapply')[0]);
+    assert.ok(lastDialog().textContent.includes('admin.quarantine.nodeSettingsReapplyWarning'));
+  });
+
+  test('says releasing cannot be undone, and gives the EOP note only to a refused letter', async () => {
+    answers['GET /api/mail-node/quarantine/40'] = { ...DETAIL, id: 40, action: 'add header' };
+    const host = await mount(React.createElement(MailNodeQuarantine, { admin: true }));
+    await click(buttons(host, 'Partner news')[0]);
+    await click(buttons(host.querySelector('[data-quarantine-entry="40"]'), 'admin.quarantine.release')[0]);
+    const dialog = lastDialog();
+    assert.ok(dialog.textContent.includes('admin.quarantine.noteDelivered'));
+    assert.ok(dialog.textContent.includes('admin.quarantine.releaseTraining'));
+    assert.ok(dialog.textContent.includes('admin.quarantine.releaseRawNote'));
+    assert.ok(!dialog.textContent.includes('admin.quarantine.releaseEopNote'));
+  });
+
+  test('deletes and trains as spam after a confirmation, and writes symbol details out', async () => {
+    answers['POST /api/mail-node/quarantine/41/learn-spam'] = { ok: true, learned: false, warnings: ['spam_learn_error already learned'] };
+    const host = await mount(React.createElement(MailNodeQuarantine, { admin: true }));
+    await click(buttons(host, 'Overdue invoice')[0]);
+    const entry = host.querySelector('[data-quarantine-entry="41"]');
+    assert.equal(entry.querySelector('[data-symbol="MIME_BAD_EXTENSION"] [data-symbol-details]').textContent, 'exe');
+    assert.equal(entry.querySelector('[data-safe-view-body]').getAttribute('tabindex'), '0');
+    await click(buttons(entry, 'admin.quarantine.learnSpam')[0]);
+    assert.ok(lastDialog().textContent.includes('admin.quarantine.learnSpamMessage'));
+    await click(dialogConfirm());
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/quarantine/41/learn-spam'));
+    assert.equal(host.querySelector('[data-quarantine-row="41"]'), null);
+    assert.ok(host.textContent.includes('admin.quarantine.learnedSpamWarnings'));
   });
 });

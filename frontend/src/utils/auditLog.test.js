@@ -12,7 +12,8 @@ describe('AUDIT_ACTIONS', () => {
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
-      'mail_node.quarantine_released', 'mail_node.quarantine_deleted',
+      'mail_node.quarantine_released', 'mail_node.quarantine_deleted', 'mail_node.quarantine_learned_spam',
+      'mail_node.quarantine_settings_applied',
     ]);
     assert.equal(auditActionLabelKey('mail_node.applied'), 'admin.audit.actionMailNodeApplied');
     assert.equal(auditActionLabelKey('mailbox.rate_limit_changed'), 'admin.audit.actionMailboxRateLimitChanged');
@@ -341,6 +342,17 @@ describe('auditDetail', () => {
       key: 'admin.audit.detailQuarantineSettingsChanged', values: {}, valueKeys: { fields: ['admin.audit.fieldQuarantineUserView'] },
     });
     assert.equal(auditActionLabelKey('mail_node.quarantine_released'), 'admin.audit.actionMailNodeQuarantineReleased');
+    assert.deepEqual(auditDetail({ action: 'mail_node.quarantine_learned_spam', details: { ...details, learned: true } }), {
+      key: 'admin.audit.detailQuarantineReleased', values: { sender: 'spam@bad.test', rcpt: 'info@example.com', score: 16.1 },
+    });
+    const applied = { maxSize: 10, retentionSize: 20, maxAge: 365, releaseFormat: 'raw' };
+    assert.deepEqual(auditDetail({ action: 'mail_node.quarantine_settings_applied', details: { reapplied: false, ...applied } }), {
+      key: 'admin.audit.detailQuarantineSettingsApplied', values: { maxSize: 10, retention: 20, maxAge: 365, format: 'raw' },
+    });
+    assert.equal(
+      auditDetail({ action: 'mail_node.quarantine_settings_applied', details: { reapplied: true, ...applied } }).key,
+      'admin.audit.detailQuarantineSettingsReapplied',
+    );
   });
 
   it('shows nothing for actions without details or unknown entries', () => {

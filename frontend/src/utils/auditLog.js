@@ -34,6 +34,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.dns_checked': 'admin.audit.actionMailNodeDnsChecked',
   'mail_node.quarantine_released': 'admin.audit.actionMailNodeQuarantineReleased',
   'mail_node.quarantine_deleted': 'admin.audit.actionMailNodeQuarantineDeleted',
+  'mail_node.quarantine_learned_spam': 'admin.audit.actionMailNodeQuarantineLearnedSpam',
+  'mail_node.quarantine_settings_applied': 'admin.audit.actionMailNodeQuarantineSettingsApplied',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -313,7 +315,9 @@ export function auditDetail(entry) {
       };
     // A letter of the node's quarantine an administrator released (delivered to its mailbox and
     // trained as ham; warnings: what the node said went wrong after it went out) or deleted.
+    // "Delete and train as spam" reads like a release: the letter, then what the node warned about.
     case 'mail_node.quarantine_released':
+    case 'mail_node.quarantine_learned_spam':
     case 'mail_node.quarantine_deleted': {
       const values = { sender: details.sender ?? '', rcpt: details.rcpt ?? '', score: details.score ?? '' };
       if (entry.action === 'mail_node.quarantine_deleted') return { key: 'admin.audit.detailQuarantineDeleted', values };
@@ -322,6 +326,14 @@ export function auditDetail(entry) {
         ? { key: 'admin.audit.detailQuarantineReleasedWarnings', values: { ...values, warnings } }
         : { key: 'admin.audit.detailQuarantineReleased', values };
     }
+    // The panel wrote mailcow's quarantine settings: the first time or again, with the values.
+    case 'mail_node.quarantine_settings_applied':
+      return {
+        key: details.reapplied ? 'admin.audit.detailQuarantineSettingsReapplied' : 'admin.audit.detailQuarantineSettingsApplied',
+        values: {
+          maxSize: details.maxSize ?? '', retention: details.retentionSize ?? '', maxAge: details.maxAge ?? '', format: details.releaseFormat ?? '',
+        },
+      };
     case 'mail_node.domain_identity_acknowledged':
       return {
         key: 'admin.audit.detailDomainIdentityAcknowledged',

@@ -426,7 +426,7 @@
       "retry": "Try again",
       "title": "Why this letter is in Spam",
       "reasonRspamd": "The mail node's spam filter (rspamd) marked it as spam.",
-      "reasonEop": "Microsoft EOP marked it, and the panel's filing rule put it in Spam.",
+      "reasonEop": "Microsoft EOP marked it ({{category}}); the panel's filing rule puts such letters in Spam unless EOP released them from its own quarantine, which the panel does not store.",
       "reasonOther": "Neither filter marked it as spam: a person, an inbox rule or a filter moved it here.",
       "score": "rspamd score {{score}} (spam from {{spam}}, refused from {{reject}}): {{action}}",
       "checkedAt": "Checked {{time}}",
@@ -441,7 +441,8 @@
         "addHeader": "marked as spam",
         "greylist": "greylisted",
         "noAction": "no action"
-      }
+      },
+      "matchedOtherRcpt": "Found by Message-ID on a letter to another address of the mail node: this copy came through an address the panel does not know, such as an alias."
     }
   },
   "messageList": {
@@ -1960,7 +1961,11 @@
       "detailQuarantineSettingsChanged": "Quarantine: {{fields}}",
       "detailQuarantineReleased": "From {{sender}} to {{rcpt}}, score {{score}}",
       "detailQuarantineReleasedWarnings": "From {{sender}} to {{rcpt}}, score {{score}}; the node reported: {{warnings}}",
-      "detailQuarantineDeleted": "Deleted: from {{sender}} to {{rcpt}}, score {{score}}"
+      "detailQuarantineDeleted": "Deleted: from {{sender}} to {{rcpt}}, score {{score}}",
+      "actionMailNodeQuarantineLearnedSpam": "Quarantine letter deleted and learned as spam",
+      "actionMailNodeQuarantineSettingsApplied": "Quarantine settings written to the node",
+      "detailQuarantineSettingsApplied": "Up to {{maxSize}} MiB, {{retention}} per mailbox, {{maxAge}} days, release format {{format}}",
+      "detailQuarantineSettingsReapplied": "Written again: up to {{maxSize}} MiB, {{retention}} per mailbox, {{maxAge}} days, release format {{format}}"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -2328,7 +2333,7 @@
       "descriptionUser": "Letters to the panel's node mailboxes that the node's spam filter refused or marked as spam. Read-only: ask an administrator to release one.",
       "userView": "Users see the entries of the panel's node mailboxes",
       "userViewNote": "Read-only, under Settings > Mailboxes. Every user sees every node mailbox of this panel, so this shows them the quarantine of all of them. Releasing and deleting stay with administrators.",
-      "settingsNote": "Retention, maximum size and notifications are set in mailcow (System > Configuration > Options > Quarantine). The panel leaves them alone: the mailcow API cannot read them back, and writing them resets the ones left out. A new mailcow keeps nothing until its maximum size and retention are above 0.",
+      "settingsNote": "Retention, maximum size and notifications live in mailcow (System > Configuration > Options > Quarantine); the mailcow API cannot read them back. A new mailcow keeps nothing until its maximum size and retention are above 0, and loses letters silently until that form was saved once. The panel can write them for you once: keep the release format \"raw\" there, the panel's texts about releasing assume it.",
       "filterPh": "Filter by sender, recipient or subject",
       "refresh": "Refresh",
       "count": "Entries: {{number}}",
@@ -2371,7 +2376,26 @@
       "deleted": "Deleted.",
       "sizeBytes": "{{value}} B",
       "sizeKb": "{{value}} KB",
-      "sizeMb": "{{value}} MB"
+      "sizeMb": "{{value}} MB",
+      "nodeSettingsNever": "The panel has not written mailcow's quarantine settings.",
+      "nodeSettingsAppliedAt": "The panel wrote mailcow's quarantine settings {{time}}.",
+      "nodeSettingsApply": "Enable quarantine on this node",
+      "nodeSettingsReapply": "Re-apply quarantine settings",
+      "nodeSettingsTitle": "Enable quarantine on this node?",
+      "nodeSettingsReapplyTitle": "Re-apply the quarantine settings?",
+      "nodeSettingsWarning": "This overwrites every quarantine setting in mailcow. The mailcow API cannot read them, so anything set there by hand is replaced, and the fields the panel leaves empty (notification sender, subject, template, BCC, redirect) go back to mailcow's defaults.",
+      "nodeSettingsReapplyWarning": "The panel wrote these settings before. Anything changed in mailcow since then (retention, size, notification template, sender, BCC, redirect, excluded domains) is overwritten again, with no way to read it first.",
+      "nodeSettingsValues": "Letters up to {{maxSize}} MiB, {{retention}} kept per mailbox, deleted after {{maxAge}} days, released as format \"{{format}}\", no excluded domains, notifications with mailcow's defaults.",
+      "nodeSettingsDone": "mailcow's quarantine settings written.",
+      "probablyOff": "The quarantine is empty, but rspamd's recent history shows {{number}} letters to the panel's mailboxes that it refused or marked as spam. Unless they were released or deleted, mailcow's quarantine is probably off: enable it above.",
+      "headersTruncated": "Only the first headers are shown.",
+      "releaseTraining": "This cannot be undone: rspamd learns the letter as not spam and adds its fuzzy hash as ham, so similar letters score lower from now on.",
+      "releaseRawNote": "This assumes mailcow releases the original letter (release format \"raw\", which the panel sets).",
+      "learnSpam": "Delete and train as spam",
+      "learnSpamTitle": "Delete this letter and train rspamd with it as spam?",
+      "learnSpamMessage": "The copy from {{sender}} to {{rcpt}} is deleted from mailcow for good, and rspamd learns it as spam and adds its fuzzy hash, so similar letters score higher from now on. This cannot be undone.",
+      "learnedSpam": "Deleted and learned as spam.",
+      "learnedSpamWarnings": "Deleted. The node reported: {{warnings}}"
     }
   },
   "blockList": {

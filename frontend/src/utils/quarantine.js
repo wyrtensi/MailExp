@@ -43,6 +43,24 @@ export function filterQuarantine(items, text) {
   return items.filter((item) => [item.sender, item.rcpt, item.subject].some((v) => String(v ?? '').toLowerCase().includes(needle)));
 }
 
+// How the history row was found, when it says something the reader should know: by recipient and
+// time (the letter has no Message-ID), or by Message-ID on a row for another address of the node.
+const MATCH_KEYS = {
+  recipient_time: 'message.spamVerdict.matchedByTime',
+  message_id_other_rcpt: 'message.spamVerdict.matchedOtherRcpt',
+};
+export function matchNoteKey(matchedBy) {
+  return MATCH_KEYS[matchedBy] ?? null;
+}
+
+// What releasing a letter does to its mailbox, by rspamd's action: a refused letter is delivered
+// (and the panel's rule files it in Spam again when EOP marked it, so the EOP note goes only with
+// a refused letter); a delivered one is dropped as a duplicate.
+export function releaseEopNoteShown(action, eop) {
+  const value = String(action ?? '').toLowerCase();
+  return (value === 'reject' || value === 'soft reject') && eopSendsToSpam(eop);
+}
+
 // An attachment's size for the screen: { key, value } in bytes, KB or MB.
 export function sizeLabel(bytes) {
   const n = Math.max(0, Number(bytes) || 0);
@@ -68,12 +86,12 @@ export function eopSendsToSpam(eop) {
 // reached the spam score), EOP's category put it there through the panel's rule, or neither (a
 // person, an inbox rule or the sender's own filter moved it). Without rspamd's row only the EOP
 // reason can be told. The sync keeps EOP's category, not its verdict (messages.eop_category).
+// A row rspamd refused never reached a mailbox by itself (only a release delivers it), so a refusal
+// is not a reason for the letter being in Spam.
 export function spamReasons({ rspamd, eopCategory }) {
   const reasons = [];
   const action = String(rspamd?.action ?? '').toLowerCase();
-  if (action === 'add header' || action === 'rewrite subject' || action === 'reject' || action === 'soft reject') {
-    reasons.push('message.spamVerdict.reasonRspamd');
-  }
+  if (action === 'add header' || action === 'rewrite subject') reasons.push('message.spamVerdict.reasonRspamd');
   if (eopSendsToSpam({ category: eopCategory })) reasons.push('message.spamVerdict.reasonEop');
   if (!reasons.length && rspamd) reasons.push('message.spamVerdict.reasonOther');
   return reasons;

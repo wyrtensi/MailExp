@@ -1150,8 +1150,23 @@ let demoQuarantine = [
 const demoPanelBoxes = () => new Map(FLEET_ACCOUNTS.filter(account => account.mail_node).map(account => [account.email_address, account.id]));
 const quarantineTop = item => item.symbols.filter(s => s.score > 0).slice(0, 3).map(({ name, score }) => ({ name, score }));
 
+// What the panel writes to mailcow's quarantine settings (backend mailcow.js QUARANTINE_NODE_SETTINGS).
+const DEMO_QUARANTINE_NODE_SETTINGS = {
+  max_size: 10, retention_size: 20, max_age: 365, max_score: '', exclude_domains: [], release_format: 'raw',
+  sender: '', subject: '', bcc: '', redirect: '', html_tmpl: '',
+};
+let demoQuarantineAppliedAt = null;
+const demoQuarantineSettings = () => clone({
+  userView: demoQuarantineUserView, nodeSettingsAppliedAt: demoQuarantineAppliedAt, nodeSettings: DEMO_QUARANTINE_NODE_SETTINGS,
+});
+
 function demoQuarantineRequest(verb, pathname, body) {
-  if (verb === 'GET' && pathname === '/mail-node/quarantine/settings') return { userView: demoQuarantineUserView };
+  if (verb === 'GET' && pathname === '/mail-node/quarantine/settings') return demoQuarantineSettings();
+  if (verb === 'POST' && pathname === '/mail-node/quarantine/node-settings') {
+    if (body?.confirm !== true) throw demoError('Writing the quarantine settings needs { confirm: true }', 'quarantine_settings_unconfirmed');
+    demoQuarantineAppliedAt = new Date().toISOString();
+    return { ok: true, ...demoQuarantineSettings() };
+  }
   if (verb === 'PUT' && pathname === '/mail-node/quarantine/settings') {
     if (typeof body?.userView !== 'boolean') throw demoError('userView must be true or false', 'quarantine_user_view_invalid');
     demoQuarantineUserView = body.userView;
@@ -1167,6 +1182,8 @@ function demoQuarantineRequest(verb, pathname, body) {
     const items = visible();
     return clone({
       admin, total: items.length, truncated: false, historyRead: true,
+      // An empty quarantine while the history shows spam for the panel's mailboxes, as on a server.
+      ...(admin && !items.length ? { spamInHistory: 3 } : {}),
       // The listing carries no letter, IP or full symbol list, as on the server.
       items: items.map(item => ({
         id: item.id, qid: item.qid, subject: item.subject, score: item.score, sender: item.sender, rcpt: item.rcpt,
@@ -1175,13 +1192,19 @@ function demoQuarantineRequest(verb, pathname, body) {
       })),
     });
   }
-  const entryMatch = pathname.match(/^\/mail-node\/quarantine\/([^/]+)(\/release)?$/);
+  const entryMatch = pathname.match(/^\/mail-node\/quarantine\/([^/]+)(\/release|\/learn-spam)?$/);
   if (entryMatch && (verb === 'GET' || verb === 'DELETE' || (verb === 'POST' && entryMatch[2]))) {
     const id = Number(decodeURIComponent(entryMatch[1]));
     if (verb !== 'GET' && !admin) throw demoError('Admin access required', 'admin_required');
     const item = (verb === 'GET' ? visible() : demoQuarantine).find(entry => entry.id === id);
     if (!item) throw demoError('No such quarantine entry', 'quarantine_item_not_found');
-    if (verb === 'GET') return clone({ ...item, user: null, created: item.created.replace('T', ' ').slice(0, 19), accountId: boxes.get(item.rcpt) ?? null, admin });
+    // As on the server, a user gets neither the sending login nor the symbols' details.
+    if (verb === 'GET') {
+      return clone({
+        ...item, ...(admin ? { user: null } : {}), created: item.created.replace('T', ' ').slice(0, 19), accountId: boxes.get(item.rcpt) ?? null, admin,
+        symbols: admin ? item.symbols : item.symbols.map(({ name, score, description }) => ({ name, score, description })),
+      });
+    }
     demoQuarantine = demoQuarantine.filter(entry => entry.id !== id);
     return verb === 'DELETE' ? { ok: true } : { ok: true, learned: true, warnings: [] };
   }
@@ -1192,7 +1215,7 @@ function demoQuarantineRequest(verb, pathname, body) {
     if (!accountFor(item.account_id)?.mail_node) throw demoError('The letter is not in a mail node mailbox', 'message_not_mail_node');
     // As a node would see a prize scam: rspamd marked it as spam on its own.
     return clone({
-      eopCategory: item.eop_category ?? null, historyRows: 1000, historyDepth: 1000,
+      eopCategory: item.eop_category ?? null, historyRows: 1000,
       rspamd: {
         matchedBy: 'message_id', time: item.date, score: 11.3, spamScore: 8, rejectScore: 15, action: 'add header', skipped: false,
         symbols: [
