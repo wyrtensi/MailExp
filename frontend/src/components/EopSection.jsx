@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
+import MailNodeApplyResult from './MailNodeApplyResult.jsx';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
 import {
   DEFAULT_SEND_LIMIT_PER_HOUR,
@@ -9,6 +10,7 @@ import {
   eopSettingsError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
+  prefilterPending,
 } from '../utils/mailNode.js';
 
 const fieldStyle = {
@@ -22,25 +24,45 @@ const primaryButtonStyle = {
   padding: '7px 12px', borderRadius: 7, fontSize: 12, fontWeight: 500, border: 'none',
   background: 'var(--accent)', color: 'var(--accent-text)', cursor: 'pointer',
 };
+const buttonStyle = { ...primaryButtonStyle, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-primary)' };
+const dangerButtonStyle = { ...primaryButtonStyle, background: '#dc2626', color: 'white' };
+const warningBoxStyle = {
+  marginTop: 10, padding: 10, borderRadius: 8, fontSize: 12, lineHeight: 1.5, color: 'var(--text-primary)',
+  background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.35)',
+};
+// Spelled out literally so the i18n coverage test finds them.
+const TLS_POLICY_KEYS = {
+  secure: 'admin.eop.tlsPolicySecure',
+  dane: 'admin.eop.tlsPolicyDane',
+  'dane-only': 'admin.eop.tlsPolicyDaneOnly',
+  verify: 'admin.eop.tlsPolicyVerify',
+  fingerprint: 'admin.eop.tlsPolicyFingerprint',
+  encrypt: 'admin.eop.tlsPolicyEncrypt',
+  default: 'admin.eop.tlsPolicyDefault',
+};
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 
-const TEXT_FIELDS = ['eopHost', 'certificateHost', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
+const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
 
 // The stored settings as the form edits them: every field a string.
 function toForm(settings) {
   return {
     ...Object.fromEntries(TEXT_FIELDS.map((field) => [field, settings?.[field] == null ? '' : String(settings[field])])),
+    tlsPolicy: settings?.tlsPolicy ?? 'secure',
     dkimMode: settings?.dkimMode ?? 'mailcow',
     sendLimitPerHour: String(settings?.sendLimitPerHour ?? DEFAULT_SEND_LIMIT_PER_HOUR),
   };
 }
 
 // Settings -> Integrations -> "EOP" (admins only), next to the mail node: how the node's mail goes
-// through Microsoft EOP. The panel keeps these and does not apply them yet. Until the panel works
-// with the tenant itself (the server's tenantDriverActive, false until the tenant driver exists),
-// the domains' onboarding is done by hand, so this section also lists the domains that are not
-// ready with their checklist and the "Done" of each step. Filling in the tenant ids alone does not
-// change that.
+// through Microsoft EOP. The next hop with its TLS policy, the DKIM mode and the send limit are
+// applied to the node through the mailcow API (saving them applies them; "Apply settings" does it
+// again for the node and every domain), and the last result is shown item by item. The spam filing
+// rule is written only by its own button, after a warning: it restarts Dovecot on the node. Until
+// the panel works with the tenant itself (the server's tenantDriverActive, false until the tenant
+// driver exists), the domains' onboarding is done by hand, so this section also lists the domains
+// that are not ready with their checklist and the "Done" of each step. Filling in the tenant ids
+// alone does not change that.
 export default function EopSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
   const [stored, setStored] = useState(null);
@@ -51,6 +73,18 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  // The node's last apply ({ at, items }) and whether the spam rule waits for its confirmation.
+  const [applied, setApplied] = useState(null);
+  const [confirmPrefilter, setConfirmPrefilter] = useState(false);
+
+  const loadApplied = useCallback(async () => {
+    try {
+      setApplied((await api.mailNode.getApplyResult())?.node ?? null);
+    } catch {
+      setApplied(null);
+    }
+  }, []);
+  useEffect(() => { loadApplied(); }, [loadApplied, revision]);
 
   useEffect(() => {
     api.mailNode.getEopSettings()
@@ -86,14 +120,20 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     setError(null);
     setNotice(null);
     try {
-      const saved = await api.mailNode.saveEopSettings({
+      const { apply, ...saved } = await api.mailNode.saveEopSettings({
         ...Object.fromEntries(TEXT_FIELDS.map((field) => [field, form[field].trim()])),
+        tlsPolicy: form.tlsPolicy,
         dkimMode: form.dkimMode,
         sendLimitPerHour: Number(form.sendLimitPerHour),
       });
       setStored(saved);
       setForm(toForm(saved));
-      setNotice('admin.eop.saved');
+      // A change the node gets was applied right away: its result replaces the last one.
+      if (apply) {
+        setApplied({ at: apply.at, items: apply.node ?? [] });
+        domainChanged();
+      }
+      setNotice(apply ? 'admin.eop.savedApplied' : 'admin.eop.saved');
     } catch (err) {
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
     } finally {
@@ -102,7 +142,28 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   };
 
   // A domain change reloads both sections through `revision` when the panel shares it.
-  const domainChanged = () => (onDomainsChanged ? onDomainsChanged() : loadDomains());
+  function domainChanged() {
+    return onDomainsChanged ? onDomainsChanged() : loadDomains();
+  }
+
+  const runApply = async (action, noticeKey) => {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await action();
+      await loadApplied();
+      setNotice(noticeKey);
+      domainChanged();
+    } catch (err) {
+      setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
+    } finally {
+      setBusy(false);
+      setConfirmPrefilter(false);
+    }
+  };
+  const applyNode = () => runApply(() => api.mailNode.applyNode(), 'admin.mailNode.applyDone');
+  const applyPrefilter = () => runApply(() => api.mailNode.applyPrefilter(), 'admin.mailNode.prefilterDone');
 
   const pending = (domains ?? []).filter((d) => !MAILBOX_READY_STATES.includes(d.state));
 
@@ -132,6 +193,18 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             <span style={labelStyle}>{t('admin.eop.eopHostLabel')}</span>
             {textField('eopHost', { placeholder: t('admin.eop.eopHostPh') })}
             <span style={hintStyle}>{t('admin.eop.eopHostNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.eop.tlsPolicyLabel')}</span>
+            <select value={form.tlsPolicy} onChange={set('tlsPolicy')} style={{ ...fieldStyle, maxWidth: 420 }}>
+              {Object.entries(TLS_POLICY_KEYS).map(([policy, key]) => <option key={policy} value={policy}>{t(key)}</option>)}
+            </select>
+            <span style={hintStyle}>{t('admin.eop.tlsPolicyNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.eop.tlsParametersLabel')}</span>
+            {textField('tlsPolicyParameters', { placeholder: t('admin.eop.tlsParametersPh') })}
+            <span style={hintStyle}>{t('admin.eop.tlsParametersNote')}</span>
           </label>
           <label>
             <span style={labelStyle}>{t('admin.eop.certificateHostLabel')}</span>
@@ -187,6 +260,36 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
         </div>
       )}
       {notice && <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>{t(notice)}</div>}
+
+      {stored && (
+        <div data-node-apply>
+          <div style={subTitleStyle}>{t('admin.mailNode.applyTitle')}</div>
+          <span style={{ ...hintStyle, marginTop: 0, marginBottom: 8 }}>{t('admin.mailNode.applyNote')}</span>
+          {applied ? <MailNodeApplyResult result={applied} /> : <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{t('admin.mailNode.applyNever')}</div>}
+          <div style={{ marginTop: 10 }}>
+            <button type="button" onClick={applyNode} disabled={busy} style={buttonStyle}>{t('admin.mailNode.applyButton')}</button>
+          </div>
+          {prefilterPending(applied) && (
+            <div role="status" data-prefilter-pending style={warningBoxStyle}>
+              <div>{t('admin.mailNode.prefilterNote')}</div>
+              {!confirmPrefilter && (
+                <button type="button" onClick={() => setConfirmPrefilter(true)} disabled={busy} style={{ ...buttonStyle, marginTop: 8 }}>
+                  {t('admin.mailNode.prefilterApply')}
+                </button>
+              )}
+              {confirmPrefilter && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontWeight: 600 }}>{t('admin.mailNode.prefilterConfirm')}</div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button type="button" onClick={applyPrefilter} disabled={busy} style={dangerButtonStyle}>{t('admin.mailNode.prefilterApplyConfirm')}</button>
+                    <button type="button" onClick={() => setConfirmPrefilter(false)} disabled={busy} style={buttonStyle}>{t('common.cancel')}</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {showChecklist && (
         <>

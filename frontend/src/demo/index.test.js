@@ -324,6 +324,66 @@ test('the demo EOP settings refuse and normalize like the server', async () => {
   assert.equal(saved.terrl, 48248);
 });
 
+test('the demo applies the node settings: the node and its domains, and the spam rule only by its own action', async () => {
+  const before = await demoRequest('GET', '/mail-node/apply');
+  assert.deepEqual(before.node.items.find(i => i.item === 'prefilter'), { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' });
+  const result = await demoRequest('POST', '/mail-node/apply');
+  assert.deepEqual(result.node.map(i => i.item), ['tls_policy', 'relayhost', 'fail2ban', 'prefilter']);
+  assert.ok(result.domains.length > 0);
+  assert.ok(result.domains.every(d => d.items.map(i => i.item).join() === 'domain_relayhost,dkim,mailbox_limits'));
+  // Every mailbox has the limit the panel wants after an apply.
+  const { mailboxes } = await demoRequest('GET', '/mail-node/mailboxes');
+  assert.ok(mailboxes.every(m => m.rateLimit && m.rateLimit.value === (m.rateLimitOverride ?? m.rateLimitDefault).value));
+  // A domain the tenant signs keeps mailcow's key until the administrator confirms its deletion.
+  let pilot = await demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/apply');
+  assert.deepEqual(pilot.items.find(i => i.item === 'dkim').code, 'dkim_delete_unconfirmed');
+  pilot = await demoRequest('POST', '/mail-node/domains/pilot.demo.mailexpert.local/apply', { confirmDkimDelete: true });
+  assert.equal(pilot.items.find(i => i.item === 'dkim').status, 'changed');
+  assert.equal(pilot.dkim, null);
+  const listed = (await demoRequest('GET', '/mail-node/domains')).domains.find(d => d.domain === 'pilot.demo.mailexpert.local');
+  assert.equal(listed.apply.items.find(i => i.item === 'dkim').status, 'changed');
+  const ready = (await demoRequest('GET', '/mail-node/domains')).domains.find(d => d.domain === 'demo.mailexpert.local');
+  assert.equal(ready.apply.dkim.name, 'dkim._domainkey.demo.mailexpert.local');
+  assert.equal((await demoRequest('POST', '/mail-node/apply/prefilter')).status, 'changed');
+  assert.equal((await demoRequest('POST', '/mail-node/apply/prefilter')).status, 'ok');
+  assert.equal((await demoRequest('GET', '/mail-node/apply')).node.items.find(i => i.item === 'prefilter').status, 'ok');
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/nowhere.example/apply'), err => err.code === 'domain_not_on_node');
+});
+
+test('the demo keeps the TLS policy of the next hop and applies a change to the node', async () => {
+  assert.equal((await demoRequest('GET', '/mail-node/eop')).tlsPolicy, 'secure');
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'none' }), err => err.code === 'tls_policy_invalid');
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'fingerprint' }), err => err.code === 'tls_parameters_invalid');
+  const saved = await demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'fingerprint', tlsPolicyParameters: ' match=AB:CD ' });
+  assert.equal(saved.tlsPolicyParameters, 'match=AB:CD');
+  assert.deepEqual(saved.apply.node[0], {
+    item: 'tls_policy', target: 'demo-mailexpert-local.mail.protection.outlook.com', status: 'changed', from: 'secure', to: 'fingerprint match=AB:CD',
+  });
+  const back = await demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'secure', tlsPolicyParameters: '' });
+  assert.equal(back.apply.node[0].to, 'secure');
+  assert.equal((await demoRequest('PUT', '/mail-node/eop', { terrl: '1000' })).apply, undefined);
+});
+
+test('the demo sets a mailbox\'s own send limit and its default again, refusing bad ones', async () => {
+  const [first] = (await demoRequest('GET', '/mail-node/mailboxes')).mailboxes;
+  await assert.rejects(() => demoRequest('PUT', `/mail-node/mailboxes/${first.accountId}/rate-limit`, { value: 0, frame: 'h' }), err => err.code === 'rate_limit_invalid');
+  await assert.rejects(() => demoRequest('PUT', `/mail-node/mailboxes/${first.accountId}/rate-limit`, { value: 5, frame: 'w' }), err => err.code === 'rate_limit_invalid');
+  let saved = await demoRequest('PUT', `/mail-node/mailboxes/${first.accountId}/rate-limit`, { value: 7, frame: 'm' });
+  assert.deepEqual(saved, { ok: true, rateLimit: { value: 7, frame: 'm' }, rateLimitOverride: { value: 7, frame: 'm' } });
+  saved = await demoRequest('PUT', `/mail-node/mailboxes/${first.accountId}/rate-limit`, { value: null });
+  assert.equal(saved.rateLimitOverride, null);
+  const listed = (await demoRequest('GET', '/mail-node/mailboxes')).mailboxes.find(m => m.accountId === first.accountId);
+  assert.deepEqual(listed.rateLimit, listed.rateLimitDefault);
+});
+
+test('the demo keeps the panel addresses for fail2ban, checked like the server', async () => {
+  assert.deepEqual((await demoRequest('GET', '/mail-node/config')).panelIps, ['203.0.113.10']);
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/config', { panelIps: '0.0.0.0/0' }), err => err.code === 'panel_ips_invalid');
+  const saved = await demoRequest('PUT', '/mail-node/config', { panelIps: '203.0.113.10, 198.51.100.0/24' });
+  assert.ok(saved.apply.node.some(i => i.item === 'fail2ban'));
+  assert.deepEqual((await demoRequest('GET', '/mail-node/config')).panelIps, ['203.0.113.10', '198.51.100.0/24']);
+});
+
 test('an ordinary demo user is offered only the ready domains', async () => {
   const originalStorage = globalThis.localStorage;
   globalThis.localStorage = { getItem: () => 'user', setItem: () => {} };

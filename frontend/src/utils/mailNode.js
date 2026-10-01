@@ -20,6 +20,13 @@ export const DKIM_MODES = ['mailcow', 'eop'];
 export const DEFAULT_SEND_LIMIT_PER_HOUR = 50;
 export const MAX_SEND_LIMIT_PER_HOUR = 10000;
 export const MAX_TERRL = 10000000;
+// The TLS Policy Map entry for the next hop (backend eopSettings.js TLS_POLICIES); 'default' is no
+// entry, mailcow's own DANE / MTA-STS then.
+export const TLS_POLICIES = ['secure', 'dane', 'dane-only', 'verify', 'fingerprint', 'encrypt', 'default'];
+// A mailbox's send limit: messages per second, minute, hour or day (mailcow rl_frame).
+export const RATE_LIMIT_FRAMES = ['s', 'm', 'h', 'd'];
+// The panel's addresses for the node's fail2ban whitelist (backend mailcow.js MAX_PANEL_IPS).
+export const MAX_PANEL_IPS = 10;
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Onboarding of a mail node domain, in order (backend services/mailNode/domains.js). 'unknown' is a
@@ -102,6 +109,16 @@ const ERROR_KEYS = {
   tenant_id_invalid: 'admin.eop.errorTenantId',
   app_id_invalid: 'admin.eop.errorAppId',
   thumbprint_invalid: 'admin.eop.errorThumbprint',
+  tls_policy_invalid: 'admin.eop.errorTlsPolicy',
+  tls_parameters_invalid: 'admin.eop.errorTlsParameters',
+  panel_ips_invalid: 'admin.mailNode.errorPanelIps',
+  rate_limit_invalid: 'admin.mailNode.errorRateLimit',
+  // Codes of the items an "apply" reports (backend services/mailNode/nodeApply.js).
+  eop_host_missing: 'admin.mailNode.applyCodeEopHostMissing',
+  panel_ips_missing: 'admin.mailNode.applyCodePanelIpsMissing',
+  dkim_delete_unconfirmed: 'admin.mailNode.applyCodeDkimDeleteUnconfirmed',
+  prefilter_differs: 'admin.mailNode.applyCodePrefilterDiffers',
+  dovecot_restart_failed: 'admin.mailNode.applyCodeDovecotRestartFailed',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -289,7 +306,7 @@ export function parseWholeNumber(value, min, max) {
 }
 
 // The error key for the settings form, or null.
-export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays }, { hasStoredKey = false } = {}) {
+export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays, panelIps }, { hasStoredKey = false } = {}) {
   if (!HOST_PATTERN.test(String(mailHost ?? '').trim().toLowerCase())) return 'admin.mailNode.errorHost';
   if (!String(apiKey ?? '').trim() && !hasStoredKey) return 'admin.mailNode.errorApiKey';
   if (parseWholeNumber(quotaMb, 1, MAX_QUOTA_MB) == null) return 'admin.mailNode.errorQuota';
@@ -298,6 +315,7 @@ export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, de
   if (deleteAfterDays !== undefined && parseWholeNumber(deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS) == null) {
     return 'admin.mailNode.errorDeleteAfterDays';
   }
+  if (panelIps !== undefined && parseNetworkList(panelIps).error) return 'admin.mailNode.errorPanelIps';
   return null;
 }
 
@@ -313,6 +331,12 @@ const parseGuid = (value) => {
   const id = String(value).trim().toLowerCase();
   return GUID_PATTERN.test(id) ? id : null;
 };
+// Postfix policy attributes: name=value pairs separated by single spaces (backend eopSettings.js).
+export function parseTlsParameters(value) {
+  const text = String(value ?? '').trim().replace(/\s+/g, ' ');
+  if (!text || text.length > 500) return null;
+  return text.split(' ').every((token) => /^[a-z][a-z0-9_]*=[!-~]+$/i.test(token)) ? text : null;
+}
 const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
   return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
@@ -320,6 +344,8 @@ const parseThumbprint = (value) => {
 // field: [parse, refusal code, whether it may be left empty]
 const EOP_PARSERS = {
   eopHost: [parseHost, 'eop_host_invalid', true],
+  tlsPolicy: [(v) => (TLS_POLICIES.includes(v) ? v : null), 'tls_policy_invalid', false],
+  tlsPolicyParameters: [parseTlsParameters, 'tls_parameters_invalid', true],
   certificateHost: [parseHost, 'certificate_host_invalid', true],
   dkimMode: [(v) => (DKIM_MODES.includes(v) ? v : null), 'dkim_mode_invalid', false],
   sendLimitPerHour: [(v) => parseWholeNumber(v, 1, MAX_SEND_LIMIT_PER_HOUR), 'send_limit_invalid', false],
@@ -346,10 +372,133 @@ export function normalizeEopSettings(body) {
   return { settings };
 }
 
+// What the settings as a whole refuse once merged with the stored ones (backend
+// eopSettingsConflict), or null: a fingerprint policy checks nothing without the fingerprint.
+export function eopSettingsConflict(settings) {
+  if (settings?.tlsPolicy === 'fingerprint' && !/(^| )match=/.test(settings?.tlsPolicyParameters ?? '')) {
+    return 'tls_parameters_invalid';
+  }
+  return null;
+}
+
 // The error key for the EOP settings form, or null. Empty optional fields are fine.
 export function eopSettingsError(form) {
-  const { error } = normalizeEopSettings(form);
-  return error ? mailNodeErrorKey(error) : null;
+  const { settings, error } = normalizeEopSettings(form);
+  const refusal = error ?? eopSettingsConflict(settings);
+  return refusal ? mailNodeErrorKey(refusal) : null;
+}
+
+// One address or network for the node's fail2ban whitelist, as the server takes it (backend
+// mailcow.js parseNetwork): an IPv4 or IPv6 address, or one with a prefix of /8 to /32 (IPv4) or
+// /16 to /128 (IPv6). Lowercased; null for anything else.
+const IPV4_PATTERN = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+function ipFamily(address) {
+  if (IPV4_PATTERN.test(address)) return 4;
+  if (!address.includes(':') || !/^[0-9a-f:.]+$/.test(address)) return 0;
+  try {
+    return new URL(`http://[${address}]/`).hostname ? 6 : 0;
+  } catch {
+    return 0;
+  }
+}
+export function parseNetwork(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  const [address, prefix, extra] = text.split('/');
+  if (extra !== undefined) return null;
+  const family = ipFamily(address);
+  if (!family) return null;
+  if (prefix === undefined) return address;
+  if (!/^\d{1,3}$/.test(prefix)) return null;
+  const bits = Number(prefix);
+  const [min, max] = family === 4 ? [8, 32] : [16, 128];
+  return bits >= min && bits <= max ? `${address}/${bits}` : null;
+}
+
+// The panel's addresses as typed (commas, spaces or new lines): { networks } without repeats, or
+// { error } with the server's refusal code.
+export function parseNetworkList(value) {
+  const parts = Array.isArray(value) ? value : String(value ?? '').split(/[\s,;]+/);
+  const networks = [];
+  for (const part of parts) {
+    if (!String(part ?? '').trim()) continue;
+    const network = parseNetwork(part);
+    if (!network) return { error: 'panel_ips_invalid' };
+    if (!networks.includes(network)) networks.push(network);
+  }
+  return networks.length > MAX_PANEL_IPS ? { error: 'panel_ips_invalid' } : { networks };
+}
+
+// --- Applying the settings to the node (backend services/mailNode/nodeApply.js) ---------------
+
+// Spelled out literally so the i18n coverage test finds them.
+const APPLY_ITEM_KEYS = {
+  tls_policy: 'admin.mailNode.applyItemTlsPolicy',
+  relayhost: 'admin.mailNode.applyItemRelayhost',
+  fail2ban: 'admin.mailNode.applyItemFail2ban',
+  prefilter: 'admin.mailNode.applyItemPrefilter',
+  domain_relayhost: 'admin.mailNode.applyItemDomainRelayhost',
+  dkim: 'admin.mailNode.applyItemDkim',
+  mailbox_limits: 'admin.mailNode.applyItemMailboxLimits',
+};
+const APPLY_STATUS_KEYS = {
+  ok: 'admin.mailNode.applyStatusOk',
+  changed: 'admin.mailNode.applyStatusChanged',
+  failed: 'admin.mailNode.applyStatusFailed',
+  skipped: 'admin.mailNode.applyStatusSkipped',
+  pending: 'admin.mailNode.applyStatusPending',
+};
+export const APPLY_STATUS_COLORS = {
+  ok: 'var(--text-secondary)', changed: 'var(--accent)', failed: 'var(--red)', skipped: 'var(--amber)', pending: 'var(--amber)',
+};
+
+export function applyItemKey(item) {
+  return APPLY_ITEM_KEYS[item] ?? item;
+}
+
+export function applyStatusKey(status) {
+  return APPLY_STATUS_KEYS[status] ?? APPLY_STATUS_KEYS.failed;
+}
+
+// The prefilter item of the node's last result: whether the spam filing rule waits to be written.
+export function prefilterPending(nodeResult) {
+  return (nodeResult?.items ?? []).some((i) => i.item === 'prefilter' && i.status === 'pending');
+}
+
+// Whether the domain's last apply left mailcow's DKIM key in place for the administrator to delete.
+export function dkimDeleteWaiting(domain) {
+  return (domain?.apply?.items ?? []).some((i) => i.item === 'dkim' && i.code === 'dkim_delete_unconfirmed');
+}
+
+// --- Send limits --------------------------------------------------------------------------------
+
+// Spelled out literally so the i18n coverage test finds them.
+const RATE_FRAME_KEYS = {
+  s: 'admin.mailNode.rateFrameS',
+  m: 'admin.mailNode.rateFrameM',
+  h: 'admin.mailNode.rateFrameH',
+  d: 'admin.mailNode.rateFrameD',
+};
+
+export function rateFrameKey(frame) {
+  return RATE_FRAME_KEYS[frame] ?? RATE_FRAME_KEYS.h;
+}
+
+// The error key for an administrator's send limit, or null when it can be sent.
+export function rateLimitError({ value, frame }) {
+  if (parseWholeNumber(value, 1, MAX_SEND_LIMIT_PER_HOUR) == null || !RATE_LIMIT_FRAMES.includes(frame)) {
+    return 'admin.mailNode.errorRateLimit';
+  }
+  return null;
+}
+
+const sameLimit = (a, b) => !!a && !!b && Number(a.value) === Number(b.value) && a.frame === b.frame;
+
+// What a mailbox's send limit is: 'own' (an administrator's), 'default', or 'differs' when the node
+// holds another limit than the panel wants (an apply sets it again; null on the node too).
+export function rateLimitState(mailbox) {
+  const wanted = mailbox?.rateLimitOverride ?? mailbox?.rateLimitDefault ?? null;
+  if (!sameLimit(mailbox?.rateLimit, wanted)) return 'differs';
+  return mailbox?.rateLimitOverride ? 'own' : 'default';
 }
 
 // Usage of a mailbox: share of its quota in whole percent, or null when the node gave no numbers.

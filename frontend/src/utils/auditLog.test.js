@@ -7,12 +7,14 @@ describe('AUDIT_ACTIONS', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed',
-      'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'message.sent', 'message.deleted',
+      'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'message.sent', 'message.deleted',
       'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
-      'mail_node.domain_identity_acknowledged',
+      'mail_node.domain_identity_acknowledged', 'mail_node.applied',
     ]);
+    assert.equal(auditActionLabelKey('mail_node.applied'), 'admin.audit.actionMailNodeApplied');
+    assert.equal(auditActionLabelKey('mailbox.rate_limit_changed'), 'admin.audit.actionMailboxRateLimitChanged');
     assert.equal(auditActionLabelKey('mail_node.domain_identity_acknowledged'), 'admin.audit.actionMailNodeDomainIdentityAcknowledged');
     assert.equal(auditActionLabelKey('mail_node.domain_state_changed'), 'admin.audit.actionMailNodeDomainStateChanged');
     assert.equal(auditActionLabelKey('message.sent'), 'admin.audit.actionMessageSent');
@@ -134,8 +136,47 @@ describe('auditDetail', () => {
       { key: 'admin.audit.detailMailNodeSettingsChanged', values: {}, valueKeys: { fields: ['admin.audit.fieldApiKey', 'admin.audit.fieldQuota'] } },
     );
     assert.deepEqual(
-      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['terrl', 'tlsPolicy'] } }),
-      { key: 'admin.audit.detailEopSettingsChanged', values: {}, valueKeys: { fields: ['admin.audit.fieldTerrl', 'tlsPolicy'] } },
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['terrl', 'tlsPolicy', 'futureField'] } }),
+      { key: 'admin.audit.detailEopSettingsChanged', values: {}, valueKeys: { fields: ['admin.audit.fieldTerrl', 'admin.audit.fieldTlsPolicy', 'futureField'] } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'node', fields: ['panelIps'] } }).valueKeys,
+      { fields: ['admin.audit.fieldPanelIps'] },
+    );
+  });
+
+  it('describes what an apply of the node settings changed and what failed', () => {
+    assert.deepEqual(
+      auditDetail({
+        action: 'mail_node.applied',
+        details: { scope: 'node', trigger: 'manual', changed: [{ item: 'tls_policy', target: 'eop.example.net', from: null, to: 'secure' }], failed: [] },
+      }),
+      { key: 'admin.audit.detailAppliedChanged', values: {}, valueKeys: { scope: 'admin.audit.detailApplyScopeNode', changed: ['admin.mailNode.applyItemTlsPolicy'], failed: [] } },
+    );
+    assert.deepEqual(
+      auditDetail({
+        action: 'mail_node.applied',
+        details: { scope: 'domain', domain: 'a.example', changed: [{ item: 'dkim' }], failed: [{ item: 'mailbox_limits', code: 'mail_node_refused' }] },
+      }),
+      {
+        key: 'admin.audit.detailAppliedBoth', values: { scope: 'a.example' },
+        valueKeys: { changed: ['admin.mailNode.applyItemDkim'], failed: ['admin.mailNode.applyItemMailboxLimits'] },
+      },
+    );
+    assert.equal(
+      auditDetail({ action: 'mail_node.applied', details: { scope: 'prefilter', changed: [], failed: [{ item: 'prefilter' }] } }).key,
+      'admin.audit.detailAppliedFailed',
+    );
+  });
+
+  it('describes a send limit set for one mailbox or set back to the default', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'mailbox.rate_limit_changed', details: { value: 200, frame: 'd', override: true, from: null } }),
+      { key: 'admin.audit.detailRateLimitSet', values: { value: 200 }, valueKeys: { frame: 'admin.mailNode.rateFrameD' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mailbox.rate_limit_changed', details: { value: 50, frame: 'h', override: false, from: { value: 200, frame: 'd' } } }),
+      { key: 'admin.audit.detailRateLimitDefault', values: { value: 50 }, valueKeys: { frame: 'admin.mailNode.rateFrameH' } },
     );
     assert.equal(auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: [] } }), null);
   });

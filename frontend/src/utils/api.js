@@ -388,6 +388,14 @@ export const api = {
     saveEopSettings: (data) => request('PUT', '/mail-node/eop', data),
     listMailboxes: () => request('GET', '/mail-node/mailboxes'),
     setQuota: (accountId, quotaMb) => request('PUT', `/mail-node/mailboxes/${accountId}/quota`, { quotaMb }),
+    // { value, frame } for an administrator's send limit, or { value: null } for the default.
+    setRateLimit: (accountId, limit) => request('PUT', `/mail-node/mailboxes/${accountId}/rate-limit`, limit),
+    // Applying the settings to the node: the node with every domain, one domain, and the spam
+    // filing rule on its own (it restarts Dovecot).
+    getApplyResult: () => request('GET', '/mail-node/apply'),
+    applyNode: () => request('POST', '/mail-node/apply'),
+    applyDomain: (domain, { confirmDkimDelete = false } = {}) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/apply`, { confirmDkimDelete }),
+    applyPrefilter: () => request('POST', '/mail-node/apply/prefilter'),
   },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
