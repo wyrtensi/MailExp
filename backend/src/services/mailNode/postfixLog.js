@@ -40,11 +40,13 @@ export const DEFAULT_LOG_LINES = MAX_LOG_LINES;
 // - queued: qmgr took it in (from=, size=, nrcpt=);
 // - notification: bounce made a notice (non-delivery, delay or success) with a new queue id;
 // - removed: qmgr is done with the message;
+// - held, released, deleted: an administrator put it on hold, released it or deleted it (postsuper,
+//   also through the panel's queue actions);
 // - rejected: cleanup or a milter refused it, or smtpd refused a command (NOQUEUE has no queue id);
 // - other: anything else (connections, TLS, warnings).
 export const LOG_EVENTS = Object.freeze([
   'sent', 'deferred', 'bounced', 'expired', 'undeliverable', 'deliverable',
-  'received', 'message_id', 'queued', 'notification', 'removed', 'rejected', 'other',
+  'received', 'message_id', 'queued', 'notification', 'removed', 'held', 'released', 'deleted', 'rejected', 'other',
 ]);
 const DELIVERY_STATUSES = new Set(['sent', 'deferred', 'bounced', 'undeliverable', 'deliverable']);
 // Postfix's default short queue ids are upper-case hex; long ids (enable_long_queue_ids) use a
@@ -101,6 +103,11 @@ function eventOf(service, rest, status) {
   if (status && DELIVERY_STATUSES.has(status)) return status;
   if (/^message-id=/.test(rest)) return 'message_id';
   if (service === 'qmgr' && rest === 'removed') return 'removed';
+  if (service === 'postsuper') {
+    if (rest === 'placed on hold') return 'held';
+    if (rest === 'released from hold') return 'released';
+    if (rest === 'removed') return 'deleted';
+  }
   if (service === 'qmgr' && /^from=<[^>]*>, size=/.test(rest)) return 'queued';
   if (/^client=/.test(rest) || (service === 'pickup' && /^uid=/.test(rest))) return 'received';
   if (service === 'bounce' && /notification: /.test(rest)) return 'notification';
@@ -207,7 +214,7 @@ export function correlateByQueueId(lines) {
     }
     if (DELIVERY_STATUSES.has(line.event) || line.event === 'expired') message.deliveries.push(line);
     if (line.event === 'notification' && line.notificationQueueId) message.notifications.push(line.notificationQueueId);
-    if (line.event === 'removed') message.removed = true;
+    if (line.event === 'removed' || line.event === 'deleted') message.removed = true;
   }
   return messages;
 }

@@ -41,6 +41,20 @@ export const STAND_SENT_LOCAL = Object.freeze({
   message: '1F2E3D4C5B6: to=<sieve-test-r11b@stage.test>, relay=dovecot[172.22.1.250]:24, delay=0.07, delays=0.03/0.01/0/0.03, dsn=2.0.0, status=sent (250 2.0.0 <sieve-test-r11b@stage.test> UASAK88svmrIAAAAqAbqoQ Saved)',
 });
 
+// A message deferred, held, released and delivered through the panel's queue actions (stand,
+// 2026-10-01, branch code), newest first.
+export const STAND_QUEUE_ACTIONS = Object.freeze([
+  { time: '1790882447', program: 'postfix/qmgr', priority: 'info', message: '20BA719F6B6: removed' },
+  { time: '1790882447', program: 'postfix/smtp', priority: 'info', message: '20BA719F6B6: to=<test@example.com>, relay=eop.test.local[172.22.1.13]:25, delay=20, delays=20/0/0.13/0.05, dsn=2.6.0, status=sent (250 2.6.0 <20261001T192047154-0031-08e6@eop.test.local> [InternalId=35] Queued mail for delivery)' },
+  { time: '1790882446', program: 'postfix/qmgr', priority: 'info', message: '20BA719F6B6: from=<someone@stage.test>, size=360, nrcpt=1 (queue active)' },
+  { time: '1790882444', program: 'postfix/postsuper', priority: 'info', message: '20BA719F6B6: released from hold' },
+  { time: '1790882437', program: 'postfix/postsuper', priority: 'info', message: '20BA719F6B6: placed on hold' },
+  { time: '1790882427', program: 'postfix/smtp', priority: 'info', message: '20BA719F6B6: to=<test@example.com>, relay=eop.test.local[172.22.1.13]:25, delay=0.25, delays=0.03/0.03/0.14/0.05, dsn=4.7.500, status=deferred (host eop.test.local[172.22.1.13] said: 451 4.7.500 Server busy. Please try again later from [172.22.1.253]. (S77) (in reply to RCPT TO command))' },
+  { time: '1790882427', program: 'postfix/qmgr', priority: 'info', message: '20BA719F6B6: from=<someone@stage.test>, size=360, nrcpt=1 (queue active)' },
+  { time: '1790882427', program: 'postfix/cleanup', priority: 'info', message: '20BA719F6B6: message-id=<20261001192027.20BA719F6B6@mail.test.local>' },
+  { time: '1790882427', program: 'postfix/pickup', priority: 'info', message: '20BA719F6B6: uid=0 from=<someone@stage.test>' },
+]);
+
 // Made up for the bypass check (R-19): mail handed straight to the recipient's MX, as it would go
 // without a relayhost; and one handed to an address inside the EOP ranges under another name.
 export const BYPASS_SENT = Object.freeze({

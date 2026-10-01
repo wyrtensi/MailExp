@@ -10,7 +10,7 @@ vi.mock('./mailcow.js', () => ({
 }));
 
 import {
-  BYPASS_SENT, EXPIRED, SENT_TO_EOP_ADDRESS, STAND_LOG, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP,
+  BYPASS_SENT, EXPIRED, SENT_TO_EOP_ADDRESS, STAND_LOG, STAND_QUEUE_ACTIONS, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP,
 } from './postfixLog.fixtures.js';
 import {
   MAX_LOG_LINES, correlateByQueueId, parsePostfixEntry, parsePostfixLog, parseRelay, readPostfixLog, relayKind,
@@ -109,6 +109,14 @@ describe('parsePostfixLog and correlateByQueueId', () => {
     expect(first.deliveries.map((d) => [d.status, d.dsn])).toEqual([['deferred', '4.7.500'], ['bounced', '5.7.711']]);
     expect(messages.get('5302E195CA8')).toMatchObject({ from: '', size: 4436 });
     expect(messages.size).toBe(4);
+  });
+
+  it('reads the queue actions of an administrator', () => {
+    const { lines } = parsePostfixLog(STAND_QUEUE_ACTIONS);
+    expect(lines.map((l) => l.event)).toEqual(['received', 'message_id', 'queued', 'deferred', 'held', 'released', 'queued', 'sent', 'removed']);
+    expect(parsePostfixEntry({ time: '1', program: 'postfix/postsuper', message: '20BA719F6B6: removed' })).toMatchObject({ event: 'deleted' });
+    const message = correlateByQueueId(lines).get('20BA719F6B6');
+    expect(message.deliveries.map((d) => d.status)).toEqual(['deferred', 'sent']);
   });
 });
 
