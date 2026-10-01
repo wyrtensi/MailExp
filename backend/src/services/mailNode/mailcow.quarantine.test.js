@@ -15,7 +15,10 @@ import {
   getRspamdHistory,
   listQuarantine,
   normalizeSymbols,
+  QUARANTINE_NODE_SETTINGS,
+  learnSpamQuarantineItem,
   releaseQuarantineItem,
+  writeQuarantineSettings,
 } from './mailcow.js';
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 5120 };
@@ -115,6 +118,47 @@ describe('quarantine', () => {
   });
 });
 
+describe('delete and train as spam', () => {
+  it('counts the entry as gone once mailcow deleted it, a failed training being a warning', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['qlearn_spam', '3'] }]));
+    expect(await learnSpamQuarantineItem(CFG, 3)).toEqual({ learned: true, warnings: [] });
+    expect(calls()[0]).toMatchObject({ url: 'https://mail.example.com/api/v1/edit/qitem', body: { items: [3], attr: { action: 'learnspam' } } });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['spam_learn_error', 'Curl: timeout'] }]));
+    expect(await learnSpamQuarantineItem(CFG, 3)).toEqual({ learned: false, warnings: ['spam_learn_error Curl: timeout'] });
+    safeFetch.mockResolvedValueOnce(answer([
+      { type: 'warning', msg: ['fuzzy_learn_error', 'x'] }, { type: 'success', msg: ['qlearn_spam', '3'] },
+    ]));
+    expect(await learnSpamQuarantineItem(CFG, 3)).toEqual({ learned: true, warnings: ['fuzzy_learn_error x'] });
+  });
+
+  it('refuses when mailcow did not touch the entry', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: 'access_denied' }]));
+    await expect(learnSpamQuarantineItem(CFG, 3)).rejects.toMatchObject({ code: 'mail_node_refused', message: 'The mail node refused: access_denied' });
+    safeFetch.mockResolvedValueOnce(answer({ type: 'success', msg: 'Task completed' }));
+    await expect(learnSpamQuarantineItem(CFG, 3)).rejects.toMatchObject({ code: 'mail_node_refused' });
+  });
+});
+
+describe('quarantine settings', () => {
+  it('writes every field, release as the original letter, and needs mailcow to say it saved them', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: 'saved_settings' }]));
+    await writeQuarantineSettings(CFG);
+    expect(calls()[0]).toMatchObject({ url: 'https://mail.example.com/api/v1/edit/quarantine', method: 'POST' });
+    expect(calls()[0].body).toEqual({
+      items: ['none'],
+      attr: {
+        action: 'settings', max_size: 10, retention_size: 20, max_age: 365, max_score: '', exclude_domains: [], release_format: 'raw',
+        sender: '', subject: '', bcc: '', redirect: '', html_tmpl: '',
+      },
+    });
+    expect(Object.isFrozen(QUARANTINE_NODE_SETTINGS)).toBe(true);
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: 'access_denied' }]));
+    await expect(writeQuarantineSettings(CFG)).rejects.toMatchObject({ code: 'mail_node_refused' });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['redis_error', 'x'] }]));
+    await expect(writeQuarantineSettings(CFG)).rejects.toMatchObject({ code: 'mail_node_refused' });
+  });
+});
+
 describe('rspamd history', () => {
   it('reads the rows without sizes, the time as ISO', async () => {
     safeFetch.mockResolvedValueOnce(answer([{
@@ -125,7 +169,7 @@ describe('rspamd history', () => {
     }]));
     expect(await getRspamdHistory(CFG, 1000)).toEqual([{
       messageId: 'abc@sender.test', time: '2025-10-01T10:00:00.000Z', score: 9.5, requiredScore: 15, spamScore: 8, rejectScore: 15, action: 'add header', skipped: false,
-      symbols: [{ name: 'R_SPF_FAIL', score: 8, options: ['-all'], description: null }], ip: '198.51.100.7',
+      symbols: [{ name: 'R_SPF_FAIL', score: 8, description: null }], ip: '198.51.100.7',
       senderSmtp: 'a@sender.test', senderMime: 'a@sender.test', rcptSmtp: ['info@example.com'], rcptMime: ['info@example.com'], subject: 'Hello',
     }]);
     expect(calls()[0].url).toBe('https://mail.example.com/api/v1/get/logs/rspamd-history/1000');

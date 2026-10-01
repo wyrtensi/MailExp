@@ -26,21 +26,28 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => ({
   getQuarantineItem: vi.fn(async () => node.item),
   releaseQuarantineItem: vi.fn(async () => ({ learned: true, warnings: [] })),
   deleteQuarantineItem: vi.fn(async () => {}),
+  learnSpamQuarantineItem: vi.fn(async () => ({ learned: true, warnings: [] })),
+  writeQuarantineSettings: vi.fn(async () => {}),
 }));
-const panel = vi.hoisted(() => ({ userView: false, mailboxes: new Map(), history: [] }));
+const panel = vi.hoisted(() => ({ userView: false, mailboxes: new Map(), history: [], appliedAt: null }));
 vi.mock('../services/mailNode/quarantine.js', async (importActual) => ({
   ...(await importActual()),
   getQuarantineUserView: vi.fn(async () => panel.userView),
   setQuarantineUserView: vi.fn(async () => {}),
   panelNodeMailboxes: vi.fn(async () => panel.mailboxes),
   readRspamdHistory: vi.fn(async () => panel.history),
+  nodeDomainNames: vi.fn(async () => ['example.com']),
+  getQuarantineSettingsAppliedAt: vi.fn(async () => panel.appliedAt),
+  markQuarantineSettingsApplied: vi.fn(async () => '2026-10-02T10:00:00.000Z'),
 }));
 
 import express from 'express';
 import routes from './mailNodeQuarantine.js';
 import { recordAudit } from '../services/auditLog.js';
-import { MailNodeError, deleteQuarantineItem, releaseQuarantineItem } from '../services/mailNode/mailcow.js';
-import { readRspamdHistory, setQuarantineUserView } from '../services/mailNode/quarantine.js';
+import {
+  MailNodeError, deleteQuarantineItem, learnSpamQuarantineItem, releaseQuarantineItem, writeQuarantineSettings,
+} from '../services/mailNode/mailcow.js';
+import { markQuarantineSettingsApplied, readRspamdHistory, setQuarantineUserView } from '../services/mailNode/quarantine.js';
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
 const ACCOUNT = '11111111-1111-4111-8111-111111111111';
@@ -75,6 +82,7 @@ describe('/api/mail-node quarantine', () => {
     panel.userView = false;
     panel.mailboxes = new Map([['info@example.com', ACCOUNT]]);
     panel.history = [historyRow({})];
+    panel.appliedAt = null;
     db.message = null;
     db.aliases = [];
   });
@@ -171,7 +179,7 @@ describe('/api/mail-node quarantine', () => {
   });
 
   it('saves the setting and journals a change only', async () => {
-    expect(await (await call('GET', '/quarantine/settings')).json()).toEqual({ userView: false });
+    expect(await (await call('GET', '/quarantine/settings')).json()).toMatchObject({ userView: false, nodeSettingsAppliedAt: null });
     expect((await call('PUT', '/quarantine/settings', { userView: 'yes' })).status).toBe(400);
     expect(await (await call('PUT', '/quarantine/settings', { userView: true })).json()).toEqual({ ok: true, userView: true });
     expect(setQuarantineUserView).toHaveBeenCalledWith(true);
@@ -190,6 +198,79 @@ describe('/api/mail-node quarantine', () => {
     expect((await call('GET', '/quarantine')).status).toBe(409);
   });
 
+  it('writes mailcow\'s quarantine settings only when confirmed, and journals first and repeated writes', async () => {
+    const refused = await call('POST', '/quarantine/node-settings', {});
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).code).toBe('quarantine_settings_unconfirmed');
+    expect(writeQuarantineSettings).not.toHaveBeenCalled();
+    const body = await (await call('POST', '/quarantine/node-settings', { confirm: true })).json();
+    expect(body).toMatchObject({ ok: true, nodeSettingsAppliedAt: '2026-10-02T10:00:00.000Z', nodeSettings: { release_format: 'raw', max_size: 10, retention_size: 20 } });
+    expect(writeQuarantineSettings).toHaveBeenCalledWith(CFG);
+    expect(markQuarantineSettingsApplied).toHaveBeenCalled();
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'user-1', action: 'mail_node.quarantine_settings_applied',
+      details: { reapplied: false, maxSize: 10, retentionSize: 20, maxAge: 365, releaseFormat: 'raw' },
+    });
+    vi.clearAllMocks();
+    panel.appliedAt = '2026-10-01T09:00:00.000Z';
+    await call('POST', '/quarantine/node-settings', { confirm: true });
+    expect(recordAudit.mock.calls[0][0].details).toMatchObject({ reapplied: true, previous: '2026-10-01T09:00:00.000Z' });
+  });
+
+  it('keeps the settings record when mailcow refuses the write, and keeps it from users', async () => {
+    writeQuarantineSettings.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: access_denied'));
+    expect((await call('POST', '/quarantine/node-settings', { confirm: true })).status).toBe(502);
+    expect(markQuarantineSettingsApplied).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+    session.isAdmin = false;
+    expect((await call('POST', '/quarantine/node-settings', { confirm: true })).status).toBe(403);
+    expect((await call('POST', '/quarantine/1/learn-spam')).status).toBe(403);
+  });
+
+  it('deletes and trains as spam, journaling the training', async () => {
+    learnSpamQuarantineItem.mockResolvedValueOnce({ learned: false, warnings: ['spam_learn_error already'] });
+    expect(await (await call('POST', '/quarantine/1/learn-spam')).json()).toEqual({ ok: true, learned: false, warnings: ['spam_learn_error already'] });
+    expect(learnSpamQuarantineItem).toHaveBeenCalledWith(CFG, 1);
+    expect(recordAudit.mock.calls[0][0]).toMatchObject({
+      action: 'mail_node.quarantine_learned_spam', accountId: ACCOUNT, details: { id: 1, learned: false, warnings: ['spam_learn_error already'] },
+    });
+    expect((await call('POST', '/quarantine/9/learn-spam')).status).toBe(404);
+  });
+
+  it('warns an administrator when the history shows spam for the panel\'s mailboxes but the quarantine is empty', async () => {
+    node.list = [];
+    panel.history = [historyRow({ action: 'reject' }), historyRow({ action: 'no action' }), historyRow({ action: 'add header', rcptSmtp: ['manual@example.com'] })];
+    expect((await (await call('GET', '/quarantine')).json()).spamInHistory).toBe(1);
+    node.list = [entry(1, 'info@example.com')];
+    expect((await (await call('GET', '/quarantine')).json()).spamInHistory).toBeUndefined();
+    node.list = [];
+    session.isAdmin = false;
+    panel.userView = true;
+    expect((await (await call('GET', '/quarantine')).json()).spamInHistory).toBeUndefined();
+  });
+
+  it('answers the list without symbols when the history is slow', async () => {
+    readRspamdHistory.mockReturnValueOnce(new Promise(() => {}));
+    const started = Date.now();
+    const body = await (await call('GET', '/quarantine')).json();
+    expect(Date.now() - started).toBeLessThan(6000);
+    expect(body).toMatchObject({ total: 2, historyRead: false });
+    expect(body.items[0].topSymbols).toBeNull();
+  }, 10000);
+
+  it('leaves out the sending login and the symbols\' details for a user', async () => {
+    const symbols = [{ name: 'R_SPF_FAIL', score: 8, options: ['secret@example.com'], description: 'SPF fail' }];
+    node.item = { ...entry(1, 'info@example.com'), ip: null, symbols, user: 'login@example.com', msg: '' };
+    const admin = await (await call('GET', '/quarantine/1')).json();
+    expect(admin.user).toBe('login@example.com');
+    expect(admin.symbols[0].options).toEqual(['secret@example.com']);
+    session.isAdmin = false;
+    panel.userView = true;
+    const user = await (await call('GET', '/quarantine/1')).json();
+    expect(user.user).toBeUndefined();
+    expect(user.symbols).toEqual([{ name: 'R_SPF_FAIL', score: 8, description: 'SPF fail' }]);
+  });
+
   describe('why is this letter in Spam', () => {
     const letter = (fields = {}) => ({
       message_id: '<abc@sender.test>', date: new Date('2026-10-01T10:00:00Z'), subject: 'S1', eop_category: 'SPM',
@@ -202,7 +283,7 @@ describe('/api/mail-node quarantine', () => {
       panel.history = [historyRow({ messageId: 'abc@sender.test' })];
       const body = await (await call('GET', `/messages/${MESSAGE}/spam-verdict`)).json();
       expect(body).toEqual({
-        eopCategory: 'SPM', historyRows: 1, historyDepth: 1000,
+        eopCategory: 'SPM', historyRows: 1,
         rspamd: {
           matchedBy: 'message_id', time: '2026-10-01T10:00:00.000Z', score: 9, spamScore: 8, rejectScore: 15, action: 'add header', skipped: false,
           symbols: [{ name: 'R_SPF_FAIL', score: 8, description: 'SPF fail' }, { name: 'MIME_GOOD', score: -0.1, description: null }],
@@ -217,7 +298,7 @@ describe('/api/mail-node quarantine', () => {
       expect((await (await call('GET', `/messages/${MESSAGE}/spam-verdict`)).json()).rspamd.matchedBy).toBe('recipient_time');
       panel.history = [];
       expect(await (await call('GET', `/messages/${MESSAGE}/spam-verdict`)).json()).toEqual({
-        eopCategory: 'SPM', historyRows: 0, historyDepth: 1000, rspamd: null,
+        eopCategory: 'SPM', historyRows: 0, rspamd: null,
       });
     });
 

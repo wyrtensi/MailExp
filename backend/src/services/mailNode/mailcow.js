@@ -656,6 +656,54 @@ export async function releaseQuarantineItem(cfg, id) {
   };
 }
 
+// "Delete and train as spam" (edit/qitem learnspam): mailcow deletes the row first, then trains
+// rspamd with the letter as spam and adds its fuzzy hash. A failed training comes back as a danger
+// item after the row is gone, so it is a warning here; only a row that was not touched (no such
+// entry, access_denied) is a refusal. Returns { learned, warnings }.
+const LEARN_SPAM_AFTER_DELETE = new Set(['qlearn_spam', 'spam_learn_error', 'fuzzy_learn_error']);
+export async function learnSpamQuarantineItem(cfg, id) {
+  const items = asList(await request(cfg, 'POST', 'edit/qitem', { items: [id], attr: { action: 'learnspam' } }, { judge: false }))
+    .filter((item) => item && typeof item === 'object');
+  const word = (item) => (Array.isArray(item.msg) ? item.msg[0] : item.msg);
+  if (!items.some((item) => LEARN_SPAM_AFTER_DELETE.has(word(item)))) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+  return {
+    learned: items.some((item) => item.type === 'success' && word(item) === 'qlearn_spam'),
+    warnings: items.filter((item) => item.type !== 'success').map((item) => messageOf(item) || item.type),
+  };
+}
+
+// The quarantine settings the panel writes when an administrator asks it to (edit/quarantine
+// 'settings'). That call writes every setting from the body and resets the ones left out, and the
+// API cannot read them back, so the panel always sends all of them: letters up to 10 MiB, 20 kept
+// per mailbox, 365 days, no excluded domains, release as the original letter ("raw": the panel's
+// texts about releasing assume it), and empty notification fields, for which mailcow falls back to
+// its own defaults (quarantine_notify.py: sender quarantine@localhost, its subject and template,
+// no score limit for notifications).
+export const QUARANTINE_NODE_SETTINGS = Object.freeze({
+  max_size: 10,
+  retention_size: 20,
+  max_age: 365,
+  max_score: '',
+  exclude_domains: [],
+  release_format: 'raw',
+  sender: '',
+  subject: '',
+  bcc: '',
+  redirect: '',
+  html_tmpl: '',
+});
+
+export async function writeQuarantineSettings(cfg) {
+  const items = asList(await request(cfg, 'POST', 'edit/quarantine', {
+    items: ['none'], attr: { action: 'settings', ...QUARANTINE_NODE_SETTINGS },
+  }, { judge: false })).filter((item) => item && typeof item === 'object');
+  if (!items.some((item) => item.type === 'success' && messageOf(item) === 'saved_settings')) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+}
+
 // delete/qitem answers success for an id it has no row for, too.
 export async function deleteQuarantineItem(cfg, id) {
   const items = asList(await request(cfg, 'POST', 'delete/qitem', [id], { judge: false }))
@@ -668,9 +716,12 @@ export async function deleteQuarantineItem(cfg, id) {
 // rspamd's history of the last `rows` letters it checked (get/logs/rspamd-history/<rows>; mailcow
 // keeps 1000, local.d/history_redis.conf), newest first, with `time` as an ISO time. A history row
 // carries no queue id: it is matched to a letter by Message-ID, recipient and time.
+// Symbols keep their name, score and description only: a symbol's options (URLs, addresses) are
+// not needed for a verdict and would make the cached history large.
 const lowerList = (value) => (Array.isArray(value) ? value.map((v) => String(v).toLowerCase()) : []);
+const HISTORY_TIMEOUT_MS = 20000;
 export async function getRspamdHistory(cfg, rows) {
-  const data = await request(cfg, 'GET', `get/logs/rspamd-history/${rows}`, undefined, { timeoutMs: MAILBOX_LIST_TIMEOUT_MS });
+  const data = await request(cfg, 'GET', `get/logs/rspamd-history/${rows}`, undefined, { timeoutMs: HISTORY_TIMEOUT_MS });
   return asList(data)
     .filter((r) => r && typeof r === 'object' && !Array.isArray(r))
     .map((r) => ({
@@ -684,7 +735,7 @@ export async function getRspamdHistory(cfg, rows) {
       rejectScore: finiteOrNull(r.thresholds?.reject ?? r.required_score),
       action: String(r.action ?? ''),
       skipped: r.is_skipped === true,
-      symbols: normalizeSymbols(r.symbols),
+      symbols: normalizeSymbols(r.symbols).map(({ name, score, description }) => ({ name, score, description })),
       ip: r.ip ? String(r.ip) : null,
       senderSmtp: String(r.sender_smtp ?? '').toLowerCase(),
       senderMime: String(r.sender_mime ?? '').toLowerCase(),

@@ -24,7 +24,8 @@ describe('recordAudit', () => {
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
-      'mail_node.quarantine_released', 'mail_node.quarantine_deleted',
+      'mail_node.quarantine_released', 'mail_node.quarantine_deleted', 'mail_node.quarantine_learned_spam',
+      'mail_node.quarantine_settings_applied',
     ]);
   });
 

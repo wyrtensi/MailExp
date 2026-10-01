@@ -10,12 +10,16 @@ import {
   clearRspamdHistoryCache,
   decodeStoredLetter,
   findHistoryEntry,
+  getQuarantineSettingsAppliedAt,
   getQuarantineUserView,
   historyForQuarantine,
+  markQuarantineSettingsApplied,
   parseQuarantineLetter,
   readRspamdHistory,
   setQuarantineUserView,
+  spamRowsFor,
   topSymbols,
+  withDeadline,
 } from './quarantine.js';
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k' };
@@ -108,6 +112,74 @@ describe('a quarantined letter', () => {
     expect(parseQuarantineLetter('')).toMatchObject({ headers: [], text: '', attachments: [] });
     expect(parseQuarantineLetter('no header at all')).toMatchObject({ headers: [], attachments: [] });
   });
+
+  it('keeps the letter\'s own entities in quoted-printable and base64 parts', () => {
+    const own = '&#8212; &#8364; &#169; &#1055;&#1088;&#1080;';
+    const letter = parseQuarantineLetter([
+      'Subject: =?UTF-8?Q?=D0=A1=D1=87=D1=91=D1=82?= &#8212; ok',
+      'Content-Type: multipart/alternative; boundary="x"',
+      '',
+      '--x',
+      'Content-Type: text/html; charset=utf-8',
+      'Content-Transfer-Encoding: quoted-printable',
+      '',
+      `<p>${own} =C3=A9t=C3=A9 =E2=80=94</p>`,
+      '--x',
+      'Content-Type: text/plain; charset=utf-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      Buffer.from(`${own} plain`, 'utf8').toString('base64'),
+      '--x--',
+    ].join('\r\n'));
+    expect(letter.html).toBe(`<p>${own} été —</p>`);
+    expect(letter.text).toBe(`${own} plain`);
+    // mailcow's conversion is undone in headers: they are text.
+    expect(letter.subject).toBe('Счёт — ok');
+  });
+
+  it('bounds the headers: first Subject, capped values, at most 150 shown', () => {
+    const lines = ['Subject: first', 'Subject: second', `To: ${'a'.repeat(9000)}@x.test`];
+    for (let i = 0; i < 400; i += 1) lines.push(`X-Filler-${i}: ${i}`);
+    const letter = parseQuarantineLetter(`${lines.join('\r\n')}\r\n\r\nbody`);
+    expect(letter.subject).toBe('first');
+    expect(letter.to).toHaveLength(4000);
+    expect(letter.headers).toHaveLength(150);
+    expect(letter.headersTruncated).toBe(true);
+    expect(letter.headers[2].value).toHaveLength(4000);
+    expect(letter.text).toBe('body');
+    const huge = parseQuarantineLetter(`${'X-A: b\r\n'.repeat(100000)}\r\nbody`);
+    expect(huge.headers).toHaveLength(150);
+  });
+
+  it('reads a boundary with a semicolon in quotes', () => {
+    const letter = parseQuarantineLetter([
+      'Content-Type: multipart/mixed; boundary="a;b"; charset=x',
+      '',
+      '--a;b',
+      'Content-Type: text/plain',
+      '',
+      'inside',
+      '--a;b--',
+    ].join('\r\n'));
+    expect(letter.text).toBe('inside');
+  });
+});
+
+describe('the deadline and the settings record', () => {
+  it('answers null when the history is late, and the value when it is not', async () => {
+    expect(await withDeadline(new Promise(() => {}), 10)).toBeNull();
+    expect(await withDeadline(Promise.resolve([1]), 1000)).toEqual([1]);
+  });
+
+  it('keeps when the panel wrote mailcow\'s quarantine settings', async () => {
+    query.mockResolvedValueOnce({ rows: [{ config: {} }] });
+    expect(await getQuarantineSettingsAppliedAt()).toBeNull();
+    query.mockResolvedValueOnce({ rows: [] });
+    expect(await markQuarantineSettingsApplied('2026-10-02T10:00:00.000Z')).toBe('2026-10-02T10:00:00.000Z');
+    expect(query.mock.calls[1][1]).toEqual(['mail_node', { quarantineSettingsAppliedAt: '2026-10-02T10:00:00.000Z' }]);
+    query.mockResolvedValueOnce({ rows: [{ config: { quarantineSettingsAppliedAt: '2026-10-02T10:00:00.000Z' } }] });
+    expect(await getQuarantineSettingsAppliedAt()).toBe('2026-10-02T10:00:00.000Z');
+  });
 });
 
 const row = (fields) => ({
@@ -124,9 +196,17 @@ describe('finding a letter in the history', () => {
 
   it('goes by Message-ID with or without brackets, the mailbox first', () => {
     expect(findHistoryEntry(rows, { messageId: '<ABC@sender.test>', recipients: ['info@example.com'] })).toEqual({ row: rows[1], matchedBy: 'message_id' });
-    expect(findHistoryEntry(rows, { messageId: 'abc@sender.test', recipients: ['alias@example.com'], date: '2026-10-01T10:00:06Z' }))
-      .toEqual({ row: rows[0], matchedBy: 'message_id' });
     expect(findHistoryEntry(rows, { messageId: '<nope@sender.test>', recipients: ['info@example.com'], date: '2026-10-01T09:00:00Z', subject: 'Hello' })).toBeNull();
+  });
+
+  it('takes a row for another recipient only on a node domain, and says so', () => {
+    // alias@example.com: example.com is the mailbox's own domain, so other@example.com counts.
+    expect(findHistoryEntry(rows, { messageId: 'abc@sender.test', recipients: ['alias@example.com'], date: '2026-10-01T10:00:06Z' }))
+      .toEqual({ row: rows[0], matchedBy: 'message_id_other_rcpt' });
+    const outside = [row({ messageId: 'abc@sender.test', rcptSmtp: ['someone@elsewhere.test'] })];
+    expect(findHistoryEntry(outside, { messageId: 'abc@sender.test', recipients: ['box@node.test'] })).toBeNull();
+    expect(findHistoryEntry(outside, { messageId: 'abc@sender.test', recipients: ['box@node.test'], nodeDomains: ['elsewhere.test'] }))
+      .toEqual({ row: outside[0], matchedBy: 'message_id_other_rcpt' });
   });
 
   it('without a Message-ID needs the mailbox, the subject and a close time', () => {
@@ -136,6 +216,25 @@ describe('finding a letter in the history', () => {
     expect(findHistoryEntry(rows, { messageId: null, recipients: ['info@example.com'], date: at, subject: 'Other' })).toBeNull();
     expect(findHistoryEntry(rows, { messageId: null, recipients: ['info@example.com'], date: '2026-10-01T12:00:00Z', subject: 'Hello' })).toBeNull();
     expect(findHistoryEntry(rows, { messageId: null, recipients: [], date: at, subject: 'Hello' })).toBeNull();
+  });
+
+  it('without a Message-ID or a subject needs a tight time', () => {
+    const blank = [row({ rcptSmtp: ['info@example.com'], time: '2026-10-01T10:00:00.000Z', subject: '' })];
+    const ask = (date) => findHistoryEntry(blank, { messageId: null, recipients: ['info@example.com'], date, subject: '' });
+    expect(ask('2026-10-01T10:01:30Z')).toEqual({ row: blank[0], matchedBy: 'recipient_time' });
+    expect(ask('2026-10-01T10:10:00Z')).toBeNull();
+    expect(findHistoryEntry(rows, { messageId: null, recipients: ['info@example.com'], date: '2026-10-01T09:00:30Z', subject: '' })).toBeNull();
+  });
+
+  it('counts the letters refused or marked as spam for the panel\'s mailboxes', () => {
+    const history = [
+      row({ action: 'reject', rcptSmtp: ['info@example.com'] }),
+      row({ action: 'add header', rcptMime: ['info@example.com'] }),
+      row({ action: 'no action', rcptSmtp: ['info@example.com'] }),
+      row({ action: 'reject', rcptSmtp: ['manual@example.com'] }),
+    ];
+    expect(spamRowsFor(history, new Map([['info@example.com', 'a1']]))).toBe(2);
+    expect(spamRowsFor([], new Map([['info@example.com', 'a1']]))).toBe(0);
   });
 
   it('matches a quarantine entry by recipient, score and time', () => {

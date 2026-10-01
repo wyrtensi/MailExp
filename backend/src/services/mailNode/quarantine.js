@@ -24,6 +24,10 @@ export function decodeStoredLetter(text) {
 // Bounds: a letter from the quarantine is read for a screen, never in full when it is huge.
 const MAX_DEPTH = 8;
 const MAX_PARTS = 100;
+// The header block read at most, the header lines read from it, and the lines and the length of
+// a value the screen gets.
+const MAX_HEAD = 256 * 1024;
+const MAX_HEADER_LINES = 1000;
 const MAX_HEADERS = 150;
 const MAX_HEADER_VALUE = 4000;
 const MAX_HTML = 1024 * 1024;
@@ -40,13 +44,15 @@ function splitEntity(text) {
   return { head: text.slice(0, at), body: text.slice(at + gap) };
 }
 
-// The header lines in their order, unfolded: [{ name, value }] with the name as written.
+// The header lines in their order, unfolded, with mailcow's entities undone (headers are text):
+// [{ name, value }] with the name as written. At most MAX_HEAD characters and MAX_HEADER_LINES lines.
 function headerLines(head) {
   const out = [];
-  for (const line of head.replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+  for (const line of head.slice(0, MAX_HEAD).replace(/\r?\n[ \t]+/g, ' ').split(/\r?\n/)) {
+    if (out.length >= MAX_HEADER_LINES) break;
     const colon = line.indexOf(':');
     if (colon < 1) continue;
-    out.push({ name: line.slice(0, colon).trim(), value: line.slice(colon + 1).trim() });
+    out.push({ name: line.slice(0, colon).trim(), value: decodeStoredLetter(line.slice(colon + 1).trim()) });
   }
   return out;
 }
@@ -75,10 +81,34 @@ function percentBytes(text) {
   return Buffer.from(bytes);
 }
 
+// A header value split at the semicolons outside quoted strings (boundary="a;b" stays whole).
+function splitParams(raw) {
+  const pieces = [];
+  let current = '';
+  let quoted = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i];
+    if (quoted && ch === '\\' && i + 1 < raw.length) {
+      current += ch + raw[i + 1];
+      i += 1;
+    } else if (ch === '"') {
+      quoted = !quoted;
+      current += ch;
+    } else if (ch === ';' && !quoted) {
+      pieces.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  pieces.push(current);
+  return pieces;
+}
+
 // "text/html; charset=utf-8; name=\"a b.pdf\"" -> { value: 'text/html', params: { charset, name } }.
 // RFC 2231 continuations (name*0, name*1) are joined; name*=utf-8''... is decoded.
 function headerParams(raw) {
-  const [first, ...rest] = String(raw ?? '').split(';');
+  const [first, ...rest] = splitParams(String(raw ?? ''));
   const params = {};
   const parts = {};
   for (const piece of rest) {
@@ -86,7 +116,7 @@ function headerParams(raw) {
     if (eq < 1) continue;
     const key = piece.slice(0, eq).trim().toLowerCase();
     let value = piece.slice(eq + 1).trim();
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) value = value.slice(1, -1);
+    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) value = value.slice(1, -1).replace(/\\(.)/g, '$1');
     const star = key.indexOf('*');
     if (star < 0) {
       params[key] = value;
@@ -140,13 +170,14 @@ function multipartParts(body, boundary) {
   return parts;
 }
 
-// A part's content as text: base64 and quoted-printable are bytes in ASCII, decoded in the part's
-// charset; 7bit, 8bit and binary parts are text already (see decodeStoredLetter).
+// A part's content as text. Base64 and quoted-printable are ASCII, which mailcow left alone: they
+// are decoded as bytes in the part's charset, and an entity such as &#8212; in them is the letter's
+// own. 7bit, 8bit and binary parts went through mailcow's conversion, which is undone here.
 function partText(body, encoding, charset) {
   if (encoding === 'base64' || encoding === 'quoted-printable') {
     return decodeBodyPart(Buffer.from(body, 'latin1'), encoding, charset);
   }
-  return body;
+  return decodeStoredLetter(body);
 }
 
 function partSize(body, encoding) {
@@ -167,7 +198,7 @@ function walk(text, depth, out) {
     for (const part of multipartParts(body, type.params.boundary)) walk(part, depth + 1, out);
     return;
   }
-  const filename = decodeMimeWords(disposition.params.filename || type.params.name || '') || null;
+  const filename = decodeMimeWords(disposition.params.filename || type.params.name || '').slice(0, MAX_HEADER_VALUE) || null;
   const inline = disposition.value !== 'attachment' && !filename;
   if (inline && type.value === 'text/html' && out.html === null) {
     const html = partText(body, encoding, type.params.charset);
@@ -183,7 +214,7 @@ function walk(text, depth, out) {
   }
   out.attachments.push({
     filename: filename || (type.value === 'message/rfc822' ? 'message.eml' : null),
-    type: type.value || 'application/octet-stream',
+    type: (type.value || 'application/octet-stream').slice(0, 200),
     size: partSize(body, encoding),
   });
 }
@@ -200,27 +231,31 @@ function eopVerdict(value) {
   return null;
 }
 
-// A quarantined letter for the screen: its headers in order (unfolded, encoded words decoded), the
-// addresses and subject, EOP's verdict and category from X-Forefront-Antispam-Report, its HTML and
-// text (the screen shows them only through the safe text view, utils/safeView.js) and its
-// attachments by name, type and size (never their content).
+// A quarantined letter for the screen: its first MAX_HEADERS headers in order (unfolded, encoded
+// words decoded), the addresses and subject (a header given twice counts once: the first Subject,
+// From, Date and Message-ID; To and Cc joined), EOP's verdict and category from
+// X-Forefront-Antispam-Report, its HTML and text (the screen shows them only through the safe text
+// view, utils/safeView.js) and its attachments by name, type and size (never their content).
 export function parseQuarantineLetter(stored) {
-  const raw = decodeStoredLetter(stored);
+  const raw = String(stored ?? '');
   const { head } = splitEntity(raw);
   const lines = headerLines(head);
   const headers = headerMap(lines);
   const out = { parts: 0, html: null, text: null, attachments: [], truncated: false };
   walk(raw, 0, out);
-  const decoded = (name) => (headers[name] ? decodeMimeWords(headers[name]) : null);
+  const cap = (value) => (value ? decodeMimeWords(value).slice(0, MAX_HEADER_VALUE) : null);
+  const first = (name) => cap(headers[name]?.split('\n')[0]);
+  const all = (name) => cap(headers[name]?.split('\n').join(', '));
   const report = headers['x-forefront-antispam-report'] ?? null;
   return {
-    headers: lines.slice(0, MAX_HEADERS).map(({ name, value }) => ({ name, value: decodeMimeWords(value).slice(0, MAX_HEADER_VALUE) })),
-    from: decoded('from'),
-    to: decoded('to'),
-    cc: decoded('cc'),
-    subject: decoded('subject'),
-    date: headers.date ?? null,
-    messageId: headers['message-id'] ?? null,
+    headers: lines.slice(0, MAX_HEADERS).map(({ name, value }) => ({ name: name.slice(0, 200), value: cap(value) ?? '' })),
+    headersTruncated: lines.length > MAX_HEADERS,
+    from: first('from'),
+    to: all('to'),
+    cc: all('cc'),
+    subject: first('subject'),
+    date: first('date'),
+    messageId: first('message-id'),
     eop: report ? { verdict: eopVerdict(report), category: eopCategory(report) } : null,
     html: out.html,
     text: out.text,
@@ -266,28 +301,60 @@ const distance = (row, ms) => (ms === null || !row.time ? 0 : Math.abs(Date.pars
 const closest = (rows, ms) => [...rows].sort((a, b) => distance(a, ms) - distance(b, ms))[0] ?? null;
 
 // Without a Message-ID the recipient, the subject and a time this close to the letter's date
-// decide: the date is the sender's own header and can be off.
+// decide: the date is the sender's own header and can be off. A letter without a subject either
+// needs a time this much closer.
 const NO_ID_WINDOW_MS = 30 * 60 * 1000;
+const NO_ID_NO_SUBJECT_WINDOW_MS = 2 * 60 * 1000;
 
-// The history row of a letter: by its Message-ID, preferring rows for one of the mailbox's
-// addresses, the one closest to the letter's date; without a Message-ID, a row for one of its
-// addresses with the same subject within NO_ID_WINDOW_MS. { row, matchedBy } or null.
-export function findHistoryEntry(rows, { messageId, recipients = [], date = null, subject = null }) {
+const domainOf = (address) => String(address).slice(String(address).lastIndexOf('@') + 1);
+const rowRecipients = (row) => [...row.rcptSmtp, ...row.rcptMime];
+
+// The history row of a letter, { row, matchedBy } or null:
+// - by its Message-ID with one of the mailbox's addresses among the recipients ('message_id'),
+//   the one closest to the letter's date;
+// - by its Message-ID on a row for another recipient on one of the node's domains
+//   ('message_id_other_rcpt': the letter reached this mailbox through an address the panel does
+//   not know, such as a node alias); never a row only for other domains;
+// - without a Message-ID, a row for one of its addresses with the same subject within
+//   NO_ID_WINDOW_MS, or within NO_ID_NO_SUBJECT_WINDOW_MS when the letter has no subject
+//   ('recipient_time').
+export function findHistoryEntry(rows, { messageId, recipients = [], date = null, subject = null, nodeDomains = [] }) {
   const wanted = new Set(recipients.map((r) => String(r).toLowerCase()));
-  const forMailbox = (row) => !wanted.size || row.rcptSmtp.some((r) => wanted.has(r)) || row.rcptMime.some((r) => wanted.has(r));
+  const domains = new Set([...nodeDomains, ...[...wanted].map(domainOf)].map((d) => String(d).toLowerCase()));
+  const forMailbox = (row) => rowRecipients(row).some((r) => wanted.has(r));
+  const onNode = (row) => rowRecipients(row).some((r) => domains.has(domainOf(r)));
   const ms = timeOf(date);
   const id = bareMessageId(messageId);
   if (id) {
     const same = rows.filter((row) => bareMessageId(row.messageId) === id);
-    const row = closest(same.filter(forMailbox), ms) ?? closest(same, ms);
-    return row ? { row, matchedBy: 'message_id' } : null;
+    const own = closest(same.filter(forMailbox), ms);
+    if (own) return { row: own, matchedBy: 'message_id' };
+    const other = closest(same.filter(onNode), ms);
+    return other ? { row: other, matchedBy: 'message_id_other_rcpt' } : null;
   }
   if (ms === null || !wanted.size) return null;
   const title = String(subject ?? '').trim();
-  const near = rows.filter((row) => forMailbox(row) && row.time && distance(row, ms) <= NO_ID_WINDOW_MS
-    && (!title || row.subject.trim() === title));
+  const window = title ? NO_ID_WINDOW_MS : NO_ID_NO_SUBJECT_WINDOW_MS;
+  const near = rows.filter((row) => forMailbox(row) && row.time && distance(row, ms) <= window
+    && row.subject.trim() === title);
   const row = closest(near, ms);
   return row ? { row, matchedBy: 'recipient_time' } : null;
+}
+
+// A promise or null after `ms`: a listing never waits long for a slow history read (the read goes
+// on and fills the cache for the next one).
+export function withDeadline(promise, ms) {
+  let timer;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); });
+  return Promise.race([promise.finally(() => clearTimeout(timer)), late]);
+}
+
+// Letters rspamd refused or marked as spam for the given mailboxes, as the history shows them: when
+// there are some and the quarantine is empty, mailcow's quarantine is probably off (a new mailcow
+// keeps nothing until its size and retention are set), unless someone released or deleted them.
+const QUARANTINED_ACTIONS = new Set(['reject', 'add header', 'rewrite subject']);
+export function spamRowsFor(rows, mailboxes) {
+  return rows.filter((row) => QUARANTINED_ACTIONS.has(row.action) && rowRecipients(row).some((r) => mailboxes.has(r))).length;
 }
 
 // A quarantine row and the history row of the same scan: the history keeps no queue id, so the
@@ -315,18 +382,44 @@ export function topSymbols(symbols, count = 3) {
 // signed-in user also sees the entries addressed to the node mailboxes the panel has: mailboxes are
 // shared by every user of the install (services/mailAccess.js), so that is the whole of what a
 // user can open anyway. Releasing and deleting stay with administrators.
-export async function getQuarantineUserView() {
+async function nodeConfigRow() {
   const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [MAIL_NODE_PROVIDER]);
-  return rows[0]?.config?.quarantineUserView === true;
+  return rows[0]?.config ?? {};
 }
 
-export async function setQuarantineUserView(enabled) {
+// Merged into the node settings: the fields of the node form survive, and they survive this.
+async function mergeNodeConfig(patch) {
   await query(`
     INSERT INTO integration_config (provider, config)
     VALUES ($1, $2)
     ON CONFLICT (provider) DO UPDATE
     SET config = integration_config.config || EXCLUDED.config, updated_at = NOW()
-  `, [MAIL_NODE_PROVIDER, { quarantineUserView: enabled === true }]);
+  `, [MAIL_NODE_PROVIDER, patch]);
+}
+
+export async function getQuarantineUserView() {
+  return (await nodeConfigRow()).quarantineUserView === true;
+}
+
+export async function setQuarantineUserView(enabled) {
+  await mergeNodeConfig({ quarantineUserView: enabled === true });
+}
+
+// When an administrator last had the panel write mailcow's quarantine settings (null: never).
+export async function getQuarantineSettingsAppliedAt() {
+  const at = (await nodeConfigRow()).quarantineSettingsAppliedAt;
+  return typeof at === 'string' ? at : null;
+}
+
+export async function markQuarantineSettingsApplied(at = new Date().toISOString()) {
+  await mergeNodeConfig({ quarantineSettingsAppliedAt: at });
+  return at;
+}
+
+// The domains the panel knows on the node.
+export async function nodeDomainNames() {
+  const { rows } = await query('SELECT domain FROM mail_node_domains');
+  return rows.map((row) => String(row.domain).toLowerCase());
 }
 
 // The panel's node mailboxes by address: Map(email -> account id).
