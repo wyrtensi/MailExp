@@ -172,6 +172,28 @@ accepted domains (`recipient-denied` отвечает всем получате�
 сессии TLS, inject и коды возврата команды). Правка `extra.cf` — `fake-eop/extra-cf.sh`, тесты —
 `scripts/deploy/test/stage-eop.bats`. В CI это отдельное задание «Stand fake-EOP».
 
+## Карантин и rspamd на стенде
+
+Проверено 2026-10-02 при работе над R-20 ([runbook, раздел 6б](mail-node.md)):
+
+- rspamd стенда оценивает и письма из сети Docker mailcow (`mynetworks`): в истории у них
+  `is_skipped: false` и обычные символы. Поэтому письмо для карантина можно отдать прямо на
+  `postfix-mailcow:25` из одноразового контейнера в сети `mailcowdockerized_mailcow-network` (простой
+  SMTP-клиент на Node, `node:22.20-alpine`), получатель — ящик стенда.
+- GTUBE (`XJS*C4JDBQADN1...`) для этого не годится: rspamd отвечает `554 5.7.1 Gtube pattern` как
+  предварительный результат, и экспортёр карантина не вызывается — записи нет. Вариант `YJS*...` («add
+  header») символа `GTUBE` на стенде не дал. Надёжно работает вложение `.exe`: `MIME_BAD_EXTENSION` (10.1) и
+  ссылка без зоны (`URL_NO_TLD`, 2) дают `add header` (12.1, письмо в Junk и копия в карантине), а с
+  заголовком EOP `X-Forefront-Antispam-Report: …SFV:SPM;…CAT:SPM;` добавляется `MICROSOFT_SPAM` (4) и
+  выходит `reject` (16.1, письмо только в карантине). `MICROSOFT_SPAM` срабатывает, пока диапазоны EOP не
+  стали forwarding hosts (R-12).
+- Карантин нового mailcow ничего не хранит: `Q_MAX_SIZE` и `Q_RETENTION_SIZE` в Redis не заданы (0), а
+  без `Q_EXCLUDE_DOMAINS` (появляется при первом сохранении формы карантина в админке) `pipe.php` падает
+  и теряет письмо, отвечая rspamd `200`. Для проверки на стенде эти три ключа ставились на время теста
+  и потом удалялись (стенд остаётся как был); на рабочем узле — раздел 3, шаг 9 runbook.
+- Выпуск письма с `SFV:SPM` правило R-11 снова кладёт в Junk; выпуск записи `add header` отбрасывает
+  штатное правило `duplicate` (тот же `Message-ID`).
+
 ## DNS-фикстуры (stage-dns)
 
 Зона `stage.test`, какой её должен публиковать тенант за EOP, для проверки DNS панели (R-14, R-15;
