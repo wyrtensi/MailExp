@@ -56,7 +56,7 @@ import { accountLabel } from '../utils/accountLabel.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
-import { formatDay, localeTag } from '../utils/formatDate.js';
+import { formatDateTime, localeTag } from '../utils/formatDate.js';
 import { CheckIcon, PlusIcon, WarningIcon } from './UiIcons.jsx';
 
 // ─── Shared field component ───────────────────────────────────────────────────
@@ -577,10 +577,11 @@ function AccountsTab() {
     // A mailbox on the mail node keeps working until its date, then it is deleted for good with all
     // its mail (owner decision 2026-10-01): the address is typed out and a reason given.
     setConfirmDialog({
-      ...nodeMailboxDeleteDialog({ t, account, days, aliases, formatDay }),
-      onConfirm: async ({ reason }) => {
+      ...nodeMailboxDeleteDialog({ t, account, days, aliases, formatDate: formatDateTime }),
+      // The address as the person typed it goes to the server, which checks it again.
+      onConfirm: async ({ reason, typed }) => {
         try {
-          const updated = await api.requestMailboxDeletion(id, { email: account.email_address, reason });
+          const updated = await api.requestMailboxDeletion(id, { email: typed, reason });
           updateAccount(id, updated);
         } catch (err) {
           throw explain(err);
@@ -589,16 +590,25 @@ function AccountsTab() {
     });
   };
 
-  // Anyone may cancel a pending deletion: the mailbox stays as it is.
+  // Anyone may cancel a pending deletion: the mailbox stays as it is. One cancel at a time per
+  // mailbox; a mailbox already gone (deleted meanwhile) leaves the list.
+  const [cancellingDeletion, setCancellingDeletion] = useState(null);
   const handleCancelDeletion = async (id) => {
+    if (cancellingDeletion) return;
+    setCancellingDeletion(id);
     try {
       const updated = await api.cancelMailboxDeletion(id);
       updateAccount(id, updated);
     } catch (err) {
+      if (err?.code === 'account_not_found') {
+        setAccounts(useStore.getState().accounts.filter(a => a.id !== id));
+      }
       addNotification({
         type: 'error', title: t('admin.accounts.deletion.cancelFailed'),
         body: isMailNodeErrorCode(err?.code) ? t(mailNodeErrorKey(err.code)) : err.message,
       });
+    } finally {
+      setCancellingDeletion(null);
     }
   };
 
@@ -1233,7 +1243,7 @@ function AccountsTab() {
             </div>
           </div>
 
-          <MailboxDeletionNotice account={account} onCancel={handleCancelDeletion} />
+          <MailboxDeletionNotice account={account} onCancel={handleCancelDeletion} busy={cancellingDeletion === account.id} />
 
           {/* Connection details bar */}
           <div style={{

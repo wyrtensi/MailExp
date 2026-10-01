@@ -137,7 +137,7 @@ describe('ConfirmOverlay', () => {
     assert.equal(host.querySelector('[data-confirm-button]').disabled, true, 'and the address must still match');
     await type(host.querySelector('[data-confirm-typed]'), 'info@example.com');
     await click(host.querySelector('[data-confirm-button]'));
-    assert.deepEqual(got, [{ reason: 'Left the company' }]);
+    assert.deepEqual(got, [{ reason: 'Left the company', typed: 'info@example.com' }], 'the typed address goes along');
   });
 
   test('shows the note about the aliases, and Escape closes the dialog', async () => {

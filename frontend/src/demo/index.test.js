@@ -271,6 +271,9 @@ test('the demo shows one mail node mailbox pending deletion and keeps the days s
   const pending = (await demoRequest('GET', '/accounts')).filter(a => a.delete_after);
   assert.deepEqual(pending.map(a => a.id), ['demo-fx-46']);
   assert.ok(pending[0].deletion_reason);
+  // Dated from now: always still ahead in the demo.
+  const ahead = (Date.parse(pending[0].delete_after) - Date.now()) / 86400000;
+  assert.ok(ahead > 2.9 && ahead < 3.1, `about 3 days ahead, not ${ahead}`);
   assert.equal((await demoRequest('GET', '/mail-node/config')).deleteAfterDays, 5);
   await assert.rejects(() => demoRequest('PUT', '/mail-node/config', { deleteAfterDays: 91 }), err => err.code === 'delete_after_days_invalid');
   await demoRequest('PUT', '/mail-node/config', { deleteAfterDays: '14' });

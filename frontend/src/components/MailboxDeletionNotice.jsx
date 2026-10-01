@@ -1,6 +1,6 @@
 import { useTranslation } from 'react-i18next';
-import { pendingDeletion } from '../utils/mailNode.js';
-import { formatDay } from '../utils/formatDate.js';
+import { mailNodeErrorKey, pendingDeletion } from '../utils/mailNode.js';
+import { formatDateTime } from '../utils/formatDate.js';
 
 // A mail node mailbox someone asked to delete keeps working until its date (owner decision
 // 2026-10-01). These say so wherever the mailbox shows, so nobody is surprised. The reason is the
@@ -13,7 +13,7 @@ export function PendingDeletionLine({ account, style }) {
   if (!pending) return null;
   return (
     <div data-pending-deletion-line style={{ fontSize: 11, color: 'var(--red)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', ...style }}>
-      {t('sidebar.pendingDeletion', { date: formatDay(pending.deleteAfter) })}
+      {t('sidebar.pendingDeletion', { date: formatDateTime(pending.deleteAfter) })}
     </div>
   );
 }
@@ -30,19 +30,22 @@ export default function MailboxDeletionNotice({ account, onCancel, busy = false 
       display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap',
     }}>
       <div style={{ flex: '1 1 220px', minWidth: 0, fontSize: 12, lineHeight: 1.5, color: 'var(--text-primary)' }}>
-        <div style={{ fontWeight: 600 }}>{t('admin.accounts.deletion.pendingBadge', { date: formatDay(pending.deleteAfter) })}</div>
+        <div style={{ fontWeight: 600 }}>{t('admin.accounts.deletion.pendingBadge', { date: formatDateTime(pending.deleteAfter) })}</div>
         <div data-deletion-reason style={{ color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
           {t('admin.accounts.deletion.why', {
-            reason: pending.reason, by: pending.requestedBy || t('admin.mailNode.someone'), at: formatDay(pending.requestedAt),
+            reason: pending.reason, by: pending.requestedBy || t('admin.mailNode.someone'), at: formatDateTime(pending.requestedAt),
           })}
         </div>
         {pending.lastError && (
-          <div data-deletion-error style={{ color: 'var(--red)' }}>{t('admin.accounts.deletion.lastError', { error: pending.lastError })}</div>
+          <div data-deletion-error data-code={pending.lastError} style={{ color: 'var(--red)' }}>
+            {t('admin.accounts.deletion.lastError', { error: t(mailNodeErrorKey(pending.lastError)) })}
+          </div>
         )}
       </div>
-      <button type="button" onClick={() => onCancel?.(account.id)} disabled={busy} style={{
+      <button type="button" onClick={() => onCancel?.(account.id)} disabled={busy} aria-busy={busy} style={{
         padding: '5px 10px', background: 'transparent', border: '1px solid var(--border)', borderRadius: 6,
-        color: 'var(--text-primary)', cursor: 'pointer', fontSize: 12, fontWeight: 500, flexShrink: 0,
+        color: 'var(--text-primary)', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
+        fontSize: 12, fontWeight: 500, flexShrink: 0,
       }}>
         {t('admin.accounts.deletion.cancel')}
       </button>

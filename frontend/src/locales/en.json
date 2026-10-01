@@ -1043,7 +1043,10 @@
         "errorAlreadyRequested": "Deleting this mailbox was asked for already.",
         "errorNotRequested": "No deletion of this mailbox is pending.",
         "errorInProgress": "The mailbox is being deleted right now.",
-        "errorRequestRequired": "A mailbox on the mail node is deleted after a waiting time: schedule its deletion."
+        "errorRequestRequired": "A mailbox on the mail node is deleted after a waiting time: schedule its deletion.",
+        "errorAccountNotFound": "This mailbox is no longer in MailExpert.",
+        "errorStepFailed": "a step before the deletion on the mail node failed",
+        "errorRowKept": "the mailbox was deleted on the mail node, but its entry here was kept: ask an administrator"
       }
     },
     "folderMappings": {

@@ -72,9 +72,17 @@ describe('MailboxDeletionNotice', () => {
     assert.deepEqual(cancelled, ['a1']);
   });
 
-  test('says why the deletion job could not delete it yet', async () => {
+  test('says, translated, why the deletion job could not delete it yet', async () => {
     const host = await mount(React.createElement(MailboxDeletionNotice, { account: { ...PENDING, deletion_last_error: 'mail_node_host_mismatch' } }));
-    assert.ok(host.querySelector('[data-deletion-error]').textContent.includes('mail_node_host_mismatch'));
+    const error = host.querySelector('[data-deletion-error]');
+    assert.ok(error.textContent.startsWith('admin.accounts.deletion.lastError'));
+    assert.ok(error.textContent.includes('admin.mailNode.errorHostMismatch'), 'the code is shown in words');
+  });
+
+  test('keeps "Cancel deletion" disabled while a cancel is on its way', async () => {
+    const host = await mount(React.createElement(MailboxDeletionNotice, { account: PENDING, busy: true, onCancel: () => {} }));
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'admin.accounts.deletion.cancel');
+    assert.equal(button.disabled, true);
   });
 
   test('shows nothing for a mailbox with no deletion pending', async () => {

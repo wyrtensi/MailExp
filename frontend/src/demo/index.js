@@ -53,9 +53,10 @@ let demoDeleteAfterDays = 5;
   const pending = FLEET_ACCOUNTS.find(account => account.id === 'demo-fx-46');
   if (pending) {
     Object.assign(pending, {
-      deletion_requested_at: '2026-09-29T09:30:00.000Z', deletion_requested_by_email: 'demo@mailexpert.local',
+      // Dated from now, so the demo always shows a deletion still ahead.
+      deletion_requested_at: new Date(Date.now() - 2 * 86400000).toISOString(), deletion_requested_by_email: 'demo@mailexpert.local',
       deletion_reason: 'The project ended; its mail was moved to the archive mailbox.',
-      delete_after: '2026-10-04T09:30:00.000Z', deletion_last_error: null,
+      delete_after: new Date(Date.now() + 3 * 86400000).toISOString(), deletion_last_error: null,
     });
   }
 }
@@ -1272,7 +1273,8 @@ export async function demoRequest(method, path, body = {}) {
     if (account.delete_after) throw demoError('Deleting this mailbox was asked for already', 'deletion_already_requested');
     const now = new Date();
     Object.assign(account, {
-      deletion_requested_at: now.toISOString(), deletion_requested_by_email: DEMO_ADMIN_EMAIL,
+      // The requester is whoever the demo is signed in as (the "view as a user" switch).
+      deletion_requested_at: now.toISOString(), deletion_requested_by_email: (demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER).email,
       deletion_reason: String(body.reason).trim(), delete_after: deletionDate(demoDeleteAfterDays, now.getTime()), deletion_last_error: null,
     });
     return clone(account);

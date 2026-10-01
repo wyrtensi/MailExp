@@ -6,8 +6,8 @@ import { MAX_DELETION_REASON, deleteConfirmationMatches, deletionReasonError } f
 // node mailbox's address) also asks for that text typed out in full, like deleting a repository on
 // GitHub: the confirm button stays disabled until it matches, ignoring case and outer spaces.
 // `typedLabel` is the line above that field. A dialog with `requireReason` also asks why (a text of
-// at most MAX_DELETION_REASON characters, `reasonLabel` above it): the button waits for it too, and
-// `onConfirm` gets { reason } trimmed. `note` is an optional second paragraph (the aliases that go
+// at most MAX_DELETION_REASON characters, `reasonLabel` above it): the button waits for it too.
+// `onConfirm` then gets { reason, typed }, both trimmed, so the server can check the typed text. `note` is an optional second paragraph (the aliases that go
 // with a node mailbox). Escape closes the dialog unless the action is running.
 export default function ConfirmOverlay({ dialog, onClose }) {
   const { t } = useTranslation();
@@ -45,7 +45,7 @@ export default function ConfirmOverlay({ dialog, onClose }) {
     setError('');
     setBusy(true);
     try {
-      await dialog.onConfirm(dialog.requireReason ? { reason: reason.trim() } : undefined);
+      await dialog.onConfirm(dialog.requireTyped || dialog.requireReason ? { reason: reason.trim(), typed: typed.trim() } : undefined);
       onClose();
     } catch (err) {
       setError(err?.message || String(err));

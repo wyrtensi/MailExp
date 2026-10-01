@@ -87,6 +87,9 @@ const ERROR_KEYS = {
   deletion_not_requested: 'admin.accounts.deletion.errorNotRequested',
   deletion_in_progress: 'admin.accounts.deletion.errorInProgress',
   mail_node_deletion_request_required: 'admin.accounts.deletion.errorRequestRequired',
+  account_not_found: 'admin.accounts.deletion.errorAccountNotFound',
+  deletion_step_failed: 'admin.accounts.deletion.errorStepFailed',
+  node_deleted_row_kept: 'admin.accounts.deletion.errorRowKept',
   mailbox_disabled_on_node: 'admin.accounts.add.domainErrorDisabledOnNode',
   mail_node_disable_unsupported: 'admin.accounts.mailNodeDisableUnsupported',
   step_invalid: 'admin.mailNode.errorStepOutOfOrder',
@@ -239,15 +242,15 @@ export function nodeAliasesNote(aliases) {
 // The confirmation of deleting a mail node mailbox (ConfirmOverlay fields, without onConfirm): it
 // keeps working until the date the given days make (or the administrator's days, when they are not
 // known), then it goes for good with its mail and the node aliases listed; the address is typed out
-// and a reason is required. `t` is the translator; `formatDay` formats the date.
-export function nodeMailboxDeleteDialog({ t, account, days, aliases, formatDay = (d) => d }) {
+// and a reason is required. `t` is the translator; `formatDate` formats the moment.
+export function nodeMailboxDeleteDialog({ t, account, days, aliases, formatDate = (d) => d }) {
   const email = account.email_address;
   const date = deletionDate(days);
   const note = nodeAliasesNote(aliases).map((part) => t(part.key, part.values)).join(' ');
   return {
     title: t('admin.accounts.deleteTitle'),
     message: date
-      ? t('admin.accounts.deleteMailNodeMessage', { email, date: formatDay(date) })
+      ? t('admin.accounts.deleteMailNodeMessage', { email, date: formatDate(date) })
       : t('admin.accounts.deleteMailNodeMessageNoDate', { email }),
     requireTyped: email,
     typedLabel: t('admin.accounts.deleteMailNodeTypeLabel', { email }),

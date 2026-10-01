@@ -259,7 +259,7 @@ describe('the pending deletion of a node mailbox', () => {
     const t = (k, v) => (v ? `${k}|${JSON.stringify(v)}` : k);
     const dialog = nodeMailboxDeleteDialog({
       t, account: { email_address: 'info@example.com' }, days: 5,
-      aliases: [{ address: 'orders@example.com', onlyTarget: true }], formatDay: () => 'DATE',
+      aliases: [{ address: 'orders@example.com', onlyTarget: true }], formatDate: () => 'DATE',
     });
     assert.equal(dialog.requireTyped, 'info@example.com');
     assert.equal(dialog.requireReason, true);
@@ -276,6 +276,9 @@ describe('the pending deletion of a node mailbox', () => {
     assert.equal(mailNodeErrorKey('mailbox_pending_deletion'), 'admin.accounts.add.domainErrorPendingDeletion');
     assert.equal(mailNodeErrorKey('deletion_reason_required'), 'admin.accounts.deletion.errorReasonRequired');
     assert.equal(isMailNodeErrorCode('deletion_in_progress'), true);
+    for (const code of ['account_not_found', 'deletion_step_failed', 'node_deleted_row_kept', 'mail_node_not_configured', 'mail_node_unreachable']) {
+      assert.equal(isMailNodeErrorCode(code), true, code);
+    }
     assert.equal(isMailNodeErrorCode('toString'), false);
     assert.equal(isMailNodeErrorCode(undefined), false);
   });
