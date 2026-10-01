@@ -6,7 +6,8 @@ describe('AUDIT_ACTIONS', () => {
   it('lists every action the server records, each with a label', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
-      'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed', 'message.sent', 'message.deleted',
+      'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed',
+      'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'message.sent', 'message.deleted',
       'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
@@ -190,6 +191,27 @@ describe('auditDetail', () => {
         values: { domain: 'a.example', from: '2026-09-01 10:00:00', to: '2026-09-30 12:00:00' },
       },
     );
+  });
+
+  it('keeps the reason of a node mailbox deletion through request, cancel and the final delete', () => {
+    const at = '2026-10-01T10:00:00.000Z';
+    const date = '2026-10-06T10:00:00.000Z';
+    const requested = auditDetail({ action: 'mailbox.deletion_requested', details: { mailNode: true, deleteAfter: date, days: 5, reason: 'Left' } });
+    assert.equal(requested.key, 'admin.audit.detailDeletionRequested');
+    assert.equal(requested.values.reason, 'Left');
+    assert.ok(requested.values.date.includes('2026'));
+    assert.equal(auditDetail({ action: 'mailbox.deletion_cancelled', details: { deleteAfter: date, reason: 'Left' } }).key, 'admin.audit.detailDeletionCancelled');
+    const deleted = auditDetail({
+      action: 'mailbox.deleted', details: { mailNode: true, pending: true, requestedBy: 'anna@example.com', requestedAt: at, reason: 'Left' },
+    });
+    assert.equal(deleted.key, 'admin.audit.detailMailNodeMailboxPending');
+    assert.equal(deleted.values.by, 'anna@example.com');
+    assert.equal(deleted.values.reason, 'Left');
+    assert.equal(
+      auditDetail({ action: 'mailbox.deleted', details: { mailNode: true, pending: true, reason: 'Left', nodeWarnings: ['w'] } }).key,
+      'admin.audit.detailMailNodeMailboxPendingWarnings',
+    );
+    assert.equal(auditActionLabelKey('mailbox.deletion_requested'), 'admin.audit.actionMailboxDeletionRequested');
   });
 
   it('describes a quota change and the delete of a mail node mailbox', () => {

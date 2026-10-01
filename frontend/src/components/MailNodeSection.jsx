@@ -3,8 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
 import {
+  DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
   DEFAULT_QUOTA_MB,
+  MAX_DELETE_AFTER_DAYS,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
   domainStateKey,
@@ -33,7 +35,9 @@ const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primar
 const cellStyle = { padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)', fontSize: 13, textAlign: 'left' };
 const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' };
 
-const EMPTY_FORM = { mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '' };
+const EMPTY_FORM = {
+  mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '', deleteAfterDays: String(DEFAULT_DELETE_AFTER_DAYS),
+};
 
 // Settings -> Integrations -> "Mail node" (admins only): the mailcow server MailExpert creates
 // domain mailboxes on, its domains with their onboarding, the mail disk and the quota of every
@@ -75,7 +79,10 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     api.mailNode.getConfig()
       .then((cfg) => {
         setStored(cfg);
-        setForm({ mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl });
+        setForm({
+          mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl,
+          deleteAfterDays: String(cfg.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS),
+        });
       })
       .catch(fail);
   }, []);
@@ -105,6 +112,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const saveConfig = () => run(async () => {
     await api.mailNode.saveConfig({
       mailHost: form.mailHost.trim(), apiKey: form.apiKey, quotaMb: Number(form.quotaMb), diskPingUrl: form.diskPingUrl.trim(),
+      deleteAfterDays: Number(form.deleteAfterDays),
     });
     const cfg = await api.mailNode.getConfig();
     setStored(cfg);
@@ -164,6 +172,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
             <span style={labelStyle}>{t('admin.mailNode.pingLabel')}</span>
             <input value={form.diskPingUrl} onChange={(e) => setForm({ ...form, diskPingUrl: e.target.value })} spellCheck={false} placeholder={t('admin.mailNode.pingPh')} style={monoFieldStyle} />
             <span style={hintStyle}>{t('admin.mailNode.pingNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.mailNode.deleteAfterLabel')}</span>
+            <input inputMode="numeric" value={form.deleteAfterDays} onChange={(e) => setForm({ ...form, deleteAfterDays: e.target.value })} style={{ ...fieldStyle, maxWidth: 160 }} />
+            <span style={hintStyle}>{t('admin.mailNode.deleteAfterNote', { max: MAX_DELETE_AFTER_DAYS })}</span>
           </label>
           <div>
             <button type="button" onClick={saveConfig} disabled={busy || !!configErrorKey} style={primaryButtonStyle}>

@@ -42,7 +42,10 @@ import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
-import { canDeleteAccount, mailNodeErrorKey, nodeAliasesNote } from '../utils/mailNode.js';
+import {
+  canDeleteAccount, isMailNodeErrorCode, mailNodeErrorKey, nodeMailboxDeleteDialog, pendingDeletion,
+} from '../utils/mailNode.js';
+import MailboxDeletionNotice from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
@@ -53,7 +56,7 @@ import { accountLabel } from '../utils/accountLabel.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
-import { localeTag } from '../utils/formatDate.js';
+import { formatDay, localeTag } from '../utils/formatDate.js';
 import { CheckIcon, PlusIcon, WarningIcon } from './UiIcons.jsx';
 
 // ─── Shared field component ───────────────────────────────────────────────────
@@ -549,32 +552,54 @@ function AccountsTab() {
     // The node's aliases that deliver to the mailbox go with it (or lose it as a target): the
     // confirmation names them. A node that does not answer in time only leaves the list out.
     let aliases = [];
+    let days = null;
     if (onNode) {
       const timeout = new Promise((resolve) => { setTimeout(() => resolve(null), 5000); });
       const found = await Promise.race([api.getNodeAliases(id).catch(() => null), timeout]);
       aliases = found?.aliases ?? [];
+      days = found?.deleteAfterDays ?? null;
     }
-    const note = nodeAliasesNote(aliases).map((part) => t(part.key, part.values)).join(' ');
-    setConfirmDialog({
-      title: t('admin.accounts.deleteTitle'),
-      // A mailbox on the mail node is deleted there too, with all its mail: the address must be typed
-      // out to confirm. A connected Gmail or IMAP mailbox only leaves MailExpert; its mail stays at
-      // the provider.
-      message: onNode ? t('admin.accounts.deleteMailNodeMessage', { email: account.email_address }) : t('admin.accounts.deleteMessage'),
-      ...(onNode ? { requireTyped: account.email_address, typedLabel: t('admin.accounts.deleteMailNodeTypeLabel', { email: account.email_address }) } : {}),
-      ...(note ? { note } : {}),
-      confirmLabel: onNode ? t('admin.accounts.deleteMailNodeConfirm') : t('common.remove'),
-      onConfirm: async () => {
-        try {
+    // Translates a mail node refusal; anything else keeps its own message.
+    const explain = (err) => (isMailNodeErrorCode(err?.code) ? new Error(t(mailNodeErrorKey(err.code)), { cause: err }) : err);
+    if (!onNode) {
+      // A connected Gmail or IMAP mailbox only leaves MailExpert at once; its mail stays at the provider.
+      setConfirmDialog({
+        title: t('admin.accounts.deleteTitle'),
+        message: t('admin.accounts.deleteMessage'),
+        confirmLabel: t('common.remove'),
+        onConfirm: async () => {
           await api.deleteAccount(id);
+          setAccounts(accounts.filter(a => a.id !== id));
+        },
+      });
+      return;
+    }
+    // A mailbox on the mail node keeps working until its date, then it is deleted for good with all
+    // its mail (owner decision 2026-10-01): the address is typed out and a reason given.
+    setConfirmDialog({
+      ...nodeMailboxDeleteDialog({ t, account, days, aliases, formatDay }),
+      onConfirm: async ({ reason }) => {
+        try {
+          const updated = await api.requestMailboxDeletion(id, { email: account.email_address, reason });
+          updateAccount(id, updated);
         } catch (err) {
-          // A mail node failure keeps the mailbox; say why in the user's language.
-          if (err?.code?.startsWith('mail_node_')) throw new Error(t(mailNodeErrorKey(err.code)), { cause: err });
-          throw err;
+          throw explain(err);
         }
-        setAccounts(accounts.filter(a => a.id !== id));
       },
     });
+  };
+
+  // Anyone may cancel a pending deletion: the mailbox stays as it is.
+  const handleCancelDeletion = async (id) => {
+    try {
+      const updated = await api.cancelMailboxDeletion(id);
+      updateAccount(id, updated);
+    } catch (err) {
+      addNotification({
+        type: 'error', title: t('admin.accounts.deletion.cancelFailed'),
+        body: isMailNodeErrorCode(err?.code) ? t(mailNodeErrorKey(err.code)) : err.message,
+      });
+    }
   };
 
   const handleReconnect = async (id) => {
@@ -1197,7 +1222,7 @@ function AccountsTab() {
                   <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
                 </svg>
               </IconBtn>
-              {canDeleteAccount(account, { isAdmin }) && (
+              {canDeleteAccount(account, { isAdmin }) && !pendingDeletion(account) && (
                 <IconBtn onClick={() => handleDelete(account.id)} title={t('common.remove')} danger>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="3 6 5 6 21 6"/>
@@ -1207,6 +1232,8 @@ function AccountsTab() {
               )}
             </div>
           </div>
+
+          <MailboxDeletionNotice account={account} onCancel={handleCancelDeletion} />
 
           {/* Connection details bar */}
           <div style={{

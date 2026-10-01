@@ -1,6 +1,9 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
-import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady, canRestartOnboarding, normalizeEopSettings } from '../utils/mailNode.js';
+import {
+  DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
+  deletionReasonError, normalizeEopSettings, parseWholeNumber,
+} from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
   {
@@ -41,6 +44,21 @@ const ACCOUNT_FIXTURES = [
 // 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50 in all.
 const FLEET_ACCOUNTS = fleetAccounts();
 ACCOUNT_FIXTURES.push(...FLEET_ACCOUNTS);
+
+// The days a mail node mailbox keeps working after its deletion is asked for (the mail node
+// settings; the server's default). The demo never runs the deletion job: a pending mailbox stays.
+let demoDeleteAfterDays = 5;
+// One fleet mailbox on the mail node is pending deletion, so the badges and "Cancel deletion" show.
+{
+  const pending = FLEET_ACCOUNTS.find(account => account.id === 'demo-fx-46');
+  if (pending) {
+    Object.assign(pending, {
+      deletion_requested_at: '2026-09-29T09:30:00.000Z', deletion_requested_by_email: 'demo@mailexpert.local',
+      deletion_reason: 'The project ended; its mail was moved to the archive mailbox.',
+      delete_after: '2026-10-04T09:30:00.000Z', deletion_last_error: null,
+    });
+  }
+}
 
 const FOLDER_FIXTURES = [
   { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
@@ -873,6 +891,9 @@ function createDomainMailbox(body) {
   // The server's order: an address already added, then a domain whose onboarding is not done,
   // then one the node lacks or has inactive.
   const email = `${localPart}@${normalizeEmail(body.domain)}`;
+  if (mailboxWithEmail(email)?.delete_after) {
+    throw demoError('This mailbox is pending deletion: cancel the deletion to keep it', 'mailbox_pending_deletion');
+  }
   if (mailboxWithEmail(email)) throw demoError('This mailbox is already in MailExpert', 'mailbox_exists');
   const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain));
   if (!MAILBOX_READY_STATES.includes(domain?.state)) throw demoError('The domain is not ready for mailboxes', 'domain_not_ready');
@@ -1217,17 +1238,44 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'DELETE' && accountMatch) {
     const id = decodeURIComponent(accountMatch[1]);
-    const index = ACCOUNT_FIXTURES.findIndex(a => a.id === id);
-    const [removed] = index !== -1 ? ACCOUNT_FIXTURES.splice(index, 1) : [];
-    // A mail node mailbox is deleted on the node with all its mail, as on the server; the demo's
-    // cached letters of any removed mailbox go with it.
-    messages = messages.filter(m => m.account_id !== id);
-    if (removed?.mail_node) {
-      const domain = normalizeEmail(removed.email_address).split('@')[1];
-      mailNodeDomains = mailNodeDomains.map(d => (d.domain === domain ? { ...d, mailboxes: Math.max(0, d.mailboxes - 1) } : d));
+    // As on the server, a mail node mailbox is never removed at once: its deletion is scheduled.
+    if (accountFor(id)?.mail_node) {
+      throw demoError('A mail node mailbox is deleted after a waiting time', 'mail_node_deletion_request_required');
     }
-    mailNodeMailboxes = mailNodeMailboxes.filter(m => m.accountId !== id);
+    const index = ACCOUNT_FIXTURES.findIndex(a => a.id === id);
+    if (index !== -1) ACCOUNT_FIXTURES.splice(index, 1);
+    // The demo's cached letters of the removed mailbox go with it.
+    messages = messages.filter(m => m.account_id !== id);
     return { ok: true };
+  }
+  // Scheduling and cancelling the deletion of a mail node mailbox, with the server's refusals
+  // (routes/accounts.js). The demo never deletes it: there is no deletion job here.
+  const deletionMatch = pathname.match(/^\/accounts\/([^/]+)\/deletion$/);
+  if (deletionMatch && (verb === 'POST' || verb === 'DELETE')) {
+    const account = accountFor(decodeURIComponent(deletionMatch[1]));
+    if (!account) throw demoError('Account not found', 'account_not_found');
+    if (verb === 'DELETE') {
+      if (!account.delete_after) throw demoError('No deletion of this mailbox is pending', 'deletion_not_requested');
+      Object.assign(account, {
+        deletion_requested_at: null, deletion_requested_by_email: null, deletion_reason: null, delete_after: null, deletion_last_error: null,
+      });
+      return clone(account);
+    }
+    if (!account.mail_node) throw demoError('Only a mailbox on the mail node waits before it is deleted', 'not_mail_node');
+    if (normalizeEmail(body?.email) !== normalizeEmail(account.email_address)) {
+      throw demoError('Type the full address of the mailbox to confirm', 'confirmation_mismatch');
+    }
+    const reasonError = deletionReasonError(body?.reason);
+    if (reasonError) {
+      throw demoError('Say why the mailbox is deleted', reasonError.endsWith('TooLong') ? 'deletion_reason_too_long' : 'deletion_reason_required');
+    }
+    if (account.delete_after) throw demoError('Deleting this mailbox was asked for already', 'deletion_already_requested');
+    const now = new Date();
+    Object.assign(account, {
+      deletion_requested_at: now.toISOString(), deletion_requested_by_email: DEMO_ADMIN_EMAIL,
+      deletion_reason: String(body.reason).trim(), delete_after: deletionDate(demoDeleteAfterDays, now.getTime()), deletion_last_error: null,
+    });
+    return clone(account);
   }
   // The node's aliases that deliver to a node mailbox, for its delete confirmation. The demo's sales
   // mailbox has one, so the confirmation shows the line about it.
@@ -1237,7 +1285,7 @@ export async function demoRequest(method, path, body = {}) {
     if (!account) throw demoError('Account not found');
     if (!account.mail_node) throw demoError('Mail node mailbox not found', 'mailbox_not_found');
     const [local, domain] = normalizeEmail(account.email_address).split('@');
-    return { aliases: local === 'sales' ? [{ address: `orders@${domain}`, onlyTarget: true }] : [] };
+    return { aliases: local === 'sales' ? [{ address: `orders@${domain}`, onlyTarget: true }] : [], deleteAfterDays: demoDeleteAfterDays };
   }
   const reconnectMatch = pathname.match(/^\/accounts\/([^/]+)\/reconnect$/);
   if (verb === 'POST' && reconnectMatch) {
@@ -1625,9 +1673,20 @@ export async function demoRequest(method, path, body = {}) {
     return { ok: true };
   }
   if (verb === 'GET' && pathname === '/mail-node/config') {
-    return { configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '' };
+    return {
+      configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '',
+      deleteAfterDays: demoDeleteAfterDays,
+    };
   }
-  if (verb === 'PUT' && pathname === '/mail-node/config') return { ok: true };
+  if (verb === 'PUT' && pathname === '/mail-node/config') {
+    // The days before a deletion, checked as the server does (1 to 90); dates already set stay.
+    if (body?.deleteAfterDays !== undefined) {
+      const days = parseWholeNumber(body.deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS);
+      if (days == null) throw demoError('Days before a deletion must be a whole number from 1 to 90', 'delete_after_days_invalid');
+      demoDeleteAfterDays = days;
+    }
+    return { ok: true };
+  }
   if (verb === 'GET' && pathname === '/mail-node/domains') {
     // As on the server, an ordinary user sees only the domains a mailbox can be created on.
     if (demoRole() !== 'user') return clone({ domains: mailNodeDomains });

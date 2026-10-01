@@ -1,4 +1,5 @@
 import { domainStateKey } from './mailNode.js';
+import { formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
 // backend/src/services/auditLog.js and the entries GET /api/admin/audit returns.
@@ -12,6 +13,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.disabled': 'admin.audit.actionMailboxDisabled',
   'mailbox.password_restored': 'admin.audit.actionMailboxPasswordRestored',
   'mailbox.quota_changed': 'admin.audit.actionMailboxQuotaChanged',
+  'mailbox.deletion_requested': 'admin.audit.actionMailboxDeletionRequested',
+  'mailbox.deletion_cancelled': 'admin.audit.actionMailboxDeletionCancelled',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
@@ -52,6 +55,7 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   apiKey: 'admin.audit.fieldApiKey',
   quotaMb: 'admin.audit.fieldQuota',
   diskPingUrl: 'admin.audit.fieldPingUrl',
+  deleteAfterDays: 'admin.audit.fieldDeleteAfterDays',
   eopHost: 'admin.audit.fieldEopHost',
   certificateHost: 'admin.audit.fieldCertificateHost',
   dkimMode: 'admin.audit.fieldDkimMode',
@@ -101,13 +105,35 @@ export function auditDetail(entry) {
       return details.oauthProvider
         ? { key: 'admin.audit.detailProvider', values: { provider: details.oauthProvider } }
         : null;
-    case 'mailbox.deleted':
-      // nodeWarnings: the node deleted the mailbox but said something went wrong on the way (its
-      // maildir could not be moved away), shown as the node wrote it.
+    case 'mailbox.deleted': {
+      // pending: the deletion job deleted a mailbox someone asked to delete; the entry keeps who
+      // asked, when and why, since the mailbox row is gone. nodeWarnings: the node deleted the
+      // mailbox but said something went wrong on the way (its maildir could not be moved away),
+      // shown as the node wrote it.
       if (!details.mailNode) return null;
-      return Array.isArray(details.nodeWarnings) && details.nodeWarnings.length
-        ? { key: 'admin.audit.detailMailNodeMailboxWarnings', values: { warnings: details.nodeWarnings.join('; ') } }
+      const warnings = Array.isArray(details.nodeWarnings) && details.nodeWarnings.length ? details.nodeWarnings.join('; ') : '';
+      if (details.pending) {
+        const values = {
+          by: details.requestedBy ?? '', at: formatDay(details.requestedAt), reason: details.reason ?? '',
+        };
+        return warnings
+          ? { key: 'admin.audit.detailMailNodeMailboxPendingWarnings', values: { ...values, warnings } }
+          : { key: 'admin.audit.detailMailNodeMailboxPending', values };
+      }
+      return warnings
+        ? { key: 'admin.audit.detailMailNodeMailboxWarnings', values: { warnings } }
         : { key: 'admin.audit.detailMailNodeMailbox', values: {} };
+    }
+    case 'mailbox.deletion_requested':
+      return {
+        key: 'admin.audit.detailDeletionRequested',
+        values: { date: formatDay(details.deleteAfter), reason: details.reason ?? '' },
+      };
+    case 'mailbox.deletion_cancelled':
+      return {
+        key: 'admin.audit.detailDeletionCancelled',
+        values: { date: formatDay(details.deleteAfter), reason: details.reason ?? '' },
+      };
     case 'mailbox.quota_changed':
       return details.from == null
         ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }

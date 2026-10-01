@@ -8,6 +8,11 @@ import {
   onboardingSteps,
   domainMailboxFormError,
   canDeleteAccount,
+  deletionDate,
+  deletionReasonError,
+  isMailNodeErrorCode,
+  nodeMailboxDeleteDialog,
+  pendingDeletion,
   canRestartOnboarding,
   deleteConfirmationMatches,
   nodeAliasesNote,
@@ -223,6 +228,63 @@ describe('deleteConfirmationMatches', () => {
     }
     assert.equal(deleteConfirmationMatches('', ''), false);
     assert.equal(deleteConfirmationMatches(' ', null), false);
+  });
+});
+
+describe('the pending deletion of a node mailbox', () => {
+  it('reads the pending state of an account, and none for one without a date', () => {
+    assert.equal(pendingDeletion({ delete_after: null }), null);
+    assert.equal(pendingDeletion(null), null);
+    assert.deepEqual(pendingDeletion({
+      delete_after: 'd', deletion_requested_at: 'r', deletion_requested_by_email: 'anna@example.com', deletion_reason: 'Left', deletion_last_error: 'x',
+    }), { deleteAfter: 'd', requestedAt: 'r', requestedBy: 'anna@example.com', reason: 'Left', lastError: 'x' });
+  });
+
+  it('wants a reason of at most 500 characters', () => {
+    assert.equal(deletionReasonError(''), 'admin.accounts.deletion.errorReasonRequired');
+    assert.equal(deletionReasonError('   '), 'admin.accounts.deletion.errorReasonRequired');
+    assert.equal(deletionReasonError(undefined), 'admin.accounts.deletion.errorReasonRequired');
+    assert.equal(deletionReasonError(' x '.repeat(1) + 'y'.repeat(498)), null);
+    assert.equal(deletionReasonError('y'.repeat(501)), 'admin.accounts.deletion.errorReasonTooLong');
+  });
+
+  it('dates a deletion asked for now the given days ahead, and none without days', () => {
+    const now = Date.parse('2026-10-01T10:00:00.000Z');
+    assert.equal(deletionDate(5, now), '2026-10-06T10:00:00.000Z');
+    assert.equal(deletionDate(null, now), null);
+    assert.equal(deletionDate(0, now), null);
+  });
+
+  it('builds the confirmation: date, typed address, required reason and the aliases', () => {
+    const t = (k, v) => (v ? `${k}|${JSON.stringify(v)}` : k);
+    const dialog = nodeMailboxDeleteDialog({
+      t, account: { email_address: 'info@example.com' }, days: 5,
+      aliases: [{ address: 'orders@example.com', onlyTarget: true }], formatDay: () => 'DATE',
+    });
+    assert.equal(dialog.requireTyped, 'info@example.com');
+    assert.equal(dialog.requireReason, true);
+    assert.equal(dialog.reasonLabel, 'admin.accounts.deletion.reasonLabel');
+    assert.equal(dialog.message, 'admin.accounts.deleteMailNodeMessage|{"email":"info@example.com","date":"DATE"}');
+    assert.ok(dialog.note.includes('orders@example.com'));
+    assert.equal(dialog.confirmLabel, 'admin.accounts.deleteMailNodeConfirm');
+    const noDays = nodeMailboxDeleteDialog({ t, account: { email_address: 'info@example.com' }, days: null, aliases: [] });
+    assert.equal(noDays.message, 'admin.accounts.deleteMailNodeMessageNoDate|{"email":"info@example.com"}');
+    assert.equal(noDays.note, undefined);
+  });
+
+  it('translates the deletion refusals and knows which codes are its own', () => {
+    assert.equal(mailNodeErrorKey('mailbox_pending_deletion'), 'admin.accounts.add.domainErrorPendingDeletion');
+    assert.equal(mailNodeErrorKey('deletion_reason_required'), 'admin.accounts.deletion.errorReasonRequired');
+    assert.equal(isMailNodeErrorCode('deletion_in_progress'), true);
+    assert.equal(isMailNodeErrorCode('toString'), false);
+    assert.equal(isMailNodeErrorCode(undefined), false);
+  });
+
+  it('checks the days of the settings form, 1 to 90', () => {
+    const form = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: '5120', diskPingUrl: '' };
+    assert.equal(mailNodeConfigError({ ...form, deleteAfterDays: '5' }), null);
+    assert.equal(mailNodeConfigError({ ...form, deleteAfterDays: '91' }), 'admin.mailNode.errorDeleteAfterDays');
+    assert.equal(mailNodeConfigError({ ...form, deleteAfterDays: '0' }), 'admin.mailNode.errorDeleteAfterDays');
   });
 });
 

@@ -440,6 +440,12 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   assert.equal(adopted.state, 'node_created');
   const acknowledged = await answer('/mail-node/domains/:param/acknowledge', 'POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge', { created: '2026-09-29 16:40:00' });
   assert.equal(acknowledged.state, 'ready');
+  const scheduled = await answer('/accounts/:param/deletion', 'POST', '/accounts/demo-fx-44/deletion', {
+    email: 'compliance@example.org', reason: 'Coverage run',
+  });
+  assert.ok(scheduled.delete_after);
+  const cancelled = await answer('/accounts/:param/deletion', 'DELETE', '/accounts/demo-fx-44/deletion');
+  assert.equal(cancelled.delete_after, null);
   const restarted = await answer('/mail-node/domains/:param/restart', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/restart');
   assert.equal(restarted.state, 'node_created');
   const eop = await answer('/mail-node/eop', 'PUT', '/mail-node/eop', { terrl: '48248' });

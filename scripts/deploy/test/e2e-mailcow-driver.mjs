@@ -167,26 +167,33 @@ assert.equal(r.status, 400);
 assert.equal(r.data.code, 'mail_node_connection_locked');
 pass('server settings of a node mailbox are locked');
 
-// 8. Delete = the mailbox and its mail are deleted on the node; creating the address again makes a
-// new, empty mailbox. A disabled mailbox left on the node is refused instead of taken over.
+// 8. Deleting a node mailbox is scheduled: the address typed and a reason given, the mailbox keeps
+// working until its date (the deletion job then deletes it on the node; covered by
+// mailboxDeletion.pglite.test.js, since this run cannot wait days). While pending, the address
+// cannot be created again; anyone may cancel. A disabled mailbox left on the node is refused
+// instead of taken over.
 r = await panel('DELETE', `/accounts/${support.id}`);
+assert.equal(r.status, 409, JSON.stringify(r.data));
+assert.equal(r.data.code, 'mail_node_deletion_request_required');
+r = await panel('POST', `/accounts/${support.id}/deletion`, { email: `support@${DOMAIN}`, reason: 'e2e check' });
 assert.equal(r.status, 200, JSON.stringify(r.data));
-assert.equal(await nodeMailbox(`support@${DOMAIN}`), null);
-assert.equal(await accountBy(`support@${DOMAIN}`), undefined);
-r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'support', domain: DOMAIN, name: 'support again' });
+assert.ok(r.data.delete_after, JSON.stringify(r.data));
+assert.equal(r.data.deletion_reason, 'e2e check');
+const stillThere = await nodeMailbox(`support@${DOMAIN}`);
+assert.equal(Number(stillThere.active_int ?? stillThere.active), 1, 'the mailbox keeps working until its date');
+const pendingLetter = `e2e while pending ${Date.now()}`;
+r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: pendingLetter, body: 'Still delivered.' });
 assert.equal(r.status, 200, JSON.stringify(r.data));
-const recreated = await nodeMailbox(`support@${DOMAIN}`);
-assert.equal(Number(recreated.active_int ?? recreated.active), 1);
-const again = await connected(`support@${DOMAIN}`);
-// A fresh letter proves the new mailbox has synced; only then is the old letter's absence telling.
-const fresh = `e2e after re-creation ${Date.now()}`;
-r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: fresh, body: 'To the new mailbox.' });
-assert.equal(r.status, 200, JSON.stringify(r.data));
-await until('the fresh letter in the new support INBOX', async () => {
-  await panel('POST', '/mail/sync', { accountId: again.id });
-  return (await inbox(again.id)).find((m) => m.subject === fresh);
+await until('the letter sent while the deletion is pending', async () => {
+  await panel('POST', '/mail/sync', { accountId: support.id });
+  return (await inbox(support.id)).find((m) => m.subject === pendingLetter);
 }, 180000);
-assert.equal((await inbox(again.id)).some((m) => m.subject === subject), false, 'the old letter came back');
+r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'support', domain: DOMAIN, name: 'support again' });
+assert.equal(r.status, 409, JSON.stringify(r.data));
+assert.equal(r.data.code, 'mailbox_pending_deletion');
+r = await panel('DELETE', `/accounts/${support.id}/deletion`);
+assert.equal(r.status, 200, JSON.stringify(r.data));
+assert.equal(r.data.delete_after, null);
 const parkedPassword = 'Parked-password-1!';
 const parked = await mailcow('POST', 'add/mailbox', {
   local_part: 'parked', domain: DOMAIN, name: 'parked', password: parkedPassword, password2: parkedPassword, quota: 1024, active: 0,
@@ -195,7 +202,7 @@ assert.equal(parked[0]?.type, 'success', JSON.stringify(parked));
 r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'parked', domain: DOMAIN });
 assert.equal(r.status, 409, JSON.stringify(r.data));
 assert.equal(r.data.code, 'mailbox_disabled_on_node');
-pass('delete removed the mailbox from the node; creating it again made an empty one; a disabled one is refused');
+pass('deletion scheduled with a reason, mailbox kept working, address refused while pending, cancelled; a disabled one is refused');
 
 // 9. A mailbox made by hand in mailcow is taken over: its old password stops working.
 const handPassword = 'Hand-made-password-1!';
@@ -212,13 +219,14 @@ await connected(`manual@${DOMAIN}`);
 await until('the old password to be refused', async () => !(await imapLogin(`manual@${DOMAIN}`, handPassword)), 400000);
 pass('a hand-made mailbox was taken over: connected, old password refused once the login cache expired');
 
-// 10. A mailbox removed by hand in mailcow: the row can still be deleted.
+// 10. A mailbox removed by hand in mailcow: its deletion can still be scheduled (the job lets the
+// row go when the node no longer has the mailbox).
 const manual = await accountBy(`manual@${DOMAIN}`);
 const removed = await mailcow('POST', 'delete/mailbox', [`manual@${DOMAIN}`]);
 assert.equal(removed[0]?.type, 'success', JSON.stringify(removed));
-r = await panel('DELETE', `/accounts/${manual.id}`);
+r = await panel('POST', `/accounts/${manual.id}/deletion`, { email: `manual@${DOMAIN}`, reason: 'removed by hand' });
 assert.equal(r.status, 200, JSON.stringify(r.data));
-pass('a mailbox already gone from the node is removed from MailExpert');
+pass('the deletion of a mailbox already gone from the node can be scheduled');
 
 // 11. The same address twice in MailExpert is refused before the node is touched.
 r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'sales', domain: DOMAIN });

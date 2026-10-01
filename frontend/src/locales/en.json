@@ -564,7 +564,8 @@
     "emptying": "Emptying \"{{name}}\"…",
     "emptied": "Folder emptied",
     "backToAccounts": "Back to accounts",
-    "updateAvailable": "Update available: v{{version}}"
+    "updateAvailable": "Update available: v{{version}}",
+    "pendingDeletion": "Deleted on {{date}}"
   },
   "contextMenu": {
     "find": "Find",
@@ -971,7 +972,8 @@
         "domainConfirmSenderAlt": "Or as",
         "senderNameInvalid": "A sender name cannot contain line breaks.",
         "domainErrorNotReady": "This domain has not finished its onboarding yet: an administrator marks it ready in Settings, Integrations, Mail node.",
-        "domainErrorDisabledOnNode": "A mailbox with this address exists on the mail node but is disabled (by an earlier delete or by hand). An administrator can enable it in mailcow, so that it is taken over with its letters, or delete it there."
+        "domainErrorDisabledOnNode": "A mailbox with this address exists on the mail node but is disabled (by an earlier delete or by hand). An administrator can enable it in mailcow, so that it is taken over with its letters, or delete it there.",
+        "domainErrorPendingDeletion": "This mailbox is pending deletion. Cancel the deletion in Settings, Accounts to keep it."
       },
       "presetYahoo": "Yahoo Mail",
       "presetIcloud": "iCloud",
@@ -1019,14 +1021,30 @@
       "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing.",
       "deleteTitle": "Remove mailbox?",
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
-      "deleteMailNodeMessage": "The mailbox {{email}} and all its mail are deleted from MailExpert and from the mail server. On the server, aliases that deliver only to this mailbox are deleted with it, the mailbox is taken out of other aliases, and its send-as rights, sync jobs and filters go too. This cannot be undone. Mail sent to the address afterwards is refused.",
+      "deleteMailNodeMessage": "The mailbox {{email}} keeps working until {{date}}. Then it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Mail sent to the address afterwards is refused. Anyone can cancel the deletion until then.",
       "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here.",
       "mailNodeBadge": "Mail node",
       "deleteMailNodeTypeLabel": "Type {{email}} to confirm.",
-      "deleteMailNodeConfirm": "Delete mailbox and mail",
+      "deleteMailNodeConfirm": "Schedule deletion",
       "mailNodeDisableUnsupported": "A mailbox on the mail node cannot be disabled: delete it instead.",
       "deleteMailNodeAliasesDeleted": "Aliases deleted with it: {{list}}.",
-      "deleteMailNodeAliasesChanged": "Aliases that stop delivering to it: {{list}}."
+      "deleteMailNodeAliasesChanged": "Aliases that stop delivering to it: {{list}}.",
+      "deleteMailNodeMessageNoDate": "The mailbox {{email}} keeps working for the days an administrator set. Then it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Mail sent to the address afterwards is refused. Anyone can cancel the deletion until then.",
+      "deletion": {
+        "reasonLabel": "Why is it deleted? (required, kept in the journal)",
+        "pendingBadge": "Pending deletion: deleted on {{date}}",
+        "why": "Why: {{reason}} (asked by {{by}}, {{at}})",
+        "lastError": "Could not be deleted yet, retried later: {{error}}",
+        "cancel": "Cancel deletion",
+        "cancelFailed": "Could not cancel the deletion",
+        "errorConfirmation": "Type the full address of the mailbox to confirm.",
+        "errorReasonRequired": "Say why the mailbox is deleted.",
+        "errorReasonTooLong": "The reason may be at most 500 characters.",
+        "errorAlreadyRequested": "Deleting this mailbox was asked for already.",
+        "errorNotRequested": "No deletion of this mailbox is pending.",
+        "errorInProgress": "The mailbox is being deleted right now.",
+        "errorRequestRequired": "A mailbox on the mail node is deleted after a waiting time: schedule its deletion."
+      }
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1839,7 +1857,14 @@
       "detailDomainRestarted": "{{domain}}: onboarding started over from {{from}}",
       "detailDomainIdentityAcknowledged": "{{domain}}: the node's creation time {{to}} accepted (was {{from}})",
       "detailMailNodeMailboxWarnings": "Mailbox on the mail node, deleted there; the node warned: {{warnings}}",
-      "detailDomainAddedAgain": "{{domain}} added to the node again, up to {{mailboxes}} mailboxes: onboarding started over from {{from}}"
+      "detailDomainAddedAgain": "{{domain}} added to the node again, up to {{mailboxes}} mailboxes: onboarding started over from {{from}}",
+      "actionMailboxDeletionRequested": "Mailbox deletion scheduled",
+      "actionMailboxDeletionCancelled": "Mailbox deletion cancelled",
+      "detailDeletionRequested": "deleted on {{date}}; why: {{reason}}",
+      "detailDeletionCancelled": "was to be deleted on {{date}}; why: {{reason}}",
+      "detailMailNodeMailboxPending": "Mailbox on the mail node, deleted there with its mail as {{by}} asked on {{at}}; why: {{reason}}",
+      "detailMailNodeMailboxPendingWarnings": "Mailbox on the mail node, deleted there as {{by}} asked on {{at}}; why: {{reason}}; the node warned: {{warnings}}",
+      "fieldDeleteAfterDays": "days before a deletion"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -1982,7 +2007,10 @@
       "errorDomainNotRecreated": "The node reports the creation time the panel knows already: nothing to accept.",
       "errorDomainNodeChanged": "The node reports another creation time than the one shown: reload the list and check again.",
       "errorNothingToRestart": "The domain is at the first step with nothing to clear.",
-      "errorHostMismatch": "This mailbox is on another mail host than the one in the mail node settings: nothing was changed."
+      "errorHostMismatch": "This mailbox is on another mail host than the one in the mail node settings: nothing was changed.",
+      "deleteAfterLabel": "Days a mailbox keeps working after its deletion is asked for",
+      "deleteAfterNote": "From 1 to {{max}}. A change applies to deletions asked for from then on; dates already set stay.",
+      "errorDeleteAfterDays": "Enter a whole number of days from 1 to 90."
     },
     "eop": {
       "title": "Mail through EOP",

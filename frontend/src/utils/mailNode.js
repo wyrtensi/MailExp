@@ -8,6 +8,11 @@ export const DEFAULT_QUOTA_MB = 5120;
 export const MAX_QUOTA_MB = 102400;
 export const DEFAULT_DOMAIN_MAILBOXES = 500;
 export const MAX_DOMAIN_MAILBOXES = 10000;
+// Days a mail node mailbox keeps working after its deletion is asked for (backend mailcow.js).
+export const DEFAULT_DELETE_AFTER_DAYS = 5;
+export const MAX_DELETE_AFTER_DAYS = 90;
+// The longest reason for a deletion the server takes (backend routes/accounts.js).
+export const MAX_DELETION_REASON = 500;
 // The disk share at which the panel pings /fail (backend services/mailNode/diskWatch.js).
 export const DISK_WARN_PERCENT = 85;
 // EOP settings limits (backend services/mailNode/eopSettings.js).
@@ -73,6 +78,15 @@ const ERROR_KEYS = {
   node_created_required: 'admin.mailNode.errorDomainNodeChanged',
   domain_nothing_to_restart: 'admin.mailNode.errorNothingToRestart',
   mail_node_host_mismatch: 'admin.mailNode.errorHostMismatch',
+  delete_after_days_invalid: 'admin.mailNode.errorDeleteAfterDays',
+  mailbox_pending_deletion: 'admin.accounts.add.domainErrorPendingDeletion',
+  confirmation_mismatch: 'admin.accounts.deletion.errorConfirmation',
+  deletion_reason_required: 'admin.accounts.deletion.errorReasonRequired',
+  deletion_reason_too_long: 'admin.accounts.deletion.errorReasonTooLong',
+  deletion_already_requested: 'admin.accounts.deletion.errorAlreadyRequested',
+  deletion_not_requested: 'admin.accounts.deletion.errorNotRequested',
+  deletion_in_progress: 'admin.accounts.deletion.errorInProgress',
+  mail_node_deletion_request_required: 'admin.accounts.deletion.errorRequestRequired',
   mailbox_disabled_on_node: 'admin.accounts.add.domainErrorDisabledOnNode',
   mail_node_disable_unsupported: 'admin.accounts.mailNodeDisableUnsupported',
   step_invalid: 'admin.mailNode.errorStepOutOfOrder',
@@ -90,6 +104,40 @@ const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
 export function mailNodeErrorKey(code) {
   return ERROR_KEYS[code] ?? ERROR_FALLBACK_KEY;
+}
+
+// Whether a refusal code is one the mail node screens translate.
+export function isMailNodeErrorCode(code) {
+  return Object.hasOwn(ERROR_KEYS, code);
+}
+
+// A mail node mailbox someone asked to delete (GET /api/accounts fields, migration 0081): when it
+// goes for good, who asked, when and why, and why the deletion job could not delete it yet. Null
+// for a mailbox with no deletion pending.
+export function pendingDeletion(account) {
+  if (!account?.delete_after) return null;
+  return {
+    deleteAfter: account.delete_after,
+    requestedAt: account.deletion_requested_at ?? null,
+    requestedBy: account.deletion_requested_by_email ?? null,
+    reason: account.deletion_reason ?? '',
+    lastError: account.deletion_last_error ?? null,
+  };
+}
+
+// The error key for the reason typed in the delete confirmation, or null when it can be sent.
+export function deletionReasonError(reason) {
+  const text = String(reason ?? '').trim();
+  if (!text) return 'admin.accounts.deletion.errorReasonRequired';
+  if (text.length > MAX_DELETION_REASON) return 'admin.accounts.deletion.errorReasonTooLong';
+  return null;
+}
+
+// When a deletion asked for now would happen: the given days from now (the server sets the exact
+// time). Null when the days are not known.
+export function deletionDate(days, now = Date.now()) {
+  const n = Number(days);
+  return Number.isInteger(n) && n > 0 ? new Date(now + n * 86400000).toISOString() : null;
 }
 
 // A refusal from mailcow carries the node's own words (e.g. "max_mailbox_exceeded"): the screens
@@ -188,6 +236,28 @@ export function nodeAliasesNote(aliases) {
   ];
 }
 
+// The confirmation of deleting a mail node mailbox (ConfirmOverlay fields, without onConfirm): it
+// keeps working until the date the given days make (or the administrator's days, when they are not
+// known), then it goes for good with its mail and the node aliases listed; the address is typed out
+// and a reason is required. `t` is the translator; `formatDay` formats the date.
+export function nodeMailboxDeleteDialog({ t, account, days, aliases, formatDay = (d) => d }) {
+  const email = account.email_address;
+  const date = deletionDate(days);
+  const note = nodeAliasesNote(aliases).map((part) => t(part.key, part.values)).join(' ');
+  return {
+    title: t('admin.accounts.deleteTitle'),
+    message: date
+      ? t('admin.accounts.deleteMailNodeMessage', { email, date: formatDay(date) })
+      : t('admin.accounts.deleteMailNodeMessageNoDate', { email }),
+    requireTyped: email,
+    typedLabel: t('admin.accounts.deleteMailNodeTypeLabel', { email }),
+    requireReason: true,
+    reasonLabel: t('admin.accounts.deletion.reasonLabel'),
+    ...(note ? { note } : {}),
+    confirmLabel: t('admin.accounts.deleteMailNodeConfirm'),
+  };
+}
+
 // Deleting a mail node mailbox takes its mail with it, so the confirmation asks for the address
 // typed out in full: it matches ignoring case and the spaces around it.
 export function deleteConfirmationMatches(typed, expected) {
@@ -216,12 +286,15 @@ export function parseWholeNumber(value, min, max) {
 }
 
 // The error key for the settings form, or null.
-export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl }, { hasStoredKey = false } = {}) {
+export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays }, { hasStoredKey = false } = {}) {
   if (!HOST_PATTERN.test(String(mailHost ?? '').trim().toLowerCase())) return 'admin.mailNode.errorHost';
   if (!String(apiKey ?? '').trim() && !hasStoredKey) return 'admin.mailNode.errorApiKey';
   if (parseWholeNumber(quotaMb, 1, MAX_QUOTA_MB) == null) return 'admin.mailNode.errorQuota';
   const ping = String(diskPingUrl ?? '').trim();
   if (ping && !/^https:\/\/\S+$/.test(ping)) return 'admin.mailNode.errorPingUrl';
+  if (deleteAfterDays !== undefined && parseWholeNumber(deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS) == null) {
+    return 'admin.mailNode.errorDeleteAfterDays';
+  }
   return null;
 }
 

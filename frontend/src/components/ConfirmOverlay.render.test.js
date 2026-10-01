@@ -112,6 +112,34 @@ describe('ConfirmOverlay', () => {
     assert.equal(closed.count, 1);
   });
 
+  test('a node mailbox deletion waits for the address and a reason, and hands the reason over trimmed', async () => {
+    const got = [];
+    const { host } = await mount({
+      title: 'Remove?', message: 'Keeps working until Oct 6, 2026.', requireTyped: 'info@example.com', typedLabel: 'Type it.',
+      requireReason: true, reasonLabel: 'Why?', confirmLabel: 'Schedule deletion',
+      onConfirm: async (args) => { got.push(args); },
+    });
+    assert.ok(host.textContent.includes('Why?'));
+    const reason = host.querySelector('[data-confirm-reason]');
+    assert.equal(reason.getAttribute('maxlength'), '500');
+    await type(host.querySelector('[data-confirm-typed]'), 'info@example.com');
+    assert.equal(host.querySelector('[data-confirm-button]').disabled, true, 'no reason yet');
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value').set;
+    const typeReason = async (value) => React.act(async () => {
+      setter.call(reason, value);
+      reason.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    await typeReason('   ');
+    assert.equal(host.querySelector('[data-confirm-button]').disabled, true, 'blank is no reason');
+    await typeReason('  Left the company  ');
+    assert.equal(host.querySelector('[data-confirm-button]').disabled, false);
+    await type(host.querySelector('[data-confirm-typed]'), 'info@example');
+    assert.equal(host.querySelector('[data-confirm-button]').disabled, true, 'and the address must still match');
+    await type(host.querySelector('[data-confirm-typed]'), 'info@example.com');
+    await click(host.querySelector('[data-confirm-button]'));
+    assert.deepEqual(got, [{ reason: 'Left the company' }]);
+  });
+
   test('shows the note about the aliases, and Escape closes the dialog', async () => {
     const { host, closed } = await mount({
       title: 'Remove?', message: 'm', note: 'Aliases deleted with it: orders@example.com.', requireTyped: 'info@example.com', typedLabel: 'l',

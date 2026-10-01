@@ -1,23 +1,26 @@
 import { useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { deleteConfirmationMatches } from '../utils/mailNode.js';
+import { MAX_DELETION_REASON, deleteConfirmationMatches, deletionReasonError } from '../utils/mailNode.js';
 
 // Shared confirm overlay (replaces window.confirm everywhere). A dialog with `requireTyped` (a mail
 // node mailbox's address) also asks for that text typed out in full, like deleting a repository on
 // GitHub: the confirm button stays disabled until it matches, ignoring case and outer spaces.
-// `typedLabel` is the line above that field. `note` is an optional second paragraph (the aliases
-// that go with a node mailbox). Escape closes the dialog unless the action is running.
+// `typedLabel` is the line above that field. A dialog with `requireReason` also asks why (a text of
+// at most MAX_DELETION_REASON characters, `reasonLabel` above it): the button waits for it too, and
+// `onConfirm` gets { reason } trimmed. `note` is an optional second paragraph (the aliases that go
+// with a node mailbox). Escape closes the dialog unless the action is running.
 export default function ConfirmOverlay({ dialog, onClose }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [typed, setTyped] = useState('');
+  const [reason, setReason] = useState('');
   const titleId = useId();
   const messageId = useId();
 
   // Clear transient state whenever a different dialog is opened, so a previous
   // failure or typed text never leaks into the next confirmation.
-  useEffect(() => { setBusy(false); setError(''); setTyped(''); }, [dialog]);
+  useEffect(() => { setBusy(false); setError(''); setTyped(''); setReason(''); }, [dialog]);
 
   useEffect(() => {
     if (!dialog || busy) return undefined;
@@ -27,7 +30,8 @@ export default function ConfirmOverlay({ dialog, onClose }) {
   }, [dialog, busy, onClose]);
 
   if (!dialog) return null;
-  const typedOk = !dialog.requireTyped || deleteConfirmationMatches(typed, dialog.requireTyped);
+  const typedOk = (!dialog.requireTyped || deleteConfirmationMatches(typed, dialog.requireTyped))
+    && (!dialog.requireReason || !deletionReasonError(reason));
 
   // Await the action rather than firing it into the void. This previously closed the
   // overlay and then called onConfirm() unawaited with no catch, so a rejected request
@@ -41,7 +45,7 @@ export default function ConfirmOverlay({ dialog, onClose }) {
     setError('');
     setBusy(true);
     try {
-      await dialog.onConfirm();
+      await dialog.onConfirm(dialog.requireReason ? { reason: reason.trim() } : undefined);
       onClose();
     } catch (err) {
       setError(err?.message || String(err));
@@ -94,6 +98,26 @@ export default function ConfirmOverlay({ dialog, onClose }) {
                 width: '100%', padding: '8px 10px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
                 borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
                 fontFamily: 'JetBrains Mono, monospace',
+              }}
+            />
+          </label>
+        )}
+        {dialog.requireReason && (
+          <label style={{ display: 'block', marginBottom: 16 }}>
+            <span style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
+              {dialog.reasonLabel}
+            </span>
+            <textarea
+              data-confirm-reason
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              maxLength={MAX_DELETION_REASON}
+              rows={3}
+              disabled={busy}
+              style={{
+                width: '100%', padding: '8px 10px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+                borderRadius: 7, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box',
+                resize: 'vertical', fontFamily: 'inherit',
               }}
             />
           </label>

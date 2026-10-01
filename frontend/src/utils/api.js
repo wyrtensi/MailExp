@@ -392,6 +392,9 @@ export const api = {
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
   getNodeAliases: (id) => request('GET', `/accounts/${id}/node-aliases`),
+  // A mail node mailbox: ask for its deletion after the waiting time ({ email, reason }), or cancel it.
+  requestMailboxDeletion: (id, { email, reason }) => request('POST', `/accounts/${id}/deletion`, { email, reason }),
+  cancelMailboxDeletion: (id) => request('DELETE', `/accounts/${id}/deletion`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
   previewThreading: (id, mode) => request('POST', `/accounts/${id}/threading/preview`, { mode }),
