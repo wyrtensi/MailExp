@@ -784,6 +784,65 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 
 Этапы 1-7 не требуют тенанта. Этапы 2-5 можно вести параллельно после 1 (R-01 и R-02 нужны всем).
 
+### 5.3. Этап 2: что сделано (2026-10-01)
+
+Код — `backend/src/services/mailNode/nodeApply.js` (сервис «применить»), клиент API —
+`services/mailNode/mailcow.js`, маршруты — `routes/mailNode.js`, миграция `0082_mail_node_apply.sql`, экраны —
+`EopSection`, `MailNodeDomainOnboarding`, `MailNodeSection`, `MailNodeApplyResult`, демо — `frontend/src/demo/index.js`.
+Порядок и пункты для администратора — [runbook, раздел 6, «Что делает панель»](../../operations/mail-node.md).
+
+Общее: каждый пункт сначала читается (`get/*`), пишется только при расхождении, в `add/*` — явный
+`active: 1`; ответ 200 с `type != success` — ошибка пункта, а не всего прогона. Итог по пунктам: `ok`,
+`changed` (с `from`/`to`), `failed` (код и слова mailcow), `skipped` (не задана настройка или ждёт
+подтверждения), `pending` (правило спама). Прогоны идут строго по одному (иначе два одновременных
+добавили бы два relayhost), после первого «узел недоступен» или «ключ отклонён» остальные пункты
+помечаются тем же кодом без новых запросов. Итог узла — `integration_config` (`mail_node_apply`), итог
+домена — `mail_node_domains.apply_result`/`applied_at` (сбрасываются «Начать подключение заново»), журнал —
+`mail_node.applied` со списком изменённых и неудавшихся пунктов, только если что-то изменилось или не
+удалось.
+
+Когда запускается: кнопка «Применить настройки» (узел и все известные панели домены, которые узел
+показывает, или один домен) и сам — после сохранения настроек EOP, если изменились `eopHost`,
+`tlsPolicy`, `tlsPolicyParameters`, `dkimMode` или `sendLimitPerHour`; после сохранения настроек узла,
+если изменились имя, ключ или адреса панели; после добавления, принятия и перезапуска онбординга
+домена. Автоматический прогон никогда не удаляет ключ DKIM и не пишет правило спама, а его ошибка не
+отменяет сохранение, которое его запустило. Состояние онбординга прогон не меняет: шаг `node_configured`
+по-прежнему подтверждает человек (открытый вопрос — переводить ли домен сам, когда все пункты домена `ok`).
+
+| Требование | Сделано | Отличия от раздела 4 |
+|---|---|---|
+| R-07 | запись TLS Policy Map для `<EOP_HOST>`, политика в настройках EOP: `secure` (по умолчанию), `dane`, `dane-only`, `verify`, `fingerprint`, `encrypt` или `default` (записи нет, решает mailcow: DANE, MTA-STS); `none` и `may` не принимаются; `fingerprint` требует `match=` | значение «без записи» — явное `default`, а не пустое поле: пустое поле означает «по умолчанию `secure`» |
+| R-08 | relayhost `<EOP_HOST>` без логина (выключенный включается, запись с логином не используется) и `edit/domain {relayhost}` для каждого домена; `relayhost_id` в строке домена | общий relayhost в `extra.cf` панель не ставит и не видит (D-12) |
+| R-09 | `add/domain` с `key_size` 2048 или 0 по режиму; режим `mailcow` — ключ создаётся, если его нет, запись TXT (куски `SPLIT_DKIM_255` склеены) показывается с копированием; режим `eop` — `delete/dkim` только по подтверждению в интерфейсе | сравнение записи с DNS (`dns_ok`) — этап 3 (R-14) |
+| R-10 | лимит на каждый ящик панели: свой лимит администратора (`email_accounts.node_rl_value`/`node_rl_frame`, `s/m/h/d`) или по умолчанию (`mail_node_domains.mailbox_send_limit`, иначе `sendLimitPerHour` в час); новый ящик — `rl_value`/`rl_frame` в `add/mailbox`, ящик, забранный у mailcow, — `edit/rl-mbox`; `mailbox.rate_limit_changed` | `edit/rl-domain` не используется: в mailcow лимит домена — один общий счётчик на домен (`DYN_RL` по ключу `env_from_domain`, `rspamd.local.lua:685-750`); ящики, которых нет в панели, не трогаются |
+| R-11 | правило в `prefilter` между метками панели, `require` в начале, правило в конце, прежнее содержимое сохраняется; запись только отдельной кнопкой с предупреждением и только при расхождении | после `fileinto "Junk"` стоит `stop`; `CAT` дополнен `HPHSH` и `HPHISH`; сравнение `:regex` (расширение `regex` в Pigeonhole mailcow есть, проверено `sievec`) |
+| R-13 | недостающие адреса панели (настройка узла, IP или сеть, не шире `/8` и `/16`) — в whitelist fail2ban | вместо чтения и записи всех полей — `edit/fail2ban {items, attr: {action: "whitelist"}}` (`functions.fail2ban.inc.php`, ветка `whitelist`): добавляет адрес и ничего больше не трогает, поэтому сбросить `ban_time_increment` и `manage_external` нечем |
+
+Проверено на стенде (2026-10-01, код ветки в одноразовом контейнере на сети стенда, mailcow `2026-09`):
+- R-07: `postmap -q eop.test.local` по карте mailcow отдаёт политику; `encrypt` — «Untrusted TLS connection
+  established to eop.test.local», `fingerprint` с `match=<SHA-256 сертификата fake-EOP>` — «Verified TLS
+  connection established to eop.test.local»; второй прогон — все пункты `ok`, записей нет.
+- R-08: `relay=eop.test.local[...]:25, status=sent`; у `stage.test` relayhost = id записи панели.
+- R-09: письмо в fake-EOP подписано `d=stage.test; s=dkim`; временный домен создан с `key_size: 0` без
+  ключа, режим `mailcow` создал ключ (`changed`), режим `eop` без подтверждения — `skipped`
+  (`dkim_delete_unconfirmed`), с подтверждением — ключ удалён. `SPLIT_DKIM_255` на стенде выключен: склейка
+  кусков проверена юнит-тестом по формату `functions.dkim.inc.php:255-257`.
+- R-10: новый ящик получил 50 в час, лимит администратора 2 в минуту — третье письмо через submission
+  получило `451 4.7.1 Ratelimit "mailcow" exceeded`.
+- R-11: `eop inject` с вердиктами `spam`, `bulk`, `phish`, `high-confidence-phish`, `rule-spam`,
+  `blocked-sender`, `high-confidence-spam`, `spoof` (у fake-EOP это `SFV:SPM`), `SFV:NSPM;CAT:BULK`,
+  `SFV:NSPM;CAT:PHSH`, `SFV:NSPM;CAT:HPHISH` и свёрнутый заголовок — в Junk; `clean`, `none`,
+  `SFV:NSPM;CAT:NONE`, `SFV:SPMX;CAT:SPMTEST`, `SFV:SKQ;CAT:SPM`, `SFV:SKQ;CAT:PHSH` — в INBOX; `postfilter`
+  не изменился (тот же хеш). Повторная доставка письма с тем же `Message-ID` вне Junk отбрасывается
+  штатным правилом `duplicate` из `postfilter` (для тестов нужен новый `Message-ID`); письма в Junk до
+  него не доходят из-за `stop`.
+- R-13: в whitelist добавлен адрес, с которого стенд видит панель (`172.22.1.1`), остальные поля
+  (`ban_time_increment: true`, `manage_external`, `blacklist`, `max_attempts` и др.) прежние.
+
+Не сделано в этом этапе: проверки в `e2e-mailcow-driver.mjs` (сценарий e2e берёт опубликованные образы,
+проверки появятся после слияния), тест петли `add/transport "*"` и пути DSN через `extra.cf` (строка этапа 2
+в таблице 5.2).
+
 ## 6. Что требует живого тенанта
 
 Нужен платный или пробный тенант с add-on (в E5 developer Inbound connector не создать) и пробный домен

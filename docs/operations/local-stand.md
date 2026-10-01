@@ -160,8 +160,11 @@ accepted domains (`recipient-denied` отвечает всем получате�
   `sessionIdContext` (без него вторая отправка давала `Cannot start TLS: handshake failure`); на это
   есть тест.
 - rspamd mailcow стирает пришедший `Authentication-Results` и ставит свой (`mail.test.local; none`);
-  `X-Forefront-Antispam-Report` остаётся. Письмо после `inject` ложится в INBOX: правила Sieve R-11 на
-  стенде ещё нет.
+  `X-Forefront-Antispam-Report` остаётся. Правило раскладки спама R-11 (кнопка панели, этап 2) на стенде
+  стоит с 2026-10-01: после `inject` спам, массовая рассылка и фишинг ложатся в Junk, `clean`, `none` и
+  `SFV:SKQ` — в INBOX. Повторный `inject` того же письма вне Junk не доходит: штатное правило `duplicate`
+  отбрасывает письмо с уже виденным `Message-ID`, поэтому перед каждым таким `inject` нужен новый
+  `eop send`.
 
 Тесты fake-EOP: `node --test scripts/deploy/test/fake-eop/eop.test.mjs` (нужен `openssl`; разбор сертификата,
 режимы, полный диалог SMTP с STARTTLS и клиентским сертификатом, строгие строки и лимиты, возобновление
