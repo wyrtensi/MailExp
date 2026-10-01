@@ -110,7 +110,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 
 - `encryption.js` — граница шифрования паролей и OAuth-токенов. Google refresh token должен проходить только через неё.
 - `hostValidation.js`, `connectionPolicy.js`, `safeFetch.js` — SSRF/DNS rebinding/TLS policy. Не обходить их в OAuth или SMTP.
-- `mailNode/mailcow.js` — клиент API mailcow (домены, создание, отключение и квота ящика, диск; отказ внутри ответа 200 — ошибка) и настройки узла в `integration_config`; `mailNode/diskWatch.js` — проверка диска узла раз в 10 минут с пингом ссылки мониторинга. Эксплуатация — [mail-node.md](../operations/mail-node.md).
+- `mailNode/mailcow.js` — клиент API mailcow (домены, создание, удаление вместе с почтой и квота ящика, диск; отказ внутри ответа 200 — ошибка) и настройки узла в `integration_config`; `mailNode/diskWatch.js` — проверка диска узла раз в 10 минут с пингом ссылки мониторинга. Эксплуатация — [mail-node.md](../operations/mail-node.md).
 - `redis.js` — клиент Redis и session/runtime state.
 - `db.js`, `migrations.js` — PostgreSQL pool, транзакции и запуск миграций.
 - `authLimiter.js`, `rateLimiter.js`, `authEvents.js` — защита login/API и журнал безопасности.

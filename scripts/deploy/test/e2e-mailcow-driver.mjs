@@ -115,7 +115,11 @@ assert.ok(domain?.active, JSON.stringify(r.data));
 assert.equal(domain.maxMailboxes, 50);
 const nodeDomain = await mailcow('GET', `get/domain/${DOMAIN}`);
 assert.equal(Number(nodeDomain.max_quota_for_mbox) / 1048576, 102400);
-pass(`domain ${DOMAIN} created on the node with 50 mailboxes`);
+// The stand has no tenant: the domain is marked ready by hand so it takes mailboxes.
+assert.equal(domain.state, 'node_created');
+r = await panel('POST', `/mail-node/domains/${DOMAIN}/ready`);
+assert.equal(r.status, 200, JSON.stringify(r.data));
+pass(`domain ${DOMAIN} created on the node with 50 mailboxes and marked ready`);
 
 // 4. Two mailboxes: created on the node with 5 GB and connected by the panel.
 for (const localPart of ['sales', 'support']) {
@@ -163,19 +167,29 @@ assert.equal(r.status, 400);
 assert.equal(r.data.code, 'mail_node_connection_locked');
 pass('server settings of a node mailbox are locked');
 
-// 8. Delete = disable on the node; creating it again enables it with the old letters.
+// 8. Delete = the mailbox and its mail are deleted on the node; creating the address again makes a
+// new, empty mailbox. A disabled mailbox left on the node is refused instead of taken over.
 r = await panel('DELETE', `/accounts/${support.id}`);
 assert.equal(r.status, 200, JSON.stringify(r.data));
-const disabled = await nodeMailbox(`support@${DOMAIN}`);
-assert.equal(Number(disabled.active_int ?? disabled.active), 0);
+assert.equal(await nodeMailbox(`support@${DOMAIN}`), null);
 assert.equal(await accountBy(`support@${DOMAIN}`), undefined);
 r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'support', domain: DOMAIN, name: 'support again' });
 assert.equal(r.status, 200, JSON.stringify(r.data));
-const enabled = await nodeMailbox(`support@${DOMAIN}`);
-assert.equal(Number(enabled.active_int ?? enabled.active), 1);
+const recreated = await nodeMailbox(`support@${DOMAIN}`);
+assert.equal(Number(recreated.active_int ?? recreated.active), 1);
 const again = await connected(`support@${DOMAIN}`);
-await until('the old letter after re-creation', async () => (await inbox(again.id)).find((m) => m.subject === subject), 180000);
-pass('delete disabled the mailbox on the node; creating it again enabled it with its old letter');
+await panel('POST', '/mail/sync', { accountId: again.id });
+await sleep(10000);
+assert.equal((await inbox(again.id)).some((m) => m.subject === subject), false, 'the old letter came back');
+const parkedPassword = 'Parked-password-1!';
+const parked = await mailcow('POST', 'add/mailbox', {
+  local_part: 'parked', domain: DOMAIN, name: 'parked', password: parkedPassword, password2: parkedPassword, quota: 1024, active: 0,
+});
+assert.equal(parked[0]?.type, 'success', JSON.stringify(parked));
+r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'parked', domain: DOMAIN });
+assert.equal(r.status, 409, JSON.stringify(r.data));
+assert.equal(r.data.code, 'mailbox_disabled_on_node');
+pass('delete removed the mailbox from the node; creating it again made an empty one; a disabled one is refused');
 
 // 9. A mailbox made by hand in mailcow is taken over: its old password stops working.
 const handPassword = 'Hand-made-password-1!';
