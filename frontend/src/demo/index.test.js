@@ -38,6 +38,25 @@ test('advertised demo attachments expose pane fields and resolve to local conten
   );
 });
 
+test('the demo shows the safe view: a letter in Spam and one EOP marked as phishing in the Inbox', async () => {
+  // R-41: the Spam letter and the phishing letter carry a link whose words hide its target.
+  const spam = await demoRequest('GET', '/mail/messages/demo-008');
+  assert.equal(spam.folder, 'Spam');
+  const spamBody = await demoRequest('GET', '/mail/messages/demo-008/body');
+  assert.match(spamBody.html, /href="https:\/\/prize\.suspicious\.example\//);
+  assert.equal(spamBody.eopCategory, null);
+  assert.equal(spamBody.attachments.length, 1);
+
+  const phish = await demoRequest('GET', '/mail/messages/demo-010');
+  assert.equal(phish.folder, 'INBOX');
+  const phishBody = await demoRequest('GET', '/mail/messages/demo-010/body');
+  assert.equal(phishBody.eopCategory, 'PHSH');
+  assert.match(phishBody.html, /href="https:\/\/login\.helpdesk-mailexpert\.example\//);
+
+  // An ordinary letter has no category.
+  assert.equal((await demoRequest('GET', '/mail/messages/demo-002/body')).eopCategory, null);
+});
+
 test('bulk delete removes Trash and Drafts messages but moves ordinary mail to Trash', async () => {
   const draft = await demoRequest('POST', '/mail/draft', {
     accountId: 'demo-sales',
