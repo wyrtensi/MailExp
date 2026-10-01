@@ -83,6 +83,9 @@ describe('mail node onboarding in demo mode', () => {
     assert.equal(states.get('demo.mailexpert.local'), 'ready');
     assert.equal(states.get('pilot.demo.mailexpert.local'), 'dns_ok');
     assert.equal(states.get('legacy.demo.mailexpert.local'), 'unknown');
+    // A ready domain whose node creation time differs keeps its state and only warns.
+    assert.equal(states.get('branch.demo.mailexpert.local'), 'ready');
+    assert.equal(host.querySelectorAll('[data-recreated-badge]').length, 1);
   });
 
   test('the EOP section shows the demo settings and its checklist, and Done moves a domain on', async () => {

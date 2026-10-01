@@ -381,6 +381,9 @@ export const api = {
     adoptDomain: (domain) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/adopt`),
     confirmDomainStep: (domain, step) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/steps/${encodeURIComponent(step)}`),
     markDomainReady: (domain) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/ready`),
+    restartDomainOnboarding: (domain) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/restart`),
+    // `created`: the node's creation time the administrator saw; the server refuses if it changed.
+    acknowledgeDomainNode: (domain, created) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/acknowledge`, { created }),
     getEopSettings: () => request('GET', '/mail-node/eop'),
     saveEopSettings: (data) => request('PUT', '/mail-node/eop', data),
     listMailboxes: () => request('GET', '/mail-node/mailboxes'),
@@ -388,6 +391,10 @@ export const api = {
   },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),
+  getNodeAliases: (id) => request('GET', `/accounts/${id}/node-aliases`),
+  // A mail node mailbox: ask for its deletion after the waiting time ({ email, reason }), or cancel it.
+  requestMailboxDeletion: (id, { email, reason }) => request('POST', `/accounts/${id}/deletion`, { email, reason }),
+  cancelMailboxDeletion: (id) => request('DELETE', `/accounts/${id}/deletion`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
   previewThreading: (id, mode) => request('POST', `/accounts/${id}/threading/preview`, { mode }),

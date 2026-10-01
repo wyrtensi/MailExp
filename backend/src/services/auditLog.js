@@ -6,10 +6,11 @@ import { query } from './db.js';
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
-  'mailbox.quota_changed',
+  'mailbox.quota_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
   'message.sent', 'message.deleted', 'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
   'access.sync_aborted',
   'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
+  'mail_node.domain_identity_acknowledged',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 
@@ -60,4 +61,15 @@ export function recordAudit(entries) {
       }
     }
   })();
+}
+
+// Records journal entries inside the caller's transaction (client: the transaction's client), so
+// the entry and the change it describes are written together or not at all. Unlike recordAudit it
+// throws: a failure rolls the change back.
+export async function insertAuditEntries(client, entries) {
+  const list = Array.isArray(entries) ? entries : [entries];
+  const unknown = list.find((entry) => !KNOWN_ACTIONS.has(entry?.action));
+  if (unknown) throw new Error(`Unknown audit action: ${unknown?.action}`);
+  if (!list.length) return;
+  await client.query(INSERT_SQL, [JSON.stringify(list.map(toRow))]);
 }

@@ -1,4 +1,5 @@
 import { domainStateKey } from './mailNode.js';
+import { formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
 // backend/src/services/auditLog.js and the entries GET /api/admin/audit returns.
@@ -12,6 +13,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.disabled': 'admin.audit.actionMailboxDisabled',
   'mailbox.password_restored': 'admin.audit.actionMailboxPasswordRestored',
   'mailbox.quota_changed': 'admin.audit.actionMailboxQuotaChanged',
+  'mailbox.deletion_requested': 'admin.audit.actionMailboxDeletionRequested',
+  'mailbox.deletion_cancelled': 'admin.audit.actionMailboxDeletionCancelled',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
@@ -25,6 +28,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.domain_added': 'admin.audit.actionMailNodeDomainAdded',
   'mail_node.domain_adopted': 'admin.audit.actionMailNodeDomainAdopted',
   'mail_node.domain_state_changed': 'admin.audit.actionMailNodeDomainStateChanged',
+  'mail_node.domain_identity_acknowledged': 'admin.audit.actionMailNodeDomainIdentityAcknowledged',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -37,12 +41,21 @@ const MOVE_REVERTED_DETAIL_KEYS = Object.freeze({
   gave_up: 'admin.audit.detailMoveRevertedGaveUp',
 });
 
+// How a mail_node.domain_state_changed entry moved the domain: "Done", "Mark ready" or "Restart
+// onboarding".
+const DOMAIN_STATE_CHANGE_KEYS = Object.freeze({
+  step_confirmed: 'admin.audit.detailDomainStepConfirmed',
+  marked_ready: 'admin.audit.detailDomainMarkedReady',
+  restarted: 'admin.audit.detailDomainRestarted',
+});
+
 // The settings fields a mail_node.config_changed entry names, as the journal shows them.
 const SETTINGS_FIELD_KEYS = Object.freeze({
   mailHost: 'admin.audit.fieldMailHost',
   apiKey: 'admin.audit.fieldApiKey',
   quotaMb: 'admin.audit.fieldQuota',
   diskPingUrl: 'admin.audit.fieldPingUrl',
+  deleteAfterDays: 'admin.audit.fieldDeleteAfterDays',
   eopHost: 'admin.audit.fieldEopHost',
   certificateHost: 'admin.audit.fieldCertificateHost',
   dkimMode: 'admin.audit.fieldDkimMode',
@@ -92,8 +105,35 @@ export function auditDetail(entry) {
       return details.oauthProvider
         ? { key: 'admin.audit.detailProvider', values: { provider: details.oauthProvider } }
         : null;
-    case 'mailbox.deleted':
-      return details.mailNode ? { key: 'admin.audit.detailMailNodeMailbox', values: {} } : null;
+    case 'mailbox.deleted': {
+      // pending: the deletion job deleted a mailbox someone asked to delete; the entry keeps who
+      // asked, when and why, since the mailbox row is gone. nodeWarnings: the node deleted the
+      // mailbox but said something went wrong on the way (its maildir could not be moved away),
+      // shown as the node wrote it.
+      if (!details.mailNode) return null;
+      const warnings = Array.isArray(details.nodeWarnings) && details.nodeWarnings.length ? details.nodeWarnings.join('; ') : '';
+      if (details.pending) {
+        const values = {
+          by: details.requestedBy ?? '', at: formatDay(details.requestedAt), reason: details.reason ?? '',
+        };
+        return warnings
+          ? { key: 'admin.audit.detailMailNodeMailboxPendingWarnings', values: { ...values, warnings } }
+          : { key: 'admin.audit.detailMailNodeMailboxPending', values };
+      }
+      return warnings
+        ? { key: 'admin.audit.detailMailNodeMailboxWarnings', values: { warnings } }
+        : { key: 'admin.audit.detailMailNodeMailbox', values: {} };
+    }
+    case 'mailbox.deletion_requested':
+      return {
+        key: 'admin.audit.detailDeletionRequested',
+        values: { date: formatDay(details.deleteAfter), reason: details.reason ?? '' },
+      };
+    case 'mailbox.deletion_cancelled':
+      return {
+        key: 'admin.audit.detailDeletionCancelled',
+        values: { date: formatDay(details.deleteAfter), reason: details.reason ?? '' },
+      };
     case 'mailbox.quota_changed':
       return details.from == null
         ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }
@@ -154,7 +194,14 @@ export function auditDetail(entry) {
         }
         : null;
     case 'mail_node.domain_added':
-      return { key: 'admin.audit.detailDomainAdded', values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' } };
+      // from: the state of a domain the panel knew, added to the node again and so started over.
+      return details.from
+        ? {
+          key: 'admin.audit.detailDomainAddedAgain',
+          values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' },
+          valueKeys: { from: domainStateKey(details.from) },
+        }
+        : { key: 'admin.audit.detailDomainAdded', values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' } };
     case 'mail_node.domain_adopted':
       return {
         key: details.origin === 'existing_mailboxes' ? 'admin.audit.detailDomainAdoptedWithMailboxes' : 'admin.audit.detailDomainAdopted',
@@ -162,9 +209,14 @@ export function auditDetail(entry) {
       };
     case 'mail_node.domain_state_changed':
       return {
-        key: details.how === 'marked_ready' ? 'admin.audit.detailDomainMarkedReady' : 'admin.audit.detailDomainStepConfirmed',
+        key: DOMAIN_STATE_CHANGE_KEYS[details.how] ?? 'admin.audit.detailDomainStepConfirmed',
         values: { domain: details.domain ?? '' },
         valueKeys: { from: domainStateKey(details.from), to: domainStateKey(details.to) },
+      };
+    case 'mail_node.domain_identity_acknowledged':
+      return {
+        key: 'admin.audit.detailDomainIdentityAcknowledged',
+        values: { domain: details.domain ?? '', from: details.from ?? '', to: details.to ?? '' },
       };
     default:
       return null;

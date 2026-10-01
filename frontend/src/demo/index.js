@@ -1,6 +1,9 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
-import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady, normalizeEopSettings } from '../utils/mailNode.js';
+import {
+  DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
+  deletionReasonError, normalizeEopSettings, parseWholeNumber,
+} from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
   {
@@ -41,6 +44,22 @@ const ACCOUNT_FIXTURES = [
 // 48 generated mailboxes (demo/fleet.js) after the two hand-made ones: 50 in all.
 const FLEET_ACCOUNTS = fleetAccounts();
 ACCOUNT_FIXTURES.push(...FLEET_ACCOUNTS);
+
+// The days a mail node mailbox keeps working after its deletion is asked for (the mail node
+// settings; the server's default). The demo never runs the deletion job: a pending mailbox stays.
+let demoDeleteAfterDays = 5;
+// One fleet mailbox on the mail node is pending deletion, so the badges and "Cancel deletion" show.
+{
+  const pending = FLEET_ACCOUNTS.find(account => account.id === 'demo-fx-46');
+  if (pending) {
+    Object.assign(pending, {
+      // Dated from now, so the demo always shows a deletion still ahead.
+      deletion_requested_at: new Date(Date.now() - 2 * 86400000).toISOString(), deletion_requested_by_email: 'demo@mailexpert.local',
+      deletion_reason: 'The project ended; its mail was moved to the archive mailbox.',
+      delete_after: new Date(Date.now() + 3 * 86400000).toISOString(), deletion_last_error: null,
+    });
+  }
+}
 
 const FOLDER_FIXTURES = [
   { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
@@ -704,8 +723,10 @@ function contactFromPayload(payload, current = {}) {
 
 // The mail node as an admin sees it in the demo: its domains with their onboarding, the mailboxes
 // made there, the disk. The domains show every kind of row: ready ones (the main domain was taken
-// in at the upgrade because it had mailboxes), one halfway through its onboarding and one made on
-// the node by hand that the panel does not know yet.
+// in at the upgrade because it had mailboxes), one ready domain whose node creation time differs
+// from the one the panel knows (the warning an administrator accepts or answers with a restart),
+// one halfway through its onboarding and one made on the node by hand that the panel does not know
+// yet.
 const DEMO_ADMIN_EMAIL = 'demo@mailexpert.local';
 const demoStep = (at) => ({ at, userId: 'demo-user', email: DEMO_ADMIN_EMAIL });
 
@@ -735,6 +756,11 @@ let mailNodeDomains = [
     steps: { node_configured: demoStep('2026-09-18T10:30:00.000Z'), dns_ok: demoStep('2026-09-18T11:20:00.000Z') },
   }),
   demoDomain({ domain: 'legacy.demo.mailexpert.local', active: true, maxMailboxes: 20, mailboxes: 0 }),
+  demoDomain({ domain: 'branch.demo.mailexpert.local', active: true, maxMailboxes: 100, mailboxes: 0, created: '2026-09-29 16:40:00' }, {
+    state: 'ready', origin: 'created', addedAt: '2026-09-02T09:15:00.000Z', addedBy: DEMO_ADMIN_EMAIL,
+    stateChangedAt: '2026-09-03T12:00:00.000Z', steps: { ready: { ...demoStep('2026-09-03T12:00:00.000Z'), markedReady: true } },
+    recreated: true, nodeCreated: '2026-09-02 09:15:00',
+  }),
 ].sort((a, b) => a.domain.localeCompare(b.domain));
 
 // The EOP settings screen: the defaults with the next hop and certificate filled in, no tenant yet.
@@ -766,10 +792,33 @@ function updateMailNodeDomain(name, change) {
   return mailNodeDomains.find(d => d.domain === name);
 }
 
-// Adopt, "Done" and "mark ready" with the same refusals as the server (routes/mailNode.js).
-function changeMailNodeDomain(action, raw, step) {
+// The domain without the warning that the node reports another creation time.
+function withoutRecreatedWarning(name) {
+  mailNodeDomains = mailNodeDomains.map(d => {
+    if (d.domain !== name) return d;
+    const rest = { ...d };
+    delete rest.recreated;
+    delete rest.nodeCreated;
+    return rest;
+  });
+}
+
+// Adopt, "Done", "mark ready", "restart onboarding" and accepting the node's creation time, with
+// the same refusals as the server (routes/mailNode.js).
+function changeMailNodeDomain(action, raw, step, body) {
   const domain = mailNodeDomainByName(raw);
   const now = new Date().toISOString();
+  if (action === 'acknowledge') {
+    // As the server: the time the administrator saw is required and must still be the node's; a
+    // row without the warning (not bound yet, or bound to this time) has nothing to accept.
+    if (typeof body?.created !== 'string' || !body.created) throw demoError('The creation time shown for the domain is required', 'node_created_required');
+    if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+    if (!domain.created) throw demoError('The node reports the creation time the panel knows already', 'domain_not_recreated');
+    if (domain.created !== body.created) throw demoError('The node reports another creation time than the one shown: reload the list', 'domain_node_changed');
+    if (!domain.recreated) throw demoError('The node reports the creation time the panel knows already', 'domain_not_recreated');
+    withoutRecreatedWarning(domain.domain);
+    return mailNodeDomains.find(d => d.domain === domain.domain);
+  }
   if (action === 'adopt') {
     if (domain.state !== 'unknown') throw demoError('The panel knows this domain already', 'domain_known');
     return updateMailNodeDomain(domain.domain, {
@@ -777,6 +826,12 @@ function changeMailNodeDomain(action, raw, step) {
     });
   }
   if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+  if (action === 'restart') {
+    if (!canRestartOnboarding(domain)) throw demoError('The domain is at the first step with nothing to clear', 'domain_nothing_to_restart');
+    // Mailboxes on the domain stay; the node identity is bound again, so the warning goes too.
+    withoutRecreatedWarning(domain.domain);
+    return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {} });
+  }
   if (action === 'ready') {
     if (!canMarkReady(domain)) throw demoError('The domain is ready already', 'domain_already_ready');
     return updateMailNodeDomain(domain.domain, {
@@ -837,6 +892,9 @@ function createDomainMailbox(body) {
   // The server's order: an address already added, then a domain whose onboarding is not done,
   // then one the node lacks or has inactive.
   const email = `${localPart}@${normalizeEmail(body.domain)}`;
+  if (mailboxWithEmail(email)?.delete_after) {
+    throw demoError('This mailbox is pending deletion: cancel the deletion to keep it', 'mailbox_pending_deletion');
+  }
   if (mailboxWithEmail(email)) throw demoError('This mailbox is already in MailExpert', 'mailbox_exists');
   const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain));
   if (!MAILBOX_READY_STATES.includes(domain?.state)) throw demoError('The domain is not ready for mailboxes', 'domain_not_ready');
@@ -1171,6 +1229,9 @@ export async function demoRequest(method, path, body = {}) {
     if (account.mail_node && (body?.imap_host !== undefined || body?.smtp_host !== undefined)) {
       throw demoError('Connection settings are locked for a mailbox on the mail node', 'mail_node_connection_locked');
     }
+    if (account.mail_node && body?.enabled !== undefined && !body.enabled && account.enabled !== false) {
+      throw demoError('A mail node mailbox cannot be disabled: delete it instead', 'mail_node_disable_unsupported');
+    }
     const assignable = ['name', 'sender_name', 'color', 'enabled', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port',
       'smtp_tls', 'folder_mappings', 'signature', 'categorization_enabled', 'sort_order', 'include_in_unified_inbox'];
     for (const key of assignable) if (body?.[key] !== undefined) account[key] = body[key];
@@ -1178,10 +1239,55 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'DELETE' && accountMatch) {
     const id = decodeURIComponent(accountMatch[1]);
+    // As on the server, a mail node mailbox is never removed at once: its deletion is scheduled.
+    if (accountFor(id)?.mail_node) {
+      throw demoError('A mail node mailbox is deleted after a waiting time', 'mail_node_deletion_request_required');
+    }
     const index = ACCOUNT_FIXTURES.findIndex(a => a.id === id);
     if (index !== -1) ACCOUNT_FIXTURES.splice(index, 1);
-    mailNodeMailboxes = mailNodeMailboxes.filter(m => m.accountId !== id);
+    // The demo's cached letters of the removed mailbox go with it.
+    messages = messages.filter(m => m.account_id !== id);
     return { ok: true };
+  }
+  // Scheduling and cancelling the deletion of a mail node mailbox, with the server's refusals
+  // (routes/accounts.js). The demo never deletes it: there is no deletion job here.
+  const deletionMatch = pathname.match(/^\/accounts\/([^/]+)\/deletion$/);
+  if (deletionMatch && (verb === 'POST' || verb === 'DELETE')) {
+    const account = accountFor(decodeURIComponent(deletionMatch[1]));
+    if (!account) throw demoError('Account not found', 'account_not_found');
+    if (verb === 'DELETE') {
+      if (!account.delete_after) throw demoError('No deletion of this mailbox is pending', 'deletion_not_requested');
+      Object.assign(account, {
+        deletion_requested_at: null, deletion_requested_by_email: null, deletion_reason: null, delete_after: null, deletion_last_error: null,
+      });
+      return clone(account);
+    }
+    if (!account.mail_node) throw demoError('Only a mailbox on the mail node waits before it is deleted', 'not_mail_node');
+    if (normalizeEmail(body?.email) !== normalizeEmail(account.email_address)) {
+      throw demoError('Type the full address of the mailbox to confirm', 'confirmation_mismatch');
+    }
+    const reasonError = deletionReasonError(body?.reason);
+    if (reasonError) {
+      throw demoError('Say why the mailbox is deleted', reasonError.endsWith('TooLong') ? 'deletion_reason_too_long' : 'deletion_reason_required');
+    }
+    if (account.delete_after) throw demoError('Deleting this mailbox was asked for already', 'deletion_already_requested');
+    const now = new Date();
+    Object.assign(account, {
+      // The requester is whoever the demo is signed in as (the "view as a user" switch).
+      deletion_requested_at: now.toISOString(), deletion_requested_by_email: (demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER).email,
+      deletion_reason: String(body.reason).trim(), delete_after: deletionDate(demoDeleteAfterDays, now.getTime()), deletion_last_error: null,
+    });
+    return clone(account);
+  }
+  // The node's aliases that deliver to a node mailbox, for its delete confirmation. The demo's sales
+  // mailbox has one, so the confirmation shows the line about it.
+  const nodeAliasesMatch = pathname.match(/^\/accounts\/([^/]+)\/node-aliases$/);
+  if (verb === 'GET' && nodeAliasesMatch) {
+    const account = accountFor(decodeURIComponent(nodeAliasesMatch[1]));
+    if (!account) throw demoError('Account not found');
+    if (!account.mail_node) throw demoError('Mail node mailbox not found', 'mailbox_not_found');
+    const [local, domain] = normalizeEmail(account.email_address).split('@');
+    return { aliases: local === 'sales' ? [{ address: `orders@${domain}`, onlyTarget: true }] : [], deleteAfterDays: demoDeleteAfterDays };
   }
   const reconnectMatch = pathname.match(/^\/accounts\/([^/]+)\/reconnect$/);
   if (verb === 'POST' && reconnectMatch) {
@@ -1569,9 +1675,20 @@ export async function demoRequest(method, path, body = {}) {
     return { ok: true };
   }
   if (verb === 'GET' && pathname === '/mail-node/config') {
-    return { configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '' };
+    return {
+      configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '',
+      deleteAfterDays: demoDeleteAfterDays,
+    };
   }
-  if (verb === 'PUT' && pathname === '/mail-node/config') return { ok: true };
+  if (verb === 'PUT' && pathname === '/mail-node/config') {
+    // The days before a deletion, checked as the server does (1 to 90); dates already set stay.
+    if (body?.deleteAfterDays !== undefined) {
+      const days = parseWholeNumber(body.deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS);
+      if (days == null) throw demoError('Days before a deletion must be a whole number from 1 to 90', 'delete_after_days_invalid');
+      demoDeleteAfterDays = days;
+    }
+    return { ok: true };
+  }
   if (verb === 'GET' && pathname === '/mail-node/domains') {
     // As on the server, an ordinary user sees only the domains a mailbox can be created on.
     if (demoRole() !== 'user') return clone({ domains: mailNodeDomains });
@@ -1592,10 +1709,10 @@ export async function demoRequest(method, path, body = {}) {
     }
     return { ok: true, domain, state: 'node_created' };
   }
-  const domainAction = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(adopt|ready|steps\/([^/]+))$/);
+  const domainAction = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(adopt|ready|restart|acknowledge|steps\/([^/]+))$/);
   if (verb === 'POST' && domainAction) {
     const action = domainAction[2].startsWith('steps/') ? 'step' : domainAction[2];
-    const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]));
+    const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]), body);
     return { ok: true, domain: changed.domain, state: changed.state };
   }
   if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();

@@ -210,6 +210,95 @@ test('the demo walks a domain through its onboarding with the server refusals', 
   assert.equal(account.email_address, 'pilot@pilot.demo.mailexpert.local');
 });
 
+test('the demo keeps a domain whose node creation time differs ready, and lets an admin accept it or restart', async () => {
+  const branch = () => demoRequest('GET', '/mail-node/domains').then(({ domains }) => domains.find(d => d.domain === 'branch.demo.mailexpert.local'));
+  const before = await branch();
+  assert.equal(before.state, 'ready');
+  assert.equal(before.recreated, true);
+  // Mailboxes are still created on it.
+  const account = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'desk', domain: 'branch.demo.mailexpert.local', name: '' });
+  assert.equal(account.email_address, 'desk@branch.demo.mailexpert.local');
+  const acknowledge = (body) => demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge', body);
+  await assert.rejects(() => acknowledge({}), err => err.code === 'node_created_required');
+  await assert.rejects(() => acknowledge({ created: '2026-01-01 00:00:00' }), err => err.code === 'domain_node_changed');
+  await acknowledge({ created: before.created });
+  const accepted = await branch();
+  assert.equal(accepted.state, 'ready');
+  assert.equal(accepted.recreated, undefined);
+  await assert.rejects(() => acknowledge({ created: before.created }), err => err.code === 'domain_not_recreated');
+  const restarted = await demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/restart');
+  assert.equal(restarted.state, 'node_created');
+  const after = await branch();
+  assert.deepEqual(after.steps, {});
+  assert.equal(after.nextStep, 'node_configured');
+  // Nothing left to clear: refused, as on the server.
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/restart'), err => err.code === 'domain_nothing_to_restart');
+  // The mailbox made on it stays.
+  assert.ok((await demoRequest('GET', '/accounts')).some(a => a.id === account.id));
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/legacy.demo.mailexpert.local/restart'), err => err.code === 'domain_not_found');
+});
+
+test('the demo schedules the deletion of a mail node mailbox with a reason, keeps it working, and lets anyone cancel', async () => {
+  const account = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'gone', domain: 'demo.mailexpert.local', name: '' });
+  const url = `/accounts/${encodeURIComponent(account.id)}/deletion`;
+  // Never removed at once.
+  await assert.rejects(() => demoRequest('DELETE', `/accounts/${encodeURIComponent(account.id)}`), err => err.code === 'mail_node_deletion_request_required');
+  await assert.rejects(() => demoRequest('POST', url, { email: 'gone@demo', reason: 'r' }), err => err.code === 'confirmation_mismatch');
+  await assert.rejects(() => demoRequest('POST', url, { email: 'gone@demo.mailexpert.local', reason: '  ' }), err => err.code === 'deletion_reason_required');
+  await assert.rejects(
+    () => demoRequest('POST', url, { email: 'gone@demo.mailexpert.local', reason: 'x'.repeat(501) }),
+    err => err.code === 'deletion_reason_too_long',
+  );
+  const pending = await demoRequest('POST', url, { email: 'GONE@demo.mailexpert.local', reason: ' Moved to the archive ' });
+  assert.equal(pending.deletion_reason, 'Moved to the archive');
+  const days = (Date.parse(pending.delete_after) - Date.now()) / 86400000;
+  assert.ok(days > 4.9 && days < 5.1, `deleted in about 5 days, not ${days}`);
+  // Still in the list, still working.
+  assert.ok((await demoRequest('GET', '/accounts')).some(a => a.id === account.id && a.delete_after));
+  await assert.rejects(() => demoRequest('POST', url, { email: 'gone@demo.mailexpert.local', reason: 'again' }), err => err.code === 'deletion_already_requested');
+  // The same address cannot be created while it is pending.
+  await assert.rejects(
+    () => demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'gone', domain: 'demo.mailexpert.local', name: '' }),
+    err => err.code === 'mailbox_pending_deletion',
+  );
+  const kept = await demoRequest('DELETE', url);
+  assert.equal(kept.delete_after, null);
+  assert.equal(kept.deletion_reason, null);
+  await assert.rejects(() => demoRequest('DELETE', url), err => err.code === 'deletion_not_requested');
+});
+
+test('the demo shows one mail node mailbox pending deletion and keeps the days setting like the server', async () => {
+  const pending = (await demoRequest('GET', '/accounts')).filter(a => a.delete_after);
+  assert.deepEqual(pending.map(a => a.id), ['demo-fx-46']);
+  assert.ok(pending[0].deletion_reason);
+  // Dated from now: always still ahead in the demo.
+  const ahead = (Date.parse(pending[0].delete_after) - Date.now()) / 86400000;
+  assert.ok(ahead > 2.9 && ahead < 3.1, `about 3 days ahead, not ${ahead}`);
+  assert.equal((await demoRequest('GET', '/mail-node/config')).deleteAfterDays, 5);
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/config', { deleteAfterDays: 91 }), err => err.code === 'delete_after_days_invalid');
+  await demoRequest('PUT', '/mail-node/config', { deleteAfterDays: '14' });
+  assert.equal((await demoRequest('GET', '/mail-node/config')).deleteAfterDays, 14);
+  // A date already set does not move.
+  assert.equal((await demoRequest('GET', '/accounts')).find(a => a.id === 'demo-fx-46').delete_after, pending[0].delete_after);
+});
+
+test('the demo lists the node aliases of a mail node mailbox for its delete confirmation', async () => {
+  const sales = (await demoRequest('GET', '/accounts')).find(a => a.mail_node && a.email_address.startsWith('sales@'));
+  const { aliases } = await demoRequest('GET', `/accounts/${encodeURIComponent(sales.id)}/node-aliases`);
+  assert.deepEqual(aliases, [{ address: `orders@${sales.email_address.split('@')[1]}`, onlyTarget: true }]);
+  assert.equal((await demoRequest('GET', `/accounts/${encodeURIComponent(sales.id)}/node-aliases`)).deleteAfterDays, 5);
+  const other = (await demoRequest('GET', '/accounts')).find(a => !a.mail_node);
+  await assert.rejects(() => demoRequest('GET', `/accounts/${encodeURIComponent(other.id)}/node-aliases`), err => err.code === 'mailbox_not_found');
+});
+
+test('the demo refuses to disable a mail node mailbox but not a connected one', async () => {
+  const node = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'paused', domain: 'demo.mailexpert.local', name: '' });
+  await assert.rejects(() => demoRequest('PUT', `/accounts/${encodeURIComponent(node.id)}`, { enabled: false }), err => err.code === 'mail_node_disable_unsupported');
+  const other = (await demoRequest('GET', '/accounts')).find(a => !a.mail_node);
+  const updated = await demoRequest('PUT', `/accounts/${encodeURIComponent(other.id)}`, { enabled: false });
+  assert.equal(updated.enabled, false);
+});
+
 test('the demo EOP settings start at mailcow signing and 50 messages an hour, and keep a save', async () => {
   const initial = await demoRequest('GET', '/mail-node/eop');
   assert.equal(initial.dkimMode, 'mailcow');

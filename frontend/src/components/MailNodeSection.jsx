@@ -3,8 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
 import {
+  DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
   DEFAULT_QUOTA_MB,
+  MAX_DELETE_AFTER_DAYS,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
   domainStateKey,
@@ -33,7 +35,9 @@ const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primar
 const cellStyle = { padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)', fontSize: 13, textAlign: 'left' };
 const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' };
 
-const EMPTY_FORM = { mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '' };
+const EMPTY_FORM = {
+  mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '', deleteAfterDays: String(DEFAULT_DELETE_AFTER_DAYS),
+};
 
 // Settings -> Integrations -> "Mail node" (admins only): the mailcow server MailExpert creates
 // domain mailboxes on, its domains with their onboarding, the mail disk and the quota of every
@@ -44,6 +48,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const [stored, setStored] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [domains, setDomains] = useState(null);
+  // The node's error when it could not list its domains: the panel's own record is shown anyway.
+  const [domainsNodeError, setDomainsNodeError] = useState(null);
   const [overview, setOverview] = useState(null);
   const [newDomain, setNewDomain] = useState({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
   const [quotaEdits, setQuotaEdits] = useState({});
@@ -54,10 +60,16 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
 
   const fail = (err) => setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
 
-  // Each list shows on its own: a failing mailbox listing does not hide the domains.
+  // Each list shows on its own: a failing mailbox listing does not hide the domains, and a node
+  // that cannot list its domains leaves the panel's record of them on screen with a warning.
   const loadNode = useCallback(async () => {
     const [d, o] = await Promise.allSettled([api.mailNode.listDomains(), api.mailNode.listMailboxes()]);
-    if (d.status === 'fulfilled') setDomains(d.value?.domains ?? []);
+    if (d.status === 'fulfilled') {
+      setDomains(d.value?.domains ?? []);
+      setDomainsNodeError(d.value?.node ?? null);
+    } else {
+      setDomainsNodeError(null);
+    }
     if (o.status === 'fulfilled') setOverview(o.value);
     const failed = [d, o].find((r) => r.status === 'rejected');
     if (failed) fail(failed.reason);
@@ -67,7 +79,10 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     api.mailNode.getConfig()
       .then((cfg) => {
         setStored(cfg);
-        setForm({ mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl });
+        setForm({
+          mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl,
+          deleteAfterDays: String(cfg.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS),
+        });
       })
       .catch(fail);
   }, []);
@@ -97,6 +112,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const saveConfig = () => run(async () => {
     await api.mailNode.saveConfig({
       mailHost: form.mailHost.trim(), apiKey: form.apiKey, quotaMb: Number(form.quotaMb), diskPingUrl: form.diskPingUrl.trim(),
+      deleteAfterDays: Number(form.deleteAfterDays),
     });
     const cfg = await api.mailNode.getConfig();
     setStored(cfg);
@@ -157,6 +173,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
             <input value={form.diskPingUrl} onChange={(e) => setForm({ ...form, diskPingUrl: e.target.value })} spellCheck={false} placeholder={t('admin.mailNode.pingPh')} style={monoFieldStyle} />
             <span style={hintStyle}>{t('admin.mailNode.pingNote')}</span>
           </label>
+          <label>
+            <span style={labelStyle}>{t('admin.mailNode.deleteAfterLabel')}</span>
+            <input inputMode="numeric" value={form.deleteAfterDays} onChange={(e) => setForm({ ...form, deleteAfterDays: e.target.value })} style={{ ...fieldStyle, maxWidth: 160 }} />
+            <span style={hintStyle}>{t('admin.mailNode.deleteAfterNote', { max: MAX_DELETE_AFTER_DAYS })}</span>
+          </label>
           <div>
             <button type="button" onClick={saveConfig} disabled={busy || !!configErrorKey} style={primaryButtonStyle}>
               {t('admin.mailNode.saveAndCheck')}
@@ -190,6 +211,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
       {stored?.configured && domains && (
         <>
           <div style={subTitleStyle}>{t('admin.mailNode.domainsTitle')}</div>
+          {domainsNodeError && (
+            <div role="alert" data-domains-node-error={domainsNodeError.code} style={{ fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
+              {t('admin.mailNode.domainsNodeUnreachable', { reason: t(mailNodeErrorKey(domainsNodeError.code)) })}
+            </div>
+          )}
           {domains.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.mailNode.domainsEmpty')}</div>}
           {domains.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -205,15 +231,26 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                   <Fragment key={d.domain}>
                     <tr>
                       <td style={cellStyle}>{d.domain}</td>
-                      <td style={cellStyle}>{t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}</td>
+                      <td style={cellStyle}>
+                        {d.onNode == null ? '—' : t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}
+                      </td>
                       <td style={cellStyle}>
                         {/* The node's own flag, then how far the panel's onboarding of the domain got. */}
-                        {!d.onNode && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
-                        {d.onNode && (d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive'))}
+                        {d.onNode === false && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
+                        {d.onNode == null && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.nodeUnknown')}</span>}
+                        {d.onNode === true && (d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive'))}
                         <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
                           <span data-domain-state={d.state} style={{ color: d.state === 'unknown' ? 'var(--red)' : 'var(--text-primary)' }}>
                             {t(domainStateKey(d.state))}
                           </span>
+                          {d.recreated && (
+                            <span data-recreated-badge style={{
+                              fontSize: 11, fontWeight: 500, color: 'var(--text-primary)', padding: '1px 7px', borderRadius: 20,
+                              border: '1px solid var(--amber)', background: 'rgba(251,191,36,0.14)',
+                            }}>
+                              {t('admin.mailNode.recreatedBadge')}
+                            </span>
+                          )}
                           <button
                             type="button"
                             aria-expanded={openDomain === d.domain}

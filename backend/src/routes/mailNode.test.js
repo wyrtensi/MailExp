@@ -39,6 +39,8 @@ vi.mock('../services/mailNode/domains.js', async (importActual) => {
     adoptDomain: vi.fn(async () => true),
     confirmStep: vi.fn(async ({ step }) => ({ from: 'node_created', to: step })),
     markReady: vi.fn(async () => ({ from: 'dns_ok', to: 'ready' })),
+    restartOnboarding: vi.fn(async () => ({ from: 'ready', to: 'node_created' })),
+    acknowledgeNodeIdentity: vi.fn(async ({ nodeCreated }) => ({ from: '2026-09-01 10:00:00', to: nodeCreated })),
   };
 });
 vi.mock('../services/mailNode/eopSettings.js', async (importActual) => {
@@ -57,11 +59,13 @@ import { recordAudit } from '../services/auditLog.js';
 import {
   MailNodeError, addDomain, listDomains, saveMailNodeConfig, setMailboxQuota,
 } from '../services/mailNode/mailcow.js';
-import { adoptDomain, confirmStep, markReady, recordCreatedDomain } from '../services/mailNode/domains.js';
+import {
+  acknowledgeNodeIdentity, adoptDomain, confirmStep, markReady, recordCreatedDomain, restartOnboarding,
+} from '../services/mailNode/domains.js';
 import { EOP_DEFAULTS, saveEopSettings } from '../services/mailNode/eopSettings.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
-const CFG = { mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 5120, diskPingUrl: null };
+const CFG = { mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 5120, diskPingUrl: null, deleteAfterDays: 5 };
 
 describe('/api/mail-node', () => {
   let server;
@@ -91,7 +95,7 @@ describe('/api/mail-node', () => {
 
   it('shows the settings to an administrator with the key redacted', async () => {
     const body = await (await call('GET', '/config')).json();
-    expect(body).toEqual({ configured: true, mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, diskPingUrl: '' });
+    expect(body).toEqual({ configured: true, mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, diskPingUrl: '', deleteAfterDays: 5 });
     session.isAdmin = false;
     expect((await call('GET', '/config')).status).toBe(403);
   });
@@ -100,21 +104,33 @@ describe('/api/mail-node', () => {
     node.cfg = null;
     const res = await call('PUT', '/config', { mailHost: 'Mail.Example.com', apiKey: 'new-key', quotaMb: '5120', diskPingUrl: 'https://hc.example.com/p/1' });
     expect(res.status).toBe(200);
-    const saved = { mailHost: 'mail.example.com', apiKey: 'new-key', quotaMb: 5120, diskPingUrl: 'https://hc.example.com/p/1' };
+    const saved = { mailHost: 'mail.example.com', apiKey: 'new-key', quotaMb: 5120, diskPingUrl: 'https://hc.example.com/p/1', deleteAfterDays: 5 };
     expect(listDomains).toHaveBeenCalledWith(saved);
     expect(saveMailNodeConfig).toHaveBeenCalledWith(saved);
     expect(recordAudit).toHaveBeenCalledWith({
       actorUserId: 'user-1', action: 'mail_node.config_changed',
-      details: { settings: 'node', fields: ['mailHost', 'apiKey', 'quotaMb', 'diskPingUrl'] },
+      details: { settings: 'node', fields: ['mailHost', 'apiKey', 'quotaMb', 'diskPingUrl', 'deleteAfterDays'] },
     });
     expect(JSON.stringify(recordAudit.mock.calls)).not.toContain('new-key');
   });
 
   it('keeps the stored key when the placeholder comes back', async () => {
     await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 1024 });
-    expect(saveMailNodeConfig).toHaveBeenCalledWith({ mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 1024, diskPingUrl: null });
+    expect(saveMailNodeConfig).toHaveBeenCalledWith({ mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 1024, diskPingUrl: null, deleteAfterDays: 5 });
     // Only the quota changed.
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { settings: 'node', fields: ['quotaMb'] } }));
+  });
+
+  it('saves the days a mailbox keeps working after its deletion is asked for, 1 to 90', async () => {
+    await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, deleteAfterDays: '14' });
+    expect(saveMailNodeConfig).toHaveBeenCalledWith(expect.objectContaining({ deleteAfterDays: 14 }));
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { settings: 'node', fields: ['deleteAfterDays'] } }));
+    for (const bad of [0, 91, 'x', 2.5]) {
+      const res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', deleteAfterDays: bad });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('delete_after_days_invalid');
+    }
+    expect(saveMailNodeConfig).toHaveBeenCalledTimes(1);
   });
 
   it('journals nothing when nothing changed', async () => {
@@ -218,19 +234,11 @@ describe('/api/mail-node', () => {
     expect(adoptDomain).toHaveBeenCalledWith({ domain: 'example.com', userId: 'user-1', nodeCreated: '2026-09-30 12:00:00' });
   });
 
-  it('refuses "Done" and mark ready for a row whose domain left the node or was made again there', async () => {
+  it('refuses "Done" and mark ready for a row whose domain the node does not list', async () => {
     for (const path of ['/domains/gone.example/steps/node_configured', '/domains/gone.example/ready']) {
       const res = await call('POST', path);
       expect(res.status).toBe(404);
       expect((await res.json()).code).toBe('domain_not_on_node');
-    }
-    panel.row = { state: 'ready', nodeCreated: '2026-09-01 10:00:00' };
-    const remade = [{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }];
-    listDomains.mockResolvedValueOnce(remade).mockResolvedValueOnce(remade);
-    for (const path of ['/domains/example.com/steps/node_configured', '/domains/example.com/ready']) {
-      const res = await call('POST', path);
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('domain_recreated');
     }
     panel.row = null;
     expect((await (await call('POST', '/domains/example.com/ready')).json()).code).toBe('domain_not_found');
@@ -239,14 +247,165 @@ describe('/api/mail-node', () => {
     expect(recordAudit).not.toHaveBeenCalled();
   });
 
-  it('shows a domain made again on the node by hand as unknown, the old row aside', async () => {
-    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }]);
+  it('moves a domain whose node creation time differs: that is a warning, not a refusal', async () => {
+    panel.row = { state: 'dns_ok', nodeCreated: '2026-09-01 10:00:00' };
+    const remade = [{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }];
+    listDomains.mockResolvedValueOnce(remade).mockResolvedValueOnce(remade);
+    expect((await call('POST', '/domains/example.com/steps/tenant_verified')).status).toBe(200);
+    expect((await call('POST', '/domains/example.com/ready')).status).toBe(200);
+    expect(confirmStep).toHaveBeenCalledTimes(1);
+    expect(markReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses "Done" and mark ready without touching the row while the node cannot be read', async () => {
+    listDomains.mockRejectedValue(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ECONNREFUSED)'));
+    try {
+      for (const path of ['/domains/example.com/steps/node_configured', '/domains/example.com/ready', '/domains/example.com/acknowledge']) {
+        const res = await call('POST', path, { created: '2026-09-30 12:00:00' });
+        expect(res.status, path).toBe(502);
+        expect((await res.json()).code).toBe('mail_node_unreachable');
+      }
+    } finally {
+      listDomains.mockReset().mockResolvedValue([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1 }]);
+    }
+    expect(confirmStep).not.toHaveBeenCalled();
+    expect(markReady).not.toHaveBeenCalled();
+    expect(acknowledgeNodeIdentity).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the state of a domain made again on the node by hand and warns the administrator', async () => {
+    const remade = [{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }];
+    listDomains.mockResolvedValueOnce(remade);
     panel.rows = [{ domain: 'example.com', state: 'ready', origin: 'created', addedAt: 't', addedBy: null, stateChangedAt: 't', steps: {}, maxMailboxes: 500, nodeCreated: '2026-09-01 10:00:00' }];
     const [domain] = (await (await call('GET', '/domains')).json()).domains;
-    expect(domain).toMatchObject({ domain: 'example.com', state: 'unknown', recreated: true, nextStep: null });
+    expect(domain).toMatchObject({
+      domain: 'example.com', state: 'ready', recreated: true, nodeCreated: '2026-09-01 10:00:00', created: '2026-09-30 12:00:00',
+    });
     session.isAdmin = false;
-    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }]);
-    expect((await (await call('GET', '/domains')).json()).domains).toEqual([]);
+    listDomains.mockResolvedValueOnce(remade);
+    expect((await (await call('GET', '/domains')).json()).domains).toEqual([{ domain: 'example.com', active: true, state: 'ready' }]);
+    expect(query.mock.calls.some(([sql]) => /UPDATE|DELETE|INSERT/.test(sql))).toBe(false);
+  });
+
+  describe('when the node fails', () => {
+    const rows = [
+      { domain: 'example.com', state: 'ready', origin: 'created', addedAt: 't', addedBy: null, stateChangedAt: 't', steps: {}, maxMailboxes: 500, nodeCreated: '2026-09-01 10:00:00' },
+      { domain: 'pending.example', state: 'dns_ok', origin: 'created', addedAt: 't', addedBy: null, stateChangedAt: 't', steps: {}, maxMailboxes: 10, nodeCreated: null },
+    ];
+    const writes = () => query.mock.calls.filter(([sql]) => /UPDATE|DELETE|INSERT/.test(sql));
+
+    for (const [name, err] of [
+      ['unreachable', new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)')],
+      ['answering an error', new MailNodeError('mail_node_failed', 'The mail node answered HTTP 500')],
+      ['refusing the key', new MailNodeError('mail_node_auth', 'The mail node refused the API key')],
+    ]) {
+      it(`shows an administrator every known domain with its state and the node ${name}, changing nothing`, async () => {
+        listDomains.mockRejectedValueOnce(err);
+        panel.rows = rows;
+        const res = await call('GET', '/domains');
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.node).toEqual({ error: err.message, code: err.code });
+        expect(body.domains.map((d) => [d.domain, d.state, d.onNode])).toEqual([
+          ['example.com', 'ready', null], ['pending.example', 'dns_ok', null],
+        ]);
+        expect(writes()).toEqual([]);
+      });
+    }
+
+    it('answers everyone else with the node error: no mailbox can be created then', async () => {
+      session.isAdmin = false;
+      listDomains.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
+      panel.rows = rows;
+      const res = await call('GET', '/domains');
+      expect(res.status).toBe(502);
+      expect((await res.json()).code).toBe('mail_node_unreachable');
+      expect(writes()).toEqual([]);
+    });
+
+    it('shows every known domain, not an empty list, when the node lists none or only some', async () => {
+      panel.rows = rows;
+      listDomains.mockResolvedValueOnce([]);
+      let body = await (await call('GET', '/domains')).json();
+      expect(body.domains.map((d) => [d.domain, d.state, d.onNode])).toEqual([
+        ['example.com', 'ready', false], ['pending.example', 'dns_ok', false],
+      ]);
+      listDomains.mockResolvedValueOnce([{ domain: 'pending.example', active: true, maxMailboxes: 10, mailboxes: 0 }]);
+      body = await (await call('GET', '/domains')).json();
+      expect(body.domains.map((d) => [d.domain, d.state, d.onNode])).toEqual([
+        ['example.com', 'ready', false], ['pending.example', 'dns_ok', true],
+      ]);
+      expect(writes()).toEqual([]);
+    });
+  });
+
+  it('restarts a domain\'s onboarding, journaled with the steps it cleared, for administrators only and without asking the node', async () => {
+    node.cfg = null;
+    const cleared = { ready: { at: 't', userId: 'u', email: 'admin@example.com', markedReady: true } };
+    restartOnboarding.mockResolvedValueOnce({ from: 'ready', to: 'node_created', steps: cleared });
+    const res = await call('POST', '/domains/Example.com/restart');
+    expect(await res.json()).toEqual({ ok: true, domain: 'example.com', state: 'node_created' });
+    expect(restartOnboarding).toHaveBeenCalledWith({ domain: 'example.com', userId: 'user-1' });
+    expect(listDomains).not.toHaveBeenCalled();
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'user-1', action: 'mail_node.domain_state_changed',
+      details: { domain: 'example.com', from: 'ready', to: 'node_created', how: 'restarted', steps: cleared },
+    });
+    restartOnboarding.mockResolvedValueOnce({ error: 'domain_not_found' });
+    expect((await call('POST', '/domains/missing.example/restart')).status).toBe(404);
+    restartOnboarding.mockResolvedValueOnce({ error: 'domain_nothing_to_restart' });
+    const nothing = await call('POST', '/domains/example.com/restart');
+    expect(nothing.status).toBe(409);
+    expect((await nothing.json()).code).toBe('domain_nothing_to_restart');
+    expect((await (await call('POST', '/domains/bad/restart')).json()).code).toBe('domain_invalid');
+    session.isAdmin = false;
+    expect((await call('POST', '/domains/example.com/restart')).status).toBe(403);
+    expect(restartOnboarding).toHaveBeenCalledTimes(3);
+    expect(recordAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts the creation time the administrator saw and the node still reports, journaled with both times', async () => {
+    const seen = { created: '2026-09-30 12:00:00' };
+    const remade = [{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }];
+    panel.row = { state: 'ready', nodeCreated: '2026-09-01 10:00:00' };
+    listDomains.mockResolvedValueOnce(remade);
+    const res = await call('POST', '/domains/example.com/acknowledge', seen);
+    expect(await res.json()).toEqual({ ok: true, domain: 'example.com' });
+    expect(acknowledgeNodeIdentity).toHaveBeenCalledWith({ domain: 'example.com', nodeCreated: '2026-09-30 12:00:00' });
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'user-1', action: 'mail_node.domain_identity_acknowledged',
+      details: { domain: 'example.com', from: '2026-09-01 10:00:00', to: '2026-09-30 12:00:00' },
+    });
+    // Without the time the administrator saw nothing is accepted.
+    let refused = await call('POST', '/domains/example.com/acknowledge');
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).code).toBe('node_created_required');
+    // The node reports yet another time by now: refused, the administrator reloads the list.
+    listDomains.mockResolvedValueOnce([{ ...remade[0], created: '2026-10-01 09:00:00' }]);
+    refused = await call('POST', '/domains/example.com/acknowledge', seen);
+    expect(refused.status).toBe(409);
+    expect((await refused.json()).code).toBe('domain_node_changed');
+    // The node sends no creation time: nothing to accept.
+    expect((await (await call('POST', '/domains/example.com/acknowledge', seen)).json()).code).toBe('domain_not_recreated');
+    acknowledgeNodeIdentity.mockResolvedValueOnce({ error: 'domain_not_recreated' });
+    listDomains.mockResolvedValueOnce(remade);
+    expect((await call('POST', '/domains/example.com/acknowledge', seen)).status).toBe(409);
+    expect((await (await call('POST', '/domains/gone.example/acknowledge', seen)).json()).code).toBe('domain_not_on_node');
+    session.isAdmin = false;
+    expect((await call('POST', '/domains/example.com/acknowledge', seen)).status).toBe(403);
+    expect(acknowledgeNodeIdentity).toHaveBeenCalledTimes(2);
+    expect(recordAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it('journals the state and steps a known domain had when it is added to the node again', async () => {
+    const steps = { node_configured: { at: 't', email: 'admin@example.com' } };
+    recordCreatedDomain.mockResolvedValueOnce({ from: 'dns_ok', steps });
+    await call('POST', '/domains', { domain: 'again.example', mailboxes: 20 });
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'user-1', action: 'mail_node.domain_added',
+      details: { domain: 'again.example', mailboxes: 20, from: 'dns_ok', steps },
+    });
   });
 
   it('adopts a node domain the panel does not know, journaled', async () => {
@@ -366,7 +525,7 @@ describe('/api/mail-node', () => {
   });
 
   it('changes the quota of a mail node mailbox only, journaled with the quota before', async () => {
-    query.mockResolvedValueOnce({ rows: [{ email_address: 'info@example.com' }] });
+    query.mockResolvedValueOnce({ rows: [{ email_address: 'info@example.com', imap_host: 'mail.example.com' }] });
     let res = await call('PUT', `/mailboxes/${ID}/quota`, { quotaMb: 10240 });
     expect(res.status).toBe(200);
     expect(setMailboxQuota).toHaveBeenCalledWith(CFG, 'info@example.com', 10240);
@@ -379,5 +538,14 @@ describe('/api/mail-node', () => {
     expect(res.status).toBe(404);
     res = await call('PUT', `/mailboxes/${ID}/quota`, { quotaMb: 999999 });
     expect((await res.json()).code).toBe('quota_invalid');
+  });
+
+  it('refuses to change the quota of a mailbox on another host than the node the settings name', async () => {
+    query.mockResolvedValueOnce({ rows: [{ email_address: 'info@example.com', imap_host: 'old-node.example.com' }] });
+    const res = await call('PUT', `/mailboxes/${ID}/quota`, { quotaMb: 10240 });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('mail_node_host_mismatch');
+    expect(setMailboxQuota).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });

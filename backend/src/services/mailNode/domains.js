@@ -64,21 +64,24 @@ export async function getDomainRow(domain) {
   return rows[0] ? { state: rows[0].state, nodeCreated: rows[0].node_created ?? null } : null;
 }
 
-// Whether the node's domain is another one than the row was onboarded with: deleted on the node and
-// made again by hand. Unknown on either side (an older mailcow, a row not bound yet) is no proof.
+// Whether the node reports another creation time for the domain than the row is bound to: the domain
+// may have been deleted on the node and made again by hand, so its node settings may need applying
+// again. Only a warning for administrators: a mailcow that prints the time another way would trip it
+// too, so it never changes the row's state or what the domain may do. Unknown on either side (an
+// older mailcow, a row not bound yet) is no sign at all.
 export function isRecreated(row, nodeDomain) {
   return !!(row?.nodeCreated && nodeDomain?.created && row.nodeCreated !== nodeDomain.created);
 }
 
-// Why "Done" or "mark ready" may not touch a row now, or null: the node no longer has its domain,
-// or has another domain of that name.
-export function nodeRefusal(row, nodeDomain) {
-  if (!nodeDomain) return 'domain_not_on_node';
-  return isRecreated(row, nodeDomain) ? 'domain_recreated' : null;
+// Why "Done" or "mark ready" may not touch a row now, or null: the node does not list its domain.
+export function nodeRefusal(nodeDomain) {
+  return nodeDomain ? null : 'domain_not_on_node';
 }
 
 // Binds rows not bound yet (created in the panel, taken in at startup) to the node's identity of
-// their domain, the first time the panel sees it. Returns the rows with the bound values.
+// their domain, the first time the panel sees it. Only ever fills an empty value: a domain the node
+// does not list, or lists without a creation time, leaves its row as it is. Returns the rows with
+// the bound values.
 export async function bindNodeIdentities(nodeDomains, rows) {
   const created = new Map(nodeDomains.map((d) => [d.domain, d.created]));
   return Promise.all(rows.map(async (row) => {
@@ -89,25 +92,36 @@ export async function bindNodeIdentities(nodeDomains, rows) {
   }));
 }
 
-// The node's domains with the panel's record of each, plus rows whose domain the node no longer
-// has (onNode: false). A domain re-created on the node by hand shows as unknown (recreated: true)
-// until an administrator adopts it again. Sorted by name.
+// The node's domains with the panel's record of each, plus rows whose domain the node does not list
+// (onNode: false). A domain whose node creation time differs from the bound one keeps its state and
+// carries recreated: true with the bound time (nodeCreated) next to the node's (created), for the
+// administrator's warning. Without the node's list (nodeDomains null: the node is unreachable or
+// failed) every row is shown as the panel knows it with onNode: null, so no domain drops out of
+// the view. Sorted by name.
 export function mergeDomains(nodeDomains, rows) {
   const known = new Map(rows.map((row) => [row.domain, row]));
   const panel = (row) => (row
     ? { state: row.state, origin: row.origin, addedAt: row.addedAt, addedBy: row.addedBy, stateChangedAt: row.stateChangedAt, steps: row.steps }
     : { state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {} });
-  const merged = nodeDomains.map((d) => {
+  const listed = nodeDomains ?? [];
+  const merged = listed.map((d) => {
     const row = known.get(d.domain);
     const recreated = isRecreated(row, d);
-    const shown = recreated ? null : row;
-    return { ...d, onNode: true, ...panel(shown), nextStep: nextStep(shown?.state ?? UNKNOWN_STATE), ...(recreated ? { recreated } : {}) };
+    return {
+      ...d, onNode: true, ...panel(row), nextStep: nextStep(row?.state ?? UNKNOWN_STATE),
+      ...(recreated ? { recreated, nodeCreated: row.nodeCreated } : {}),
+    };
   });
-  const onNode = new Set(nodeDomains.map((d) => d.domain));
+  const onNode = new Set(listed.map((d) => d.domain));
+  const unreachable = nodeDomains === null;
   for (const row of rows) {
     if (onNode.has(row.domain)) continue;
     merged.push({
-      domain: row.domain, active: false, maxMailboxes: row.maxMailboxes ?? 0, mailboxes: 0, onNode: false,
+      domain: row.domain,
+      active: unreachable ? null : false,
+      maxMailboxes: row.maxMailboxes ?? (unreachable ? null : 0),
+      mailboxes: unreachable ? null : 0,
+      onNode: unreachable ? null : false,
       ...panel(row), nextStep: nextStep(row.state),
     });
   }
@@ -116,40 +130,84 @@ export function mergeDomains(nodeDomains, rows) {
 
 // Starting the onboarding over clears everything that described the domain as it was on the node
 // and in the tenant: relayhost, DNS and tenant results, the accepted domain type, the expected MX
-// and the node identity. The domain's DKIM mode and send limit stay: they are the owner's choices
-// for the domain, applied again to the new node domain, not something the node held.
+// and the node identity (bound again when the panel next lists the domains). The domain's DKIM
+// mode and send limit stay: they are the owner's choices for the domain, applied again to the node
+// domain, not something the node held. Mailboxes on the domain are not touched.
 const RESTART_SET = `
-  state = 'node_created', added_by = $2, added_at = NOW(), steps = '{}', state_changed_by = $2,
-  state_changed_at = NOW(), updated_at = NOW(), relayhost_id = NULL, dns_check = NULL,
-  dns_checked_at = NULL, tenant = NULL, accepted_domain_type = NULL, expected_mx = '[]'`;
+  state = 'node_created', steps = '{}', state_changed_by = $2, state_changed_at = NOW(), updated_at = NOW(),
+  relayhost_id = NULL, dns_check = NULL, dns_checked_at = NULL, tenant = NULL, accepted_domain_type = NULL,
+  expected_mx = '[]', node_created = NULL`;
 
 // A domain the panel just created on the node. Adding a domain again after it was removed from the
 // node starts its onboarding over: the node lost its settings with it. The node identity is bound
-// when the panel next lists the domains.
+// when the panel next lists the domains. Returns the state and the confirmed steps the row had
+// before (from: null, steps: null for a domain the panel did not know), for the journal.
 export async function recordCreatedDomain({ domain, userId, maxMailboxes }) {
-  await query(`
+  const { rows } = await query(`
+    WITH old AS (SELECT state, steps FROM mail_node_domains WHERE domain = $1)
     INSERT INTO mail_node_domains (domain, state, origin, added_by, max_mailboxes, state_changed_by)
     VALUES ($1, 'node_created', 'created', $2, $3, $2)
     ON CONFLICT (domain) DO UPDATE
-    SET ${RESTART_SET}, origin = 'created', max_mailboxes = $3, node_created = NULL
+    SET ${RESTART_SET}, added_by = $2, added_at = NOW(), origin = 'created', max_mailboxes = $3
+    RETURNING (SELECT state FROM old) AS from_state, (SELECT steps FROM old) AS from_steps
   `, [domain, userId, maxMailboxes]);
+  return { from: rows[0]?.from_state ?? null, steps: rows[0]?.from_steps ?? null };
 }
 
-// An administrator takes in a domain made on the node by hand: one the panel has no row for, or one
-// deleted on the node and made again (its node identity differs from the row's). Its onboarding
-// starts at the beginning: the panel cannot tell what was set up. False when the panel knows this
-// very domain already.
+// An administrator takes in a domain made on the node by hand, one the panel has no row for. Its
+// onboarding starts at the beginning: the panel cannot tell what was set up. False when the panel
+// has a row for the domain already: adoption never overwrites one ("Restart onboarding" starts a
+// known domain over, on purpose and journaled).
 export async function adoptDomain({ domain, userId, nodeCreated = null }) {
   const { rows } = await query(`
     INSERT INTO mail_node_domains (domain, state, origin, added_by, state_changed_by, node_created)
     VALUES ($1, 'node_created', 'adopted', $2, $2, $3)
-    ON CONFLICT (domain) DO UPDATE
-    SET ${RESTART_SET}, origin = 'adopted', max_mailboxes = NULL, node_created = EXCLUDED.node_created
-    WHERE mail_node_domains.node_created IS NOT NULL AND EXCLUDED.node_created IS NOT NULL
-      AND mail_node_domains.node_created <> EXCLUDED.node_created
+    ON CONFLICT (domain) DO NOTHING
     RETURNING domain
   `, [domain, userId, nodeCreated]);
   return rows.length > 0;
+}
+
+// A row at the first step with nothing confirmed and nothing recorded about the node or the tenant:
+// restarting it would change nothing.
+const PRISTINE = `state = 'node_created' AND steps = '{}'::jsonb AND relayhost_id IS NULL AND dns_check IS NULL
+  AND dns_checked_at IS NULL AND tenant IS NULL AND accepted_domain_type IS NULL AND expected_mx = '[]'::jsonb`;
+
+// "Restart onboarding": an administrator starts a domain's onboarding over, from any state. Where
+// the domain came from, who added it and its mailbox limit stay. Answers { from, to, steps } with
+// the steps that were confirmed before (who and when, for the journal), or { error }:
+// domain_nothing_to_restart for a row that has nothing to clear.
+export async function restartOnboarding({ domain, userId }) {
+  const { rows } = await query(`
+    WITH old AS (
+      SELECT domain, state, steps, (${PRISTINE}) AS pristine FROM mail_node_domains WHERE domain = $1 FOR UPDATE
+    )
+    UPDATE mail_node_domains d
+       SET ${RESTART_SET}
+      FROM old
+     WHERE d.domain = old.domain AND NOT old.pristine
+    RETURNING old.state AS from_state, old.steps AS from_steps
+  `, [domain, userId]);
+  if (!rows.length) return { error: (await getDomainRow(domain)) ? 'domain_nothing_to_restart' : 'domain_not_found' };
+  return { from: rows[0].from_state, to: 'node_created', steps: rows[0].from_steps ?? {} };
+}
+
+// An administrator accepts the creation time the node reports now (a mailcow that prints it another
+// way, or a domain made again by hand whose settings were applied again): the row is bound to it and
+// the warning goes. Nothing else changes. Only a row with the warning, one bound to another time,
+// is changed: a row not bound yet is bound by the next listing, not here (domain_not_recreated).
+// Answers { from, to } or { error }.
+export async function acknowledgeNodeIdentity({ domain, nodeCreated }) {
+  const { rows } = await query(`
+    WITH old AS (SELECT domain, node_created FROM mail_node_domains WHERE domain = $1 FOR UPDATE)
+    UPDATE mail_node_domains d
+       SET node_created = $2::text, updated_at = NOW()
+      FROM old
+     WHERE d.domain = old.domain AND old.node_created IS NOT NULL AND old.node_created <> $2::text
+    RETURNING old.node_created AS from_created
+  `, [domain, nodeCreated]);
+  if (!rows.length) return { error: (await getDomainRow(domain)) ? 'domain_not_recreated' : 'domain_not_found' };
+  return { from: rows[0].from_created ?? null, to: nodeCreated };
 }
 
 async function refusal(domain) {

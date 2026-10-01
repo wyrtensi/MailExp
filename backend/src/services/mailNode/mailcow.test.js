@@ -14,11 +14,12 @@ import {
   MAX_QUOTA_MB,
   MailNodeError,
   addDomain,
-  disableMailbox,
+  deleteMailbox,
   generateMailboxPassword,
   getMailbox,
   getDiskStatus,
   getMailNodeConfig,
+  listAliasesTo,
   listDomains,
   listMailboxes,
   parseHostName,
@@ -95,7 +96,7 @@ describe('stored settings', () => {
     expect(stored).toEqual({ mailHost: 'mail.example.com', apiKey: 'enc:api-key-1', quotaMb: 2048, diskPingUrl: null });
 
     query.mockResolvedValueOnce({ rows: [{ config: stored }] });
-    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null });
+    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null, deleteAfterDays: 5 });
   });
 
   it('falls back to the default quota when the stored one is unusable', async () => {
@@ -167,8 +168,8 @@ describe('API requests', () => {
     expect(add.body.password2).toBe(created.password);
   });
 
-  it('takes over an existing mailbox, disabled or not, by enabling it with a new password', async () => {
-    for (const active of ['0', '1']) {
+  it('takes over an active mailbox made by hand by enabling it with a new password', async () => {
+    for (const active of ['1', '2']) {
       safeFetch.mockReset();
       safeFetch.mockResolvedValueOnce(answer({ username: 'info@example.com', active, quota: 5368709120 })).mockResolvedValueOnce(answer(OK));
       const created = await provisionMailbox(CFG, { localPart: 'info', domain: 'example.com', name: 'Info' });
@@ -182,14 +183,82 @@ describe('API requests', () => {
     }
   });
 
-  it('disables a mailbox and sets its quota through edit/mailbox', async () => {
-    safeFetch.mockResolvedValue(answer(OK));
-    await disableMailbox(CFG, 'info@example.com');
-    await setMailboxQuota(CFG, 'info@example.com', 10240);
-    expect(calls().map((c) => c.body)).toEqual([
-      { items: ['info@example.com'], attr: { active: 0 } },
-      { items: ['info@example.com'], attr: { quota: 10240 } },
+  it('never brings back a disabled mailbox with its old letters: it refuses and changes nothing', async () => {
+    safeFetch.mockResolvedValueOnce(answer({ username: 'info@example.com', active: '0', active_int: 0, quota: 5368709120 }));
+    const err = await provisionMailbox(CFG, { localPart: 'info', domain: 'example.com', name: 'Info' }).catch((e) => e);
+    expect(err).toBeInstanceOf(MailNodeError);
+    expect(err.code).toBe('mailbox_disabled_on_node');
+    expect(err.status).toBe(409);
+    expect(calls().map((c) => c.method)).toEqual(['GET']);
+  });
+
+  it('makes a new, empty mailbox at an address deleted before: the node no longer has it', async () => {
+    safeFetch
+      .mockResolvedValueOnce(answer([{ type: 'success', msg: ['mailbox_removed', 'info@example.com'] }]))
+      .mockResolvedValueOnce(answer({}))
+      .mockResolvedValueOnce(answer(OK));
+    await deleteMailbox(CFG, 'info@example.com');
+    const created = await provisionMailbox(CFG, { localPart: 'info', domain: 'example.com', name: 'Info' });
+    expect(created.reused).toBe(false);
+    expect(calls().map((c) => c.url.replace('https://mail.example.com/api/v1/', ''))).toEqual([
+      'delete/mailbox', 'get/mailbox/info%40example.com', 'add/mailbox',
     ]);
+  });
+
+  it('deletes a mailbox with delete/mailbox and a JSON array of addresses', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['mailbox_removed', 'info@example.com'] }]));
+    expect(await deleteMailbox(CFG, 'info@example.com')).toEqual({ warnings: [] });
+    const [call] = calls();
+    expect(call.url).toBe('https://mail.example.com/api/v1/delete/mailbox');
+    expect(call.method).toBe('POST');
+    expect(call.headers['Content-Type']).toBe('application/json');
+    expect(call.body).toEqual(['info@example.com']);
+  });
+
+  it('counts a delete whose maildir stayed in place as done and passes the warning on', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { type: 'warning', msg: 'Could not move maildir to garbage collector: command failed' },
+      { type: 'success', msg: ['mailbox_removed', 'info@example.com'] },
+    ]));
+    expect(await deleteMailbox(CFG, 'info@example.com')).toEqual({
+      warnings: ['Could not move maildir to garbage collector: command failed'],
+    });
+  });
+
+  it('reports a delete without a success as a refusal with the node message', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: 'access_denied' }]));
+    let err = await deleteMailbox(CFG, 'gone@example.com').catch((e) => e);
+    expect(err).toBeInstanceOf(MailNodeError);
+    expect(err.code).toBe('mail_node_refused');
+    expect(err.message).toContain('access_denied');
+    safeFetch.mockResolvedValueOnce(answer({}));
+    err = await deleteMailbox(CFG, 'gone@example.com').catch((e) => e);
+    expect(err.code).toBe('mail_node_refused');
+    safeFetch.mockRejectedValueOnce(Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }));
+    expect((await deleteMailbox(CFG, 'info@example.com').catch((e) => e)).code).toBe('mail_node_unreachable');
+  });
+
+  it('sets the quota of a mailbox through edit/mailbox', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    await setMailboxQuota(CFG, 'info@example.com', 10240);
+    expect(calls().map((c) => c.body)).toEqual([{ items: ['info@example.com'], attr: { quota: 10240 } }]);
+  });
+
+  it('lists the aliases that deliver to a mailbox, telling those it is the only target of', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { address: 'Sales@example.com', goto: 'info@example.com' },
+      { address: 'team@example.com', goto: 'desk@example.com,INFO@example.com' },
+      { address: 'other@example.com', goto: 'desk@example.com' },
+      { address: 'info@example.com', goto: 'info@example.com' },
+      { address: '@example.com', goto: 'catchall@example.com' },
+    ]));
+    expect(await listAliasesTo(CFG, 'info@example.com')).toEqual([
+      { address: 'sales@example.com', onlyTarget: true },
+      { address: 'team@example.com', onlyTarget: false },
+    ]);
+    expect(calls()[0].url).toBe('https://mail.example.com/api/v1/get/alias/all');
+    safeFetch.mockResolvedValueOnce(answer({}));
+    expect(await listAliasesTo(CFG, 'info@example.com')).toEqual([]);
   });
 
   it('reads what besides the password decides whether a mailbox may sign in', async () => {
