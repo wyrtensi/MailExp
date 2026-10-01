@@ -24,6 +24,8 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
+import { safeTextMarkup, safeViewReason, safeViewText } from '../utils/safeView.js';
+import SafeViewNotice from './SafeViewNotice.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailexpert:message-opening';
 // riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
@@ -307,6 +309,15 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const [retryKey, setRetryKey] = useState(0);
   const [loadingBody, setLoadingBody] = useState(false);
   const [downloadingPart, setDownloadingPart] = useState(null);
+  // Safe view (R-41, utils/safeView.js): a letter in Spam, or one EOP marked as phishing, malware
+  // or a spoofed sender in any folder, opens as text with its attachments locked. "Show in full"
+  // holds the letter's id for this view only: opening another letter forgets it.
+  const [fullViewId, setFullViewId] = useState(null);
+  useEffect(() => { setFullViewId(null); }, [selectedMessageId]);
+  const safeReason = message ? safeViewReason({ inSpamFolder, eopCategory: body?.eopCategory }) : null;
+  const safeView = Boolean(safeReason) && fullViewId !== message?.id;
+  // Converted only while the safe view is on, so a normal letter costs nothing.
+  const safeMarkup = useMemo(() => (safeView && body ? safeTextMarkup(safeViewText(body)) : ''), [safeView, body]);
   const [showReplyMenu, setShowReplyMenu] = useState(false);
   const [savingAllow, setSavingAllow] = useState(false);
   const [paneScrolled, setPaneScrolled] = useState(false);
@@ -381,9 +392,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // useMemo so prepared is available in the same render as body.html — no extra frame,
   // no flash of empty content between skeleton-gone and email-shown.
   const prepared = useMemo(() => {
-    if (!USE_DIV_RENDER || !body?.html) return null;
+    if (!USE_DIV_RENDER || !body?.html || safeView) return null;
     return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'));
-  }, [body?.html, message?.id, windowMode]);
+  }, [body?.html, message?.id, windowMode, safeView]);
   const outerRef = useRef(null);
   const scaleRef = useRef(null);
   const innerRef = useRef(null);
@@ -588,7 +599,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // percentage-height elements expand → body grows → observer fires → repeat.
   useEffect(() => {
     const iframe = iframeRef.current;
-    if (!iframe || !body?.html) return;
+    // safeView is a dependency because "Show in full" mounts the frame for the same body.
+    if (!iframe || !body?.html || safeView) return;
 
     let rafId;
     let pollId = null;
@@ -866,7 +878,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       iframe.removeEventListener('load', onLoaded);
       emailScaleRef.current = 1;
     };
-  }, [body?.html, selectedMessageId, hasNativeContextTarget, openPaneContextMenu]);
+  }, [body?.html, selectedMessageId, hasNativeContextTarget, openPaneContextMenu, safeView]);
 
   // Inject scoped email styles before paint so there is no flash of unstyled content.
   // useLayoutEffect runs synchronously after DOM mutations and before the browser paints,
@@ -1291,7 +1303,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const toStr = parseList(message.to_addresses).map(fmtAddr).join(', ');
     const ccStr = parseList(message.cc_addresses).map(fmtAddr).join(', ');
 
-    const bodyContent = body?.html
+    // A letter in safe view prints as the text on screen: printing must not load what it holds back.
+    const bodyContent = safeView
+      ? `<pre style="white-space:pre-wrap;font-family:sans-serif;font-size:14px">${esc(safeViewText(body))}</pre>`
+      : body?.html
       ? DOMPurify.sanitize(body.html, { ADD_ATTR: ['target'] })
       : body?.text
         ? `<pre style="white-space:pre-wrap;font-family:sans-serif;font-size:14px">${esc(body.text)}</pre>`
@@ -2739,8 +2754,49 @@ ${bodyContent}
           onToggleThread={setShowThread}
         />
 
+        {safeView && (
+          <SafeViewNotice
+            reason={safeReason}
+            eopCategory={body?.eopCategory}
+            onShowFull={() => setFullViewId(message.id)}
+          />
+        )}
+
+        {/* Attachments in safe view: named, never fetched. "Show in full" brings the buttons back. */}
+        {safeView && attachments.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', fontWeight: 500, marginBottom: 8 }}>
+              {t('message.attachment', { count: attachments.length })}
+            </div>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {attachments.map((att, i) => (
+                <li
+                  key={i}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '8px 12px', borderRadius: 8, maxWidth: 240,
+                    background: 'var(--bg-secondary)', border: '1px dashed var(--border)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <span aria-hidden="true" style={{ display: 'flex', flexShrink: 0 }}>{fileIcon(att.type)}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {att.filename}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatBytes(att.size)}</div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>
+              {t('message.safeView.attachmentsLocked')}
+            </div>
+          </div>
+        )}
+
         {/* Attachments */}
-        {attachments.length > 0 && (
+        {!safeView && attachments.length > 0 && (
           <div style={{ marginBottom: 20 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <div style={{ fontSize: 12, color: 'var(--text-tertiary)', fontWeight: 500 }}>
@@ -2918,8 +2974,28 @@ ${bodyContent}
         )}
       </div>
 
+      {/* Safe view — the letter as text in the plain-text card: no images, styles or links (the
+          addresses are text), and none of the banners below (unsubscribe, AI classify, images). */}
+      {!loadingBody && !bodyError && safeView && (body?.html || body?.text) && (
+        <div style={{ padding: isMobile ? '0 0px 16px' : '0 28px 24px' }}>
+          <div className="msg-card" data-safe-view-body="" style={{
+            margin: 0, padding: '14px 16px 12px',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            fontSize: 14, color: '#1a1a1a', lineHeight: 1.7,
+            fontFamily: 'var(--font-sans, sans-serif)', background: 'white',
+            borderRadius: isMobile ? 0 : 10,
+            border: isMobile ? 'none' : '1px solid var(--border-subtle)',
+            overflow: 'hidden',
+          }}
+            // Written in one piece and opted back into translation, like the plain-text body.
+            translate="yes"
+            dangerouslySetInnerHTML={{ __html: safeMarkup }}
+          />
+        </div>
+      )}
+
       {/* HTML email — iframe sized to full content height; outer container scrolls */}
-      {!loadingBody && !bodyError && body?.html && (
+      {!loadingBody && !bodyError && !safeView && body?.html && (
         <div style={{ padding: isMobile ? '0 0 16px' : '0 28px 24px' }}>
           {/* Unsubscribe banner — shown for newsletter messages that have a List-Unsubscribe header */}
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
@@ -3110,7 +3186,7 @@ ${bodyContent}
       )}
 
       {/* Plain-text email — no internal scroll, outer container handles it */}
-      {!loadingBody && !bodyError && body?.text && !body?.html && (
+      {!loadingBody && !bodyError && !safeView && body?.text && !body?.html && (
         <div style={{
           padding: isMobile ? '0 0px 16px' : '0 28px 24px',
         }}>
@@ -3174,7 +3250,7 @@ ${bodyContent}
         </div>
       )}
       {showThread && conversation?.items?.length > 1 && (
-        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} />
+        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} spamFolderPaths={spamFolderPaths} />
       )}
       </div>{/* end single scroll container */}
 

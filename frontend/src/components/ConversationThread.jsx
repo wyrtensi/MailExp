@@ -7,13 +7,17 @@ import { createHeightController, forceEagerImages, measureContentHeight } from '
 import { conversationSrcDoc, htmlHasQuote, personLabel, recipientsLine, splitTextQuote } from '../utils/conversationView.js';
 import DirectionBadge from './DirectionBadge.jsx';
 import { useMobile } from '../hooks/useMobile.js';
+import { safeTextMarkup, safeViewReason, safeViewText } from '../utils/safeView.js';
+import SafeViewNotice from './SafeViewNotice.jsx';
 
 // The whole conversation stacked under an open letter, the way Gmail shows it: every letter of
 // the thread in this mailbox, oldest first. Each letter is a card: its header (sent or received,
 // who, to whom, when) and, once expanded, its text with the quoted history hidden until asked
 // for. The open letter itself is only marked in its place, since it is shown in full above.
 // Shown only while the "Whole conversation" box above is ticked; the box resets on every open.
-export default function ConversationThread({ conversation, currentId, onOpen }) {
+// A stacked letter in Spam (spamFolderPaths, the open letter's account) or one EOP marked as
+// dangerous opens in safe view, like the open letter (utils/safeView.js).
+export default function ConversationThread({ conversation, currentId, onOpen, spamFolderPaths = null }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const others = conversation.items.filter((item) => item.id !== currentId);
@@ -65,6 +69,7 @@ export default function ConversationThread({ conversation, currentId, onOpen }) 
             open={expanded.has(item.id)}
             onToggle={() => toggle(item.id)}
             onOpen={() => onOpen(item.id)}
+            inSpamFolder={Boolean(spamFolderPaths?.has(item.folder))}
             isMobile={isMobile}
             t={t}
           />
@@ -74,7 +79,7 @@ export default function ConversationThread({ conversation, currentId, onOpen }) 
   );
 }
 
-function ThreadLetter({ item, open, onToggle, onOpen, isMobile, t }) {
+function ThreadLetter({ item, open, onToggle, onOpen, inSpamFolder, isMobile, t }) {
   const to = recipientsLine(item.to_addresses, item.cc_addresses);
   return (
     <article className="reading-card" style={{
@@ -110,7 +115,7 @@ function ThreadLetter({ item, open, onToggle, onOpen, isMobile, t }) {
           </div>
         )}
       </button>
-      {open && <ThreadLetterBody id={item.id} onOpen={onOpen} t={t} />}
+      {open && <ThreadLetterBody id={item.id} onOpen={onOpen} inSpamFolder={inSpamFolder} t={t} />}
     </article>
   );
 }
@@ -145,15 +150,18 @@ function loadBody(id) {
   return bodyCache.get(id);
 }
 
-function ThreadLetterBody({ id, onOpen, t }) {
+function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
   const [body, setBody] = useState(null);
   const [failed, setFailed] = useState(false);
   const [showQuote, setShowQuote] = useState(false);
+  // "Show in full" of a letter in safe view; collapsing the letter forgets it.
+  const [full, setFull] = useState(false);
 
   useEffect(() => {
     let live = true;
     setBody(null);
     setFailed(false);
+    setFull(false);
     loadBody(id)
       .then((data) => { if (live) setBody(data); })
       .catch(() => { if (live) setFailed(true); });
@@ -176,6 +184,27 @@ function ThreadLetterBody({ id, onOpen, t }) {
   }
   if (!body) {
     return <div style={{ padding: '0 14px 12px', fontSize: 13, color: 'var(--text-tertiary)' }}>{t('message.senderHistory.threadLoading')}</div>;
+  }
+  const safeReason = full ? null : safeViewReason({ inSpamFolder, eopCategory: body.eopCategory });
+  if (safeReason && (body.html || body.text)) {
+    return (
+      <>
+        <div style={{ padding: '0 14px' }}>
+          <SafeViewNotice reason={safeReason} eopCategory={body.eopCategory} onShowFull={() => setFull(true)} compact />
+        </div>
+        <div
+          data-safe-view-body=""
+          style={{
+            padding: '0 14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14, lineHeight: 1.6,
+            color: '#1a1a1a', background: 'white', fontFamily: 'var(--font-sans, sans-serif)',
+          }}
+          // One innerHTML write, opted back into translation, as in the open letter's safe view.
+          translate="yes"
+          dangerouslySetInnerHTML={{ __html: safeTextMarkup(safeViewText(body)) }}
+        />
+        {footer(false)}
+      </>
+    );
   }
   if (body.html) {
     return (

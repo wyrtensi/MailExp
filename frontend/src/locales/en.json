@@ -246,6 +246,19 @@
       "doubleExt": "Hidden extension: .{{ext}} — the real type is the last one",
       "confirm": "click again to download anyway"
     },
+    "safeView": {
+      "label": "Safe view",
+      "title": {
+        "spam": "This letter is in Spam",
+        "phishing": "This letter looks like phishing",
+        "malware": "This letter may carry malware",
+        "spoof": "The sender of this letter may be forged"
+      },
+      "explain": "Shown as text only: no images, no clickable links, and attachments cannot be opened. Check the sender before you trust it.",
+      "category": "Mail filter verdict: {{category}}",
+      "showFull": "Show in full",
+      "attachmentsLocked": "Show the letter in full to open its attachments."
+    },
     "downloadAll": "Download all",
     "reply": "Reply",
     "replyAll": "Reply All",

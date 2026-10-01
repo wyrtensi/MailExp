@@ -410,3 +410,116 @@ describe('A plain-text body stays translatable under the translate="no" UI', () 
     assert.equal(card.getAttribute('translate'), 'yes');
   });
 });
+
+describe('Safe view of letters in Spam and of phishing anywhere (R-41)', () => {
+  // A letter in the account's Spam folder, or one EOP marked as phishing, malware or spoofed in
+  // any folder, opens as text until "Show in full": no images, no links, no attachment downloads,
+  // none of the active banners. The header and toolbar stay. Showing in full is for this view only.
+  const PHISH_HTML = '<p>Please <a href="https://evil.example/login">verify your account</a></p>'
+    + '<img src="https://tracker.example/p.gif" alt="">';
+  const MSG_SPAM = { ...MSG_A, id: 's1', uid: 11, folder: 'Junk', subject: 'You won', list_unsubscribe: '<https://unsub.example/x>' };
+  const MSG_PHISH = { ...MSG_A, id: 'p1', uid: 12, folder: 'INBOX', subject: 'Verify' };
+  const MSG_NORMAL = { ...MSG_A, id: 'n1', uid: 13, folder: 'INBOX', subject: 'Hello' };
+  const BODIES = {
+    s1: {
+      html: PHISH_HTML, text: '', eopCategory: null,
+      attachments: [
+        { filename: 'prize.pdf', type: 'application/pdf', part: '2', size: 10 },
+        { filename: 'claim.pdf', type: 'application/pdf', part: '3', size: 10 },
+      ],
+    },
+    p1: { html: PHISH_HTML, text: '', attachments: [], eopCategory: 'PHSH' },
+    n1: { html: '<p>Hello there</p>', text: 'Hello there', attachments: [], eopCategory: null },
+  };
+  let originalFetch;
+  before(() => {
+    globalThis.requestAnimationFrame ??= cb => setTimeout(() => cb(Date.now()), 0);
+    globalThis.cancelAnimationFrame ??= id => clearTimeout(id);
+    dom.window.requestAnimationFrame ??= globalThis.requestAnimationFrame;
+    dom.window.cancelAnimationFrame ??= globalThis.cancelAnimationFrame;
+    globalThis.DOMParser ??= dom.window.DOMParser;
+    useStore.getState().setFolders('acct', [
+      { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
+      { path: 'Junk', name: 'Junk E-mail', special_use: '\\Junk' },
+    ]);
+    useStore.getState().setMessages?.([MSG_A, MSG_SPAM, MSG_PHISH, MSG_NORMAL]);
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
+      const json = BODIES[id] || {};
+      return { ok: true, status: 200, json: async () => json, text: async () => '' };
+    };
+  });
+  after(() => { globalThis.fetch = originalFetch; });
+
+  async function open(id) {
+    await React.act(async () => {
+      useStore.getState().setSelectedMessage(id);
+      root.render(React.createElement(MessagePane));
+    });
+    await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  }
+  const pane = () => document.getElementById('root');
+  const notice = () => pane().querySelector('[role="region"][aria-label="message.safeView.label"]');
+  const showFull = () => [...pane().querySelectorAll('button')].find(b => b.textContent === 'message.safeView.showFull');
+
+  test('a letter in Spam opens as text with its link targets visible and nothing clickable or loaded', async () => {
+    await open('s1');
+    assert.ok(notice(), 'the warning bar is shown');
+    assert.match(notice().textContent, /message\.safeView\.title\.spam/);
+    assert.equal(pane().querySelector('iframe'), null, 'the HTML body is not rendered');
+    const body = pane().querySelector('[data-safe-view-body]');
+    assert.ok(body, 'the safe text body is rendered');
+    assert.equal(body.getAttribute('translate'), 'yes', 'the text stays translatable');
+    assert.match(body.textContent, /verify your account <https:\/\/evil\.example\/login>/);
+    assert.equal(pane().querySelector('a[href*="evil.example"]'), null, 'no link to the target');
+    assert.equal(pane().querySelector('img[src*="tracker.example"]'), null, 'no remote image');
+    // The header stays as usual.
+    assert.match(pane().textContent, /You won/);
+    assert.match(pane().textContent, /x@y\.z/);
+  });
+
+  test('its attachments are listed but cannot be downloaded, and the active banners are not shown', async () => {
+    await open('s1');
+    assert.match(pane().textContent, /prize\.pdf/);
+    assert.match(pane().textContent, /message\.safeView\.attachmentsLocked/);
+    const attachmentButton = [...pane().querySelectorAll('button')].find(b => /prize\.pdf/.test(b.textContent));
+    assert.equal(attachmentButton, undefined, 'the attachment is not a download button');
+    assert.equal([...pane().querySelectorAll('a')].find(a => /message\.downloadAll/.test(a.textContent)), undefined);
+    assert.doesNotMatch(pane().textContent, /message\.unsubscribe\.button/);
+  });
+
+  test('Show in full renders the letter normally for this view only', async () => {
+    await open('s1');
+    const button = showFull();
+    assert.ok(button, 'the Show in full button is rendered');
+    await React.act(async () => { button.click(); });
+    assert.equal(notice(), null, 'the warning bar goes');
+    const frame = pane().querySelector('iframe');
+    assert.ok(frame, 'the HTML body is rendered');
+    assert.match(frame.getAttribute('srcdoc'), /evil\.example\/login/);
+    assert.ok([...pane().querySelectorAll('button')].find(b => /prize\.pdf/.test(b.textContent)), 'attachments download again');
+    assert.match(pane().textContent, /message\.unsubscribe\.button/);
+
+    // Not remembered: another letter and back, and it is safe again.
+    await open('n1');
+    await open('s1');
+    assert.ok(notice(), 'safe again after coming back');
+    assert.equal(pane().querySelector('iframe'), null);
+  });
+
+  test('a letter EOP marked as phishing is safe in any folder and says why', async () => {
+    await open('p1');
+    assert.ok(notice());
+    assert.match(notice().textContent, /message\.safeView\.title\.phishing/);
+    assert.match(notice().textContent, /message\.safeView\.category/);
+    assert.equal(pane().querySelector('iframe'), null);
+  });
+
+  test('a normal letter renders as before', async () => {
+    await open('n1');
+    assert.equal(notice(), null);
+    assert.equal(pane().querySelector('[data-safe-view-body]'), null);
+    assert.ok(pane().querySelector('iframe'), 'the HTML body is rendered');
+  });
+});
