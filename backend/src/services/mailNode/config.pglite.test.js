@@ -10,7 +10,7 @@ vi.mock('../encryption.js', () => ({
   decrypt: (v) => (typeof v === 'string' && v.startsWith('enc:') ? v.slice(4) : v),
 }));
 
-const { MAIL_NODE_PROVIDER, getMailNodeConfig, saveMailNodeConfig } = await import('./mailcow.js');
+const { MAIL_NODE_PROVIDER, getDeleteAfterDays, getMailNodeConfig, saveMailNodeConfig } = await import('./mailcow.js');
 const { EOP_DEFAULTS, EOP_PROVIDER, getEopSettings, saveEopSettings } = await import('./eopSettings.js');
 
 let db;
@@ -35,7 +35,22 @@ describe('saveMailNodeConfig', () => {
     expect(await storedConfig(MAIL_NODE_PROVIDER)).toEqual({
       mailHost: 'mail.example.com', apiKey: 'enc:second', quotaMb: 1024, diskPingUrl: 'https://hc.example.com/p/2', tlsPolicy: 'secure',
     });
-    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'second', quotaMb: 1024, diskPingUrl: 'https://hc.example.com/p/2' });
+    expect(await getMailNodeConfig()).toEqual({
+      mailHost: 'mail.example.com', apiKey: 'second', quotaMb: 1024, diskPingUrl: 'https://hc.example.com/p/2', deleteAfterDays: 5,
+    });
+  });
+
+  it('keeps the days before a deletion, 5 until an administrator sets them, 1 to 90', async () => {
+    await saveMailNodeConfig({ mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 });
+    expect((await getMailNodeConfig()).deleteAfterDays).toBe(5);
+    expect(await getDeleteAfterDays()).toBe(5);
+    await saveMailNodeConfig({ mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120, deleteAfterDays: 30 });
+    expect((await getMailNodeConfig()).deleteAfterDays).toBe(30);
+    // A save from a form without the field keeps it.
+    await saveMailNodeConfig({ mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 });
+    expect(await getDeleteAfterDays()).toBe(30);
+    await db.query("UPDATE integration_config SET config = config || '{\"deleteAfterDays\": 365}' WHERE provider = $1", [MAIL_NODE_PROVIDER]);
+    expect(await getDeleteAfterDays()).toBe(5);
   });
 
   it('clears the ping URL when it is saved empty', async () => {

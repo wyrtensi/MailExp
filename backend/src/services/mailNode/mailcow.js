@@ -13,6 +13,10 @@ export const DEFAULT_QUOTA_MB = 5120;
 // Highest quota an administrator can give one mailbox; also the domain's per-mailbox maximum.
 export const MAX_QUOTA_MB = 102400;
 export const DEFAULT_DOMAIN_MAILBOXES = 500;
+// Days a mail node mailbox keeps working after someone asked to delete it, before the deletion
+// job deletes it for good (services/mailNode/mailboxDeletion.js). An administrator sets it.
+export const DEFAULT_DELETE_AFTER_DAYS = 5;
+export const MAX_DELETE_AFTER_DAYS = 90;
 export const MAX_DOMAIN_MAILBOXES = 10000;
 const REQUEST_TIMEOUT_MS = 15000;
 
@@ -64,7 +68,18 @@ export async function getMailNodeConfig() {
     apiKey: decrypt(cfg.apiKey),
     quotaMb: parseWholeNumber(cfg.quotaMb, 1, MAX_QUOTA_MB) ?? DEFAULT_QUOTA_MB,
     diskPingUrl: cfg.diskPingUrl || null,
+    deleteAfterDays: storedDeleteAfterDays(cfg),
   };
+}
+
+function storedDeleteAfterDays(cfg) {
+  return parseWholeNumber(cfg?.deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS) ?? DEFAULT_DELETE_AFTER_DAYS;
+}
+
+// The days a mailbox asked to be deleted keeps working, also before the node is set up.
+export async function getDeleteAfterDays() {
+  const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [MAIL_NODE_PROVIDER]);
+  return storedDeleteAfterDays(rows[0]?.config);
 }
 
 // An https URL for the disk check pings (a Healthchecks-style service); null for anything else.
@@ -80,13 +95,15 @@ export function parsePingUrl(value) {
 
 // Merges into the stored settings: a field this form does not send (a later stage's) survives a
 // save, while each field it sends, a cleared ping URL (null) too, replaces the stored one.
-export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUrl = null }) {
+export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUrl = null, deleteAfterDays }) {
   await query(`
     INSERT INTO integration_config (provider, config)
     VALUES ($1, $2)
     ON CONFLICT (provider) DO UPDATE
     SET config = integration_config.config || EXCLUDED.config, updated_at = NOW()
-  `, [MAIL_NODE_PROVIDER, { mailHost, apiKey: encrypt(apiKey), quotaMb, diskPingUrl }]);
+  `, [MAIL_NODE_PROVIDER, {
+    mailHost, apiKey: encrypt(apiKey), quotaMb, diskPingUrl, ...(deleteAfterDays ? { deleteAfterDays } : {}),
+  }]);
 }
 
 const messageOf = (item) => (Array.isArray(item.msg) ? item.msg.join(' ') : String(item.msg ?? ''));

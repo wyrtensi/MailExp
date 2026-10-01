@@ -65,7 +65,7 @@ import {
 import { EOP_DEFAULTS, saveEopSettings } from '../services/mailNode/eopSettings.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
-const CFG = { mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 5120, diskPingUrl: null };
+const CFG = { mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 5120, diskPingUrl: null, deleteAfterDays: 5 };
 
 describe('/api/mail-node', () => {
   let server;
@@ -95,7 +95,7 @@ describe('/api/mail-node', () => {
 
   it('shows the settings to an administrator with the key redacted', async () => {
     const body = await (await call('GET', '/config')).json();
-    expect(body).toEqual({ configured: true, mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, diskPingUrl: '' });
+    expect(body).toEqual({ configured: true, mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, diskPingUrl: '', deleteAfterDays: 5 });
     session.isAdmin = false;
     expect((await call('GET', '/config')).status).toBe(403);
   });
@@ -104,21 +104,33 @@ describe('/api/mail-node', () => {
     node.cfg = null;
     const res = await call('PUT', '/config', { mailHost: 'Mail.Example.com', apiKey: 'new-key', quotaMb: '5120', diskPingUrl: 'https://hc.example.com/p/1' });
     expect(res.status).toBe(200);
-    const saved = { mailHost: 'mail.example.com', apiKey: 'new-key', quotaMb: 5120, diskPingUrl: 'https://hc.example.com/p/1' };
+    const saved = { mailHost: 'mail.example.com', apiKey: 'new-key', quotaMb: 5120, diskPingUrl: 'https://hc.example.com/p/1', deleteAfterDays: 5 };
     expect(listDomains).toHaveBeenCalledWith(saved);
     expect(saveMailNodeConfig).toHaveBeenCalledWith(saved);
     expect(recordAudit).toHaveBeenCalledWith({
       actorUserId: 'user-1', action: 'mail_node.config_changed',
-      details: { settings: 'node', fields: ['mailHost', 'apiKey', 'quotaMb', 'diskPingUrl'] },
+      details: { settings: 'node', fields: ['mailHost', 'apiKey', 'quotaMb', 'diskPingUrl', 'deleteAfterDays'] },
     });
     expect(JSON.stringify(recordAudit.mock.calls)).not.toContain('new-key');
   });
 
   it('keeps the stored key when the placeholder comes back', async () => {
     await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 1024 });
-    expect(saveMailNodeConfig).toHaveBeenCalledWith({ mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 1024, diskPingUrl: null });
+    expect(saveMailNodeConfig).toHaveBeenCalledWith({ mailHost: 'mail.example.com', apiKey: 'stored-key', quotaMb: 1024, diskPingUrl: null, deleteAfterDays: 5 });
     // Only the quota changed.
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { settings: 'node', fields: ['quotaMb'] } }));
+  });
+
+  it('saves the days a mailbox keeps working after its deletion is asked for, 1 to 90', async () => {
+    await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, deleteAfterDays: '14' });
+    expect(saveMailNodeConfig).toHaveBeenCalledWith(expect.objectContaining({ deleteAfterDays: 14 }));
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { settings: 'node', fields: ['deleteAfterDays'] } }));
+    for (const bad of [0, 91, 'x', 2.5]) {
+      const res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', deleteAfterDays: bad });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('delete_after_days_invalid');
+    }
+    expect(saveMailNodeConfig).toHaveBeenCalledTimes(1);
   });
 
   it('journals nothing when nothing changed', async () => {

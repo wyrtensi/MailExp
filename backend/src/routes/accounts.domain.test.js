@@ -34,6 +34,12 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
     getMailbox: vi.fn(async () => null),
   };
 });
+// The pending deletion of a node mailbox (services/mailNode/mailboxDeletion.js, covered against
+// PGlite there): here only what the routes ask of it.
+vi.mock('../services/mailNode/mailboxDeletion.js', () => ({
+  requestDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', days: 5 })),
+  cancelDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' })),
+}));
 // The panel's onboarding state of each domain: only ready (and authoritative) ones take mailboxes.
 const domainStates = vi.hoisted(() => new Map());
 vi.mock('../services/mailNode/domains.js', async (importActual) => ({
@@ -46,12 +52,13 @@ import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { recordAudit } from '../services/auditLog.js';
+import { cancelDeletion, requestDeletion } from '../services/mailNode/mailboxDeletion.js';
 import {
-  MailNodeError, deleteMailbox, getMailbox, listAliasesTo, listDomains, provisionMailbox,
+  MailNodeError, deleteMailbox, listAliasesTo, listDomains, provisionMailbox,
 } from '../services/mailNode/mailcow.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
-const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
+const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120, deleteAfterDays: 5 };
 
 describe('domain mailboxes in /api/accounts', () => {
   let server;
@@ -257,80 +264,121 @@ describe('domain mailboxes in /api/accounts', () => {
     }
   });
 
-  describe('DELETE', () => {
+  describe('DELETE and the pending deletion of a node mailbox', () => {
     const del = () => fetch(`${base}/api/accounts/${ID}`, { method: 'DELETE' });
+    const askDelete = (body) => fetch(`${base}/api/accounts/${ID}/deletion`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const cancel = () => fetch(`${base}/api/accounts/${ID}/deletion`, { method: 'DELETE' });
 
+    const ROW = { id: ID, email_address: 'Info@example.com', mail_node: true, imap_host: 'mail.example.com' };
     const nodeRow = (extra = {}) => query.mockImplementation(async (sql) => (
-      sql.startsWith('SELECT id, email_address, mail_node')
-        ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true, imap_host: 'mail.example.com', ...extra }] }
+      sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts')
+        ? { rows: [{ ...ROW, ...extra }] }
         : { rows: [] }
     ));
     const rowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE'));
 
-    it('deletes a mail node mailbox on the node with its mail, then deletes the row', async () => {
-      const order = [];
-      deleteMailbox.mockImplementationOnce(async () => { order.push('node'); return { warnings: [] }; });
-      query.mockImplementation(async (sql) => {
-        if (sql.startsWith('SELECT id, email_address, mail_node')) return { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true, imap_host: 'mail.example.com' }] };
-        if (sql.startsWith('DELETE')) order.push('row');
-        return { rows: [] };
-      });
-      const res = await del();
-      expect(res.status).toBe(200);
-      expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
-      expect(order).toEqual(['node', 'row']);
-      expect(recordAudit).toHaveBeenCalledWith({
-        actorUserId: 'user-1', accountEmail: 'info@example.com', action: 'mailbox.deleted', details: { mailNode: true },
-      });
-    });
-
-    it('journals the node warning when the mailbox went but its maildir stayed', async () => {
-      deleteMailbox.mockResolvedValueOnce({ warnings: ['Could not move maildir to garbage collector: command failed'] });
+    it('never removes a node mailbox at once: its deletion has to be asked for', async () => {
       nodeRow();
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const res = await del();
-      warnSpy.mockRestore();
-      expect(res.status).toBe(200);
-      expect(rowDeleted()).toBe(true);
-      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
-        action: 'mailbox.deleted',
-        details: { mailNode: true, nodeWarnings: ['Could not move maildir to garbage collector: command failed'] },
-      }));
-    });
-
-    for (const [name, err] of [
-      ['is unreachable', new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ECONNREFUSED)')],
-      ['answers an error', new MailNodeError('mail_node_failed', 'The mail node answered HTTP 500')],
-      ['refuses the key', new MailNodeError('mail_node_auth', 'The mail node refused the API key')],
-    ]) {
-      it(`keeps the row and answers the node error when the node ${name}`, async () => {
-        deleteMailbox.mockRejectedValueOnce(err);
-        nodeRow();
-        const res = await del();
-        expect(res.status).toBe(502);
-        expect(await res.json()).toEqual({ error: err.message, code: err.code });
-        expect(rowDeleted()).toBe(false);
-        expect(recordAudit).not.toHaveBeenCalled();
-      });
-    }
-
-    it('keeps the row of a mailbox on another host than the node the settings name now', async () => {
-      nodeRow({ imap_host: 'old-node.example.com' });
       const res = await del();
       expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('mail_node_host_mismatch');
+      expect((await res.json()).code).toBe('mail_node_deletion_request_required');
       expect(deleteMailbox).not.toHaveBeenCalled();
       expect(rowDeleted()).toBe(false);
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
-    it('lists the node aliases that deliver to the mailbox for the confirmation', async () => {
+    it('lets an ordinary user ask to delete a node mailbox with its address typed and a reason, journaled with both', async () => {
+      nodeRow({ delete_after: '2026-10-06T10:00:00.000Z', deletion_reason: 'Left the company' });
+      const res = await askDelete({ email: ' info@EXAMPLE.com ', reason: '  Left the company  ' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toMatchObject({ id: ID, delete_after: '2026-10-06T10:00:00.000Z', deletion_reason: 'Left the company' });
+      expect(requestDeletion).toHaveBeenCalledWith({ accountId: ID, userId: 'user-1', reason: 'Left the company' });
+      expect(recordAudit).toHaveBeenCalledWith({
+        actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_requested',
+        details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', days: 5, reason: 'Left the company' },
+      });
+      // Nothing is asked of the node now: the mailbox keeps working until its date.
+      expect(deleteMailbox).not.toHaveBeenCalled();
+      expect(rowDeleted()).toBe(false);
+    });
+
+    it('refuses the request without the full address, without a reason or with a reason too long', async () => {
+      nodeRow();
+      const cases = [
+        [{ email: 'info@example', reason: 'r' }, 'confirmation_mismatch'],
+        [{ reason: 'r' }, 'confirmation_mismatch'],
+        [{ email: 'info@example.com' }, 'deletion_reason_required'],
+        [{ email: 'info@example.com', reason: '   ' }, 'deletion_reason_required'],
+        [{ email: 'info@example.com', reason: 'x'.repeat(501) }, 'deletion_reason_too_long'],
+      ];
+      for (const [body, code] of cases) {
+        const res = await askDelete(body);
+        expect(res.status, code).toBe(400);
+        expect((await res.json()).code).toBe(code);
+      }
+      expect(requestDeletion).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('keeps line breaks of the reason and turns other control characters into spaces', async () => {
+      nodeRow();
+      await askDelete({ email: 'info@example.com', reason: 'Closed\nby\u0007 order' });
+      expect(requestDeletion).toHaveBeenCalledWith(expect.objectContaining({ reason: 'Closed\nby  order' }));
+    });
+
+    it('refuses a request for another mailbox, an unknown one and one already pending', async () => {
+      nodeRow({ mail_node: false });
+      let res = await askDelete({ email: 'info@example.com', reason: 'r' });
+      expect((await res.json()).code).toBe('not_mail_node');
+      query.mockImplementation(async () => ({ rows: [] }));
+      res = await askDelete({ email: 'info@example.com', reason: 'r' });
+      expect(res.status).toBe(404);
+      nodeRow();
+      requestDeletion.mockResolvedValueOnce({ error: 'deletion_already_requested' });
+      res = await askDelete({ email: 'info@example.com', reason: 'r' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('deletion_already_requested');
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('lets anyone cancel a pending deletion, journaled with the date and reason it had', async () => {
+      nodeRow();
+      const res = await cancel();
+      expect(res.status).toBe(200);
+      expect(cancelDeletion).toHaveBeenCalledWith({ accountId: ID });
+      expect(recordAudit).toHaveBeenCalledWith({
+        actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_cancelled',
+        details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' },
+      });
+      for (const [code, status] of [['deletion_not_requested', 409], ['deletion_in_progress', 409], ['account_not_found', 404]]) {
+        cancelDeletion.mockResolvedValueOnce({ error: code });
+        const refused = await cancel();
+        expect(refused.status).toBe(status);
+        expect((await refused.json()).code).toBe(code);
+      }
+      expect(recordAudit).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to create the address again while its mailbox is pending deletion', async () => {
+      query.mockImplementation(async (sql) => (
+        sql.includes('lower(email_address)') ? { rows: [{ delete_after: '2026-10-06T10:00:00.000Z' }] } : { rows: [] }
+      ));
+      const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mailbox_pending_deletion');
+      expect(provisionMailbox).not.toHaveBeenCalled();
+    });
+
+    it('lists the node aliases that deliver to the mailbox and the days before it goes, for the confirmation', async () => {
       listAliasesTo.mockResolvedValueOnce([{ address: 'sales@example.com', onlyTarget: true }]);
       nodeRow();
       let res = await fetch(`${base}/api/accounts/${ID}/node-aliases`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ aliases: [{ address: 'sales@example.com', onlyTarget: true }] });
-      expect(listAliasesTo).toHaveBeenCalledWith(CFG, 'info@example.com');
+      expect(await res.json()).toEqual({ aliases: [{ address: 'sales@example.com', onlyTarget: true }], deleteAfterDays: 5 });
+      expect(listAliasesTo).toHaveBeenCalledWith(CFG, 'Info@example.com');
       nodeRow({ imap_host: 'old-node.example.com' });
       res = await fetch(`${base}/api/accounts/${ID}/node-aliases`);
       expect((await res.json()).code).toBe('mail_node_host_mismatch');
@@ -344,41 +392,7 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(listAliasesTo).toHaveBeenCalledTimes(2);
     });
 
-    it('keeps the row without a mail node configured', async () => {
-      node.cfg = null;
-      nodeRow();
-      const res = await del();
-      expect(res.status).toBe(409);
-      expect((await res.json()).code).toBe('mail_node_not_configured');
-      expect(deleteMailbox).not.toHaveBeenCalled();
-      expect(rowDeleted()).toBe(false);
-    });
-
-    it('deletes the row when the node refuses because the mailbox is gone', async () => {
-      deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: access_denied'));
-      getMailbox.mockResolvedValueOnce(null);
-      nodeRow();
-      const res = await del();
-      expect(res.status).toBe(200);
-      expect(rowDeleted()).toBe(true);
-      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.deleted', details: { mailNode: true } }));
-    });
-
-    it('keeps the row when the node refuses and the mailbox is still there, or cannot be looked up', async () => {
-      deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: something'));
-      getMailbox.mockResolvedValueOnce({ email: 'info@example.com', active: true });
-      nodeRow();
-      let res = await del();
-      expect(res.status).toBe(502);
-      deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: something'));
-      getMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
-      res = await del();
-      expect(res.status).toBe(502);
-      expect((await res.json()).code).toBe('mail_node_refused');
-      expect(rowDeleted()).toBe(false);
-    });
-
-    it('deletes any other mailbox without calling the node', async () => {
+    it('removes any other mailbox at once, without calling the node', async () => {
       query.mockImplementation(async (sql) => (
         sql.startsWith('SELECT id, email_address, mail_node')
           ? { rows: [{ id: ID, email_address: 'x@gmail.com', mail_node: false }] }
@@ -388,6 +402,9 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       expect(deleteMailbox).not.toHaveBeenCalled();
       expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(true);
+      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.deleted', details: { mailNode: false } }));
+      // Asking to delete it later is for node mailboxes only.
+      expect((await (await askDelete({ email: 'x@gmail.com', reason: 'r' })).json()).code).toBe('not_mail_node');
     });
   });
 

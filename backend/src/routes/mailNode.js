@@ -5,8 +5,10 @@ import { uuidParam } from '../utils/uuid.js';
 import { recordAudit } from '../services/auditLog.js';
 import { DISK_WARN_PERCENT, checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
 import {
+  DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
   DEFAULT_QUOTA_MB,
+  MAX_DELETE_AFTER_DAYS,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
   MailNodeError,
@@ -64,6 +66,7 @@ const ERRORS = {
   domain_invalid: [400, 'Domain must be a domain name such as example.com'],
   ping_url_invalid: [400, 'Ping URL must be an https address'],
   mailboxes_invalid: [400, `Mailbox limit must be a whole number from 1 to ${MAX_DOMAIN_MAILBOXES}`],
+  delete_after_days_invalid: [400, `Days before a deletion must be a whole number from 1 to ${MAX_DELETE_AFTER_DAYS}`],
   mail_node_not_configured: [409, 'The mail node is not set up'],
   mailbox_not_found: [404, 'Mail node mailbox not found'],
   domain_not_ready: [400, 'Mailboxes can be created only on a domain that finished its onboarding'],
@@ -126,6 +129,7 @@ router.get('/config', requireAdmin, async (req, res) => {
     apiKey: cfg ? REDACTED_SECRET : '',
     quotaMb: cfg?.quotaMb ?? DEFAULT_QUOTA_MB,
     diskPingUrl: cfg?.diskPingUrl ?? '',
+    deleteAfterDays: cfg?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS,
   });
 });
 
@@ -140,13 +144,19 @@ router.put('/config', requireAdmin, async (req, res) => {
   if (rawPing && !diskPingUrl) return refuse(res, 'ping_url_invalid');
   const sent = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
   const current = await getMailNodeConfig();
+  // Days a mailbox asked to be deleted keeps working. A new value applies to deletions asked for
+  // from now on: dates already set stay as they are.
+  const deleteAfterDays = parseWholeNumber(
+    req.body?.deleteAfterDays ?? current?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS, 1, MAX_DELETE_AFTER_DAYS,
+  );
+  if (!deleteAfterDays) return refuse(res, 'delete_after_days_invalid');
   let apiKey = sent;
   if (!sent || sent === REDACTED_SECRET) {
     // The stored key goes only to the host it was entered for: a new host needs the key again.
     if (!current?.apiKey || current.mailHost !== mailHost) return refuse(res, 'api_key_required');
     apiKey = current.apiKey;
   }
-  const cfg = { mailHost, apiKey, quotaMb, diskPingUrl };
+  const cfg = { mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays };
   try {
     await listDomains(cfg);
   } catch (err) {

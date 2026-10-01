@@ -96,7 +96,7 @@ describe('stored settings', () => {
     expect(stored).toEqual({ mailHost: 'mail.example.com', apiKey: 'enc:api-key-1', quotaMb: 2048, diskPingUrl: null });
 
     query.mockResolvedValueOnce({ rows: [{ config: stored }] });
-    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null });
+    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null, deleteAfterDays: 5 });
   });
 
   it('falls back to the default quota when the stored one is unusable', async () => {

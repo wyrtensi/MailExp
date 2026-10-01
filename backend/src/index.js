@@ -19,6 +19,7 @@ import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
+import { startMailboxDeletionJob } from './services/mailNode/mailboxDeletion.js';
 import { adoptDomainsWithMailboxes } from './services/mailNode/domains.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
@@ -299,6 +300,9 @@ imapManager.startSnoozeWatcher();
 
 // Read the mail node's disk every 10 minutes and ping the administrator's check URL.
 startMailNodeDiskWatch();
+
+// Delete, on the node and here, the mail node mailboxes whose asked-for deletion date has come.
+startMailboxDeletionJob({ disconnect: (accountId) => imapManager.disconnectAccount(accountId) });
 
 // Keep the Cloudflare Access policy in line with approved users; only google mode approves users.
 if (getAuthSettings().mode === 'google') {
