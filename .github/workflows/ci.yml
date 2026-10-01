@@ -103,11 +103,18 @@ jobs:
       - name: Deploy script unit tests
         run: docker run --rm -v "$PWD:/code:ro" -w /code bats/bats:1.14.0 scripts/deploy/test
 
+  fake-eop:
+    name: Stand fake-EOP
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
 
-      - name: Stand fake-EOP unit tests
+      - name: Unit tests of the fake EOP relay (needs openssl, which the runner has)
         run: node --test scripts/deploy/test/fake-eop/eop.test.mjs
 
   deploy-e2e:
@@ -172,7 +179,7 @@ jobs:
 
   images:
     name: Images
-    needs: [backend, frontend, shellcheck, bats, deploy-e2e]
+    needs: [backend, frontend, shellcheck, bats, fake-eop, deploy-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: read

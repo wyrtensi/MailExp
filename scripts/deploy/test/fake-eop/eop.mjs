@@ -6,31 +6,45 @@
 //   status                         the control state and the spool size
 //   mode <mode> [--stage mail|rcpt|data]
 //                                  accept | tempfail | blocked-connector | tenant-limit | recipient-denied | drop
-//   connector <name>               the name the client certificate must carry
-//   list | show <id|latest> | clear
-//   inject <id|latest> [--verdict spam] [--to a@b,c@d] [--auth pass|fail] [--folded]
+//   connector <name>               the host name the client certificate must carry (no wildcard)
+//   list | show [id|latest] | clear
+//   inject <id|latest> --to a@b[,c@d] [--verdict spam] [--auth pass|fail] [--folded]
 //                       [--host postfix-mailcow] [--port 25]
-//                                  hand a stored message to the node with EOP's headers added
+//                                  hand a stored message to the node with EOP's headers added;
+//                                  --to is required: stored messages are addressed to the outside,
+//                                  and delivering them as they are would send them out again
 //
 // Env: EOP_DATA (/data: state.json, spool/, tls/eop.crt eop.key ca.pem), EOP_HOST (eop.test.local),
 // EOP_CONNECTOR (initial connector name, mail.test.local), EOP_PORT (25).
+// Exit status: 0 done, 1 failed (also: the node refused or dropped the message), 2 bad usage.
 import fs from 'node:fs';
 import path from 'node:path';
 import {
-  MODES, eopHeaders, listMessages, loadMessage, readState, smtpSend, writeState,
+  MODES, VERDICTS, eopHeaders, listMessages, loadMessage, readState, smtpSend, validateState, writeState,
 } from './lib.mjs';
 import { createServer, loadTls } from './server.mjs';
 
 const DATA = process.env.EOP_DATA || '/data';
 const STATE = path.join(DATA, 'state.json');
 const SPOOL = path.join(DATA, 'spool');
+const USAGE = `usage: eop.mjs serve | status | mode <${Object.keys(MODES).join('|')}> [--stage mail|rcpt|data] | connector <host name> | list | show [id|latest] | clear
+       eop.mjs inject <id|latest> --to <a@b[,c@d]> [--verdict <${Object.keys(VERDICTS).join('|')}|SFV:..;CAT:..>] [--auth pass|fail] [--folded] [--host H] [--port P]`;
+
+class UsageError extends Error {}
 
 function options(args) {
   const flags = {};
   const rest = [];
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === '--folded') flags.folded = true;
-    else if (args[i].startsWith('--')) { flags[args[i].slice(2)] = args[i + 1]; i += 1; } else rest.push(args[i]);
+    if (args[i] === '--folded') {
+      flags.folded = true;
+    } else if (args[i].startsWith('--')) {
+      if (args[i + 1] === undefined) throw new UsageError(`${args[i]} needs a value`);
+      flags[args[i].slice(2)] = args[i + 1];
+      i += 1;
+    } else {
+      rest.push(args[i]);
+    }
   }
   return { flags, rest };
 }
@@ -40,6 +54,7 @@ async function main() {
   const { flags, rest } = options(args);
   switch (command) {
     case 'serve': {
+      validateState(readState(STATE));
       const server = createServer({
         host: process.env.EOP_HOST || 'eop.test.local',
         ...loadTls(path.join(DATA, 'tls')),
@@ -48,6 +63,10 @@ async function main() {
         log: (line) => console.log(`${new Date().toISOString()} ${line}`),
       });
       const port = Number(process.env.EOP_PORT || 25);
+      server.on('error', (error) => {
+        console.error(`error: ${error.message}`);
+        process.exit(1);
+      });
       server.listen(port, () => {
         const s = readState(STATE);
         console.log(`${new Date().toISOString()} event=listen port=${port} connector=${s.connector} mode=${s.mode} stage=${s.stage}`);
@@ -60,6 +79,7 @@ async function main() {
       return;
     }
     case 'mode': {
+      if (!rest[0]) throw new UsageError('mode needs a value');
       const patch = { mode: rest[0] };
       if (flags.stage) patch.stage = flags.stage;
       const s = writeState(STATE, patch);
@@ -67,6 +87,7 @@ async function main() {
       return;
     }
     case 'connector': {
+      if (!rest[0]) throw new UsageError('connector needs a host name');
       const s = writeState(STATE, { connector: rest[0] });
       console.log(`mode=${s.mode} stage=${s.stage} connector=${s.connector}`);
       return;
@@ -85,8 +106,11 @@ async function main() {
       console.log('spool cleared');
       return;
     case 'inject': {
+      const to = (flags.to || '').split(',').map((a) => a.trim()).filter(Boolean);
+      if (to.length === 0) {
+        throw new UsageError('inject needs --to <mailbox of the stand>: a stored message is addressed to the outside and would be relayed out again');
+      }
       const { envelope, raw } = loadMessage(SPOOL, rest[0] || 'latest');
-      const to = flags.to ? flags.to.split(',').map((a) => a.trim()).filter(Boolean) : envelope.to;
       const headers = eopHeaders({
         verdict: flags.verdict || 'spam', auth: flags.auth || 'pass', folded: Boolean(flags.folded), envelope, nodeHost: flags.host || 'postfix-mailcow',
       });
@@ -98,12 +122,12 @@ async function main() {
       return;
     }
     default:
-      console.error(`usage: eop.mjs serve|status|mode <${Object.keys(MODES).join('|')}>|connector <name>|list|show <id>|clear|inject <id> [--verdict v] [--to a,b]`);
-      process.exitCode = 2;
+      throw new UsageError(`unknown command "${command ?? ''}"`);
   }
 }
 
 main().catch((error) => {
   console.error(`error: ${error.message}`);
-  process.exitCode = 1;
+  if (error instanceof UsageError) console.error(USAGE);
+  process.exitCode = error instanceof UsageError ? 2 : 1;
 });

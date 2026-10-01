@@ -30,7 +30,8 @@ setup() {
 @test "get prints the value; an absent key or file exits 1" {
   printf 'a = 1\nrelayhost = eop.test.local  \n' >"$F"
   run sh "$EXTRA_CF" get "$F" relayhost
-  [ "$status" -eq 0 ] && [ "$output" = eop.test.local ]
+  [ "$status" -eq 0 ]
+  [ "$output" = eop.test.local ]
   run sh "$EXTRA_CF" get "$F" missing
   [ "$status" -eq 1 ]
   run sh "$EXTRA_CF" get "$BATS_TEST_TMPDIR/none" relayhost

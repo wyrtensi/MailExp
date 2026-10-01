@@ -73,8 +73,19 @@ scripts/deploy/test/stage.sh eop up
 scripts/deploy/test/stage.sh eop down
 ```
 
-Обратное действие: убирает `relayhost` из `extra.cf`, перезапускает Postfix и удаляет контейнер.
-Принятые письма остаются в `/opt/fake-eop-data` внутри стенда.
+Обратное действие: возвращает `extra.cf` к тому, что было до первого `eop up` (прежний `relayhost`, если
+он был, иначе строка убирается; файл, которого не было и который остался пустым, удаляется),
+перезапускает Postfix и удаляет контейнер. Прежнее значение запоминается при первом `eop up` в
+`/opt/fake-eop-data/relayhost.before`. Принятые письма остаются в `/opt/fake-eop-data/spool`.
+
+**Что скрипты меняют в стенде.** `eop up`: одну строку `relayhost` в
+`/opt/mailcow/data/conf/postfix/extra.cf` и перезапуск `postfix-mailcow` (только если значение в
+работающем Postfix отличается); файлы `eop.crt`, `eop.key`, `eop.csr`, `eop.cnf` и счётчик серийных
+номеров в `/opt/testca` (ключ самого CA никуда не копируется); каталоги `/opt/fake-eop` (код) и
+`/opt/fake-eop-data` (TLS-файлы, состояние, очередь, запись о прежнем relayhost); контейнер `fake-eop` и
+образ `node:22.20-alpine`. `dns up`: каталог `/opt/stage-dns` (зона и ключ DKIM фикстуры), образ
+`stage-dns:dnsmasq` (собирается один раз из `alpine:3.22`, дальше сети не нужно) и контейнер `stage-dns`.
+Больше ничего: ни данные mailcow и панели, ни `mailcow.conf`, ни compose-файлы.
 
 | Команда | Что делает |
 |---|---|
@@ -83,15 +94,20 @@ scripts/deploy/test/stage.sh eop down
 | `eop connector <имя>` | имя, которое должен нести клиентский сертификат; по умолчанию `mail.test.local` |
 | `eop mode <режим> [--stage mail\|rcpt\|data]` | ответ на письмо, см. ниже; `--stage` — на какой команде SMTP (по умолчанию `rcpt`) |
 | `eop list`, `eop show [id]`, `eop clear` | сохранённые письма |
-| `eop inject <id\|latest> [вердикт] [--to a@b] [--auth pass\|fail] [--folded]` | вернуть сохранённое письмо на порт 25 узла с заголовками EOP |
+| `eop inject <id\|latest> [вердикт] --to a@b[,c@d] [--auth pass\|fail] [--folded]` | вернуть сохранённое письмо на порт 25 узла с заголовками EOP; `--to` обязателен |
 | `eop logs [n]`, `eop relaylog [n]`, `eop queue` | журнал fake-EOP; строки `relay=`/`status=` журнала Postfix; очередь Postfix |
 
 **Что делает fake-EOP.** Принимает SMTP на порту 25 только после STARTTLS (до него `530 5.7.0`) с
 сертификатом от CA стенда. Запрашивает клиентский сертификат (Postfix mailcow предъявляет
 `/etc/ssl/mail/cert.pem`, то есть сертификат `mail.test.local`) и проверяет его: цепочка до CA стенда
-полная, срок действия, имя из SAN (или CN, если SAN нет) совпадает с именем коннектора. Нет сертификата,
-неполная цепочка, чужой CA или другое имя — `550 5.7.64 TenantAttribution; Relay Access Denied`. Имя
-коннектора читается в каждой сессии, так что `eop connector <имя>` действует сразу. Режимы:
+полная и каждое звено проверено, промежуточные сертификаты имеют `CA:TRUE`, никто в цепочке (и сам CA) не
+просрочен, имя из SAN (с подстановкой `*.` в сертификате, как в TLS) или CN, если SAN нет, совпадает с
+именем коннектора. Нет сертификата, неполная цепочка, промежуточный не CA, чужой CA или другое имя —
+`550 5.7.64 TenantAttribution; Relay Access Denied`. Расширенное использование ключа проверяется мягко:
+подходят `serverAuth` (его и предъявляет Postfix, сертификат стенда выпускается только с ним), `clientAuth`
+и сертификат без EKU; сертификат только «для подписи кода» отклоняется. Имя коннектора читается в каждой
+сессии, так что `eop connector <имя>` действует сразу; это обычное имя хоста, подстановочные имена EOP
+(`*.example.com`) в имени коннектора не поддерживаются и отклоняются при вводе. Режимы:
 
 | Режим | Ответ |
 |---|---|
@@ -106,9 +122,18 @@ scripts/deploy/test/stage.sh eop down
 результат атрибуции, ответ. Пустой отправитель (DSN) проходит те же проверки, отдельного правила для него
 нет.
 
+Строки SMTP строгие, как у Postfix с `smtpd_forbid_bare_newline`: команды и строки письма оканчиваются
+CRLF, одиночный LF получает `500 5.5.2 Error: bare <LF> received` и разрыв соединения сразу, без
+ожидания таймаута. Команда длиннее 2048 байт — `500 5.5.2 Line too long`. Размер письма ограничен 25 МиБ;
+то же число объявляется в `SIZE`, а `MAIL FROM ... SIZE=` больше него получает `552 5.3.4`. Если спул
+стенда не пишется, ответ `451 4.3.0`, процесс не падает. После `STARTTLS` всё, что клиент послал открытым
+текстом следом за командой, отбрасывается.
+
 **Обратный путь EOP → узел.** `eop inject` берёт сохранённое письмо и отдаёт его `postfix-mailcow:25`
-по обычному SMTP с исходным конвертом (получателей можно заменить через `--to`: сохранённые письма
-адресованы наружу, а принять их должен ящик стенда). К письму добавляются `Received`,
+по обычному SMTP с исходным отправителем. `--to` обязателен: сохранённые письма адресованы наружу, и
+отдать их с исходными получателями значило бы снова отправить их через relayhost; получатель должен быть
+ящиком стенда. Если узел обрывает связь или отвечает 4xx/5xx, команда печатает причину и завершается с
+кодом 1. К письму добавляются `Received`,
 `Authentication-Results` и `X-Forefront-Antispam-Report` с `SFV`, `CAT` и `SCL` по вердикту: `spam` (по
 умолчанию), `clean`, `high-confidence-spam`, `bulk`, `phish`, `high-confidence-phish`, `spoof`,
 `blocked-sender` (`SFV:SKB`), `rule-spam` (`SFV:SKS`), `none` (без заголовка) или своя строка вида
@@ -139,13 +164,14 @@ accepted domains (`recipient-denied` отвечает всем получате�
   стенде ещё нет.
 
 Тесты fake-EOP: `node --test scripts/deploy/test/fake-eop/eop.test.mjs` (нужен `openssl`; разбор сертификата,
-режимы, полный диалог SMTP с STARTTLS и клиентским сертификатом, возобновление сессии TLS, inject).
-Правка `extra.cf` — `fake-eop/extra-cf.sh`, тесты — `scripts/deploy/test/stage-eop.bats`.
+режимы, полный диалог SMTP с STARTTLS и клиентским сертификатом, строгие строки и лимиты, возобновление
+сессии TLS, inject и коды возврата команды). Правка `extra.cf` — `fake-eop/extra-cf.sh`, тесты —
+`scripts/deploy/test/stage-eop.bats`. В CI это отдельное задание «Stand fake-EOP».
 
 ## DNS-фикстуры (stage-dns)
 
 Зона `stage.test`, какой её должен публиковать тенант за EOP, для будущей проверки DNS панели (R-14,
-R-15). Опционально: контейнер `stage-dns` (dnsmasq в `alpine:3.22`) стоит в сети панели `stage_mailexpert`
+R-15). Опционально: контейнер `stage-dns` (dnsmasq, образ `stage-dns:dnsmasq` собирается из `alpine:3.22`) стоит в сети панели `stage_mailexpert`
 и в сети mailcow, и **ничем не пользуется, пока клиент не укажет его адрес**. Ни панель, ни mailcow на
 него не переключаются, реальные адреса (Gmail) резолвятся как раньше.
 
@@ -163,9 +189,10 @@ scripts/deploy/test/stage.sh dns down
 mailcow), `_dmarc`, а также A `mail.test.local` и PTR к нему (`203.0.113.10`). Неполные варианты:
 `no-spf`, `spf-ip4`, `spf-double`, `no-dkim`, `dkim-mismatch`, `dkim-cname` (CNAME `selector1/2`),
 `no-dmarc`, `dmarc-bad`, `wrong-mx`, `extra-mx`, `mx-new-form` (`*.mx.microsoft`), `no-ms-txt`,
-`ms-txt-wrong`, `mta-sts`, `no-ptr`, `aaaa`. Имя вне зоны получает `REFUSED` (наружу `stage-dns` ничего не пересылает), несуществующее имя в
-`stage.test` — `NXDOMAIN`. Адрес
-резолвера — вывод `dns status`; панель, когда у проверки появится настройка резолвера (предлагается
+`ms-txt-wrong`, `mta-sts`, `no-ptr`, `aaaa`. Имя вне зоны получает `REFUSED` (наружу `stage-dns` ничего
+не пересылает), несуществующее имя в `stage.test` — `NXDOMAIN`. Новая зона пишется во временный файл и
+подменяет рабочую только когда сформирована целиком: неверное имя варианта или пустой ключ не портят
+действующую зону. Адрес резолвера — вывод `dns status`; панель, когда у проверки появится настройка резолвера (предлагается
 `DNS_CHECK_RESOLVER`), получит его как единственный сервер. Зона — `scripts/deploy/test/stand-dns/zone.sh`,
 тесты — `scripts/deploy/test/stage-dns.bats`. Unbound mailcow на `stage-dns` не настроен (для него понадобился
 бы `stub-zone` и `local-zone: "test." transparent`); проверка DNS этого не требует.
@@ -175,8 +202,8 @@ mailcow), `_dmarc`, а также A `mail.test.local` и PTR к нему (`203.0
 Runbook требует `ENABLE_IPV6=false` ([mail-node.md](mail-node.md), раздел 3). `stage.sh up` теперь
 выставляет его при создании стенда и останавливается, если такой строки в `mailcow.conf` нет. На уже
 запущенном стенде значение меняется только полным `docker compose down` и `up -d` всего mailcow (сеть
-Docker пересоздаётся); скрипты `eop` и `dns` этого не делают. На стенде, который сейчас работает,
-в `mailcow.conf` уже `ENABLE_IPV6=false`.
+Docker пересоздаётся); скрипты `eop` и `dns` этого не делают. Какое значение у конкретного стенда,
+показывает `docker exec me-stage grep ENABLE_IPV6 /opt/mailcow/mailcow.conf`.
 
 ## Секреты
 

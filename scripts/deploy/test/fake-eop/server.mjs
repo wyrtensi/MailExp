@@ -1,6 +1,9 @@
 // The SMTP side of fake-EOP: what Exchange Online Protection does to mail from a mail node that is
 // an on-premises connector. STARTTLS is mandatory, the client certificate is checked against the
 // connector name, and a control file picks the answer (see lib.mjs, MODES).
+//
+// Line discipline is strict, like Postfix's smtpd_forbid_bare_newline: commands and message lines
+// end in CRLF, and a bare LF is answered with 500 5.5.2 and a closed connection at once.
 import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
@@ -8,7 +11,9 @@ import {
   attribute, modeReply, parseAddress, readState, saveMessage,
 } from './lib.mjs';
 
-const MAX_SIZE = 50 * 1024 * 1024;
+export const MAX_SIZE = 25 * 1024 * 1024;
+export const MAX_LINE = 2048;
+const IDLE_MS = 60000;
 
 // options: { host, key, cert, caPem, stateFile, spoolDir, log(line) }
 export function createServer(options) {
@@ -27,13 +32,17 @@ export function createServer(options) {
     const conn = counter;
     const ip = (raw.remoteAddress || '').replace(/^::ffff:/, '');
     const session = {
-      socket: raw, tls: false, version: '', cert: '-', attribution: null, helo: '', from: null, rcpts: [], data: null,
+      socket: raw, tls: false, version: '', cert: '-', attribution: null, helo: '', from: null, rcpts: [],
     };
+    let inbuf = ''; // received text, latin1: what is not yet a complete command, or the message so far
+    let inData = false; // inbuf holds a message that began with a virtual CRLF
+    let scanFrom = 0;
+    let closed = false;
+
     const say = (line) => { if (!session.socket.destroyed) session.socket.write(`${line}\r\n`); };
     const note = (event, extra = '') => log(`conn=${conn} ip=${ip} tls=${session.version || 'none'} cert="${session.cert}" ${event}${extra ? ` ${extra}` : ''}`);
-    let closed = false;
     const closeNote = () => { if (!closed) { closed = true; note('event=close'); } };
-    const reset = () => { session.from = null; session.rcpts = []; session.data = null; };
+    const reset = () => { session.from = null; session.rcpts = []; };
     const drop = (why) => { note('event=drop', `why=${why}`); session.socket.destroy(); };
 
     // The answer owed at `stage` (null: go on). Attribution comes before the mode, as at EOP.
@@ -48,13 +57,13 @@ export function createServer(options) {
       return reply ? { ...reply, verdict: `mode=${state.mode}` } : null;
     };
     const refuse = (reply) => {
-      if (reply.drop) { drop('mode=drop'); return true; }
+      if (reply.drop) { drop('mode=drop'); return; }
       note(`event=reject reply="${reply.code} ${reply.text}"`, `verdict=${reply.verdict}`);
       say(`${reply.code} ${reply.text}`);
-      return true;
     };
 
-    const inTls = () => session.tls;
+    // Switches the connection to TLS. Whatever the client sent after STARTTLS in the clear is
+    // dropped with the rest of inbuf (RFC 3207: no plaintext command injection into the TLS state).
     const upgrade = () => {
       const plain = session.socket;
       plain.removeAllListeners('data');
@@ -62,7 +71,7 @@ export function createServer(options) {
       const secure = new tls.TLSSocket(plain, {
         isServer: true, secureContext, requestCert: true, rejectUnauthorized: false,
       });
-      secure.setTimeout(60000, () => secure.destroy());
+      secure.setTimeout(IDLE_MS, () => secure.destroy());
       secure.on('error', (error) => note('event=tls-error', `error="${error.message}"`));
       secure.on('secure', () => {
         session.socket = secure;
@@ -74,29 +83,39 @@ export function createServer(options) {
           seen.add(c.fingerprint256);
           chain.push(c.raw);
         }
-        session.attribution = attribute(chain, caPem, readState(stateFile).connector);
+        const { connector } = readState(stateFile);
+        session.attribution = attribute(chain, caPem, connector);
         session.cert = session.attribution.subject || '-';
-        note('event=starttls', `attribution=${session.attribution.ok ? 'ok' : `failed reason="${session.attribution.reason}"`} connector=${readState(stateFile).connector}`);
+        note('event=starttls', `attribution=${session.attribution.ok ? 'ok' : `failed reason="${session.attribution.reason}"`} connector=${connector}`);
       });
       secure.on('data', onData);
       secure.on('close', closeNote);
       session.socket = secure;
-      buffer = Buffer.alloc(0);
+      session.helo = '';
+      reset();
+      inbuf = '';
     };
-
-    let buffer = Buffer.alloc(0);
 
     const finishData = (message) => {
       const gateReply = gate('data');
       if (gateReply) { refuse(gateReply); reset(); return; }
-      const id = saveMessage(spoolDir, {
-        from: session.from, to: session.rcpts, peer: ip, tls: session.version, cert: session.cert, helo: session.helo, receivedAt: new Date().toISOString(),
-      }, message);
+      let id;
+      try {
+        id = saveMessage(spoolDir, {
+          from: session.from, to: session.rcpts, peer: ip, tls: session.version, cert: session.cert, helo: session.helo, receivedAt: new Date().toISOString(),
+        }, message);
+      } catch (error) {
+        note('event=spool-error', `error="${error.message}"`);
+        say('451 4.3.0 Mail system error: the fake-EOP spool is not writable');
+        reset();
+        return;
+      }
       note(`event=accept id=${id} from="<${session.from}>" rcpt="${session.rcpts.join(',')}" bytes=${message.length}`, 'verdict=accepted');
       say(`250 2.6.0 <${id}@${host}> [InternalId=${counter}] Queued mail for delivery`);
       reset();
     };
 
+    // Runs one command; returns 'tls' when the connection was just switched to TLS.
     const command = (line) => {
       const [verbRaw, ...rest] = line.split(' ');
       const verb = verbRaw.toUpperCase();
@@ -106,92 +125,113 @@ export function createServer(options) {
         case 'HELO':
           session.helo = arg;
           reset();
-          if (verb === 'HELO') { say(`250 ${host} Hello [${ip}]`); return; }
+          if (verb === 'HELO') { say(`250 ${host} Hello [${ip}]`); return null; }
           say(`250-${host} Hello [${ip}]`);
-          say('250-SIZE 157286400');
+          say(`250-SIZE ${MAX_SIZE}`);
           say('250-PIPELINING');
           say('250-8BITMIME');
           say('250-SMTPUTF8');
-          if (!inTls()) say('250-STARTTLS');
+          if (!session.tls) say('250-STARTTLS');
           say('250 ENHANCEDSTATUSCODES');
-          return;
+          return null;
         case 'STARTTLS':
-          if (inTls()) { say('503 5.5.1 TLS already active'); return; }
+          if (session.tls) { say('503 5.5.1 TLS already active'); return null; }
           say('220 2.0.0 SMTP server ready');
           upgrade();
-          return;
+          return 'tls';
         case 'MAIL': {
-          if (!inTls()) { say('530 5.7.0 Must issue a STARTTLS command first'); return; }
+          if (!session.tls) { say('530 5.7.0 Must issue a STARTTLS command first'); return null; }
           const address = /^FROM:\s*(.*)$/i.exec(arg);
           const from = address ? parseAddress(address[1]) : null;
-          if (from === null) { say('501 5.5.4 Syntax error in parameters or arguments'); return; }
+          if (from === null) { say('501 5.5.4 Syntax error in parameters or arguments'); return null; }
+          const declared = /\sSIZE=(\d+)/i.exec(address[1]);
+          if (declared && Number(declared[1]) > MAX_SIZE) { say('552 5.3.4 Message size exceeds fixed limit'); return null; }
           const reply = gate('mail');
-          if (reply) { refuse(reply); return; }
+          if (reply) { refuse(reply); return null; }
           session.from = from;
           say('250 2.1.0 Sender OK');
-          return;
+          return null;
         }
         case 'RCPT': {
-          if (!inTls()) { say('530 5.7.0 Must issue a STARTTLS command first'); return; }
-          if (session.from === null) { say('503 5.5.1 Need MAIL command first'); return; }
+          if (!session.tls) { say('530 5.7.0 Must issue a STARTTLS command first'); return null; }
+          if (session.from === null) { say('503 5.5.1 Need MAIL command first'); return null; }
           const address = /^TO:\s*(.*)$/i.exec(arg);
           const rcpt = address ? parseAddress(address[1]) : null;
-          if (!rcpt) { say('501 5.5.4 Syntax error in parameters or arguments'); return; }
+          if (!rcpt) { say('501 5.5.4 Syntax error in parameters or arguments'); return null; }
           const reply = gate('rcpt');
-          if (reply) { refuse(reply); return; }
+          if (reply) { refuse(reply); return null; }
           session.rcpts.push(rcpt);
           say('250 2.1.5 Recipient OK');
-          return;
+          return null;
         }
         case 'DATA':
-          if (!inTls()) { say('530 5.7.0 Must issue a STARTTLS command first'); return; }
-          if (session.from === null || session.rcpts.length === 0) { say('503 5.5.1 Need MAIL and RCPT commands first'); return; }
-          session.data = Buffer.from('\r\n');
+          if (!session.tls) { say('530 5.7.0 Must issue a STARTTLS command first'); return null; }
+          if (session.from === null || session.rcpts.length === 0) { say('503 5.5.1 Need MAIL and RCPT commands first'); return null; }
+          // A virtual CRLF in front lets ".\r\n" as the first line and "\r\n.." stuffing be handled alike.
+          inbuf = `\r\n${inbuf}`;
+          inData = true;
+          scanFrom = 0;
           say('354 Start mail input; end with <CRLF>.<CRLF>');
+          return null;
+        case 'RSET': reset(); say('250 2.0.0 Resetting'); return null;
+        case 'NOOP': say('250 2.0.0 OK'); return null;
+        case 'VRFY': say('252 2.5.2 Cannot VRFY user, but will take message for this user'); return null;
+        case 'QUIT': say('221 2.0.0 Service closing transmission channel'); session.socket.end(); return null;
+        default: say('500 5.5.2 Syntax error, command unrecognized'); return null;
+      }
+    };
+
+    // Takes commands and message text out of inbuf for as long as complete ones are there.
+    const pump = () => {
+      for (;;) {
+        if (session.socket.destroyed) return;
+        if (inData) {
+          const end = inbuf.indexOf('\r\n.\r\n', scanFrom);
+          if (end < 0) {
+            if (inbuf.length > MAX_SIZE) { say('552 5.3.4 Message size exceeds fixed limit'); drop('too-big'); return; }
+            scanFrom = Math.max(0, inbuf.length - 4);
+            return;
+          }
+          // Unstuffing only after a CRLF; the virtual CRLF in front is cut off again.
+          const message = Buffer.from(inbuf.slice(0, end + 2).replace(/\r\n\.\./g, '\r\n.').slice(2), 'latin1');
+          inbuf = inbuf.slice(end + 5);
+          inData = false;
+          finishData(message);
+          continue;
+        }
+        const eol = inbuf.indexOf('\r\n');
+        if (eol < 0) {
+          if (inbuf.length > MAX_LINE) { say('500 5.5.2 Line too long'); drop('line-too-long'); }
           return;
-        case 'RSET': reset(); say('250 2.0.0 Resetting'); return;
-        case 'NOOP': say('250 2.0.0 OK'); return;
-        case 'VRFY': say('252 2.5.2 Cannot VRFY user, but will take message for this user'); return;
-        case 'QUIT': say('221 2.0.0 Service closing transmission channel'); session.socket.end(); return;
-        default: say('500 5.5.2 Syntax error, command unrecognized');
+        }
+        const line = inbuf.slice(0, eol);
+        inbuf = inbuf.slice(eol + 2);
+        if (line.length > MAX_LINE) { say('500 5.5.2 Line too long'); continue; }
+        if (command(line.trim()) === 'tls') return; // what follows belongs to the TLS layer
       }
     };
 
     function onData(chunk) {
-      buffer = Buffer.concat([buffer, chunk]);
-      for (;;) {
-        if (session.data) {
-          session.data = Buffer.concat([session.data, buffer]);
-          buffer = Buffer.alloc(0);
-          const end = session.data.indexOf('\r\n.\r\n');
-          if (end < 0) {
-            if (session.data.length > MAX_SIZE) { say('552 5.3.4 Message too big'); drop('too-big'); }
-            return;
-          }
-          const tail = session.data.subarray(end + 5);
-          // The message without the leading CRLF we put in, with dot-stuffing removed.
-          const message = Buffer.from(session.data.subarray(2, end + 2).toString('latin1').replace(/^\.\./gm, '.'), 'latin1');
-          session.data = null;
-          buffer = Buffer.from(tail);
-          finishData(message);
-          continue;
-        }
-        const eol = buffer.indexOf('\r\n');
-        if (eol < 0) {
-          if (buffer.length > 4096) drop('line-too-long');
+      try {
+        // A bare LF (one not preceded by CR) is refused at once, not waited out until a timeout.
+        const from = Math.max(0, inbuf.length - 1);
+        inbuf += chunk.toString('latin1');
+        const bare = /(?<!\r)\n/g;
+        bare.lastIndex = from;
+        if (bare.test(inbuf)) {
+          say('500 5.5.2 Error: bare <LF> received');
+          drop('bare-lf');
           return;
         }
-        const line = buffer.subarray(0, eol).toString('latin1');
-        buffer = buffer.subarray(eol + 2);
-        const wasStarttls = /^STARTTLS$/i.test(line.trim());
-        command(line.trim());
-        if (wasStarttls) return; // what follows belongs to the TLS layer
-        if (session.socket.destroyed) return;
+        pump();
+      } catch (error) {
+        note('event=internal-error', `error="${error.message}"`);
+        session.socket.destroy();
       }
     }
 
     note('event=connect');
-    raw.setTimeout(60000, () => { say('421 4.4.2 Connection timed out'); raw.destroy(); });
+    raw.setTimeout(IDLE_MS, () => { say('421 4.4.2 Connection timed out'); raw.destroy(); });
     raw.on('error', (error) => note('event=socket-error', `error="${error.message}"`));
     raw.on('close', closeNote);
     raw.on('data', onData);

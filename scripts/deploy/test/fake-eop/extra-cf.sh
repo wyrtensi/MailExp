@@ -17,11 +17,18 @@ case $action in
     exit 2
     ;;
 esac
-[ -n "$file" ] && [ -n "$key" ] || { echo "extra-cf.sh: file and key are required" >&2; exit 2; }
+if [ -z "$file" ] || [ -z "$key" ]; then
+  echo "extra-cf.sh: file and key are required" >&2
+  exit 2
+fi
 case $key in *[!a-z_0-9]*) echo "extra-cf.sh: bad key: $key" >&2; exit 2 ;; esac
 
-# Every line except the key's.
-others() { [ -f "$file" ] && { grep -v "^[[:space:]]*${key}[[:space:]]*=" "$file" || true; } || true; }
+# Every line except the key's. Nothing when the file does not exist.
+others() {
+  if [ -f "$file" ]; then
+    grep -v "^[[:space:]]*${key}[[:space:]]*=" "$file" || true
+  fi
+}
 
 case $action in
   get)
@@ -32,7 +39,10 @@ case $action in
     ;;
   set)
     value=${4:-}
-    [ -n "$value" ] || { echo "extra-cf.sh: a value is required" >&2; exit 2; }
+    if [ -z "$value" ]; then
+      echo "extra-cf.sh: a value is required" >&2
+      exit 2
+    fi
     case $value in *[[:space:]]*) echo "extra-cf.sh: the value must be one word" >&2; exit 2 ;; esac
     tmp=$(mktemp)
     { others; printf '%s = %s\n' "$key" "$value"; } >"$tmp"
