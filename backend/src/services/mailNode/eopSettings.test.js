@@ -35,6 +35,17 @@ describe('parseEopSettings', () => {
     });
   });
 
+  it('takes the licenses and the tenant creation date of the TERRL budget', () => {
+    expect(parseEopSettings({ licenses: '500', tenantCreatedOn: ' 2026-09-14 ' })).toEqual({ settings: { licenses: 500, tenantCreatedOn: '2026-09-14' } });
+    expect(parseEopSettings({ licenses: '', tenantCreatedOn: '' })).toEqual({ settings: { licenses: null, tenantCreatedOn: null } });
+    expect(parseEopSettings({ licenses: 0 })).toEqual({ error: 'licenses_invalid' });
+    expect(parseEopSettings({ licenses: 1000001 })).toEqual({ error: 'licenses_invalid' });
+    for (const day of ['2026-02-30', '14.09.2026', '2999-01-01', 20260914]) {
+      expect(parseEopSettings({ tenantCreatedOn: day })).toEqual({ error: 'tenant_created_invalid' });
+    }
+    expect(EOP_DEFAULTS).toMatchObject({ licenses: null, tenantCreatedOn: null });
+  });
+
   it('leaves out the fields not sent and clears optional ones sent empty', () => {
     expect(parseEopSettings({ terrl: '', tenantId: null })).toEqual({ settings: { terrl: null, tenantId: null } });
     expect(parseEopSettings({})).toEqual({ settings: {} });

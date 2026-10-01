@@ -162,8 +162,9 @@ function refusal(body) {
 }
 
 // judge: false leaves the answer of a POST to the caller (delete/mailbox mixes warnings with its
-// success).
-async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+// success). text: the answer as text, for the few calls that print instead of answering JSON
+// (get/postcat).
+async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS, text = false } = {}) {
   let res;
   try {
     // allowPrivate: on a one-server install <MAIL_HOST> resolves to this host's own address.
@@ -185,6 +186,7 @@ async function request(cfg, method, path, body, { judge = true, timeoutMs = REQU
     throw new MailNodeError('mail_node_auth', 'The mail node refused the API key');
   }
   if (!res.ok) throw new MailNodeError('mail_node_failed', `The mail node answered HTTP ${res.status}`);
+  if (text) return res.text();
   let data;
   try {
     data = await res.json();
@@ -558,4 +560,102 @@ export async function getDiskStatus(cfg) {
   const usedPercent = Number.parseInt(String(data?.used_percent ?? ''), 10);
   if (!Number.isFinite(usedPercent)) throw new MailNodeError('mail_node_failed', 'The mail node did not report its disk');
   return { usedPercent, used: String(data.used ?? ''), total: String(data.total ?? '') };
+}
+
+// --- Node operations: the mail queue (R-16), the Postfix log and the containers (R-18) -----------
+// mailcow runs each queue call as a command in postfix-mailcow through its dockerapi: get/mailq/all
+// is `postqueue -j` (at most 10000 entries), get/postcat/<id> is `postcat -q <id>` printed as text,
+// edit/mailq hold/unhold/deliver are `postsuper -h/-H` and `postqueue -i` per id, flush is
+// `postqueue -f`, delete/mailq is `postsuper -d` per id. Its super_delete (`postsuper -d ALL`) is
+// never called from the panel. All of them need an administrator's API key.
+
+const QUEUE_LIST_TIMEOUT_MS = 30000;
+const LOG_TIMEOUT_MS = 30000;
+// The queues postqueue -j names.
+export const QUEUE_NAMES = Object.freeze(['active', 'deferred', 'hold', 'incoming', 'maildrop']);
+// What the panel lets an administrator do with one queued message besides deleting it.
+export const QUEUE_ACTIONS = Object.freeze(['hold', 'unhold', 'deliver']);
+
+// A queue id as mailcow's dockerapi takes it (hex only; it drops anything else silently): upper
+// case, or null.
+export function parseQueueId(value) {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return /^[0-9A-Fa-f]{6,20}$/.test(id) ? id.toUpperCase() : null;
+}
+
+// mailcow rewrites each recipient of postqueue -j into "address (delay reason)" when Postfix gave a
+// reason, and keeps the bare address otherwise.
+function queueRecipient(value) {
+  if (value && typeof value === 'object') {
+    return { address: String(value.address ?? '').toLowerCase(), reason: value.delay_reason ? String(value.delay_reason) : null };
+  }
+  const text = String(value ?? '').trim();
+  const match = /^(\S+) \(([\s\S]*)\)$/.exec(text);
+  return match ? { address: match[1].toLowerCase(), reason: match[2] } : { address: text.toLowerCase(), reason: null };
+}
+
+// The node's mail queue: [{ queueId, queue, arrivedAt (ISO), size (bytes), forcedExpire, sender
+// ('' for the null sender of a bounce), recipients: [{ address, reason }] }].
+export async function listQueue(cfg) {
+  const data = await request(cfg, 'GET', 'get/mailq/all', undefined, { timeoutMs: QUEUE_LIST_TIMEOUT_MS });
+  return (Array.isArray(data) ? data : asList(data))
+    .filter((item) => item && typeof item === 'object' && parseQueueId(String(item.queue_id ?? '')))
+    .map((item) => {
+      const arrival = Number(item.arrival_time);
+      return {
+        queueId: parseQueueId(String(item.queue_id)),
+        queue: String(item.queue_name ?? ''),
+        arrivedAt: Number.isFinite(arrival) && arrival > 0 ? new Date(arrival * 1000).toISOString() : null,
+        size: Number(item.message_size ?? 0) || 0,
+        forcedExpire: item.forced_expire === true,
+        sender: String(item.sender ?? '').toLowerCase(),
+        recipients: (Array.isArray(item.recipients) ? item.recipients : []).map(queueRecipient).filter((r) => r.address),
+      };
+    });
+}
+
+// The queued message as `postcat -q` prints it (envelope records, the message, extracted headers),
+// or what postcat said instead when the message is gone.
+export async function getQueuedMessageText(cfg, queueId) {
+  return request(cfg, 'GET', `get/postcat/${encodeURIComponent(queueId)}`, undefined, { text: true, timeoutMs: QUEUE_LIST_TIMEOUT_MS });
+}
+
+// hold, unhold or deliver for the given queue ids. deliver answers success whatever postqueue did.
+export async function queueAction(cfg, queueIds, action) {
+  if (!QUEUE_ACTIONS.includes(action)) throw new MailNodeError('queue_action_invalid', 'No such queue action', 400);
+  await request(cfg, 'POST', 'edit/mailq', { items: queueIds, attr: { action } });
+}
+
+// Tries every deferred message again now.
+export async function flushQueue(cfg) {
+  await request(cfg, 'POST', 'edit/mailq', { items: [], attr: { action: 'flush' } });
+}
+
+export async function deleteQueued(cfg, queueIds) {
+  await request(cfg, 'POST', 'delete/mailq', queueIds);
+}
+
+// The last `lines` lines of the Postfix log, newest first, as mailcow keeps them:
+// [{ time: "<unix seconds>", program, priority, message }]. Parsed by services/mailNode/postfixLog.js.
+export async function getPostfixLog(cfg, lines) {
+  const data = await request(cfg, 'GET', `get/logs/postfix/${lines}`, undefined, { timeoutMs: LOG_TIMEOUT_MS });
+  return Array.isArray(data) ? data : [];
+}
+
+// The node's containers: [{ name, state ('running', 'exited', 'restarting', ...), startedAt, image }].
+// mailcow answers an object keyed by container name.
+export async function getContainers(cfg) {
+  const data = await request(cfg, 'GET', 'get/status/containers');
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new MailNodeError('mail_node_failed', 'The mail node did not report its containers');
+  }
+  return Object.entries(data)
+    .filter(([, c]) => c && typeof c === 'object')
+    .map(([key, c]) => ({
+      name: String(c.container ?? key),
+      state: String(c.state ?? '').toLowerCase(),
+      startedAt: c.started_at ? String(c.started_at) : null,
+      image: c.image ? String(c.image) : null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
