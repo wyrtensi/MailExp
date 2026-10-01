@@ -219,7 +219,20 @@ test('the demo EOP settings start at mailcow signing and 50 messages an hour, an
     tenantId: '11111111-2222-4333-8444-555555555555', appId: '22222222-3333-4444-8555-666666666666', certThumbprint: 'A'.repeat(40),
   });
   assert.equal(saved.tenantConfigured, true);
+  assert.equal(saved.tenantDriverActive, false);
   assert.equal((await demoRequest('GET', '/mail-node/eop')).appId, '22222222-3333-4444-8555-666666666666');
+});
+
+test('the demo EOP settings refuse and normalize like the server', async () => {
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { certThumbprint: 'xyz' }), err => err.code === 'thumbprint_invalid');
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { sendLimitPerHour: '0' }), err => err.code === 'send_limit_invalid');
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tenantId: 'contoso' }), err => err.code === 'tenant_id_invalid');
+  const saved = await demoRequest('PUT', '/mail-node/eop', {
+    certThumbprint: 'ab:cd ef01 2345 6789 abcd ef01 2345 6789 abcd ef01', tenantId: 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE', terrl: '48248',
+  });
+  assert.equal(saved.certThumbprint, 'ABCDEF0123456789ABCDEF0123456789ABCDEF01');
+  assert.equal(saved.tenantId, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  assert.equal(saved.terrl, 48248);
 });
 
 test('an ordinary demo user is offered only the ready domains', async () => {

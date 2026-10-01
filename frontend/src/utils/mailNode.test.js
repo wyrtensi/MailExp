@@ -4,6 +4,7 @@ import {
   canMarkReady,
   domainStateKey,
   eopSettingsError,
+  normalizeEopSettings,
   onboardingSteps,
   domainMailboxFormError,
   domainMailboxTaken,
@@ -88,6 +89,27 @@ describe('domain onboarding', () => {
     assert.equal(canMarkReady({ state: 'ready' }), false);
     assert.equal(canMarkReady({ state: 'authoritative' }), false);
     assert.equal(canMarkReady({ state: 'unknown' }), false);
+  });
+});
+
+describe('normalizeEopSettings', () => {
+  it('normalizes the fields sent the way the server does', () => {
+    assert.deepEqual(normalizeEopSettings({
+      eopHost: ' Contoso-com.mail.protection.outlook.com ', dkimMode: 'eop', sendLimitPerHour: '25', terrl: 48248,
+      tenantId: ' AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE ', appId: '', certThumbprint: 'ab:cd ef01 2345 6789 abcd ef01 2345 6789 abcd ef01',
+    }), {
+      settings: {
+        eopHost: 'contoso-com.mail.protection.outlook.com', dkimMode: 'eop', sendLimitPerHour: 25, terrl: 48248,
+        tenantId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', appId: null, certThumbprint: 'ABCDEF0123456789ABCDEF0123456789ABCDEF01',
+      },
+    });
+  });
+
+  it('answers the server refusal codes', () => {
+    assert.deepEqual(normalizeEopSettings({ dkimMode: '' }), { error: 'dkim_mode_invalid' });
+    assert.deepEqual(normalizeEopSettings({ sendLimitPerHour: null }), { error: 'send_limit_invalid' });
+    assert.deepEqual(normalizeEopSettings({ certThumbprint: 'xyz' }), { error: 'thumbprint_invalid' });
+    assert.deepEqual(normalizeEopSettings({}), { settings: {} });
   });
 });
 

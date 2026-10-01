@@ -120,7 +120,7 @@ describe('mailbox actions are journaled', () => {
     const res = await send('DELETE', `/${ID}`);
     expect(res.status).toBe(200);
     expect(recordAudit).toHaveBeenCalledWith({
-      actorUserId: 'user-2', accountEmail: 'team@example.com', action: 'mailbox.deleted', details: {},
+      actorUserId: 'user-2', accountEmail: 'team@example.com', action: 'mailbox.deleted', details: { mailNode: false },
     });
     const deleteOrder = query.mock.invocationCallOrder[query.mock.calls.findIndex(([sql]) => sql === 'DELETE FROM email_accounts WHERE id = $1')];
     expect(recordAudit.mock.invocationCallOrder[0]).toBeGreaterThan(deleteOrder);

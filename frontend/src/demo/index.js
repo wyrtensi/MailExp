@@ -1,6 +1,6 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
-import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady } from '../utils/mailNode.js';
+import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady, normalizeEopSettings } from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
   {
@@ -751,7 +751,7 @@ let demoEopSettings = {
 
 function eopSettingsAnswer() {
   const s = demoEopSettings;
-  return clone({ ...s, tenantConfigured: !!(s.tenantId && s.appId && s.certThumbprint) });
+  return clone({ ...s, tenantConfigured: !!(s.tenantId && s.appId && s.certThumbprint), tenantDriverActive: false });
 }
 
 function mailNodeDomainByName(raw) {
@@ -1600,8 +1600,10 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();
   if (verb === 'PUT' && pathname === '/mail-node/eop') {
-    const fields = Object.keys(demoEopSettings).filter(field => body?.[field] !== undefined);
-    demoEopSettings = { ...demoEopSettings, ...Object.fromEntries(fields.map(field => [field, body[field] === '' ? null : body[field]])) };
+    // The server's checks and normalization (utils/mailNode.js mirrors eopSettings.js).
+    const { settings, error } = normalizeEopSettings(body);
+    if (error) throw demoError('Invalid EOP setting', error);
+    demoEopSettings = { ...demoEopSettings, ...settings };
     return eopSettingsAnswer();
   }
   if (verb === 'GET' && pathname === '/mail-node/mailboxes') {

@@ -6,7 +6,7 @@ describe('AUDIT_ACTIONS', () => {
   it('lists every action the server records, each with a label', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
-      'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'message.sent', 'message.deleted',
+      'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed', 'message.sent', 'message.deleted',
       'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
@@ -128,11 +128,11 @@ describe('auditDetail', () => {
   it('describes mail node settings changes by the names of the fields', () => {
     assert.deepEqual(
       auditDetail({ action: 'mail_node.config_changed', details: { settings: 'node', fields: ['apiKey', 'quotaMb'] } }),
-      { key: 'admin.audit.detailMailNodeSettingsChanged', values: { fields: 'apiKey, quotaMb' } },
+      { key: 'admin.audit.detailMailNodeSettingsChanged', values: {}, valueKeys: { fields: ['admin.audit.fieldApiKey', 'admin.audit.fieldQuota'] } },
     );
     assert.deepEqual(
-      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['terrl'] } }),
-      { key: 'admin.audit.detailEopSettingsChanged', values: { fields: 'terrl' } },
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['terrl', 'tlsPolicy'] } }),
+      { key: 'admin.audit.detailEopSettingsChanged', values: {}, valueKeys: { fields: ['admin.audit.fieldTerrl', 'tlsPolicy'] } },
     );
     assert.equal(auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: [] } }), null);
   });
@@ -161,6 +161,19 @@ describe('auditDetail', () => {
       auditDetail({ action: 'mail_node.domain_state_changed', details: { domain: 'a.example', from: 'node_created', to: 'ready', how: 'marked_ready' } }).key,
       'admin.audit.detailDomainMarkedReady',
     );
+  });
+
+  it('describes a quota change and the delete of a mail node mailbox', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'mailbox.quota_changed', details: { quotaMb: 10240, from: 5120 } }),
+      { key: 'admin.audit.detailQuotaChanged', values: { from: 5120, to: 10240 } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mailbox.quota_changed', details: { quotaMb: 10240, from: null } }),
+      { key: 'admin.audit.detailQuotaSet', values: { to: 10240 } },
+    );
+    assert.deepEqual(auditDetail({ action: 'mailbox.deleted', details: { mailNode: true } }), { key: 'admin.audit.detailMailNodeMailbox', values: {} });
+    assert.equal(auditDetail({ action: 'mailbox.deleted', details: { mailNode: false } }), null);
   });
 
   it('shows nothing for actions without details or unknown entries', () => {

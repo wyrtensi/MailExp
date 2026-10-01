@@ -12,6 +12,7 @@ import {
   MailNodeError,
   addDomain,
   getDiskStatus,
+  getMailbox,
   getMailNodeConfig,
   listDomains,
   listMailboxes,
@@ -23,11 +24,14 @@ import {
 } from '../services/mailNode/mailcow.js';
 import {
   adoptDomain,
+  bindNodeIdentities,
   canCreateMailboxes,
   confirmStep,
+  getDomainRow,
   listDomainRows,
   markReady,
   mergeDomains,
+  nodeRefusal,
   recordCreatedDomain,
 } from '../services/mailNode/domains.js';
 import {
@@ -38,6 +42,7 @@ import {
   parseEopSettings,
   saveEopSettings,
   tenantConfigured,
+  tenantDriverActive,
 } from '../services/mailNode/eopSettings.js';
 
 // The mail node (mailcow) settings, its domains with their onboarding, the EOP settings and the
@@ -64,6 +69,7 @@ const ERRORS = {
   domain_not_found: [404, 'The panel does not know this domain'],
   domain_known: [409, 'The panel knows this domain already'],
   domain_already_ready: [409, 'The domain is ready already'],
+  domain_recreated: [409, 'The node has another domain of this name now, made again by hand: adopt it again'],
   step_invalid: [400, 'No such onboarding step'],
   step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
   eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
@@ -153,7 +159,7 @@ router.get('/domains', async (req, res) => {
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  const domains = mergeDomains(onNode, await listDomainRows());
+  const domains = mergeDomains(onNode, await bindNodeIdentities(onNode, await listDomainRows()));
   if (await isAdmin(req)) return res.json({ domains });
   res.json({
     domains: domains
@@ -181,24 +187,52 @@ router.post('/domains', requireAdmin, async (req, res) => {
   res.json({ ok: true, domain, state: 'node_created' });
 });
 
-// Takes in a domain made on the node by hand: it starts at node_created like a new one.
+// Takes in a domain made on the node by hand, or one made again there after the panel onboarded
+// it: it starts at node_created like a new one, bound to the node's identity of the domain.
 router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
+  let onNode;
   try {
-    if (!(await listDomains(cfg)).some((d) => d.domain === domain)) return refuse(res, 'domain_not_on_node');
+    onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  if (!(await adoptDomain({ domain, userId: req.session.userId }))) return refuse(res, 'domain_known');
+  if (!onNode) return refuse(res, 'domain_not_on_node');
+  if (!(await adoptDomain({ domain, userId: req.session.userId, nodeCreated: onNode.created }))) return refuse(res, 'domain_known');
   recordAudit({
     actorUserId: req.session.userId, action: 'mail_node.domain_adopted',
     details: { domain, state: 'node_created', origin: 'adopted' },
   });
   res.json({ ok: true, domain, state: 'node_created' });
 });
+
+// Answers the refusal and returns true when the row may not move: the panel has no row, the node
+// no longer has the domain, or has another one of that name. A stale row only changes by adoption.
+async function refusedByNode(res, domain) {
+  const row = await getDomainRow(domain);
+  if (!row) {
+    refuse(res, 'domain_not_found');
+    return true;
+  }
+  const cfg = await getMailNodeConfig();
+  if (!cfg) {
+    refuse(res, 'mail_node_not_configured');
+    return true;
+  }
+  let onNode;
+  try {
+    onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
+  } catch (err) {
+    mailNodeFailure(res, err);
+    return true;
+  }
+  const why = nodeRefusal(row, onNode);
+  if (why) refuse(res, why);
+  return !!why;
+}
 
 function stateChanged(req, res, domain, result, how) {
   if (result.error) return refuse(res, result.error);
@@ -213,6 +247,7 @@ function stateChanged(req, res, domain, result, how) {
 router.post('/domains/:domain/steps/:step', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
+  if (await refusedByNode(res, domain)) return undefined;
   const result = await confirmStep({ domain, step: req.params.step, userId: req.session.userId });
   return stateChanged(req, res, domain, result, 'step_confirmed');
 });
@@ -221,13 +256,17 @@ router.post('/domains/:domain/steps/:step', requireAdmin, async (req, res) => {
 router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
+  if (await refusedByNode(res, domain)) return undefined;
   const result = await markReady({ domain, userId: req.session.userId });
   return stateChanged(req, res, domain, result, 'marked_ready');
 });
 
+function eopAnswer(settings) {
+  return { ...settings, tenantConfigured: tenantConfigured(settings), tenantDriverActive: tenantDriverActive() };
+}
+
 router.get('/eop', requireAdmin, async (req, res) => {
-  const settings = await getEopSettings();
-  res.json({ ...settings, tenantConfigured: tenantConfigured(settings) });
+  res.json(eopAnswer(await getEopSettings()));
 });
 
 // Only checked and kept for now: later stages apply them to the node and the tenant.
@@ -237,8 +276,7 @@ router.put('/eop', requireAdmin, async (req, res) => {
   const current = await getEopSettings();
   await saveEopSettings(settings);
   configAudit(req, 'eop', EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]));
-  const saved = { ...current, ...settings };
-  res.json({ ...saved, tenantConfigured: tenantConfigured(saved) });
+  res.json(eopAnswer({ ...current, ...settings }));
 });
 
 // The node mailboxes MailExpert knows, with quota and usage as the node reports them.
@@ -284,11 +322,18 @@ router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {
   if (!rows.length) return refuse(res, 'mailbox_not_found');
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
+  // The quota before the change, read from the node, goes into the journal.
+  let before;
   try {
+    before = await getMailbox(cfg, rows[0].email_address);
     await setMailboxQuota(cfg, rows[0].email_address, quotaMb);
   } catch (err) {
     return mailNodeFailure(res, err);
   }
+  recordAudit({
+    actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.quota_changed',
+    details: { quotaMb, from: before?.quotaMb ?? null },
+  });
   res.json({ ok: true, quotaMb });
 });
 

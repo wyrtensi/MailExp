@@ -100,3 +100,10 @@ export async function saveEopSettings(settings) {
 export function tenantConfigured(settings) {
   return !!(settings.tenantId && settings.appId && settings.certThumbprint);
 }
+
+// Whether the panel works with the tenant itself (the tenant driver of a later stage). Until it
+// does, every onboarding step is confirmed by hand, whatever is filled in above, and the EOP screen
+// keeps the checklist. The tenant driver replaces this with its own status.
+export function tenantDriverActive() {
+  return false;
+}

@@ -1846,7 +1846,23 @@
       "detailDomainAdopted": "Домен {{domain}}",
       "detailDomainAdoptedWithMailboxes": "{{domain}}: готовым, на нём уже были ящики",
       "detailDomainStepConfirmed": "{{domain}}: {{from}} → {{to}}",
-      "detailDomainMarkedReady": "{{domain}}: отмечен готовым вручную из состояния «{{from}}»"
+      "detailDomainMarkedReady": "{{domain}}: отмечен готовым вручную из состояния «{{from}}»",
+      "actionMailboxQuotaChanged": "Изменена квота ящика",
+      "detailQuotaChanged": "с {{from}} МБ на {{to}} МБ",
+      "detailQuotaSet": "теперь {{to}} МБ",
+      "detailMailNodeMailbox": "Ящик почтового узла, отключён на узле",
+      "fieldMailHost": "хост",
+      "fieldApiKey": "ключ API",
+      "fieldQuota": "квота нового ящика",
+      "fieldPingUrl": "ссылка проверки диска",
+      "fieldEopHost": "хост EOP",
+      "fieldCertificateHost": "имя в сертификате",
+      "fieldDkimMode": "режим DKIM",
+      "fieldSendLimit": "лимит отправки",
+      "fieldTerrl": "лимит TERRL",
+      "fieldTenantId": "ID тенанта",
+      "fieldAppId": "ID приложения",
+      "fieldThumbprint": "отпечаток сертификата"
     },
     "accessSync": {
       "tab": "Синхронизация с Access",
@@ -1975,7 +1991,9 @@
       "errorDomainNotFound": "Панель не знает этот домен: сначала примите его.",
       "errorDomainKnown": "Панель уже знает этот домен.",
       "errorDomainAlreadyReady": "Домен уже готов.",
-      "errorStepOutOfOrder": "Подтвердить можно только следующий шаг: обновите список."
+      "errorStepOutOfOrder": "Подтвердить можно только следующий шаг: обновите список.",
+      "recreatedNote": "На узле снова есть домен с этим именем: его создали вручную после того, как панель подключила прежний. Примите его, чтобы начать подключение заново; до этого ящики на нём не создаются.",
+      "errorDomainRecreated": "На узле теперь другой домен с этим именем: примите его заново."
     },
     "eop": {
       "title": "Почта через EOP",

@@ -23,17 +23,19 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
     listDomains: vi.fn(async () => [{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1 }]),
     addDomain: vi.fn(async () => {}),
     listMailboxes: vi.fn(async () => [{ email: 'info@example.com', active: true, quotaMb: 5120, usedBytes: 2048 }]),
+    getMailbox: vi.fn(async () => ({ email: 'info@example.com', quotaMb: 5120 })),
     setMailboxQuota: vi.fn(async () => {}),
     getDiskStatus: vi.fn(async () => ({ usedPercent: 90, used: '36G', total: '40G' })),
   };
 });
-const panel = vi.hoisted(() => ({ rows: [], eop: null }));
+const panel = vi.hoisted(() => ({ rows: [], eop: null, row: null }));
 vi.mock('../services/mailNode/domains.js', async (importActual) => {
   const actual = await importActual();
   return {
     ...actual,
     listDomainRows: vi.fn(async () => panel.rows),
     recordCreatedDomain: vi.fn(async () => {}),
+    getDomainRow: vi.fn(async () => panel.row),
     adoptDomain: vi.fn(async () => true),
     confirmStep: vi.fn(async ({ step }) => ({ from: 'node_created', to: step })),
     markReady: vi.fn(async () => ({ from: 'dns_ok', to: 'ready' })),
@@ -77,6 +79,7 @@ describe('/api/mail-node', () => {
     session.isAdmin = true;
     node.cfg = CFG;
     panel.rows = [];
+    panel.row = { state: 'node_created', nodeCreated: null };
     panel.eop = null;
   });
 
@@ -198,10 +201,58 @@ describe('/api/mail-node', () => {
     expect(recordAudit).not.toHaveBeenCalled();
   });
 
+  it('refuses adopt, "Done" and mark ready to a user who is not an administrator', async () => {
+    session.isAdmin = false;
+    for (const path of ['/domains/example.com/adopt', '/domains/example.com/steps/node_configured', '/domains/example.com/ready']) {
+      expect((await call('POST', path)).status, path).toBe(403);
+    }
+    expect(adoptDomain).not.toHaveBeenCalled();
+    expect(confirmStep).not.toHaveBeenCalled();
+    expect(markReady).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it('binds a domain to the node identity it is adopted with', async () => {
+    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }]);
+    await call('POST', '/domains/example.com/adopt');
+    expect(adoptDomain).toHaveBeenCalledWith({ domain: 'example.com', userId: 'user-1', nodeCreated: '2026-09-30 12:00:00' });
+  });
+
+  it('refuses "Done" and mark ready for a row whose domain left the node or was made again there', async () => {
+    for (const path of ['/domains/gone.example/steps/node_configured', '/domains/gone.example/ready']) {
+      const res = await call('POST', path);
+      expect(res.status).toBe(404);
+      expect((await res.json()).code).toBe('domain_not_on_node');
+    }
+    panel.row = { state: 'ready', nodeCreated: '2026-09-01 10:00:00' };
+    const remade = [{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }];
+    listDomains.mockResolvedValueOnce(remade).mockResolvedValueOnce(remade);
+    for (const path of ['/domains/example.com/steps/node_configured', '/domains/example.com/ready']) {
+      const res = await call('POST', path);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('domain_recreated');
+    }
+    panel.row = null;
+    expect((await (await call('POST', '/domains/example.com/ready')).json()).code).toBe('domain_not_found');
+    expect(confirmStep).not.toHaveBeenCalled();
+    expect(markReady).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it('shows a domain made again on the node by hand as unknown, the old row aside', async () => {
+    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }]);
+    panel.rows = [{ domain: 'example.com', state: 'ready', origin: 'created', addedAt: 't', addedBy: null, stateChangedAt: 't', steps: {}, maxMailboxes: 500, nodeCreated: '2026-09-01 10:00:00' }];
+    const [domain] = (await (await call('GET', '/domains')).json()).domains;
+    expect(domain).toMatchObject({ domain: 'example.com', state: 'unknown', recreated: true, nextStep: null });
+    session.isAdmin = false;
+    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 1, created: '2026-09-30 12:00:00' }]);
+    expect((await (await call('GET', '/domains')).json()).domains).toEqual([]);
+  });
+
   it('adopts a node domain the panel does not know, journaled', async () => {
     let res = await call('POST', '/domains/Example.com/adopt');
     expect(await res.json()).toEqual({ ok: true, domain: 'example.com', state: 'node_created' });
-    expect(adoptDomain).toHaveBeenCalledWith({ domain: 'example.com', userId: 'user-1' });
+    expect(adoptDomain).toHaveBeenCalledWith({ domain: 'example.com', userId: 'user-1', nodeCreated: undefined });
     expect(recordAudit).toHaveBeenCalledWith({
       actorUserId: 'user-1', action: 'mail_node.domain_adopted',
       details: { domain: 'example.com', state: 'node_created', origin: 'adopted' },
@@ -262,7 +313,7 @@ describe('/api/mail-node', () => {
 
     it('shows the defaults to an administrator only: mailcow signs, 50 messages an hour', async () => {
       const body = await (await call('GET', '/eop')).json();
-      expect(body).toEqual({ ...EOP_DEFAULTS, dkimMode: 'mailcow', sendLimitPerHour: 50, tenantConfigured: false });
+      expect(body).toEqual({ ...EOP_DEFAULTS, dkimMode: 'mailcow', sendLimitPerHour: 50, tenantConfigured: false, tenantDriverActive: false });
       session.isAdmin = false;
       expect((await call('GET', '/eop')).status).toBe(403);
       expect((await call('PUT', '/eop', { dkimMode: 'eop' })).status).toBe(403);
@@ -279,7 +330,7 @@ describe('/api/mail-node', () => {
         sendLimitPerHour: 50, terrl: 48248, tenantId: TENANT, appId: null, certThumbprint: null,
       };
       expect(saveEopSettings).toHaveBeenCalledWith(saved);
-      expect(await res.json()).toEqual({ ...saved, tenantConfigured: false });
+      expect(await res.json()).toEqual({ ...saved, tenantConfigured: false, tenantDriverActive: false });
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', action: 'mail_node.config_changed',
         details: { settings: 'eop', fields: ['eopHost', 'certificateHost', 'terrl', 'tenantId'] },
@@ -314,11 +365,15 @@ describe('/api/mail-node', () => {
     ]);
   });
 
-  it('changes the quota of a mail node mailbox only', async () => {
+  it('changes the quota of a mail node mailbox only, journaled with the quota before', async () => {
     query.mockResolvedValueOnce({ rows: [{ email_address: 'info@example.com' }] });
     let res = await call('PUT', `/mailboxes/${ID}/quota`, { quotaMb: 10240 });
     expect(res.status).toBe(200);
     expect(setMailboxQuota).toHaveBeenCalledWith(CFG, 'info@example.com', 10240);
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'user-1', accountId: ID, action: 'mailbox.quota_changed', details: { quotaMb: 10240, from: 5120 },
+    });
+    expect(recordAudit).toHaveBeenCalledTimes(1);
     query.mockResolvedValueOnce({ rows: [] });
     res = await call('PUT', `/mailboxes/${ID}/quota`, { quotaMb: 10240 });
     expect(res.status).toBe(404);

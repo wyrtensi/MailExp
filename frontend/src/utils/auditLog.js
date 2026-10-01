@@ -11,6 +11,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.enabled': 'admin.audit.actionMailboxEnabled',
   'mailbox.disabled': 'admin.audit.actionMailboxDisabled',
   'mailbox.password_restored': 'admin.audit.actionMailboxPasswordRestored',
+  'mailbox.quota_changed': 'admin.audit.actionMailboxQuotaChanged',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
@@ -34,6 +35,22 @@ const MOVE_REVERTED_DETAIL_KEYS = Object.freeze({
   gone: 'admin.audit.detailMoveRevertedGone',
   destination_gone: 'admin.audit.detailMoveRevertedDestinationGone',
   gave_up: 'admin.audit.detailMoveRevertedGaveUp',
+});
+
+// The settings fields a mail_node.config_changed entry names, as the journal shows them.
+const SETTINGS_FIELD_KEYS = Object.freeze({
+  mailHost: 'admin.audit.fieldMailHost',
+  apiKey: 'admin.audit.fieldApiKey',
+  quotaMb: 'admin.audit.fieldQuota',
+  diskPingUrl: 'admin.audit.fieldPingUrl',
+  eopHost: 'admin.audit.fieldEopHost',
+  certificateHost: 'admin.audit.fieldCertificateHost',
+  dkimMode: 'admin.audit.fieldDkimMode',
+  sendLimitPerHour: 'admin.audit.fieldSendLimit',
+  terrl: 'admin.audit.fieldTerrl',
+  tenantId: 'admin.audit.fieldTenantId',
+  appId: 'admin.audit.fieldAppId',
+  certThumbprint: 'admin.audit.fieldThumbprint',
 });
 
 export function auditActionLabelKey(action) {
@@ -65,7 +82,8 @@ export function auditQuery({ account, user, action, fromDate, toDate, before } =
 
 // What the details column shows for an entry: a translation key with its values, plain text,
 // or null when there is nothing to add. `valueKeys` are values that are translation keys
-// themselves (a domain's onboarding state).
+// themselves (a domain's onboarding state), or lists of them shown joined (settings fields); a
+// field this screen has no name for is passed as is and shows as written.
 export function auditDetail(entry) {
   const details = entry?.details ?? {};
   switch (entry?.action) {
@@ -74,6 +92,12 @@ export function auditDetail(entry) {
       return details.oauthProvider
         ? { key: 'admin.audit.detailProvider', values: { provider: details.oauthProvider } }
         : null;
+    case 'mailbox.deleted':
+      return details.mailNode ? { key: 'admin.audit.detailMailNodeMailbox', values: {} } : null;
+    case 'mailbox.quota_changed':
+      return details.from == null
+        ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }
+        : { key: 'admin.audit.detailQuotaChanged', values: { from: details.from, to: details.quotaMb ?? '' } };
     case 'mailbox.connection_changed':
       return Array.isArray(details.fields) && details.fields.length
         ? { key: 'admin.audit.detailFields', values: { fields: details.fields.join(', ') } }
@@ -125,7 +149,8 @@ export function auditDetail(entry) {
       return Array.isArray(details.fields) && details.fields.length
         ? {
           key: details.settings === 'eop' ? 'admin.audit.detailEopSettingsChanged' : 'admin.audit.detailMailNodeSettingsChanged',
-          values: { fields: details.fields.join(', ') },
+          values: {},
+          valueKeys: { fields: details.fields.map((field) => SETTINGS_FIELD_KEYS[field] ?? field) },
         }
         : null;
     case 'mail_node.domain_added':

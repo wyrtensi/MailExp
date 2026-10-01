@@ -66,7 +66,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
   if (domain.state === 'unknown') {
     return (
       <div data-domain-onboarding={domain.domain}>
-        <div style={noteStyle}>{t('admin.mailNode.unknownNote')}</div>
+        <div style={noteStyle}>{t(domain.recreated ? 'admin.mailNode.recreatedNote' : 'admin.mailNode.unknownNote')}</div>
         <button type="button" onClick={() => run(() => api.mailNode.adoptDomain(domain.domain))} disabled={busy} style={{ ...primaryButtonStyle, marginTop: 8 }}>
           {t('admin.mailNode.adopt')}
         </button>
@@ -76,6 +76,8 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
   }
 
   const steps = onboardingSteps(domain);
+  // A row whose domain the node no longer has only shows its history: the server refuses to move it.
+  const actionable = domain.onNode !== false;
   const originKey = ORIGIN_KEYS[domain.origin];
   return (
     <div data-domain-onboarding={domain.domain}>
@@ -94,7 +96,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
                 ? t(step.markedReady ? 'admin.mailNode.stepMarkedReadyBy' : 'admin.mailNode.stepConfirmedBy', { by: step.by, at: when(step.at) })
                 : t(STATUS_KEYS[step.status])}
             </span>
-            {step.status === 'next' && (
+            {step.status === 'next' && actionable && (
               <button type="button" onClick={() => run(() => api.mailNode.confirmDomainStep(domain.domain, step.state))} disabled={busy} style={{ ...buttonStyle, marginLeft: 8 }}>
                 {t('admin.mailNode.stepDone')}
               </button>
@@ -103,7 +105,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
         ))}
       </ol>
       {domain.state === 'authoritative' && <div style={{ ...noteStyle, marginTop: 8 }}>{t('admin.mailNode.authoritativeNote')}</div>}
-      {canMarkReady(domain) && !confirmingReady && (
+      {actionable && canMarkReady(domain) && !confirmingReady && (
         <div style={{ marginTop: 10 }}>
           <button type="button" onClick={() => setConfirmingReady(true)} disabled={busy} style={buttonStyle}>
             {t('admin.mailNode.markReady')}

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../db.js', () => ({ query: vi.fn() }));
 
-import { parseEopSettings, tenantConfigured } from './eopSettings.js';
+import { parseEopSettings, tenantConfigured, tenantDriverActive } from './eopSettings.js';
 
 const TENANT = '11111111-2222-4333-8444-555555555555';
 const APP = 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE';
@@ -55,6 +55,12 @@ describe('parseEopSettings', () => {
       [{ certThumbprint: 'XYZ' }, 'thumbprint_invalid'],
     ];
     for (const [body, code] of cases) expect(parseEopSettings(body), JSON.stringify(body)).toEqual({ error: code });
+  });
+});
+
+describe('tenantDriverActive', () => {
+  it('is off in this stage: the panel never talks to the tenant yet', () => {
+    expect(tenantDriverActive()).toBe(false);
   });
 });
 

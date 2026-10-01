@@ -1812,7 +1812,23 @@
       "detailDomainAdopted": "{{domain}}",
       "detailDomainAdoptedWithMailboxes": "{{domain}}: as ready, it already had mailboxes",
       "detailDomainStepConfirmed": "{{domain}}: {{from}} to {{to}}",
-      "detailDomainMarkedReady": "{{domain}}: marked ready by hand from {{from}}"
+      "detailDomainMarkedReady": "{{domain}}: marked ready by hand from {{from}}",
+      "actionMailboxQuotaChanged": "Mailbox quota changed",
+      "detailQuotaChanged": "{{from}} MB to {{to}} MB",
+      "detailQuotaSet": "now {{to}} MB",
+      "detailMailNodeMailbox": "Mailbox on the mail node, disabled there",
+      "fieldMailHost": "host",
+      "fieldApiKey": "API key",
+      "fieldQuota": "quota of a new mailbox",
+      "fieldPingUrl": "disk check URL",
+      "fieldEopHost": "EOP host",
+      "fieldCertificateHost": "certificate host",
+      "fieldDkimMode": "DKIM mode",
+      "fieldSendLimit": "send limit",
+      "fieldTerrl": "TERRL",
+      "fieldTenantId": "tenant ID",
+      "fieldAppId": "application ID",
+      "fieldThumbprint": "certificate thumbprint"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -1941,7 +1957,9 @@
       "errorDomainNotFound": "The panel has no record of this domain: adopt it first.",
       "errorDomainKnown": "The panel knows this domain already.",
       "errorDomainAlreadyReady": "The domain is ready already.",
-      "errorStepOutOfOrder": "Only the next step can be confirmed: reload the list."
+      "errorStepOutOfOrder": "Only the next step can be confirmed: reload the list.",
+      "recreatedNote": "The node has a domain of this name again, made by hand after the panel onboarded the old one. Adopt it to start its onboarding over; mailboxes cannot be created on it until then.",
+      "errorDomainRecreated": "The node has another domain of this name now: adopt it again."
     },
     "eop": {
       "title": "Mail through EOP",

@@ -136,12 +136,16 @@ function asList(data) {
   return [];
 }
 
+// created: when mailcow made the domain, as it prints it ("2026-09-30 12:00:00"), or null from a
+// mailcow that does not send it. A domain deleted and made again by hand gets a new one, so the
+// panel tells it apart from the domain it onboarded (services/mailNode/domains.js).
 export async function listDomains(cfg) {
   return asList(await request(cfg, 'GET', 'get/domain/all')).map((d) => ({
     domain: String(d.domain_name ?? d.domain ?? '').toLowerCase(),
     active: Number(d.active_int ?? d.active) === 1,
     maxMailboxes: Number(d.max_num_mboxes_for_domain ?? d.mailboxes ?? 0),
     mailboxes: Number(d.mboxes_in_domain ?? 0),
+    created: d.created ? String(d.created) : null,
   })).filter((d) => d.domain);
 }
 

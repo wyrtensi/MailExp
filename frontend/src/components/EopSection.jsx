@@ -36,9 +36,11 @@ function toForm(settings) {
 }
 
 // Settings -> Integrations -> "EOP" (admins only), next to the mail node: how the node's mail goes
-// through Microsoft EOP. The panel keeps these and does not apply them yet. Until the panel is
-// connected to a tenant, the domains' onboarding is done by hand, so this section also lists the
-// domains that are not ready with their checklist and the "Done" of each step.
+// through Microsoft EOP. The panel keeps these and does not apply them yet. Until the panel works
+// with the tenant itself (the server's tenantDriverActive, false until the tenant driver exists),
+// the domains' onboarding is done by hand, so this section also lists the domains that are not
+// ready with their checklist and the "Done" of each step. Filling in the tenant ids alone does not
+// change that.
 export default function EopSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
   const [stored, setStored] = useState(null);
@@ -68,7 +70,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     }
   }, []);
 
-  const showChecklist = !!stored && !stored.tenantConfigured;
+  const showChecklist = !!stored && !stored.tenantDriverActive;
   useEffect(() => {
     if (showChecklist) loadDomains();
   }, [showChecklist, loadDomains, revision]);

@@ -77,6 +77,7 @@ const DOMAINS = [
 const EOP = {
   eopHost: 'contoso-com.mail.protection.outlook.com', certificateHost: 'mail.example.com', dkimMode: 'mailcow',
   sendLimitPerHour: 50, terrl: null, tenantId: null, appId: null, certThumbprint: null, tenantConfigured: false,
+  tenantDriverActive: false,
 };
 
 let calls;
@@ -184,6 +185,25 @@ describe('MailNodeSection — domain onboarding', () => {
   });
 });
 
+describe('MailNodeDomainOnboarding — stale rows', () => {
+  test('a domain made again on the node says so and offers adoption; a row off the node offers no action', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: [
+        domainRow('remade.example', 'unknown', { recreated: true }),
+        domainRow('gone.example', 'dns_ok', { onNode: false, active: false, nextStep: 'tenant_verified' }),
+      ],
+    };
+    const host = await mount(React.createElement(EopSection));
+    const remade = host.querySelector('[data-domain-onboarding="remade.example"]');
+    assert.ok(remade.textContent.includes('admin.mailNode.recreatedNote'));
+    assert.equal(buttons(remade, 'admin.mailNode.adopt').length, 1);
+    const gone = host.querySelector('[data-domain-onboarding="gone.example"]');
+    assert.ok(gone.textContent.includes('admin.mailNode.domainNotOnNode'));
+    assert.equal(buttons(gone, 'admin.mailNode.stepDone').length, 0);
+    assert.equal(buttons(gone, 'admin.mailNode.markReady').length, 0);
+  });
+});
+
 describe('EopSection', () => {
   test('shows the stored settings and, without a tenant, the domains that are not ready', async () => {
     const host = await mount(React.createElement(EopSection));
@@ -212,8 +232,15 @@ describe('EopSection', () => {
     assert.ok(host.textContent.includes('admin.eop.saved'));
   });
 
-  test('leaves the checklist out once the tenant connection is filled in', async () => {
+  test('keeps the checklist when the tenant ids are filled in: the panel does not talk to the tenant yet', async () => {
     answers['GET /api/mail-node/eop'] = { ...EOP, tenantConfigured: true };
+    const host = await mount(React.createElement(EopSection));
+    assert.ok(host.textContent.includes('admin.eop.checklistTitle'));
+    assert.ok(host.querySelector('[data-domain-onboarding="pending.example"]'));
+  });
+
+  test('leaves the checklist out once the tenant driver works with the tenant', async () => {
+    answers['GET /api/mail-node/eop'] = { ...EOP, tenantConfigured: true, tenantDriverActive: true };
     const host = await mount(React.createElement(EopSection));
     assert.equal(host.textContent.includes('admin.eop.checklistTitle'), false);
     assert.equal(calls.some((c) => c.path === '/api/mail-node/domains'), false);

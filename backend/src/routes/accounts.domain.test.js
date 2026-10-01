@@ -37,7 +37,7 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
 const domainStates = vi.hoisted(() => new Map());
 vi.mock('../services/mailNode/domains.js', async (importActual) => ({
   ...(await importActual()),
-  getDomainState: vi.fn(async (domain) => domainStates.get(domain) ?? null),
+  getDomainRow: vi.fn(async (domain) => (domainStates.has(domain) ? { state: domainStates.get(domain), nodeCreated: '2026-09-01 10:00:00' } : null)),
 }));
 
 import express from 'express';
@@ -157,6 +157,14 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(provisionMailbox).not.toHaveBeenCalled();
   });
 
+  it('refuses a ready domain that was deleted on the node and made again by hand', async () => {
+    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, created: '2026-09-30 08:00:00' }]);
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('domain_not_ready');
+    expect(provisionMailbox).not.toHaveBeenCalled();
+  });
+
   it('creates a mailbox on an authoritative domain too', async () => {
     listDomains.mockResolvedValueOnce([{ domain: 'dbeb.example', active: true }]);
     const res = await post({ kind: 'domain', localPart: 'info', domain: 'dbeb.example' });
@@ -214,6 +222,9 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       expect(disableMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
       expect(order).toEqual(['disable', 'delete']);
+      expect(recordAudit).toHaveBeenCalledWith({
+        actorUserId: 'user-1', accountEmail: 'info@example.com', action: 'mailbox.deleted', details: { mailNode: true },
+      });
     });
 
     it('keeps the row when the node cannot disable the mailbox', async () => {

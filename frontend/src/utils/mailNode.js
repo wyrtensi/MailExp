@@ -68,6 +68,7 @@ const ERROR_KEYS = {
   domain_not_found: 'admin.mailNode.errorDomainNotFound',
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
+  domain_recreated: 'admin.mailNode.errorDomainRecreated',
   step_invalid: 'admin.mailNode.errorStepOutOfOrder',
   step_out_of_order: 'admin.mailNode.errorStepOutOfOrder',
   eop_host_invalid: 'admin.eop.errorEopHost',
@@ -179,26 +180,55 @@ export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl }, 
   return null;
 }
 
+// The EOP settings as the server takes them (backend services/mailNode/eopSettings.js
+// parseEopSettings): { settings } with the fields sent, checked and normalized, or { error } with
+// the server's refusal code. A field left out is not in `settings`; an optional one sent empty is
+// null. The demo answers with it too, so it refuses and stores exactly what the server would.
+const parseHost = (value) => {
+  const host = String(value).trim().toLowerCase();
+  return HOST_PATTERN.test(host) ? host : null;
+};
+const parseGuid = (value) => {
+  const id = String(value).trim().toLowerCase();
+  return GUID_PATTERN.test(id) ? id : null;
+};
+const parseThumbprint = (value) => {
+  const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
+  return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
+};
+// field: [parse, refusal code, whether it may be left empty]
+const EOP_PARSERS = {
+  eopHost: [parseHost, 'eop_host_invalid', true],
+  certificateHost: [parseHost, 'certificate_host_invalid', true],
+  dkimMode: [(v) => (DKIM_MODES.includes(v) ? v : null), 'dkim_mode_invalid', false],
+  sendLimitPerHour: [(v) => parseWholeNumber(v, 1, MAX_SEND_LIMIT_PER_HOUR), 'send_limit_invalid', false],
+  terrl: [(v) => parseWholeNumber(v, 1, MAX_TERRL), 'terrl_invalid', true],
+  tenantId: [parseGuid, 'tenant_id_invalid', true],
+  appId: [parseGuid, 'app_id_invalid', true],
+  certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
+};
+
+export function normalizeEopSettings(body) {
+  const settings = {};
+  for (const [field, [parse, code, optional]] of Object.entries(EOP_PARSERS)) {
+    const value = body?.[field];
+    if (value === undefined) continue;
+    if (value === null || String(value).trim() === '') {
+      if (!optional) return { error: code };
+      settings[field] = null;
+      continue;
+    }
+    const parsed = parse(value);
+    if (parsed == null) return { error: code };
+    settings[field] = parsed;
+  }
+  return { settings };
+}
+
 // The error key for the EOP settings form, or null. Empty optional fields are fine.
-export function eopSettingsError({ eopHost, certificateHost, dkimMode, sendLimitPerHour, terrl, tenantId, appId, certThumbprint }) {
-  const host = (value) => {
-    const text = String(value ?? '').trim().toLowerCase();
-    return !text || HOST_PATTERN.test(text);
-  };
-  const guid = (value) => {
-    const text = String(value ?? '').trim();
-    return !text || GUID_PATTERN.test(text);
-  };
-  if (!host(eopHost)) return 'admin.eop.errorEopHost';
-  if (!host(certificateHost)) return 'admin.eop.errorCertificateHost';
-  if (!DKIM_MODES.includes(dkimMode)) return 'admin.eop.errorDkimMode';
-  if (parseWholeNumber(sendLimitPerHour, 1, MAX_SEND_LIMIT_PER_HOUR) == null) return 'admin.eop.errorSendLimit';
-  if (String(terrl ?? '').trim() && parseWholeNumber(terrl, 1, MAX_TERRL) == null) return 'admin.eop.errorTerrl';
-  if (!guid(tenantId)) return 'admin.eop.errorTenantId';
-  if (!guid(appId)) return 'admin.eop.errorAppId';
-  const thumbprint = String(certThumbprint ?? '').replace(/[\s:]/g, '');
-  if (thumbprint && !/^[0-9a-f]{40}$/i.test(thumbprint)) return 'admin.eop.errorThumbprint';
-  return null;
+export function eopSettingsError(form) {
+  const { error } = normalizeEopSettings(form);
+  return error ? mailNodeErrorKey(error) : null;
 }
 
 // Usage of a mailbox: share of its quota in whole percent, or null when the node gave no numbers.
