@@ -47,6 +47,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   const [form, setForm] = useState(toForm(null));
   const [domains, setDomains] = useState(null);
   const [domainsError, setDomainsError] = useState(null);
+  const [domainsNodeError, setDomainsNodeError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -64,6 +65,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     try {
       const data = await api.mailNode.listDomains();
       setDomains(data?.domains ?? []);
+      setDomainsNodeError(data?.node ?? null);
       setDomainsError(null);
     } catch (err) {
       setDomainsError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
@@ -190,6 +192,11 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
           <div style={subTitleStyle}>{t('admin.eop.checklistTitle')}</div>
           <span style={{ ...hintStyle, marginTop: 0, marginBottom: 10 }}>{t('admin.eop.checklistNote')}</span>
           {domainsError && <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{t(domainsError.key)}</div>}
+          {domainsNodeError && (
+            <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
+              {t('admin.mailNode.domainsNodeUnreachable', { reason: t(mailNodeErrorKey(domainsNodeError.code)) })}
+            </div>
+          )}
           {!domainsError && !domains && <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>}
           {domains && pending.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.eop.checklistEmpty')}</div>}
           {pending.map((d) => (

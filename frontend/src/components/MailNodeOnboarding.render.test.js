@@ -185,22 +185,97 @@ describe('MailNodeSection — domain onboarding', () => {
   });
 });
 
-describe('MailNodeDomainOnboarding — stale rows', () => {
-  test('a domain made again on the node says so and offers adoption; a row off the node offers no action', async () => {
+describe('MailNodeDomainOnboarding — node trouble never hides or resets a domain', () => {
+  test('a domain whose node creation time differs keeps its state, warns, and the warning can be accepted', async () => {
     answers['GET /api/mail-node/domains'] = {
       domains: [
-        domainRow('remade.example', 'unknown', { recreated: true }),
+        domainRow('remade.example', 'dns_ok', {
+          nextStep: 'tenant_verified', recreated: true, nodeCreated: '2026-09-01 10:00:00', created: '2026-09-30 12:00:00',
+        }),
         domainRow('gone.example', 'dns_ok', { onNode: false, active: false, nextStep: 'tenant_verified' }),
       ],
     };
     const host = await mount(React.createElement(EopSection));
     const remade = host.querySelector('[data-domain-onboarding="remade.example"]');
-    assert.ok(remade.textContent.includes('admin.mailNode.recreatedNote'));
-    assert.equal(buttons(remade, 'admin.mailNode.adopt').length, 1);
+    assert.ok(remade.textContent.includes('admin.mailNode.stateNow'), 'the domain shows its own state');
+    assert.ok(remade.querySelector('[data-domain-recreated="remade.example"]').textContent.includes('admin.mailNode.recreatedNote'));
+    assert.equal(buttons(remade, 'admin.mailNode.adopt').length, 0);
+    assert.equal(buttons(remade, 'admin.mailNode.stepDone').length, 1, 'Done still works on it');
+    answers['POST /api/mail-node/domains/remade.example/acknowledge'] = { ok: true, domain: 'remade.example' };
+    await click(buttons(remade, 'admin.mailNode.acknowledge')[0]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/domains/remade.example/acknowledge'));
     const gone = host.querySelector('[data-domain-onboarding="gone.example"]');
     assert.ok(gone.textContent.includes('admin.mailNode.domainNotOnNode'));
     assert.equal(buttons(gone, 'admin.mailNode.stepDone').length, 0);
     assert.equal(buttons(gone, 'admin.mailNode.markReady').length, 0);
+  });
+
+  test('the domain list marks the warning in the state column', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: [domainRow('remade.example', 'ready', { recreated: true, nodeCreated: 'a', created: 'b' }), DOMAINS[0]],
+    };
+    const host = await mount(React.createElement(MailNodeSection));
+    const badges = [...host.querySelectorAll('[data-recreated-badge]')];
+    assert.equal(badges.length, 1);
+    assert.equal(badges[0].textContent, 'admin.mailNode.recreatedBadge');
+    assert.equal(host.querySelector('[data-domain-state]').getAttribute('data-domain-state'), 'ready');
+  });
+
+  test('with the node unreachable the domains stay listed with the node error, and no step can be confirmed', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: DOMAINS.filter((d) => d.state !== 'unknown').map((d) => ({ ...d, onNode: null, active: null, mailboxes: null })),
+      node: { error: 'The mail node is unreachable (ETIMEDOUT)', code: 'mail_node_unreachable' },
+    };
+    const host = await mount(React.createElement(MailNodeSection));
+    const alert = host.querySelector('[data-domains-node-error]');
+    assert.ok(alert, 'the node error is shown');
+    assert.ok(alert.textContent.includes('admin.mailNode.domainsNodeUnreachable'));
+    const states = [...host.querySelectorAll('[data-domain-state]')].map((el) => el.getAttribute('data-domain-state'));
+    assert.deepEqual(states, ['ready', 'dns_ok']);
+    assert.ok(host.textContent.includes('admin.mailNode.nodeUnknown'));
+    assert.equal(host.textContent.includes('admin.mailNode.domainsEmpty'), false);
+    await click(buttons(host, 'admin.mailNode.showDetails')[1]);
+    const detail = host.querySelector('[data-domain-onboarding="pending.example"]');
+    assert.ok(detail.textContent.includes('admin.mailNode.nodeUnreachableNote'));
+    assert.equal(buttons(detail, 'admin.mailNode.stepDone').length, 0);
+    assert.equal(buttons(detail, 'admin.mailNode.restart').length, 1, 'restart needs no answer from the node');
+  });
+
+  test('the EOP checklist keeps its domains and says the node is unreachable', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: [domainRow('pending.example', 'dns_ok', { onNode: null, active: null, nextStep: 'tenant_verified' })],
+      node: { error: 'The mail node answered HTTP 500', code: 'mail_node_failed' },
+    };
+    const host = await mount(React.createElement(EopSection));
+    assert.ok(host.textContent.includes('admin.mailNode.domainsNodeUnreachable'));
+    assert.ok(host.querySelector('[data-domain-onboarding="pending.example"]'));
+  });
+});
+
+describe('MailNodeDomainOnboarding — restart onboarding', () => {
+  test('restarts a domain only after a second confirmation', async () => {
+    let changed = 0;
+    const host = await mount(React.createElement(MailNodeSection, { onDomainsChanged: () => { changed += 1; } }));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    const detail = host.querySelector('[data-domain-onboarding="ready.example"]');
+    await click(buttons(detail, 'admin.mailNode.restart')[0]);
+    assert.ok(detail.textContent.includes('admin.mailNode.restartConfirm'));
+    assert.equal(calls.some((c) => c.path.endsWith('/restart')), false, 'nothing is sent before the confirmation');
+    await click(buttons(detail, 'common.cancel')[0]);
+    assert.equal(detail.textContent.includes('admin.mailNode.restartConfirm'), false);
+    await click(buttons(detail, 'admin.mailNode.restart')[0]);
+    answers['POST /api/mail-node/domains/ready.example/restart'] = { ok: true, domain: 'ready.example', state: 'node_created' };
+    const confirm = buttons(detail, 'admin.mailNode.restart');
+    await click(confirm[confirm.length - 1]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/domains/ready.example/restart'));
+    assert.equal(changed, 1);
+  });
+
+  test('offers no restart for a domain the panel does not know', async () => {
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[2]);
+    const detail = host.querySelector('[data-domain-onboarding="manual.example"]');
+    assert.equal(buttons(detail, 'admin.mailNode.restart').length, 0);
   });
 });
 

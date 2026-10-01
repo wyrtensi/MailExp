@@ -7,6 +7,7 @@ import {
   normalizeEopSettings,
   onboardingSteps,
   domainMailboxFormError,
+  deleteConfirmationMatches,
   domainMailboxTaken,
   senderNameError,
   senderNamesPayload,
@@ -163,6 +164,9 @@ describe('errors', () => {
     assert.equal(mailNodeErrorKey('step_out_of_order'), 'admin.mailNode.errorStepOutOfOrder');
     assert.equal(mailNodeErrorKey('thumbprint_invalid'), 'admin.eop.errorThumbprint');
     assert.equal(mailNodeErrorKey('something_new'), 'admin.mailNode.errorFailed');
+    assert.equal(mailNodeErrorKey('domain_not_recreated'), 'admin.mailNode.errorDomainNotRecreated');
+    assert.equal(mailNodeErrorKey('mailbox_disabled_on_node'), 'admin.accounts.add.domainErrorDisabledOnNode');
+    assert.equal(mailNodeErrorKey('mail_node_disable_unsupported'), 'admin.accounts.mailNodeDisableUnsupported');
   });
 
   it('shows the node words of a refusal only', () => {
@@ -197,6 +201,21 @@ describe('quotaMbInGb', () => {
     assert.equal(quotaMbInGb(1024), '1.0');
     assert.equal(quotaMbInGb('5120'), '5.0');
     assert.equal(quotaMbInGb(102400), '100.0');
+  });
+});
+
+describe('deleteConfirmationMatches', () => {
+  it('matches the full address, ignoring case and surrounding spaces', () => {
+    assert.equal(deleteConfirmationMatches('info@example.com', 'info@example.com'), true);
+    assert.equal(deleteConfirmationMatches('  Info@Example.COM ', 'info@example.com'), true);
+  });
+
+  it('refuses anything short of the full address, and an empty one', () => {
+    for (const typed of ['', 'info', 'info@example', 'info@example.com.', 'info @example.com', null, undefined]) {
+      assert.equal(deleteConfirmationMatches(typed, 'info@example.com'), false, String(typed));
+    }
+    assert.equal(deleteConfirmationMatches('', ''), false);
+    assert.equal(deleteConfirmationMatches(' ', null), false);
   });
 });
 

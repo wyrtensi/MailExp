@@ -437,6 +437,10 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   assert.equal(ready.state, 'ready');
   const adopted = await answer('/mail-node/domains/:param/adopt', 'POST', '/mail-node/domains/legacy.demo.mailexpert.local/adopt');
   assert.equal(adopted.state, 'node_created');
+  const acknowledged = await answer('/mail-node/domains/:param/acknowledge', 'POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge');
+  assert.equal(acknowledged.state, 'ready');
+  const restarted = await answer('/mail-node/domains/:param/restart', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/restart');
+  assert.equal(restarted.state, 'node_created');
   const eop = await answer('/mail-node/eop', 'PUT', '/mail-node/eop', { terrl: '48248' });
   assert.equal(eop.terrl, 48248);
   const mailboxes = await demoRequest('GET', '/mail-node/mailboxes');

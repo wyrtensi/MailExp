@@ -68,7 +68,9 @@ const ERROR_KEYS = {
   domain_not_found: 'admin.mailNode.errorDomainNotFound',
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
-  domain_recreated: 'admin.mailNode.errorDomainRecreated',
+  domain_not_recreated: 'admin.mailNode.errorDomainNotRecreated',
+  mailbox_disabled_on_node: 'admin.accounts.add.domainErrorDisabledOnNode',
+  mail_node_disable_unsupported: 'admin.accounts.mailNodeDisableUnsupported',
   step_invalid: 'admin.mailNode.errorStepOutOfOrder',
   step_out_of_order: 'admin.mailNode.errorStepOutOfOrder',
   eop_host_invalid: 'admin.eop.errorEopHost',
@@ -121,8 +123,8 @@ export function senderNamesPayload({ senderName, senderNameAlt } = {}) {
 }
 
 // Whether the address the form would create is a mailbox of the install already. The server
-// refuses it too (409 mailbox_exists); the form says so while the name is typed. A mailbox that is
-// only on the node, not in MailExpert, is not taken: creating it enables it again.
+// refuses it too (409 mailbox_exists); the form says so while the name is typed. A mailbox deleted
+// in MailExpert is gone from the node too, so creating the address again makes a new, empty one.
 export function domainMailboxTaken({ localPart, domain }, accounts = []) {
   const local = normalizeLocalPart(localPart);
   if (!local || !domain) return false;
@@ -155,6 +157,13 @@ export function onboardingSteps(domain) {
       by: confirmed?.email ?? null, at: confirmed?.at ?? null, markedReady: !!confirmed?.markedReady,
     };
   });
+}
+
+// Deleting a mail node mailbox takes its mail with it, so the confirmation asks for the address
+// typed out in full: it matches ignoring case and the spaces around it.
+export function deleteConfirmationMatches(typed, expected) {
+  const want = String(expected ?? '').trim().toLowerCase();
+  return want !== '' && String(typed ?? '').trim().toLowerCase() === want;
 }
 
 // A domain the panel knows that has not reached 'ready' yet: an administrator may mark it ready.

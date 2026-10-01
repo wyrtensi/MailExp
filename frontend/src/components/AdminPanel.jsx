@@ -544,12 +544,16 @@ function AccountsTab() {
   };
 
   const handleDelete = (id) => {
-    const onNode = accounts.find(a => a.id === id)?.mail_node;
+    const account = accounts.find(a => a.id === id);
+    const onNode = account?.mail_node === true;
     setConfirmDialog({
       title: t('admin.accounts.deleteTitle'),
-      // A mailbox on the mail node is only disabled there; creating it again enables it back.
-      message: onNode ? t('admin.accounts.deleteMailNodeMessage') : t('admin.accounts.deleteMessage'),
-      confirmLabel: t('common.remove'),
+      // A mailbox on the mail node is deleted there too, with all its mail: the address must be typed
+      // out to confirm. A connected Gmail or IMAP mailbox only leaves MailExpert; its mail stays at
+      // the provider.
+      message: onNode ? t('admin.accounts.deleteMailNodeMessage', { email: account.email_address }) : t('admin.accounts.deleteMessage'),
+      ...(onNode ? { requireTyped: account.email_address, typedLabel: t('admin.accounts.deleteMailNodeTypeLabel', { email: account.email_address }) } : {}),
+      confirmLabel: onNode ? t('admin.accounts.deleteMailNodeConfirm') : t('common.remove'),
       onConfirm: async () => {
         try {
           await api.deleteAccount(id);

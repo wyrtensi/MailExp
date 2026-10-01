@@ -44,6 +44,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const [stored, setStored] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [domains, setDomains] = useState(null);
+  // The node's error when it could not list its domains: the panel's own record is shown anyway.
+  const [domainsNodeError, setDomainsNodeError] = useState(null);
   const [overview, setOverview] = useState(null);
   const [newDomain, setNewDomain] = useState({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
   const [quotaEdits, setQuotaEdits] = useState({});
@@ -54,10 +56,14 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
 
   const fail = (err) => setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
 
-  // Each list shows on its own: a failing mailbox listing does not hide the domains.
+  // Each list shows on its own: a failing mailbox listing does not hide the domains, and a node
+  // that cannot list its domains leaves the panel's record of them on screen with a warning.
   const loadNode = useCallback(async () => {
     const [d, o] = await Promise.allSettled([api.mailNode.listDomains(), api.mailNode.listMailboxes()]);
-    if (d.status === 'fulfilled') setDomains(d.value?.domains ?? []);
+    if (d.status === 'fulfilled') {
+      setDomains(d.value?.domains ?? []);
+      setDomainsNodeError(d.value?.node ?? null);
+    }
     if (o.status === 'fulfilled') setOverview(o.value);
     const failed = [d, o].find((r) => r.status === 'rejected');
     if (failed) fail(failed.reason);
@@ -190,6 +196,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
       {stored?.configured && domains && (
         <>
           <div style={subTitleStyle}>{t('admin.mailNode.domainsTitle')}</div>
+          {domainsNodeError && (
+            <div role="alert" data-domains-node-error={domainsNodeError.code} style={{ fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
+              {t('admin.mailNode.domainsNodeUnreachable', { reason: t(mailNodeErrorKey(domainsNodeError.code)) })}
+            </div>
+          )}
           {domains.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.mailNode.domainsEmpty')}</div>}
           {domains.length > 0 && (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -205,15 +216,21 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                   <Fragment key={d.domain}>
                     <tr>
                       <td style={cellStyle}>{d.domain}</td>
-                      <td style={cellStyle}>{t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}</td>
+                      <td style={cellStyle}>
+                        {d.onNode == null ? '—' : t('admin.mailNode.mailboxesCount', { used: d.mailboxes, max: d.maxMailboxes })}
+                      </td>
                       <td style={cellStyle}>
                         {/* The node's own flag, then how far the panel's onboarding of the domain got. */}
-                        {!d.onNode && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
-                        {d.onNode && (d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive'))}
+                        {d.onNode === false && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
+                        {d.onNode == null && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.nodeUnknown')}</span>}
+                        {d.onNode === true && (d.active ? t('admin.mailNode.domainActive') : t('admin.mailNode.domainInactive'))}
                         <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
                           <span data-domain-state={d.state} style={{ color: d.state === 'unknown' ? 'var(--red)' : 'var(--text-primary)' }}>
                             {t(domainStateKey(d.state))}
                           </span>
+                          {d.recreated && (
+                            <span data-recreated-badge style={{ fontSize: 11, color: 'var(--amber)' }}>{t('admin.mailNode.recreatedBadge')}</span>
+                          )}
                           <button
                             type="button"
                             aria-expanded={openDomain === d.domain}

@@ -25,6 +25,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.domain_added': 'admin.audit.actionMailNodeDomainAdded',
   'mail_node.domain_adopted': 'admin.audit.actionMailNodeDomainAdopted',
   'mail_node.domain_state_changed': 'admin.audit.actionMailNodeDomainStateChanged',
+  'mail_node.domain_identity_acknowledged': 'admin.audit.actionMailNodeDomainIdentityAcknowledged',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -35,6 +36,14 @@ const MOVE_REVERTED_DETAIL_KEYS = Object.freeze({
   gone: 'admin.audit.detailMoveRevertedGone',
   destination_gone: 'admin.audit.detailMoveRevertedDestinationGone',
   gave_up: 'admin.audit.detailMoveRevertedGaveUp',
+});
+
+// How a mail_node.domain_state_changed entry moved the domain: "Done", "Mark ready" or "Restart
+// onboarding".
+const DOMAIN_STATE_CHANGE_KEYS = Object.freeze({
+  step_confirmed: 'admin.audit.detailDomainStepConfirmed',
+  marked_ready: 'admin.audit.detailDomainMarkedReady',
+  restarted: 'admin.audit.detailDomainRestarted',
 });
 
 // The settings fields a mail_node.config_changed entry names, as the journal shows them.
@@ -93,7 +102,12 @@ export function auditDetail(entry) {
         ? { key: 'admin.audit.detailProvider', values: { provider: details.oauthProvider } }
         : null;
     case 'mailbox.deleted':
-      return details.mailNode ? { key: 'admin.audit.detailMailNodeMailbox', values: {} } : null;
+      // nodeWarnings: the node deleted the mailbox but said something went wrong on the way (its
+      // maildir could not be moved away), shown as the node wrote it.
+      if (!details.mailNode) return null;
+      return Array.isArray(details.nodeWarnings) && details.nodeWarnings.length
+        ? { key: 'admin.audit.detailMailNodeMailboxWarnings', values: { warnings: details.nodeWarnings.join('; ') } }
+        : { key: 'admin.audit.detailMailNodeMailbox', values: {} };
     case 'mailbox.quota_changed':
       return details.from == null
         ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }
@@ -162,9 +176,14 @@ export function auditDetail(entry) {
       };
     case 'mail_node.domain_state_changed':
       return {
-        key: details.how === 'marked_ready' ? 'admin.audit.detailDomainMarkedReady' : 'admin.audit.detailDomainStepConfirmed',
+        key: DOMAIN_STATE_CHANGE_KEYS[details.how] ?? 'admin.audit.detailDomainStepConfirmed',
         values: { domain: details.domain ?? '' },
         valueKeys: { from: domainStateKey(details.from), to: domainStateKey(details.to) },
+      };
+    case 'mail_node.domain_identity_acknowledged':
+      return {
+        key: 'admin.audit.detailDomainIdentityAcknowledged',
+        values: { domain: details.domain ?? '', from: details.from ?? '', to: details.to ?? '' },
       };
     default:
       return null;

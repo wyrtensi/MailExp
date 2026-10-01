@@ -704,8 +704,10 @@ function contactFromPayload(payload, current = {}) {
 
 // The mail node as an admin sees it in the demo: its domains with their onboarding, the mailboxes
 // made there, the disk. The domains show every kind of row: ready ones (the main domain was taken
-// in at the upgrade because it had mailboxes), one halfway through its onboarding and one made on
-// the node by hand that the panel does not know yet.
+// in at the upgrade because it had mailboxes), one ready domain whose node creation time differs
+// from the one the panel knows (the warning an administrator accepts or answers with a restart),
+// one halfway through its onboarding and one made on the node by hand that the panel does not know
+// yet.
 const DEMO_ADMIN_EMAIL = 'demo@mailexpert.local';
 const demoStep = (at) => ({ at, userId: 'demo-user', email: DEMO_ADMIN_EMAIL });
 
@@ -735,6 +737,11 @@ let mailNodeDomains = [
     steps: { node_configured: demoStep('2026-09-18T10:30:00.000Z'), dns_ok: demoStep('2026-09-18T11:20:00.000Z') },
   }),
   demoDomain({ domain: 'legacy.demo.mailexpert.local', active: true, maxMailboxes: 20, mailboxes: 0 }),
+  demoDomain({ domain: 'branch.demo.mailexpert.local', active: true, maxMailboxes: 100, mailboxes: 0, created: '2026-09-29 16:40:00' }, {
+    state: 'ready', origin: 'created', addedAt: '2026-09-02T09:15:00.000Z', addedBy: DEMO_ADMIN_EMAIL,
+    stateChangedAt: '2026-09-03T12:00:00.000Z', steps: { ready: { ...demoStep('2026-09-03T12:00:00.000Z'), markedReady: true } },
+    recreated: true, nodeCreated: '2026-09-02 09:15:00',
+  }),
 ].sort((a, b) => a.domain.localeCompare(b.domain));
 
 // The EOP settings screen: the defaults with the next hop and certificate filled in, no tenant yet.
@@ -766,10 +773,28 @@ function updateMailNodeDomain(name, change) {
   return mailNodeDomains.find(d => d.domain === name);
 }
 
-// Adopt, "Done" and "mark ready" with the same refusals as the server (routes/mailNode.js).
+// The domain without the warning that the node reports another creation time.
+function withoutRecreatedWarning(name) {
+  mailNodeDomains = mailNodeDomains.map(d => {
+    if (d.domain !== name) return d;
+    const rest = { ...d };
+    delete rest.recreated;
+    delete rest.nodeCreated;
+    return rest;
+  });
+}
+
+// Adopt, "Done", "mark ready", "restart onboarding" and accepting the node's creation time, with
+// the same refusals as the server (routes/mailNode.js).
 function changeMailNodeDomain(action, raw, step) {
   const domain = mailNodeDomainByName(raw);
   const now = new Date().toISOString();
+  if (action === 'acknowledge') {
+    if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+    if (!domain.recreated) throw demoError('The node reports the creation time the panel knows already', 'domain_not_recreated');
+    withoutRecreatedWarning(domain.domain);
+    return mailNodeDomains.find(d => d.domain === domain.domain);
+  }
   if (action === 'adopt') {
     if (domain.state !== 'unknown') throw demoError('The panel knows this domain already', 'domain_known');
     return updateMailNodeDomain(domain.domain, {
@@ -777,6 +802,11 @@ function changeMailNodeDomain(action, raw, step) {
     });
   }
   if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+  if (action === 'restart') {
+    // Mailboxes on the domain stay; the node identity is bound again, so the warning goes too.
+    withoutRecreatedWarning(domain.domain);
+    return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {} });
+  }
   if (action === 'ready') {
     if (!canMarkReady(domain)) throw demoError('The domain is ready already', 'domain_already_ready');
     return updateMailNodeDomain(domain.domain, {
@@ -1171,6 +1201,9 @@ export async function demoRequest(method, path, body = {}) {
     if (account.mail_node && (body?.imap_host !== undefined || body?.smtp_host !== undefined)) {
       throw demoError('Connection settings are locked for a mailbox on the mail node', 'mail_node_connection_locked');
     }
+    if (account.mail_node && body?.enabled !== undefined && !body.enabled && account.enabled !== false) {
+      throw demoError('A mail node mailbox cannot be disabled: delete it instead', 'mail_node_disable_unsupported');
+    }
     const assignable = ['name', 'sender_name', 'color', 'enabled', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port',
       'smtp_tls', 'folder_mappings', 'signature', 'categorization_enabled', 'sort_order', 'include_in_unified_inbox'];
     for (const key of assignable) if (body?.[key] !== undefined) account[key] = body[key];
@@ -1179,7 +1212,14 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'DELETE' && accountMatch) {
     const id = decodeURIComponent(accountMatch[1]);
     const index = ACCOUNT_FIXTURES.findIndex(a => a.id === id);
-    if (index !== -1) ACCOUNT_FIXTURES.splice(index, 1);
+    const [removed] = index !== -1 ? ACCOUNT_FIXTURES.splice(index, 1) : [];
+    // A mail node mailbox is deleted on the node with all its mail, as on the server; the demo's
+    // cached letters of any removed mailbox go with it.
+    messages = messages.filter(m => m.account_id !== id);
+    if (removed?.mail_node) {
+      const domain = normalizeEmail(removed.email_address).split('@')[1];
+      mailNodeDomains = mailNodeDomains.map(d => (d.domain === domain ? { ...d, mailboxes: Math.max(0, d.mailboxes - 1) } : d));
+    }
     mailNodeMailboxes = mailNodeMailboxes.filter(m => m.accountId !== id);
     return { ok: true };
   }
@@ -1592,7 +1632,7 @@ export async function demoRequest(method, path, body = {}) {
     }
     return { ok: true, domain, state: 'node_created' };
   }
-  const domainAction = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(adopt|ready|steps\/([^/]+))$/);
+  const domainAction = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(adopt|ready|restart|acknowledge|steps\/([^/]+))$/);
   if (verb === 'POST' && domainAction) {
     const action = domainAction[2].startsWith('steps/') ? 'step' : domainAction[2];
     const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]));

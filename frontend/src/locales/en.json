@@ -970,7 +970,8 @@
         "domainConfirmSender": "Sends as",
         "domainConfirmSenderAlt": "Or as",
         "senderNameInvalid": "A sender name cannot contain line breaks.",
-        "domainErrorNotReady": "This domain has not finished its onboarding yet: an administrator marks it ready in Settings, Integrations, Mail node."
+        "domainErrorNotReady": "This domain has not finished its onboarding yet: an administrator marks it ready in Settings, Integrations, Mail node.",
+        "domainErrorDisabledOnNode": "The mail node has a disabled mailbox with this address, with letters an earlier version left there. An administrator deletes it in mailcow first, or enables it there to take it over with its letters."
       },
       "presetYahoo": "Yahoo Mail",
       "presetIcloud": "iCloud",
@@ -1018,9 +1019,12 @@
       "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing.",
       "deleteTitle": "Remove mailbox?",
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
-      "deleteMailNodeMessage": "The mailbox leaves MailExpert and is disabled on the mail node: mail to it is refused and its letters stay on the server. Creating the same address again turns it back on.",
+      "deleteMailNodeMessage": "The mailbox {{email}} and all its mail are deleted from MailExpert and from the mail server. This cannot be undone. Mail sent to the address afterwards is refused.",
       "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here.",
-      "mailNodeBadge": "Mail node"
+      "mailNodeBadge": "Mail node",
+      "deleteMailNodeTypeLabel": "Type {{email}} to confirm.",
+      "deleteMailNodeConfirm": "Delete mailbox and mail",
+      "mailNodeDisableUnsupported": "A mailbox on the mail node cannot be disabled: delete it instead."
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1816,7 +1820,7 @@
       "actionMailboxQuotaChanged": "Mailbox quota changed",
       "detailQuotaChanged": "{{from}} MB to {{to}} MB",
       "detailQuotaSet": "now {{to}} MB",
-      "detailMailNodeMailbox": "Mailbox on the mail node, disabled there",
+      "detailMailNodeMailbox": "Mailbox on the mail node, deleted there with its mail",
       "fieldMailHost": "host",
       "fieldApiKey": "API key",
       "fieldQuota": "quota of a new mailbox",
@@ -1828,7 +1832,11 @@
       "fieldTerrl": "TERRL",
       "fieldTenantId": "tenant ID",
       "fieldAppId": "application ID",
-      "fieldThumbprint": "certificate thumbprint"
+      "fieldThumbprint": "certificate thumbprint",
+      "actionMailNodeDomainIdentityAcknowledged": "Domain creation time accepted",
+      "detailDomainRestarted": "{{domain}}: onboarding started over from {{from}}",
+      "detailDomainIdentityAcknowledged": "{{domain}}: the node's creation time {{to}} accepted (was {{from}})",
+      "detailMailNodeMailboxWarnings": "Mailbox on the mail node, deleted there; the node warned: {{warnings}}"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -1958,8 +1966,17 @@
       "errorDomainKnown": "The panel knows this domain already.",
       "errorDomainAlreadyReady": "The domain is ready already.",
       "errorStepOutOfOrder": "Only the next step can be confirmed: reload the list.",
-      "recreatedNote": "The node has a domain of this name again, made by hand after the panel onboarded the old one. Adopt it to start its onboarding over; mailboxes cannot be created on it until then.",
-      "errorDomainRecreated": "The node has another domain of this name now: adopt it again."
+      "recreatedNote": "The node reports another creation time for this domain ({{now}}) than the one the panel knows ({{was}}): the domain may have been deleted on the node and made again by hand, so its settings there may need applying again. Nothing changed in the panel: the domain keeps its state and takes mailboxes as before.",
+      "acknowledge": "Accept the new time",
+      "acknowledgeNote": "When the domain is set up on the node as it should be. If not, restart its onboarding instead.",
+      "restart": "Restart onboarding",
+      "restartNote": "Back to the first step. Mailboxes on the domain and their mail stay.",
+      "restartConfirm": "Start the onboarding of {{domain}} over? The confirmed steps and what the panel recorded about the domain on the node and in the tenant are cleared; the DKIM mode and the send limit stay. Mailboxes on the domain and their mail are not touched. Until the domain is ready again, no new mailbox can be created on it. The change is journaled.",
+      "nodeUnreachableNote": "The mail node could not be asked about this domain now: the panel's record is shown as it is and nothing in it changed.",
+      "domainsNodeUnreachable": "The mail node could not list its domains ({{reason}}). The domains below are the panel's record, unchanged; their state on the node is unknown until it answers again.",
+      "nodeUnknown": "Node not answering",
+      "recreatedBadge": "Check: created again on the node?",
+      "errorDomainNotRecreated": "The node reports the creation time the panel knows already: nothing to accept."
     },
     "eop": {
       "title": "Mail through EOP",

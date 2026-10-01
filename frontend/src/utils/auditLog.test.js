@@ -10,7 +10,9 @@ describe('AUDIT_ACTIONS', () => {
       'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
+      'mail_node.domain_identity_acknowledged',
     ]);
+    assert.equal(auditActionLabelKey('mail_node.domain_identity_acknowledged'), 'admin.audit.actionMailNodeDomainIdentityAcknowledged');
     assert.equal(auditActionLabelKey('mail_node.domain_state_changed'), 'admin.audit.actionMailNodeDomainStateChanged');
     assert.equal(auditActionLabelKey('message.sent'), 'admin.audit.actionMessageSent');
     assert.equal(auditActionLabelKey('mailbox.password_restored'), 'admin.audit.actionMailboxPasswordRestored');
@@ -161,6 +163,26 @@ describe('auditDetail', () => {
       auditDetail({ action: 'mail_node.domain_state_changed', details: { domain: 'a.example', from: 'node_created', to: 'ready', how: 'marked_ready' } }).key,
       'admin.audit.detailDomainMarkedReady',
     );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.domain_state_changed', details: { domain: 'a.example', from: 'ready', to: 'node_created', how: 'restarted' } }),
+      {
+        key: 'admin.audit.detailDomainRestarted', values: { domain: 'a.example' },
+        valueKeys: { from: 'admin.mailNode.stateReady', to: 'admin.mailNode.stateNodeCreated' },
+      },
+    );
+  });
+
+  it('names both creation times when an administrator accepts the one the node reports', () => {
+    assert.deepEqual(
+      auditDetail({
+        action: 'mail_node.domain_identity_acknowledged',
+        details: { domain: 'a.example', from: '2026-09-01 10:00:00', to: '2026-09-30 12:00:00' },
+      }),
+      {
+        key: 'admin.audit.detailDomainIdentityAcknowledged',
+        values: { domain: 'a.example', from: '2026-09-01 10:00:00', to: '2026-09-30 12:00:00' },
+      },
+    );
   });
 
   it('describes a quota change and the delete of a mail node mailbox', () => {
@@ -173,6 +195,10 @@ describe('auditDetail', () => {
       { key: 'admin.audit.detailQuotaSet', values: { to: 10240 } },
     );
     assert.deepEqual(auditDetail({ action: 'mailbox.deleted', details: { mailNode: true } }), { key: 'admin.audit.detailMailNodeMailbox', values: {} });
+    assert.deepEqual(
+      auditDetail({ action: 'mailbox.deleted', details: { mailNode: true, nodeWarnings: ['Could not move maildir to garbage collector: x'] } }),
+      { key: 'admin.audit.detailMailNodeMailboxWarnings', values: { warnings: 'Could not move maildir to garbage collector: x' } },
+    );
     assert.equal(auditDetail({ action: 'mailbox.deleted', details: { mailNode: false } }), null);
   });
 
