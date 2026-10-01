@@ -529,11 +529,16 @@ router.get('/:id/node-aliases', async (req, res) => {
 // The reason someone gives for deleting a node mailbox: required, kept in the journal for good.
 const MAX_DELETION_REASON = 500;
 
-// The reason as stored: trimmed, control characters other than line breaks turned into spaces.
+// The reason as stored: line breaks made \n, invisible format characters (bidi controls,
+// zero-width marks) removed, other control characters turned into spaces, then trimmed.
 function parseDeletionReason(value) {
   if (typeof value !== 'string') return { error: 'deletion_reason_required' };
-  // eslint-disable-next-line no-control-regex
-  const reason = value.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ').trim();
+  const reason = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/\p{Cf}/gu, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ')
+    .trim();
   if (!reason) return { error: 'deletion_reason_required' };
   if (reason.length > MAX_DELETION_REASON) return { error: 'deletion_reason_too_long' };
   return { reason };
@@ -560,10 +565,15 @@ function refuseDeletion(res, code) {
 // repeats the mailbox's address, as typed in the confirmation, and says why ({ email, reason }).
 // Nothing is asked of the node now.
 router.post('/:id/deletion', async (req, res) => {
-  const { rows } = await query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [req.params.id]);
+  const { rows } = await query('SELECT id, email_address, mail_node, imap_host FROM email_accounts WHERE id = $1', [req.params.id]);
   if (!rows.length) return refuseDeletion(res, 'account_not_found');
   if (!rows[0].mail_node) return refuseDeletion(res, 'not_mail_node');
   if (!(await mayDeleteAccount(req, rows[0]))) return res.status(403).json({ error: 'Admin access required' });
+  // Refused up front what the deletion job could never do: without the node settings, or for a
+  // mailbox on another host than the node they name.
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
+  if (refusedOtherHost(res, rows[0], cfg)) return undefined;
   const typed = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   if (typed !== String(rows[0].email_address).trim().toLowerCase()) return refuseDeletion(res, 'confirmation_mismatch');
   const { reason, error } = parseDeletionReason(req.body?.reason);

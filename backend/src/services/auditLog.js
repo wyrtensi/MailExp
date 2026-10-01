@@ -62,3 +62,14 @@ export function recordAudit(entries) {
     }
   })();
 }
+
+// Records journal entries inside the caller's transaction (client: the transaction's client), so
+// the entry and the change it describes are written together or not at all. Unlike recordAudit it
+// throws: a failure rolls the change back.
+export async function insertAuditEntries(client, entries) {
+  const list = Array.isArray(entries) ? entries : [entries];
+  const unknown = list.find((entry) => !KNOWN_ACTIONS.has(entry?.action));
+  if (unknown) throw new Error(`Unknown audit action: ${unknown?.action}`);
+  if (!list.length) return;
+  await client.query(INSERT_SQL, [JSON.stringify(list.map(toRow))]);
+}

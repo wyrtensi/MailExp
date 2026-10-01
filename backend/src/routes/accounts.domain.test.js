@@ -323,10 +323,25 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
-    it('keeps line breaks of the reason and turns other control characters into spaces', async () => {
+    it('keeps line breaks of the reason, drops invisible format characters and turns other control characters into spaces', async () => {
       nodeRow();
-      await askDelete({ email: 'info@example.com', reason: 'Closed\nby\u0007 order' });
-      expect(requestDeletion).toHaveBeenCalledWith(expect.objectContaining({ reason: 'Closed\nby  order' }));
+      await askDelete({ email: 'info@example.com', reason: 'Closed\r\nby\u0007 order‮​ done\rok' });
+      expect(requestDeletion).toHaveBeenCalledWith(expect.objectContaining({ reason: 'Closed\nby  order done\nok' }));
+    });
+
+    it('refuses the request up front without the mail node, or for a mailbox on another host', async () => {
+      node.cfg = null;
+      nodeRow();
+      let res = await askDelete({ email: 'info@example.com', reason: 'r' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mail_node_not_configured');
+      node.cfg = CFG;
+      nodeRow({ imap_host: 'old-node.example.com' });
+      res = await askDelete({ email: 'info@example.com', reason: 'r' });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mail_node_host_mismatch');
+      expect(requestDeletion).not.toHaveBeenCalled();
+      expect(recordAudit).not.toHaveBeenCalled();
     });
 
     it('refuses a request for another mailbox, an unknown one and one already pending', async () => {

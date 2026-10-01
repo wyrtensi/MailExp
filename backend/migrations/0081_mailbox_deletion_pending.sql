@@ -9,13 +9,17 @@
 -- the row is gone; a cancel clears it here (the journal keeps the request).
 -- delete_after: when the job deletes the mailbox for good; NULL means no deletion is pending. The
 -- job never touches a row whose delete_after is NULL or in the future.
+-- deletion_started_at: the job's claim on a due row while it deletes it on the node; a cancel is
+-- refused while a claim exists, and a claim older than 10 minutes (a run that stopped) is taken
+-- again by the next run.
 -- deletion_attempts, deletion_next_attempt_at, deletion_last_error: the job's retries after a
--- failure on the node (backoff) and the last reason, shown to the administrators.
+-- failure (backoff) and the last reason as a code the screens translate.
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_requested_at timestamptz;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_requested_by uuid REFERENCES users(id) ON DELETE SET NULL;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_requested_by_email text;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_reason text;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS delete_after timestamptz;
+ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_started_at timestamptz;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_attempts integer NOT NULL DEFAULT 0;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_next_attempt_at timestamptz;
 ALTER TABLE email_accounts ADD COLUMN IF NOT EXISTS deletion_last_error text;
