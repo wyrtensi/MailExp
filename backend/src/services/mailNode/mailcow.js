@@ -162,9 +162,9 @@ function refusal(body) {
 }
 
 // judge: false leaves the answer of a POST to the caller (delete/mailbox mixes warnings with its
-// success). text: the answer as text, for the few calls that print instead of answering JSON
-// (get/postcat).
-async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS, text = false } = {}) {
+// success). textLimit: the answer as text of at most that many bytes ({ text, truncated }), for
+// the few calls that print instead of answering JSON (get/postcat).
+async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS, textLimit = 0 } = {}) {
   let res;
   try {
     // allowPrivate: on a one-server install <MAIL_HOST> resolves to this host's own address.
@@ -186,7 +186,7 @@ async function request(cfg, method, path, body, { judge = true, timeoutMs = REQU
     throw new MailNodeError('mail_node_auth', 'The mail node refused the API key');
   }
   if (!res.ok) throw new MailNodeError('mail_node_failed', `The mail node answered HTTP ${res.status}`);
-  if (text) return res.text();
+  if (textLimit) return textCapped(res, textLimit);
   let data;
   try {
     data = await res.json();
@@ -614,10 +614,45 @@ export async function listQueue(cfg) {
     });
 }
 
+// A queued message can be up to Postfix's message_size_limit; the panel reads at most this much of
+// its postcat dump (the envelope and the headers come first).
+export const MAX_POSTCAT_BYTES = 2 * 1024 * 1024;
+
+// An answer as text, stopping after maxBytes: { text, truncated }.
+async function textCapped(res, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  let truncated = false;
+  if (res.body?.getReader) {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const room = maxBytes - size;
+      if (value.byteLength > room) {
+        chunks.push(Buffer.from(value.subarray(0, room)));
+        truncated = true;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+      chunks.push(Buffer.from(value));
+      size += value.byteLength;
+    }
+  } else {
+    const whole = Buffer.from(await res.text());
+    truncated = whole.length > maxBytes;
+    chunks.push(truncated ? whole.subarray(0, maxBytes) : whole);
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), truncated };
+}
+
 // The queued message as `postcat -q` prints it (envelope records, the message, extracted headers),
-// or what postcat said instead when the message is gone.
+// or what postcat said instead when the message is gone: { text, truncated } (cut at
+// MAX_POSTCAT_BYTES).
 export async function getQueuedMessageText(cfg, queueId) {
-  return request(cfg, 'GET', `get/postcat/${encodeURIComponent(queueId)}`, undefined, { text: true, timeoutMs: QUEUE_LIST_TIMEOUT_MS });
+  return request(cfg, 'GET', `get/postcat/${encodeURIComponent(queueId)}`, undefined, {
+    textLimit: MAX_POSTCAT_BYTES, timeoutMs: QUEUE_LIST_TIMEOUT_MS,
+  });
 }
 
 // hold, unhold or deliver for the given queue ids. deliver answers success whatever postqueue did.
@@ -637,13 +672,28 @@ export async function deleteQueued(cfg, queueIds) {
 
 // The last `lines` lines of the Postfix log, newest first, as mailcow keeps them:
 // [{ time: "<unix seconds>", program, priority, message }]. Parsed by services/mailNode/postfixLog.js.
+// mailcow answers {} when Redis has no lines; Postfix logs all the time, so that, an empty list or
+// anything else that is no list of lines is a failure (mail_node_failed), never "nothing happened".
 export async function getPostfixLog(cfg, lines) {
   const data = await request(cfg, 'GET', `get/logs/postfix/${lines}`, undefined, { timeoutMs: LOG_TIMEOUT_MS });
-  return Array.isArray(data) ? data : [];
+  if (!Array.isArray(data) || !data.length) {
+    throw new MailNodeError('mail_node_failed', 'The mail node returned no Postfix log');
+  }
+  return data;
 }
 
-// The node's containers: [{ name, state ('running', 'exited', 'restarting', ...), startedAt, image }].
-// mailcow answers an object keyed by container name.
+// The node's alias domains (get/alias-domain/all), lower case: mail to them is the node's own.
+export async function listAliasDomains(cfg) {
+  return asList(await request(cfg, 'GET', 'get/alias-domain/all'))
+    .map((d) => String(d.alias_domain ?? '').trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// The node's containers: [{ name, state ('running', 'exited', 'restarting', ...), health, startedAt,
+// image }]. mailcow answers an object keyed by container name. health: Docker's health status
+// ('healthy', 'unhealthy', 'starting') when the answer carries it, else null; mailcow 2026-09 sends
+// only the state (json_api.php status/containers), so an unhealthy but running container shows only
+// with a mailcow that adds it.
 export async function getContainers(cfg) {
   const data = await request(cfg, 'GET', 'get/status/containers');
   if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -654,6 +704,10 @@ export async function getContainers(cfg) {
     .map(([key, c]) => ({
       name: String(c.container ?? key),
       state: String(c.state ?? '').toLowerCase(),
+      health: (() => {
+        const health = c.health ?? c.health_status ?? c.State?.Health?.Status;
+        return health ? String(health).toLowerCase() : null;
+      })(),
       startedAt: c.started_at ? String(c.started_at) : null,
       image: c.image ? String(c.image) : null,
     }))

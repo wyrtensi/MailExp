@@ -18,17 +18,17 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => ({
     if (node.queue instanceof Error) throw node.queue;
     return node.queue;
   }),
-  getQueuedMessageText: vi.fn(async () => node.postcat),
+  getQueuedMessageText: vi.fn(async () => ({ text: node.postcat, truncated: false })),
   queueAction: vi.fn(async () => {}),
   flushQueue: vi.fn(async () => {}),
   deleteQueued: vi.fn(async () => {}),
-}));
-vi.mock('../services/mailNode/postfixLog.js', async (importActual) => ({
-  ...(await importActual()),
-  readPostfixLog: vi.fn(async () => {
+  // The log goes through the real, shared reader (services/mailNode/postfixLog.js).
+  getPostfixLog: vi.fn(async () => {
+    await new Promise((resolve) => { setTimeout(resolve, 5); });
     if (node.log instanceof Error) throw node.log;
     return node.log;
   }),
+  listAliasDomains: vi.fn(async () => ['alias.test']),
 }));
 vi.mock('../services/mailNode/terrl.js', async (importActual) => ({
   ...(await importActual()),
@@ -50,7 +50,9 @@ vi.mock('../services/mailNode/eopSettings.js', async (importActual) => ({
 import express from 'express';
 import mailNodeRoutes from './mailNode.js';
 import { recordAudit } from '../services/auditLog.js';
-import { MailNodeError, deleteQueued, flushQueue, queueAction } from '../services/mailNode/mailcow.js';
+import { MailNodeError, deleteQueued, flushQueue, getPostfixLog, queueAction } from '../services/mailNode/mailcow.js';
+import { clearPostfixLogCache } from '../services/mailNode/postfixLog.js';
+import { clearAliasDomainCache } from '../services/mailNode/terrl.js';
 import { checkAlertsNow, saveAlertSettings } from '../services/mailNode/nodeAlerts.js';
 import { computeTerrlBudget } from '../services/mailNode/terrl.js';
 
@@ -82,7 +84,9 @@ describe('/api/mail-node node operations', () => {
     node.cfg = CFG;
     node.queue = [ITEM];
     node.postcat = POSTCAT;
-    node.log = { lines: [], oldestAt: null };
+    node.log = [{ time: '1790881379', program: 'postfix/qmgr', priority: 'info', message: '53A99193F13: removed' }];
+    clearPostfixLogCache();
+    clearAliasDomainCache();
     alerts.state = { at: '2026-10-01T19:10:00.000Z', alerts: [], errors: [] };
   });
 
@@ -186,8 +190,43 @@ describe('/api/mail-node node operations', () => {
 
   it('gives the TERRL budget, from the journal alone when the node does not answer', async () => {
     expect(await (await call('GET', '/eop/budget')).json()).toMatchObject({ used: 3, limit: 100, log: { read: true } });
+    expect(computeTerrlBudget).toHaveBeenLastCalledWith(expect.objectContaining({ aliasDomains: ['alias.test'] }));
+    clearPostfixLogCache();
     node.log = new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)');
     expect(await (await call('GET', '/eop/budget')).json()).toMatchObject({ log: { read: false } });
     expect(computeTerrlBudget).toHaveBeenLastCalledWith(expect.objectContaining({ log: null, eop: { eopHost: 'eop.test.local', terrl: 100 } }));
+  });
+
+  it('reads the node log once for budget requests close together', async () => {
+    const answers = await Promise.all([call('GET', '/eop/budget'), call('GET', '/eop/budget'), call('GET', '/eop/budget')]);
+    expect(answers.map((r) => r.status)).toEqual([200, 200, 200]);
+    await call('GET', '/eop/budget');
+    expect(getPostfixLog).toHaveBeenCalledTimes(1);
+    expect(computeTerrlBudget).toHaveBeenCalledTimes(4);
+  });
+
+  it('journals reading a body, with the id and the envelope only', async () => {
+    await call('GET', '/queue/53A99193F13');
+    expect(recordAudit).not.toHaveBeenCalled();
+    await call('GET', '/queue/53A99193F13?body=1');
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'admin-1', action: 'mail_node.queue_action',
+      details: { action: 'view_body', queueId: '53A99193F13', queue: 'deferred', sender: 'someone@stage.test', recipients: ['test@example.com'] },
+    });
+  });
+
+  it('answers 502, not 404, when postcat fails some other way', async () => {
+    node.postcat = 'err: invalid';
+    const res = await call('GET', '/queue/53A99193F13');
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('mail_node_failed');
+  });
+
+  it('refuses "try now" for a held message', async () => {
+    node.queue = [{ ...ITEM, queue: 'hold' }];
+    const res = await call('POST', '/queue/53A99193F13/deliver');
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('queue_item_held');
+    expect(queueAction).not.toHaveBeenCalled();
   });
 });

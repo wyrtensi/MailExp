@@ -65,6 +65,17 @@ export const SENT_TO_EOP_ADDRESS = Object.freeze({
   time: '1790881501', program: 'postfix/smtp', priority: 'info',
   message: '8B2C3D4E5F6: to=<partner@example.org>, relay=contoso-com.mail.protection.outlook.com[2a01:111:f403:c800::1]:25, delay=0.9, delays=0.1/0/0.4/0.4, dsn=2.6.0, status=sent (250 2.6.0 <id@example> [InternalId=1] Queued mail for delivery)',
 });
+// Made up: mail handed straight to a recipient's Microsoft 365 MX (another tenant's EOP, inside the
+// EOP ranges): not this tenant's path, so a bypass while <EOP_HOST> names this tenant's.
+export const SENT_TO_RECIPIENT_M365_MX = Object.freeze({
+  time: '1790881502', program: 'postfix/smtp', priority: 'info',
+  message: '9D3E4F5A6B7: to=<buyer@m365cust.com>, relay=m365cust-com.mail.protection.outlook.com[52.101.10.5]:25, delay=0.8, delays=0.1/0/0.3/0.4, dsn=2.6.0, status=sent (250 2.6.0 <id@example> [InternalId=2] Queued mail for delivery)',
+});
+// A message a header check threw away (Postfix's format).
+export const DISCARDED = Object.freeze({
+  time: '1790881503', program: 'postfix/discard', priority: 'info',
+  message: 'AE4F5A6B7C8: to=<nobody@example.org>, relay=none, delay=0.1, delays=0.1/0/0/0, dsn=2.0.0, status=sent (discarded by header check)',
+});
 // A message qmgr gave up on (Postfix's format; not seen on the stand).
 export const EXPIRED = Object.freeze({
   time: '1790881600', program: 'postfix/qmgr', priority: 'info',

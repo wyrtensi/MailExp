@@ -77,9 +77,9 @@ import {
   parseQueueId,
   queueAction,
 } from '../services/mailNode/mailcow.js';
-import { parsePostcat, summarizeQueue } from '../services/mailNode/mailQueue.js';
+import { parsePostcat, postcatGone, summarizeQueue } from '../services/mailNode/mailQueue.js';
 import { readPostfixLog } from '../services/mailNode/postfixLog.js';
-import { TERRL_WINDOW_MS, computeTerrlBudget } from '../services/mailNode/terrl.js';
+import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from '../services/mailNode/terrl.js';
 import {
   ALERT_DEFAULTS,
   MAX_DEFERRED_COUNT,
@@ -147,6 +147,7 @@ const ERRORS = {
   queue_action_invalid: [400, 'Queue action must be hold, unhold, deliver or delete'],
   queue_delete_unconfirmed: [400, 'Deleting a queued message must be confirmed'],
   queue_item_not_found: [404, 'The mail queue has no message with this ID'],
+  queue_item_held: [409, 'A held message is released first, then delivered'],
   deferred_count_invalid: [400, `Deferred message threshold must be a whole number from 1 to ${MAX_DEFERRED_COUNT}`],
   deferred_minutes_invalid: [400, `Deferred age threshold must be a whole number of minutes from 1 to ${MAX_DEFERRED_MINUTES}`],
   alert_check_failed: [502, 'The alert check failed'],
@@ -693,20 +694,35 @@ router.get('/queue', requireAdmin, async (req, res) => {
   }
 });
 
-// One queued message: its envelope and headers; the body only with ?body=1 (cut at 64 KB).
+// One queued message: its envelope and headers; the body only with ?body=1 (cut at 64 KB), and
+// reading the body is journaled (the id and the envelope, never the body). Postcat's dump is read
+// up to 2 MB. Gone from the queue -> 404; any other answer that is no dump -> 502.
 router.get('/queue/:queueId', requireAdmin, async (req, res) => {
   const queueId = parseQueueId(req.params.queueId);
   if (!queueId) return refuse(res, 'queue_id_invalid');
   const cfg = await nodeConfigOr(res);
   if (!cfg) return undefined;
-  let text;
+  let dump;
   try {
-    text = await getQueuedMessageText(cfg, queueId);
+    dump = await getQueuedMessageText(cfg, queueId);
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  const message = parsePostcat(text, { withBody: req.query.body === '1' });
-  if (!message) return refuse(res, 'queue_item_not_found');
+  const withBody = req.query.body === '1';
+  const message = parsePostcat(dump.text, { withBody, truncated: dump.truncated });
+  if (!message) {
+    if (postcatGone(dump.text)) return refuse(res, 'queue_item_not_found');
+    return mailNodeFailure(res, new MailNodeError('mail_node_failed', 'The mail node did not show the queued message'));
+  }
+  if (withBody) {
+    recordAudit({
+      actorUserId: req.session.userId, action: 'mail_node.queue_action',
+      details: {
+        action: 'view_body', queueId, queue: message.queue,
+        sender: message.envelope.sender ?? '', recipients: message.envelope.recipients,
+      },
+    });
+  }
   return res.json(message);
 });
 
@@ -739,6 +755,8 @@ router.post('/queue/:queueId/:action', requireAdmin, async (req, res) => {
   try {
     item = (await listQueue(cfg)).find((entry) => entry.queueId === queueId);
     if (!item) return refuse(res, 'queue_item_not_found');
+    // postqueue -i does not release a held message: it is released first, by "Release".
+    if (action === 'deliver' && item.queue === 'hold') return refuse(res, 'queue_item_held');
     if (action === 'delete') await deleteQueued(cfg, [queueId]);
     else await queueAction(cfg, [queueId], action);
   } catch (err) {
@@ -780,8 +798,10 @@ router.put('/alerts/settings', requireAdmin, async (req, res) => {
 });
 
 // The TERRL budget now: unique external recipients of the last 24 hours against the limit
-// (services/mailNode/terrl.js). The node's log is read for what the journal does not see; when the
-// node does not answer, the journal alone counts (log.read: false).
+// (services/mailNode/terrl.js). The node's log is read for what the journal does not see, through
+// the shared read of the alert job (a minute's cache, one read at a time), so opening the EOP
+// screen does not ask the node for 10000 lines each time; when the node does not answer, the
+// journal alone counts (log.read: false).
 router.get('/eop/budget', requireAdmin, async (req, res) => {
   const now = Date.now();
   const [eop, cfg] = await Promise.all([getEopSettings(), getMailNodeConfig()]);
@@ -791,7 +811,8 @@ router.get('/eop/budget', requireAdmin, async (req, res) => {
       throw err;
     })
     : null;
-  res.json(await computeTerrlBudget({ eop, log, now }));
+  const aliasDomains = cfg ? await aliasDomainsOf(cfg) : [];
+  res.json(await computeTerrlBudget({ eop, log, aliasDomains, now }));
 });
 
 export default router;

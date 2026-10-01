@@ -1,5 +1,4 @@
 import { getPostfixLog } from './mailcow.js';
-import { isEopAddress } from './eopRanges.js';
 
 // The node's Postfix log as the mailcow API gives it (get/logs/postfix/<lines>), parsed line by line
 // and tied together by queue id. The alerts (services/mailNode/nodeAlerts.js: EOP refusal codes and
@@ -20,7 +19,8 @@ import { isEopAddress } from './eopRanges.js';
 //   to, origTo, from: addresses without <> (from may be '' for the null sender) | null,
 //   relay: the relay= value as written | null, relayHost, relayIp, relayPort: its parts | null,
 //   dsn: '4.7.500' | null, status: sent|deferred|bounced|expired|undeliverable|deliverable | null,
-//   statusText: the text in parentheses after status= (the remote reply) | null,
+//   statusText: the text in parentheses after status=, to the end of the line | null,
+//   reply: the remote server's words in it (after "said: ", without "(in reply to ...)") | null,
 //   delay: seconds | null, messageId: '<id@host>' | null, size, nrcpt: numbers | null,
 //   notificationQueueId: the queue id of the bounce or delay notice a bounce line names | null,
 //   message: the line as logged (folded to one line),
@@ -54,23 +54,29 @@ const DELIVERY_STATUSES = new Set(['sent', 'deferred', 'bounced', 'undeliverable
 // queue actions take only hex ids; the reader reads both.
 const LONG_ID_CHARS = '0-9B-DF-HJ-NP-TV-Zb-df-hj-np-tv-y';
 const QUEUE_ID_RE = new RegExp(`^(?:[0-9A-F]{6,20}|(?=.{12,24}$)[${LONG_ID_CHARS}]+z[${LONG_ID_CHARS}]+)$`);
-const LOCAL_SERVICES = new Set(['lmtp', 'local', 'virtual', 'pipe']);
+// discard: a message a rule threw away (relay=none), never sent anywhere.
+const LOCAL_SERVICES = new Set(['lmtp', 'local', 'virtual', 'pipe', 'discard']);
 
-// The text of the outermost parentheses that start right after `status=<word> `, up to the matching
-// closing one (the remote reply quotes parentheses of its own, e.g. "(S77) (in reply to ...)").
+// The text of the status block: from the parenthesis right after `status=<word> ` to the closing
+// parenthesis that ends the line. The block is the last thing Postfix writes on a delivery line, and
+// the remote reply inside it may hold parentheses of its own, balanced ("(S77) (in reply to ...)") or
+// not ("550 :) nope"), so the end of the line is the only safe end. A line cut off before its closing
+// parenthesis keeps what is there.
 function statusText(message, from) {
-  const open = message.indexOf('(', from);
-  if (open < 0) return null;
-  let depth = 0;
-  for (let i = open; i < message.length; i += 1) {
-    if (message[i] === '(') depth += 1;
-    else if (message[i] === ')') {
-      depth -= 1;
-      if (depth === 0) return message.slice(open + 1, i);
-    }
-  }
-  // A line cut off before its closing parenthesis keeps what is there.
-  return message.slice(open + 1);
+  const rest = message.slice(from);
+  const match = /^\s*\(/.exec(rest);
+  if (!match) return null;
+  const body = rest.slice(match[0].length);
+  return body.endsWith(')') ? body.slice(0, -1) : body;
+}
+
+// The remote server's own words in a status text: what follows "said: ", without Postfix's
+// "(in reply to ... command)" at the end. Null when the text quotes no remote server.
+export function remoteReply(text) {
+  if (!text) return null;
+  const said = text.indexOf(' said: ');
+  if (said < 0) return null;
+  return text.slice(said + ' said: '.length).replace(/\s*\(in reply to [^()]*\)\s*$/, '');
 }
 
 // relay=host[address]:port, relay=host[address], relay=none, relay=local.
@@ -146,6 +152,7 @@ export function parsePostfixEntry(entry) {
 
   const statusMatch = /(?:^|[\s,])status=([a-z]+)/.exec(rest);
   const status = statusMatch ? statusMatch[1] : null;
+  const text = statusMatch ? statusText(rest, statusMatch.index + statusMatch[0].length) : null;
   const relay = field(rest, 'relay');
   const notice = service === 'bounce' ? /notification: ([0-9A-Za-z]+)\s*$/.exec(rest) : null;
   const messageIdMatch = /^message-id=(\S*)/.exec(rest);
@@ -163,7 +170,8 @@ export function parsePostfixEntry(entry) {
     ...parseRelay(relay),
     dsn: field(rest, 'dsn'),
     status,
-    statusText: statusMatch ? statusText(rest, statusMatch.index + statusMatch[0].length) : null,
+    statusText: text,
+    reply: remoteReply(text),
     delay: numberOr(field(rest, 'delay')),
     messageId: messageIdMatch ? messageIdMatch[1] || null : null,
     size: numberOr(field(rest, 'size')),
@@ -219,35 +227,69 @@ export function correlateByQueueId(lines) {
   return messages;
 }
 
-// Reads the last `lines` lines of the node's Postfix log: { lines (parsed, oldest first), fetched,
-// malformed, oldestAt, newestAt, covered }. covered: with `since` (ms), whether the oldest line read
-// is at or before it, so nothing between `since` and now is missing; without, null. A node failure
-// is thrown (MailNodeError).
-export async function readPostfixLog(cfg, { lines = DEFAULT_LOG_LINES, since = null } = {}) {
-  const count = Math.min(Math.max(1, Math.trunc(lines) || DEFAULT_LOG_LINES), MAX_LOG_LINES);
+// How long a read of the log serves every caller: the alert job (every five minutes) and the TERRL
+// budget of the EOP screen share one read instead of each asking the node for 10000 lines.
+export const LOG_CACHE_MS = 60 * 1000;
+const cache = new Map();
+
+async function fetchLog(cfg, count) {
   const entries = await getPostfixLog(cfg, count);
   const parsed = parsePostfixLog(entries);
   const timed = parsed.lines.filter((line) => line.epoch != null);
-  const oldest = timed[0]?.epoch ?? null;
-  const newest = timed.at(-1)?.epoch ?? null;
   return {
     lines: parsed.lines,
     fetched: entries.length,
     malformed: parsed.malformed,
-    oldestAt: oldest ? new Date(oldest).toISOString() : null,
-    newestAt: newest ? new Date(newest).toISOString() : null,
-    covered: since == null ? null : oldest != null && oldest <= since,
+    oldest: timed[0]?.epoch ?? null,
+    newest: timed.at(-1)?.epoch ?? null,
   };
 }
 
-// Where a delivery line handed the message: 'local' (Dovecot over LMTP, or Postfix's local,
-// virtual or pipe delivery), 'eop' (relay named <EOP_HOST>, or an address in the EOP ranges), or
-// 'other'. eopHost: the EOP settings' next hop, lowercase; ranges: a test's own EOP ranges.
-export function relayKind(line, { eopHost = null, ranges = null } = {}) {
+// Forgets every cached read (tests; a new node).
+export function clearPostfixLogCache() {
+  cache.clear();
+}
+
+// Reads the last `lines` lines of the node's Postfix log: { lines (parsed, oldest first), fetched,
+// malformed, oldestAt, newestAt, covered }. covered: with `since` (ms), whether the oldest line read
+// is at or before it, so nothing between `since` and now is missing; without, null. A node failure
+// is thrown (MailNodeError), and so is an answer without a single line (services/mailNode/mailcow.js
+// getPostfixLog): a node always logs something, so an empty answer is a failure, not a quiet node.
+//
+// Single flight with a short cache: callers within LOG_CACHE_MS of a read (or while it runs) get
+// that read; a failed read is not kept. maxAgeMs: 0 asks the node again.
+export async function readPostfixLog(cfg, { lines = DEFAULT_LOG_LINES, since = null, maxAgeMs = LOG_CACHE_MS } = {}) {
+  const count = Math.min(Math.max(1, Math.trunc(lines) || DEFAULT_LOG_LINES), MAX_LOG_LINES);
+  const key = `${cfg.mailHost}|${count}`;
+  let entry = cache.get(key);
+  if (!entry || Date.now() - entry.at >= maxAgeMs) {
+    entry = { at: Date.now(), promise: fetchLog(cfg, count) };
+    cache.set(key, entry);
+    const own = entry;
+    own.promise.catch(() => {
+      if (cache.get(key) === own) cache.delete(key);
+    });
+  }
+  const read = await entry.promise;
+  return {
+    lines: read.lines,
+    fetched: read.fetched,
+    malformed: read.malformed,
+    oldestAt: read.oldest ? new Date(read.oldest).toISOString() : null,
+    newestAt: read.newest ? new Date(read.newest).toISOString() : null,
+    covered: since == null ? null : read.oldest != null && read.oldest <= since,
+  };
+}
+
+// Where a delivery line handed the message: 'local' (Dovecot over LMTP, Postfix's local, virtual or
+// pipe delivery, or the discard service), 'eop' (relay named <EOP_HOST>), or 'other'. eopHost: the
+// EOP settings' next hop. Only the name counts: a relay inside the EOP ranges under another name
+// (another tenant's MX, mail.protection.outlook.com of a recipient's domain) is not this tenant's
+// path through EOP. Without eopHost nothing is 'eop'.
+export function relayKind(line, { eopHost = null } = {}) {
   if (LOCAL_SERVICES.has(line.service)) return 'local';
   if (line.relayHost === 'local' || line.relayHost === 'virtual') return 'local';
   const host = String(line.relayHost ?? '').replace(/\.$/, '');
   if (eopHost && host && host === String(eopHost).toLowerCase().replace(/\.$/, '')) return 'eop';
-  if (line.relayIp && isEopAddress(line.relayIp, ranges)) return 'eop';
   return 'other';
 }

@@ -2,11 +2,13 @@ import { BlockList, isIP } from 'node:net';
 
 // The addresses Microsoft Exchange Online Protection sends and receives SMTP from: the Microsoft 365
 // endpoints web service, worldwide instance, the Exchange entry with TCP 25 (eop-panel-requirements.md,
-// section 2.10). The bypass check (R-19, services/mailNode/nodeAlerts.js) counts a relay inside these
-// ranges as EOP even when its name is not <EOP_HOST>.
+// section 2.10), for the node's forwarding hosts and firewall (R-12, R-40). The bypass check (R-19)
+// does not use them: an address in these ranges is any tenant's EOP, a recipient's Microsoft 365 MX
+// included, so only the name <EOP_HOST> marks this tenant's path.
 //
 // A static list on purpose: the panel makes no call to Microsoft. To update it, run
-// `node scripts/update-eop-ranges.mjs` in backend/ (it asks endpoints.office.com, filters the entries
+// `EOP_CLIENT_REQUEST_ID=<the installation's GUID> node scripts/update-eop-ranges.mjs` in backend/
+// (it asks endpoints.office.com, filters the entries
 // with rangesFromEndpoints below and prints the new EOP_RANGES block to paste here) and bump
 // `version` and `retrieved`. A later stage (R-40) keeps the list current by itself.
 export const EOP_RANGES = Object.freeze({

@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({ query: vi.fn() }));
 
 import { parsePostfixLog } from './postfixLog.js';
-import { BYPASS_SENT, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP } from './postfixLog.fixtures.js';
+import {
+  BYPASS_SENT, SENT_TO_EOP_ADDRESS, SENT_TO_RECIPIENT_M365_MX, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP,
+} from './postfixLog.fixtures.js';
 import {
   eopRecipientsInLog, externalRecipients, rampPercent, recipientAddress, tenantAgeDays, terrlBudget, terrlFromLicenses, terrlLimit,
 } from './terrl.js';
@@ -76,6 +78,12 @@ describe('eopRecipientsInLog', () => {
     const { lines } = parsePostfixLog([BYPASS_SENT, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP]);
     expect(eopRecipientsInLog(lines, { since: 0, eopHost: 'eop.test.local' })).toEqual(['test@example.com']);
     expect(eopRecipientsInLog(lines, { since: Date.parse('2026-10-02T00:00:00Z'), eopHost: 'eop.test.local' })).toEqual([]);
+  });
+
+  it('does not count mail to a recipient\'s Microsoft 365 MX, nor anything without <EOP_HOST>', () => {
+    const { lines } = parsePostfixLog([SENT_TO_RECIPIENT_M365_MX, SENT_TO_EOP_ADDRESS, STAND_SENT_VIA_EOP]);
+    expect(eopRecipientsInLog(lines, { since: 0, eopHost: 'eop.test.local' })).toEqual(['test@example.com']);
+    expect(eopRecipientsInLog(lines, { since: 0, eopHost: null })).toEqual([]);
   });
 });
 

@@ -7,7 +7,7 @@ import { getNodeDnsCheck } from './dnsCheckJob.js';
 import { SYSTEM_ACTOR } from './domains.js';
 import { summarizeQueue } from './mailQueue.js';
 import { readPostfixLog, relayKind } from './postfixLog.js';
-import { TERRL_WINDOW_MS, computeTerrlBudget } from './terrl.js';
+import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from './terrl.js';
 
 // The mail node's alerts (R-18): what an administrator must hear about before the employees notice,
 // checked every five minutes and shown in the panel, and pinged to a Healthchecks-style check URL
@@ -17,21 +17,25 @@ import { TERRL_WINDOW_MS, computeTerrlBudget } from './terrl.js';
 // - log: in the node's Postfix log of the last hour, a delivery refused with 5.7.711 / AS(2204)
 //   (EOP blocked the inbound connector), 5.7.64 (tenant attribution: the node's certificate or its
 //   chain), 5.7.233 or 5.7.232 (the tenant's external recipient limit; a trial tenant's), and any
-//   status=sent handed neither to EOP (relay named <EOP_HOST> or inside the EOP ranges) nor to local
-//   delivery: mail that went around EOP (R-19);
+//   status=sent handed neither to EOP (the relay named <EOP_HOST>) nor to local delivery: mail that
+//   went around EOP (R-19). Only the name counts: an address inside the EOP ranges under another
+//   name is another tenant's MX (a recipient on Microsoft 365), not this tenant's path. Without
+//   <EOP_HOST> there is no bypass check, only the note eop_host_missing (information, never /fail);
 // - queue: more deferred messages than the threshold, or the oldest deferred older than it;
 // - certificate: the last DNS check of the node (services/mailNode/dnsCheckJob.js) found the
 //   certificate of <MAIL_HOST> on 587 expiring in under 14 days or expired;
-// - containers: a mailcow container that is not running;
+// - containers: a mailcow container that is not running, or reported unhealthy;
 // - terrl: the tenant's external recipients of the last 24 hours at 80 percent of the limit or more
-//   (services/mailNode/terrl.js).
+//   (services/mailNode/terrl.js). It counts the log too, so when the log could not be read the
+//   budget keeps its previous alert instead of falling back to the journal and flapping.
 //
 // What it keeps: the settings in integration_config 'mail_node_alerts' (ping URL, thresholds), the
 // last run in 'mail_node_alert_state' ({ at, alerts, errors, log }). An alert keeps the time it was
 // first raised; the journal gets mail_node.alert_raised and mail_node.alert_cleared only when an
 // alert comes or goes, never on every run. The ping goes on every run that read every source:
-// success without alerts, /fail with them. A run that could not read the node sends none, so the
-// check service notices the silence, as for the disk.
+// /fail when an alert of severity error is up, success otherwise, warnings and notes named in its
+// body. A run that could not read a source sends none, so the check service notices the silence, as
+// for the disk.
 
 export const ALERTS_PROVIDER = 'mail_node_alerts';
 export const ALERT_STATE_PROVIDER = 'mail_node_alert_state';
@@ -55,15 +59,19 @@ export const ALERTS = Object.freeze({
   certificate: ['certificate', 'warning'],
   containers: ['containers', 'error'],
   terrl_budget: ['terrl', 'warning'],
+  eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
 
-// The refusal codes of EOP the log signals look for, in the dsn= and in the remote reply.
+// The refusal codes of EOP the log signals look for: the dsn= field exactly, or the code in the
+// status text standing alone (not part of a longer code or of an address like [5.7.64.12]).
+const code = (text) => new RegExp(`(?<![\\d.])${text.replaceAll('.', '\\.')}(?![\\d.])`);
 const REFUSALS = [
-  ['connector_blocked', /\b5\.7\.711\b|AS\(2204\)/],
-  ['tenant_attribution', /\b5\.7\.64\b/],
-  ['terrl_exceeded', /\b5\.7\.23[23]\b/],
+  ['connector_blocked', ['5.7.711'], [code('5.7.711'), /AS\(2204\)/]],
+  ['tenant_attribution', ['5.7.64'], [code('5.7.64')]],
+  ['terrl_exceeded', ['5.7.233', '5.7.232'], [code('5.7.233'), code('5.7.232')]],
 ];
+const refused = (line, codes, patterns) => codes.includes(line.dsn) || patterns.some((re) => re.test(line.statusText ?? ''));
 const FAILED_EVENTS = new Set(['deferred', 'bounced', 'expired', 'undeliverable']);
 
 let timer = null;
@@ -82,20 +90,28 @@ function signal(key, lines, extra = {}) {
   };
 }
 
-// The log alerts of the lines newer than now - SIGNAL_WINDOW_MS. eopHost: the EOP settings' next hop.
-export function logSignals(lines, { now = Date.now(), eopHost = null, ranges = null } = {}) {
+// The log alerts of the lines newer than now - SIGNAL_WINDOW_MS. eopHost: the EOP settings' next
+// hop; without it there is no bypass check.
+export function logSignals(lines, { now = Date.now(), eopHost = null } = {}) {
   const recent = lines.filter((line) => line.epoch != null && line.epoch >= now - SIGNAL_WINDOW_MS);
   const alerts = [];
-  for (const [key, re] of REFUSALS) {
-    const hits = recent.filter((line) => FAILED_EVENTS.has(line.event) && re.test(`${line.dsn ?? ''} ${line.statusText ?? ''}`));
+  for (const [key, codes, patterns] of REFUSALS) {
+    const hits = recent.filter((line) => FAILED_EVENTS.has(line.event) && refused(line, codes, patterns));
     if (hits.length) alerts.push(signal(key, hits));
   }
-  const bypass = recent.filter((line) => line.event === 'sent' && relayKind(line, { eopHost, ranges }) === 'other');
+  if (!eopHost) return alerts;
+  const bypass = recent.filter((line) => line.event === 'sent' && relayKind(line, { eopHost }) === 'other');
   if (bypass.length) {
     const relays = [...new Set(bypass.map((line) => line.relayHost || line.relay).filter(Boolean))];
-    alerts.push(signal('eop_bypass', bypass, { relays, eopHostSet: !!eopHost }));
+    alerts.push(signal('eop_bypass', bypass, { relays }));
   }
   return alerts;
+}
+
+// The note while <EOP_HOST> is not set: nothing tells EOP from any other relay, so there is no
+// bypass check. Information only: it never makes the ping fail.
+export function eopHostSignal(eopHost) {
+  return eopHost ? [] : [{ key: 'eop_host_missing', severity: 'info', details: {} }];
 }
 
 // The queue alert: deferred above the count, or the oldest deferred older than the minutes.
@@ -121,8 +137,12 @@ export function certificateSignal(nodeDns) {
   }];
 }
 
+// A container is down when it is not running, or running but reported unhealthy (when the node's
+// answer carries the health, services/mailNode/mailcow.js getContainers).
 export function containerSignal(containers) {
-  const down = containers.filter((c) => c.state !== 'running').map(({ name, state }) => ({ name, state }));
+  const down = containers
+    .filter((c) => c.state !== 'running' || c.health === 'unhealthy')
+    .map(({ name, state, health }) => ({ name, state: state === 'running' && health === 'unhealthy' ? 'unhealthy' : state }));
   return down.length ? [{ key: 'containers', severity: 'error', details: { down } }] : [];
 }
 
@@ -251,6 +271,7 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
     }
   };
 
+  fresh.push(...eopHostSignal(eop.eopHost));
   const log = await read('log', () => readPostfixLog(cfg, { since: now - TERRL_WINDOW_MS }));
   if (log) fresh.push(...logSignals(log.lines, { now, eopHost: eop.eopHost }));
   const queue = await read('queue', async () => summarizeQueue(await listQueue(cfg), now));
@@ -259,8 +280,14 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   if (!failed.includes('certificate')) fresh.push(...certificateSignal(nodeDns));
   const containers = await read('containers', () => getContainers(cfg));
   if (containers) fresh.push(...containerSignal(containers));
-  const budget = await read('terrl', () => computeTerrlBudget({ eop, log, now }));
-  if (budget) fresh.push(...terrlSignal(budget));
+  // The budget counts the log as well: without it the count would drop and the alert flap, so the
+  // budget's alert stays as it was until the log reads again.
+  if (log) {
+    const budget = await read('terrl', async () => computeTerrlBudget({ eop, log, aliasDomains: await aliasDomainsOf(cfg), now }));
+    if (budget) fresh.push(...terrlSignal(budget));
+  } else {
+    failed.push('terrl');
+  }
 
   const merged = mergeAlerts(previous?.alerts, fresh, failed, now);
   const state = {
@@ -287,10 +314,20 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   ]);
 
   if (settings.pingUrl && !errors.length) {
-    const keys = merged.alerts.map((alert) => alert.key);
-    await ping(settings.pingUrl, keys.length > 0, keys.length ? `mail node alerts: ${keys.join(', ')}` : 'mail node: no alerts');
+    const { fail, body } = pingOf(merged.alerts);
+    await ping(settings.pingUrl, fail, body);
   }
   return state;
+}
+
+// The ping of a run: /fail only for an alert of severity error; every alert up, with its severity,
+// in the body.
+export function pingOf(alerts) {
+  if (!alerts.length) return { fail: false, body: 'mail node: no alerts' };
+  return {
+    fail: alerts.some((alert) => alert.severity === 'error'),
+    body: `mail node alerts: ${alerts.map((alert) => `${alert.key} (${alert.severity})`).join(', ')}`,
+  };
 }
 
 // What the journal keeps of an alert: counts and names, never message samples.
@@ -302,6 +339,7 @@ function summaryOf(alert) {
     case 'containers': return { down: (d.down ?? []).map((c) => c.name) };
     case 'terrl_budget': return { used: d.used, limit: d.limit, percent: d.percent };
     case 'eop_bypass': return { count: d.count, relays: d.relays ?? [] };
+    case 'eop_host_missing': return {};
     default: return { count: d.count };
   }
 }

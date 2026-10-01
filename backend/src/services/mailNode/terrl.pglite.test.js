@@ -55,5 +55,9 @@ describe('computeTerrlBudget', () => {
       log: { read: true, covered: false, oldestAt: log.oldestAt },
     });
     expect(await computeTerrlBudget({ eop: { terrl: 4 }, log: null, now: NOW })).toMatchObject({ used: 2, log: { read: false } });
+    // The node's alias domains are its own too.
+    await sent(NOW - 600000, 'info@stage.test', { to: ['team@alias.test'], cc: [], bcc: [] });
+    expect((await computeTerrlBudget({ eop: { terrl: 4 }, log: null, now: NOW })).used).toBe(3);
+    expect((await computeTerrlBudget({ eop: { terrl: 4 }, log: null, aliasDomains: ['alias.test'], now: NOW })).used).toBe(2);
   });
 });

@@ -19,13 +19,22 @@ const fail = (value) => {
   if (value instanceof Error) throw value;
   return value;
 };
-vi.mock('./mailcow.js', async (importActual) => ({
-  ...(await importActual()),
-  getMailNodeConfig: vi.fn(async () => node.cfg),
-  getPostfixLog: vi.fn(async () => fail(node.log)),
-  listQueue: vi.fn(async () => fail(node.queue)),
-  getContainers: vi.fn(async () => fail(node.containers)),
-}));
+vi.mock('./mailcow.js', async (importActual) => {
+  const actual = await importActual();
+  return {
+    ...actual,
+    getMailNodeConfig: vi.fn(async () => node.cfg),
+    // As the real one: an answer that is no list of lines is a failure.
+    getPostfixLog: vi.fn(async () => {
+      const log = fail(node.log);
+      if (!Array.isArray(log) || !log.length) throw new actual.MailNodeError('mail_node_failed', 'The mail node returned no Postfix log');
+      return log;
+    }),
+    listQueue: vi.fn(async () => fail(node.queue)),
+    getContainers: vi.fn(async () => fail(node.containers)),
+    listAliasDomains: vi.fn(async () => []),
+  };
+});
 vi.mock('./eopSettings.js', () => ({ getEopSettings: vi.fn(async () => node.eop) }));
 vi.mock('./dnsCheckJob.js', () => ({ getNodeDnsCheck: vi.fn(async () => fail(node.nodeDns)) }));
 vi.mock('./terrl.js', async (importActual) => ({
@@ -35,12 +44,15 @@ vi.mock('./terrl.js', async (importActual) => ({
 
 import { recordAudit } from '../auditLog.js';
 import { safeFetch } from '../safeFetch.js';
-import { MailNodeError } from './mailcow.js';
-import { parsePostfixLog } from './postfixLog.js';
-import { BYPASS_SENT, STAND_LOG, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP } from './postfixLog.fixtures.js';
+import { MailNodeError, getMailNodeConfig } from './mailcow.js';
+import { clearPostfixLogCache, parsePostfixLog } from './postfixLog.js';
+import { clearAliasDomainCache, computeTerrlBudget } from './terrl.js';
 import {
-  ALERTS_PROVIDER, ALERT_STATE_PROVIDER, certificateSignal, containerSignal, getAlertSettings, logSignals, mergeAlerts,
-  parseAlertSettings, queueSignal, runAlertCheck, terrlSignal,
+  BYPASS_SENT, SENT_TO_RECIPIENT_M365_MX, STAND_LOG, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP,
+} from './postfixLog.fixtures.js';
+import {
+  ALERTS_PROVIDER, ALERT_STATE_PROVIDER, certificateSignal, containerSignal, eopHostSignal, getAlertSettings, logSignals,
+  mergeAlerts, parseAlertSettings, pingOf, queueSignal, runAlertCheck, startNodeAlertJob, stopNodeAlertJob, terrlSignal,
 } from './nodeAlerts.js';
 
 // The stand's lines happened at 19:02:59-19:03:11 on 2026-10-01; "now" is a few minutes later.
@@ -52,7 +64,11 @@ const keys = (alerts) => alerts.map((a) => a.key);
 beforeEach(() => {
   db.configs = {};
   node.cfg = { mailHost: 'mail.example.com', apiKey: 'k' };
-  node.log = [];
+  // A quiet log: one local delivery long before the window.
+  node.log = [STAND_SENT_LOCAL];
+  clearPostfixLogCache();
+  clearAliasDomainCache();
+  computeTerrlBudget.mockClear();
   node.queue = [];
   node.containers = [{ name: 'postfix-mailcow', state: 'running' }];
   node.nodeDns = null;
@@ -86,12 +102,27 @@ describe('logSignals', () => {
     // (19:05) is not older than it either.
     const alerts = logSignals(lines([BYPASS_SENT, STAND_SENT_VIA_EOP, STAND_SENT_LOCAL]), { now: Date.parse('2026-10-01T18:45:00Z'), eopHost: 'eop.test.local' });
     expect(keys(alerts)).toEqual(['eop_bypass']);
-    expect(alerts[0].details).toMatchObject({ count: 1, relays: ['mx.example.org'], eopHostSet: true });
+    expect(alerts[0].details).toMatchObject({ count: 1, relays: ['mx.example.org'] });
   });
 
-  it('counts every outbound delivery as a bypass while <EOP_HOST> is not set and the address is no EOP one', () => {
-    const alerts = logSignals(lines([STAND_SENT_VIA_EOP]), { now: Date.parse('2026-10-01T18:00:00Z') });
-    expect(alerts[0].details).toMatchObject({ relays: ['eop.test.local'], eopHostSet: false });
+  it('counts mail to a recipient\'s Microsoft 365 MX as a bypass: only the name of <EOP_HOST> is EOP', () => {
+    const alerts = logSignals(lines([SENT_TO_RECIPIENT_M365_MX]), { now: NOW, eopHost: 'contoso-com.mail.protection.outlook.com' });
+    expect(keys(alerts)).toEqual(['eop_bypass']);
+    expect(alerts[0].details.relays).toEqual(['m365cust-com.mail.protection.outlook.com']);
+  });
+
+  it('checks no bypass while <EOP_HOST> is not set, and notes it instead', () => {
+    expect(logSignals(lines([STAND_SENT_VIA_EOP, BYPASS_SENT]), { now: Date.parse('2026-10-01T18:00:00Z') })).toEqual([]);
+    expect(eopHostSignal(null)).toEqual([{ key: 'eop_host_missing', severity: 'info', details: {} }]);
+    expect(eopHostSignal('eop.test.local')).toEqual([]);
+  });
+
+  it('takes a refusal code only as the DSN or standing alone, not inside an address', () => {
+    const entry = (dsn, text) => ({ time: '1790881390', program: 'postfix/smtp', message: `AB12CD34EF5: to=<a@example.org>, relay=eop.test.local[172.22.1.13]:25, dsn=${dsn}, status=deferred (host eop.test.local[172.22.1.13] said: ${text} (in reply to RCPT TO command))` });
+    expect(logSignals(lines([entry('4.4.2', '421 try later from [5.7.64.12]')]), { now: NOW })).toEqual([]);
+    expect(logSignals(lines([entry('4.4.2', '421 see 15.7.711.3 and 5.7.2330')]), { now: NOW })).toEqual([]);
+    expect(keys(logSignals(lines([entry('5.7.64', 'TenantAttribution')]), { now: NOW }))).toEqual(['tenant_attribution']);
+    expect(keys(logSignals(lines([entry('5.0.0', '550 5.7.711 Access denied')]), { now: NOW }))).toEqual(['connector_blocked']);
   });
 });
 
@@ -117,6 +148,18 @@ describe('the other signals', () => {
   it('names the containers that are not running', () => {
     expect(containerSignal([{ name: 'a', state: 'running' }])).toEqual([]);
     expect(containerSignal([{ name: 'a', state: 'running' }, { name: 'b', state: 'exited' }])[0].details.down).toEqual([{ name: 'b', state: 'exited' }]);
+  });
+
+  it('counts a running but unhealthy container as down', () => {
+    expect(containerSignal([{ name: 'a', state: 'running', health: 'unhealthy' }, { name: 'b', state: 'running', health: 'healthy' }])[0].details.down)
+      .toEqual([{ name: 'a', state: 'unhealthy' }]);
+  });
+
+  it('fails the ping only for an error, naming warnings and notes in the body', () => {
+    expect(pingOf([])).toEqual({ fail: false, body: 'mail node: no alerts' });
+    expect(pingOf([{ key: 'queue_deferred', severity: 'warning' }, { key: 'eop_host_missing', severity: 'info' }]))
+      .toEqual({ fail: false, body: 'mail node alerts: queue_deferred (warning), eop_host_missing (info)' });
+    expect(pingOf([{ key: 'queue_deferred', severity: 'warning' }, { key: 'containers', severity: 'error' }]).fail).toBe(true);
   });
 
   it('raises the budget alert at 80 percent, as an error once exceeded', () => {
@@ -182,7 +225,7 @@ describe('runAlertCheck', () => {
     ]);
     expect(journaled()[0]).toMatchObject({ actorEmail: 'MailExpert', details: { severity: 'error', count: 1 } });
     expect(safeFetch.mock.calls[0][0]).toBe(`${PING}/fail`);
-    expect(safeFetch.mock.calls[0][1].body).toBe('mail node alerts: connector_blocked, terrl_exceeded');
+    expect(safeFetch.mock.calls[0][1].body).toBe('mail node alerts: connector_blocked (error), terrl_exceeded (error)');
 
     recordAudit.mockClear();
     await runAlertCheck({ now: NOW + 60000 });
@@ -221,5 +264,69 @@ describe('runAlertCheck', () => {
     expect(keys(state.alerts)).toEqual(['queue_deferred', 'certificate', 'terrl_budget']);
     expect(state.queue).toMatchObject({ total: 2, counts: { deferred: 2 } });
     expect(safeFetch).not.toHaveBeenCalled();
+  });
+
+  it('pings success with warnings only, naming them in the body', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    node.budget = { warn: true, exceeded: false, used: 900, limit: 1000, percent: 90, rampPercent: 100 };
+    await runAlertCheck({ now: NOW });
+    expect(safeFetch.mock.calls[0][0]).toBe(PING);
+    expect(safeFetch.mock.calls[0][1].body).toBe('mail node alerts: terrl_budget (warning)');
+  });
+
+  it('notes a missing <EOP_HOST> without a bypass alert and without failing the ping', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    node.eop = { eopHost: null };
+    node.log = [{ ...BYPASS_SENT, time: String(NOW / 1000 - 60) }];
+    const state = await runAlertCheck({ now: NOW });
+    expect(state.alerts.map((a) => [a.key, a.severity])).toEqual([['eop_host_missing', 'info']]);
+    expect(safeFetch.mock.calls[0][0]).toBe(PING);
+  });
+
+  it('keeps the log and budget alerts when the log answers nothing, and sends no ping', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    node.log = STAND_LOG;
+    node.budget = { warn: true, exceeded: false, used: 900, limit: 1000, percent: 90, rampPercent: 100 };
+    await runAlertCheck({ now: NOW });
+    safeFetch.mockClear();
+    recordAudit.mockClear();
+    computeTerrlBudget.mockClear();
+    clearPostfixLogCache();
+    for (const empty of [{}, [], 'nothing']) {
+      node.log = empty;
+      node.budget = { warn: false, used: 10, limit: 1000, percent: 1 };
+      const state = await runAlertCheck({ now: NOW + 60000 });
+      expect(keys(state.alerts)).toEqual(['connector_blocked', 'terrl_exceeded', 'terrl_budget']);
+      expect(state.errors).toEqual([{ source: 'log', code: 'mail_node_failed', message: 'The mail node returned no Postfix log' }]);
+    }
+    expect(computeTerrlBudget).not.toHaveBeenCalled();
+    expect(journaled()).toEqual([]);
+    expect(safeFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('startNodeAlertJob', () => {
+  it('runs first after 90 seconds, then every five minutes, without holding the process', async () => {
+    vi.useFakeTimers();
+    try {
+      node.cfg = null;
+      getMailNodeConfig.mockClear();
+      startNodeAlertJob();
+      startNodeAlertJob();
+      await vi.advanceTimersByTimeAsync(89 * 1000);
+      expect(getMailNodeConfig).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(getMailNodeConfig).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 - 90 * 1000);
+      expect(getMailNodeConfig).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(getMailNodeConfig).toHaveBeenCalledTimes(3);
+      stopNodeAlertJob();
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(getMailNodeConfig).toHaveBeenCalledTimes(3);
+    } finally {
+      stopNodeAlertJob();
+      vi.useRealTimers();
+    }
   });
 });

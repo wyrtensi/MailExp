@@ -39,10 +39,17 @@ function parseHeaders(lines) {
   return headers;
 }
 
+// Whether postcat's answer says the message is no longer in the queue ("fatal: open queue file
+// <id>: No such file or directory"), rather than failing some other way.
+export function postcatGone(text) {
+  return typeof text === 'string' && /No such file or directory/i.test(text) && !text.includes('*** ENVELOPE RECORDS');
+}
+
 // `postcat -q` output: null when it is not a queue file dump (the message left the queue, postcat
-// failed); otherwise { queueId, queue, envelope: { sender, recipients, arrival }, headers,
-// bodyBytes, body (only with withBody, cut at MAX_BODY_BYTES), bodyTruncated }.
-export function parsePostcat(text, { withBody = false } = {}) {
+// failed); otherwise { queueId, queue, envelope: { sender, recipients, doneRecipients, arrival },
+// headers, bodyBytes, body (only with withBody, cut at MAX_BODY_BYTES), bodyTruncated, dumpTruncated }.
+// truncated: the dump itself was cut (mailcow.js MAX_POSTCAT_BYTES): bodyBytes is then what was read.
+export function parsePostcat(text, { withBody = false, truncated = false } = {}) {
   if (typeof text !== 'string' || !text.includes('*** ENVELOPE RECORDS')) return null;
   const sections = {};
   let current = null;
@@ -61,14 +68,22 @@ export function parsePostcat(text, { withBody = false } = {}) {
   const parts = String(where ?? '').split('/');
   const queue = parts.length > 1 ? parts[0] : null;
   const queueId = parts.at(-1);
-  const envelope = { sender: null, recipients: [], arrival: null };
-  for (const line of sections['ENVELOPE RECORDS'] ?? []) {
+  // Recipients sit in the envelope records, and those Postfix took from the headers (sendmail -t)
+  // in the extracted records after the message. done_recipient: one Postfix delivered already.
+  const envelope = { sender: null, recipients: [], doneRecipients: [], arrival: null };
+  const add = (list, value) => {
+    const address = value.trim().toLowerCase();
+    if (address && !list.includes(address)) list.push(address);
+  };
+  for (const line of [...(sections['ENVELOPE RECORDS'] ?? []), ...(sections['HEADER EXTRACTED'] ?? [])]) {
     const match = /^([a-z_]+):\s*(.*)$/.exec(line);
     if (!match) continue;
-    if (match[1] === 'sender') envelope.sender = match[2].toLowerCase();
-    if (match[1] === 'recipient' || match[1] === 'done_recipient') envelope.recipients.push(match[2].toLowerCase());
+    if (match[1] === 'sender' && envelope.sender == null) envelope.sender = match[2].toLowerCase();
+    if (match[1] === 'recipient') add(envelope.recipients, match[2]);
+    if (match[1] === 'done_recipient') add(envelope.doneRecipients, match[2]);
     if (match[1] === 'message_arrival_time') envelope.arrival = match[2];
   }
+  envelope.recipients = envelope.recipients.filter((address) => !envelope.doneRecipients.includes(address));
   const content = sections['MESSAGE CONTENTS'] ?? [];
   const blank = content.findIndex((line) => line === '');
   const headerLines = blank < 0 ? content : content.slice(0, blank);
@@ -82,11 +97,12 @@ export function parsePostcat(text, { withBody = false } = {}) {
     bodyBytes,
     body: null,
     bodyTruncated: false,
+    dumpTruncated: truncated,
   };
   if (withBody) {
     const cut = bodyBytes > MAX_BODY_BYTES;
     result.body = cut ? Buffer.from(bodyText).subarray(0, MAX_BODY_BYTES).toString('utf8') : bodyText;
-    result.bodyTruncated = cut;
+    result.bodyTruncated = cut || truncated;
   }
   return result;
 }

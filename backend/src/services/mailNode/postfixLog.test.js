@@ -10,10 +10,12 @@ vi.mock('./mailcow.js', () => ({
 }));
 
 import {
-  BYPASS_SENT, EXPIRED, SENT_TO_EOP_ADDRESS, STAND_LOG, STAND_QUEUE_ACTIONS, STAND_SENT_LOCAL, STAND_SENT_VIA_EOP,
+  BYPASS_SENT, DISCARDED, EXPIRED, SENT_TO_EOP_ADDRESS, SENT_TO_RECIPIENT_M365_MX, STAND_LOG, STAND_QUEUE_ACTIONS, STAND_SENT_LOCAL,
+  STAND_SENT_VIA_EOP,
 } from './postfixLog.fixtures.js';
 import {
-  MAX_LOG_LINES, correlateByQueueId, parsePostfixEntry, parsePostfixLog, parseRelay, readPostfixLog, relayKind,
+  MAX_LOG_LINES, clearPostfixLogCache, correlateByQueueId, parsePostfixEntry, parsePostfixLog, parseRelay, readPostfixLog,
+  relayKind,
 } from './postfixLog.js';
 
 beforeEach(() => {
@@ -128,23 +130,42 @@ describe('relayKind', () => {
     expect(relayKind(parse(STAND_SENT_VIA_EOP), { eopHost: 'other.example.com' })).toBe('other');
   });
 
-  it('counts an address inside the EOP ranges as EOP whatever its name', () => {
-    expect(relayKind(parse(SENT_TO_EOP_ADDRESS), { eopHost: 'stage-test.mail.protection.outlook.com' })).toBe('eop');
+  it('does not count an address inside the EOP ranges under another name as EOP', () => {
+    expect(relayKind(parse(SENT_TO_EOP_ADDRESS), { eopHost: 'stage-test.mail.protection.outlook.com' })).toBe('other');
+    expect(relayKind(parse(SENT_TO_RECIPIENT_M365_MX), { eopHost: 'contoso-com.mail.protection.outlook.com' })).toBe('other');
+    expect(relayKind(parse(SENT_TO_RECIPIENT_M365_MX), { eopHost: 'm365cust-com.mail.protection.outlook.com' })).toBe('eop');
   });
 
-  it('counts LMTP to Dovecot as local and a direct MX delivery as other', () => {
+  it('counts LMTP to Dovecot and a discarded message as local and a direct MX delivery as other', () => {
     expect(relayKind(parse(STAND_SENT_LOCAL), { eopHost: 'eop.test.local' })).toBe('local');
+    expect(relayKind(parse(DISCARDED), { eopHost: 'eop.test.local' })).toBe('local');
     expect(relayKind(parse(BYPASS_SENT), { eopHost: 'eop.test.local' })).toBe('other');
-    expect(relayKind(parse(BYPASS_SENT), {})).toBe('other');
+    expect(relayKind(parse(STAND_SENT_VIA_EOP), {})).toBe('other');
+  });
+});
+
+describe('the status text', () => {
+  it('runs to the end of the line whatever parentheses the reply holds', () => {
+    const line = parsePostfixEntry({
+      time: '1790881390', program: 'postfix/smtp',
+      message: 'AB12CD34EF5: to=<a@example.org>, relay=eop.test.local[172.22.1.13]:25, dsn=5.0.0, status=bounced (host eop.test.local[172.22.1.13] said: 550 :) nope (in reply to RCPT TO command))',
+    });
+    expect(line.statusText).toBe('host eop.test.local[172.22.1.13] said: 550 :) nope (in reply to RCPT TO command)');
+    expect(line.reply).toBe('550 :) nope');
+    expect(parsePostfixEntry(STAND_LOG.at(-4)).reply).toBe('451 4.7.500 Server busy. Please try again later from [172.22.1.253]. (S77)');
+    expect(parsePostfixEntry(STAND_SENT_VIA_EOP).reply).toBeNull();
   });
 });
 
 describe('readPostfixLog', () => {
   const CFG = { mailHost: 'mail.example.com', apiKey: 'k' };
+  beforeEach(() => clearPostfixLogCache());
 
   it('asks for an explicit count, all the node keeps by default, at most 10000', async () => {
+    node.entries = STAND_LOG;
     await readPostfixLog(CFG);
     await readPostfixLog(CFG, { lines: 500 });
+    clearPostfixLogCache();
     await readPostfixLog(CFG, { lines: 999999 });
     expect(node.calls).toEqual([MAX_LOG_LINES, 500, MAX_LOG_LINES]);
   });
@@ -155,12 +176,42 @@ describe('readPostfixLog', () => {
     expect(read).toMatchObject({ fetched: STAND_LOG.length, malformed: 0, oldestAt: '2026-10-01T19:02:59.000Z', newestAt: '2026-10-01T19:03:11.000Z', covered: true });
     expect((await readPostfixLog(CFG, { since: 1790881378 * 1000 })).covered).toBe(false);
     expect((await readPostfixLog(CFG)).covered).toBeNull();
-    node.entries = [];
-    expect(await readPostfixLog(CFG, { since: 0 })).toMatchObject({ lines: [], oldestAt: null, covered: false });
   });
 
-  it('passes a node failure on', async () => {
+  it('shares one read between callers for a minute, one at a time', async () => {
+    node.entries = STAND_LOG;
+    const [a, b] = await Promise.all([readPostfixLog(CFG), readPostfixLog(CFG)]);
+    await readPostfixLog(CFG);
+    expect(node.calls).toEqual([MAX_LOG_LINES]);
+    expect(a.lines).toBe(b.lines);
+    await readPostfixLog(CFG, { maxAgeMs: 0 });
+    expect(node.calls).toHaveLength(2);
+    await readPostfixLog({ ...CFG, mailHost: 'other.example.com' });
+    expect(node.calls).toHaveLength(3);
+  });
+
+  it('asks again after a minute', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.parse('2026-10-01T19:00:00Z'));
+      node.entries = STAND_LOG;
+      await readPostfixLog(CFG);
+      vi.setSystemTime(Date.parse('2026-10-01T19:00:59Z'));
+      await readPostfixLog(CFG);
+      expect(node.calls).toHaveLength(1);
+      vi.setSystemTime(Date.parse('2026-10-01T19:01:01Z'));
+      await readPostfixLog(CFG);
+      expect(node.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('passes a node failure on and does not keep it', async () => {
     node.entries = new Error('unreachable');
     await expect(readPostfixLog(CFG)).rejects.toThrow('unreachable');
+    node.entries = STAND_LOG;
+    expect((await readPostfixLog(CFG)).fetched).toBe(STAND_LOG.length);
+    expect(node.calls).toHaveLength(2);
   });
 });

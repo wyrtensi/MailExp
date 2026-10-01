@@ -89,14 +89,15 @@ function parseIpv4(value) {
   return isIP(ip) === 4 ? ip : null;
 }
 
-// A calendar day as YYYY-MM-DD (the tenant's creation date), not after today (UTC); null for
-// anything else.
+// A calendar day as YYYY-MM-DD (the tenant's creation date), not in the future; null for anything
+// else. The administrator picks it in their own time zone, which may already be a day ahead of UTC
+// (up to UTC+14), so "today" there passes: the day may start up to 24 hours after now.
 export function parseDay(value, now = Date.now()) {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
   const at = Date.parse(`${text}T00:00:00Z`);
   if (!Number.isFinite(at) || new Date(at).toISOString().slice(0, 10) !== text) return null;
-  return at <= now ? text : null;
+  return at <= now + 24 * 60 * 60 * 1000 ? text : null;
 }
 
 function parseGuid(value) {

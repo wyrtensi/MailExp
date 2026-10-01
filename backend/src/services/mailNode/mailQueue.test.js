@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_BODY_BYTES, parsePostcat, summarizeQueue } from './mailQueue.js';
+import { MAX_BODY_BYTES, parsePostcat, postcatGone, summarizeQueue } from './mailQueue.js';
 
 // `postcat -q` of a message fake-EOP deferred on the stand (2026-10-01), its long headers shortened.
 const POSTCAT = [
@@ -56,6 +56,26 @@ describe('parsePostcat', () => {
   it('reads a message of an unhashed queue and CRLF output', () => {
     const active = POSTCAT.replaceAll('deferred/5/53A99193F13', 'active/53A99193F13').replace(/\n/g, '\r\n');
     expect(parsePostcat(active)).toMatchObject({ queue: 'active', queueId: '53A99193F13' });
+  });
+
+  it('reads recipients from the extracted headers too, and keeps delivered ones apart', () => {
+    const dump = POSTCAT
+      .replace('recipient: test@example.com', 'recipient: test@example.com\ndone_recipient: done@example.com')
+      .replace('named_attribute: message_id=', 'recipient: Bcc-Copy@Example.org\nnamed_attribute: message_id=');
+    expect(parsePostcat(dump).envelope).toMatchObject({
+      recipients: ['test@example.com', 'bcc-copy@example.org'], doneRecipients: ['done@example.com'],
+    });
+  });
+
+  it('marks a dump cut at the read limit', () => {
+    const message = parsePostcat(POSTCAT.split('*** HEADER EXTRACTED')[0], { withBody: true, truncated: true });
+    expect(message).toMatchObject({ dumpTruncated: true, bodyTruncated: true });
+  });
+
+  it('tells a message gone from the queue from other failures', () => {
+    expect(postcatGone('/usr/sbin/postcat: fatal: open queue file DDA3F1A23C1: No such file or directory\n')).toBe(true);
+    expect(postcatGone('err: invalid')).toBe(false);
+    expect(postcatGone(POSTCAT)).toBe(false);
   });
 
   it('is null for what postcat says when the message is gone', () => {

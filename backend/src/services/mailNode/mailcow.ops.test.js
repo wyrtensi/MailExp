@@ -8,7 +8,8 @@ vi.mock('../safeFetch.js', () => ({ safeFetch: vi.fn() }));
 
 import { safeFetch } from '../safeFetch.js';
 import {
-  MailNodeError, deleteQueued, flushQueue, getContainers, getPostfixLog, getQueuedMessageText, listQueue, parseQueueId, queueAction,
+  MAX_POSTCAT_BYTES, MailNodeError, deleteQueued, flushQueue, getContainers, getPostfixLog, getQueuedMessageText, listAliasDomains,
+  listQueue, parseQueueId, queueAction,
 } from './mailcow.js';
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 5120 };
@@ -59,8 +60,25 @@ describe('listQueue', () => {
 describe('queue actions', () => {
   it('reads one message as text', async () => {
     safeFetch.mockResolvedValue(answer('*** ENVELOPE RECORDS deferred/5/53A99193F13 ***\n'));
-    expect(await getQueuedMessageText(CFG, '53A99193F13')).toContain('ENVELOPE RECORDS');
+    expect(await getQueuedMessageText(CFG, '53A99193F13')).toEqual({ text: '*** ENVELOPE RECORDS deferred/5/53A99193F13 ***\n', truncated: false });
     expect(sent().url).toBe('https://mail.example.com/api/v1/get/postcat/53A99193F13');
+  });
+
+  it('stops reading a dump at 2 MB and says so', async () => {
+    const chunk = new Uint8Array(512 * 1024).fill(0x61);
+    let pulled = 0;
+    const body = new ReadableStream({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 20) controller.close();
+        else controller.enqueue(chunk);
+      },
+    });
+    safeFetch.mockResolvedValue({ status: 200, ok: true, body, json: async () => { throw new Error('not json'); } });
+    const dump = await getQueuedMessageText(CFG, '53A99193F13');
+    expect(dump.truncated).toBe(true);
+    expect(dump.text).toHaveLength(MAX_POSTCAT_BYTES);
+    expect(pulled).toBeLessThan(10);
   });
 
   it('holds, releases and delivers by id, flushes all, deletes by id', async () => {
@@ -95,9 +113,21 @@ describe('getPostfixLog', () => {
     expect(sent().url).toBe('https://mail.example.com/api/v1/get/logs/postfix/2000');
   });
 
-  it('is empty when mailcow answers {}', async () => {
+  it('is a failure, not a quiet node, when mailcow answers {}, an empty list or no list', async () => {
+    for (const body of [{}, [], 'nothing', null]) {
+      safeFetch.mockResolvedValue(answer(body));
+      await expect(getPostfixLog(CFG, 10), JSON.stringify(body)).rejects.toMatchObject({ code: 'mail_node_failed' });
+    }
+  });
+});
+
+describe('listAliasDomains', () => {
+  it('reads the alias domains in lower case', async () => {
+    safeFetch.mockResolvedValue(answer([{ alias_domain: 'Stage-Alias.test', target_domain: 'stage.test', active: 1 }]));
+    expect(await listAliasDomains(CFG)).toEqual(['stage-alias.test']);
+    expect(sent().url).toBe('https://mail.example.com/api/v1/get/alias-domain/all');
     safeFetch.mockResolvedValue(answer({}));
-    expect(await getPostfixLog(CFG, 10)).toEqual([]);
+    expect(await listAliasDomains(CFG)).toEqual([]);
   });
 });
 
@@ -108,9 +138,17 @@ describe('getContainers', () => {
       'acme-mailcow': { type: 'info', container: 'acme-mailcow', state: 'Exited', started_at: '2026-10-01T05:00:00Z', image: 'ghcr.io/mailcow/acme:1.98' },
     }));
     expect(await getContainers(CFG)).toEqual([
-      { name: 'acme-mailcow', state: 'exited', startedAt: '2026-10-01T05:00:00Z', image: 'ghcr.io/mailcow/acme:1.98' },
-      { name: 'postfix-mailcow', state: 'running', startedAt: '2026-10-01T05:00:00Z', image: 'ghcr.io/mailcow/postfix:3.10.12-1' },
+      { name: 'acme-mailcow', state: 'exited', health: null, startedAt: '2026-10-01T05:00:00Z', image: 'ghcr.io/mailcow/acme:1.98' },
+      { name: 'postfix-mailcow', state: 'running', health: null, startedAt: '2026-10-01T05:00:00Z', image: 'ghcr.io/mailcow/postfix:3.10.12-1' },
     ]);
+  });
+
+  it('reads the health when the answer carries it', async () => {
+    safeFetch.mockResolvedValue(answer({
+      'dovecot-mailcow': { container: 'dovecot-mailcow', state: 'running', health: 'Unhealthy' },
+      'rspamd-mailcow': { container: 'rspamd-mailcow', state: 'running', State: { Health: { Status: 'healthy' } } },
+    }));
+    expect((await getContainers(CFG)).map((c) => [c.name, c.health])).toEqual([['dovecot-mailcow', 'unhealthy'], ['rspamd-mailcow', 'healthy']]);
   });
 
   it('refuses an answer that is no such object', async () => {

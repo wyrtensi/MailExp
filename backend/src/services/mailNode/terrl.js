@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { relayKind } from './postfixLog.js';
+import { listAliasDomains } from './mailcow.js';
 
 // The tenant's external recipient budget (TERRL, R-21; eop-panel-requirements.md, section 2.9):
 // EOP counts the unique external recipients of the whole tenant over a rolling 24 hours, relayed
@@ -12,11 +13,13 @@ import { relayKind } from './postfixLog.js';
 // creation date (since 2026-09-14: under 31 days 10 percent, 31 to 60 days 25 percent). If the EAC
 // report already shows the ramped number, enter it as TERRL and leave the creation date empty.
 //
-// What is counted, unique addresses, lower case, recipients on the node's own domains left out:
+// What is counted, unique addresses, lower case, recipients on the node's own domains (the panel's
+// node domains and mailcow's alias domains) left out:
 // - the panel's journal (message.sent of a mailbox on a node domain: To, Cc and Bcc as sent) over
 //   the full 24 hours: exact times, kept in the database, indexed by time;
 // - the node's Postfix log, as far back as it reaches: every recipient a delivery line shows handed
-//   to EOP with status=sent. It adds what the journal never sees: messages an inbox rule forwards
+//   to EOP (relay named <EOP_HOST>; without it the log adds nothing) with status=sent. It adds
+//   what the journal never sees: messages an inbox rule forwards
 //   and notices the node sends itself (bounces, Sieve redirects). The log alone is not enough: the
 //   node keeps a few thousand lines, which on a busy node cover hours, not a day.
 
@@ -118,6 +121,29 @@ export async function nodeDomainNames() {
   return rows.map((row) => row.domain);
 }
 
+const ALIAS_CACHE_MS = 60 * 1000;
+let aliasCache = null;
+
+// The node's alias domains for the count, read at most once a minute; [] when the node does not
+// list them (its recipients then count as external: the budget errs high, never low).
+export async function aliasDomainsOf(cfg, { maxAgeMs = ALIAS_CACHE_MS } = {}) {
+  if (!aliasCache || aliasCache.host !== cfg.mailHost || Date.now() - aliasCache.at > maxAgeMs) {
+    aliasCache = {
+      host: cfg.mailHost, at: Date.now(),
+      promise: listAliasDomains(cfg).catch((err) => {
+        console.error(`Mail node alias domains could not be read: ${err?.code || 'error'}`);
+        aliasCache = null;
+        return [];
+      }),
+    };
+  }
+  return aliasCache.promise;
+}
+
+export function clearAliasDomainCache() {
+  aliasCache = null;
+}
+
 // The recipients the log shows handed to EOP (status=sent) since `since` (ms).
 export function eopRecipientsInLog(lines, { since, eopHost }) {
   return lines
@@ -128,10 +154,12 @@ export function eopRecipientsInLog(lines, { since, eopHost }) {
 
 // The budget now (terrlBudget) with where the count came from: { ...budget, windowStart, log: {
 // read, covered, oldestAt } }. log: the node's Postfix log already read (readPostfixLog) or null
-// when it could not be read; the journal alone counts then.
-export async function computeTerrlBudget({ eop, log = null, now = Date.now() }) {
+// when it could not be read; the journal alone counts then. aliasDomains: the node's alias domains
+// (mailcow get/alias-domain/all), own domains too; [] when the node did not list them.
+export async function computeTerrlBudget({ eop, log = null, aliasDomains = [], now = Date.now() }) {
   const since = now - TERRL_WINDOW_MS;
-  const [journal, ownDomains] = await Promise.all([journalSince(new Date(since)), nodeDomainNames()]);
+  const [journal, nodeDomains] = await Promise.all([journalSince(new Date(since)), nodeDomainNames()]);
+  const ownDomains = [...nodeDomains, ...aliasDomains];
   const addresses = log ? eopRecipientsInLog(log.lines, { since, eopHost: eop.eopHost }) : [];
   const used = externalRecipients({ journal, addresses, ownDomains }).size;
   return {
