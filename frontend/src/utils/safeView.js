@@ -27,6 +27,28 @@ const LOCKED_CATEGORIES = {
   FTBP: 'malware',
 };
 
+// EOP categories in words (Microsoft's "Anti-spam message headers"); the code itself stays in the
+// line's tooltip. A code not listed here is shown as it is.
+export const EOP_CATEGORY_LABEL_KEYS = {
+  SPM: 'message.safeView.categories.spam',
+  HSPM: 'message.safeView.categories.highSpam',
+  BULK: 'message.safeView.categories.bulk',
+  OSPM: 'message.safeView.categories.outboundSpam',
+  PHSH: 'message.safeView.categories.phishing',
+  HPHSH: 'message.safeView.categories.highPhishing',
+  HPHISH: 'message.safeView.categories.highPhishing',
+  INTOS: 'message.safeView.categories.intraOrgPhishing',
+  DIMP: 'message.safeView.categories.domainImpersonation',
+  UIMP: 'message.safeView.categories.userImpersonation',
+  GIMP: 'message.safeView.categories.mailboxImpersonation',
+  BIMP: 'message.safeView.categories.brandImpersonation',
+  SPOOF: 'message.safeView.categories.spoof',
+  MALW: 'message.safeView.categories.malware',
+  AMP: 'message.safeView.categories.antiMalware',
+  SAP: 'message.safeView.categories.safeAttachments',
+  FTBP: 'message.safeView.categories.fileType',
+};
+
 // { reason, locked } for a letter that opens in safe view (locked) or only under a warning, or null
 // for a normal letter. A spoofed sender locks the letter in Spam; elsewhere EOP delivered it on
 // purpose (an allowed sender, say), so it only warns. The category names the danger more precisely

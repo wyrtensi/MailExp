@@ -9,6 +9,7 @@ import DirectionBadge from './DirectionBadge.jsx';
 import { useMobile } from '../hooks/useMobile.js';
 import { safeViewMarkup, safeViewState } from '../utils/safeView.js';
 import SafeViewNotice from './SafeViewNotice.jsx';
+import SpamVerdict from './SpamVerdict.jsx';
 
 // The whole conversation stacked under an open letter, the way Gmail shows it: every letter of
 // the thread in this mailbox, oldest first. Each letter is a card: its header (sent or received,
@@ -16,8 +17,9 @@ import SafeViewNotice from './SafeViewNotice.jsx';
 // for. The open letter itself is only marked in its place, since it is shown in full above.
 // Shown only while the "Whole conversation" box above is ticked; the box resets on every open.
 // A stacked letter in Spam (spamFolderPaths, the open letter's account) or one EOP marked as
-// dangerous opens in safe view, like the open letter (utils/safeView.js).
-export default function ConversationThread({ conversation, currentId, onOpen, spamFolderPaths = null }) {
+// dangerous opens in safe view, like the open letter (utils/safeView.js). In a mail node mailbox
+// (nodeMailbox) such a letter in Spam also offers rspamd's verdict (SpamVerdict, R-20).
+export default function ConversationThread({ conversation, currentId, onOpen, spamFolderPaths = null, nodeMailbox = false }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const others = conversation.items.filter((item) => item.id !== currentId);
@@ -70,6 +72,7 @@ export default function ConversationThread({ conversation, currentId, onOpen, sp
             onToggle={() => toggle(item.id)}
             onOpen={() => onOpen(item.id)}
             inSpamFolder={Boolean(spamFolderPaths?.has(item.folder))}
+            nodeMailbox={nodeMailbox}
             isMobile={isMobile}
             t={t}
           />
@@ -79,7 +82,7 @@ export default function ConversationThread({ conversation, currentId, onOpen, sp
   );
 }
 
-function ThreadLetter({ item, open, onToggle, onOpen, inSpamFolder, isMobile, t }) {
+function ThreadLetter({ item, open, onToggle, onOpen, inSpamFolder, nodeMailbox, isMobile, t }) {
   const to = recipientsLine(item.to_addresses, item.cc_addresses);
   return (
     <article className="reading-card" style={{
@@ -115,7 +118,7 @@ function ThreadLetter({ item, open, onToggle, onOpen, inSpamFolder, isMobile, t 
           </div>
         )}
       </button>
-      {open && <ThreadLetterBody id={item.id} onOpen={onOpen} inSpamFolder={inSpamFolder} t={t} />}
+      {open && <ThreadLetterBody id={item.id} onOpen={onOpen} inSpamFolder={inSpamFolder} nodeMailbox={nodeMailbox} t={t} />}
     </article>
   );
 }
@@ -150,7 +153,7 @@ function loadBody(id) {
   return bodyCache.get(id);
 }
 
-function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
+function ThreadLetterBody({ id, onOpen, inSpamFolder, nodeMailbox, t }) {
   const [body, setBody] = useState(null);
   const [failed, setFailed] = useState(false);
   const [showQuote, setShowQuote] = useState(false);
@@ -203,6 +206,12 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
   if (!body) {
     return <div style={{ padding: '0 14px 12px', fontSize: 13, color: 'var(--text-tertiary)' }}>{t('message.senderHistory.threadLoading')}</div>;
   }
+  // rspamd's verdict on request, for a letter in Spam of a node mailbox.
+  const verdict = inSpamFolder && nodeMailbox && (
+    <div style={{ padding: '0 14px' }}>
+      <SpamVerdict messageId={id} eopCategory={body.eopCategory} compact />
+    </div>
+  );
   if (locked) {
     // A letter with attachments only still shows why it is held back.
     return (
@@ -210,6 +219,7 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
         <div style={{ padding: '0 14px' }}>
           <SafeViewNotice reason={safeState.reason} eopCategory={body.eopCategory} onShowFull={showInFull} compact />
         </div>
+        {verdict}
         {(body.html || body.text) && (
           <div
             data-safe-view-body=""
@@ -236,6 +246,7 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
     return (
       <>
         {warning}
+        {verdict}
         <div ref={contentRef} tabIndex={-1} style={{ padding: '0 14px', background: 'white' }}>
           <LetterFrame html={body.html} showQuote={showQuote} title={t('message.emailFrameTitle')} />
         </div>
@@ -247,6 +258,7 @@ function ThreadLetterBody({ id, onOpen, inSpamFolder, t }) {
   return (
     <>
       {warning}
+      {verdict}
       <div ref={contentRef} tabIndex={-1} style={{
         padding: '0 14px', whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 14, lineHeight: 1.6,
         color: '#1a1a1a', background: 'white', fontFamily: 'var(--font-sans, sans-serif)',

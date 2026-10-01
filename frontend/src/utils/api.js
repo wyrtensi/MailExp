@@ -412,6 +412,19 @@ export const api = {
     checkAlerts: () => request('POST', '/mail-node/alerts/check'),
     saveAlertSettings: (data) => request('PUT', '/mail-node/alerts/settings', data),
     getTerrlBudget: () => request('GET', '/mail-node/eop/budget'),
+    // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
+    // release and delete (administrators), and whether users see it too.
+    listQuarantine: () => request('GET', '/mail-node/quarantine'),
+    getQuarantineItem: (id) => request('GET', `/mail-node/quarantine/${encodeURIComponent(id)}`),
+    releaseQuarantineItem: (id) => request('POST', `/mail-node/quarantine/${encodeURIComponent(id)}/release`),
+    deleteQuarantineItem: (id) => request('DELETE', `/mail-node/quarantine/${encodeURIComponent(id)}`),
+    learnSpamQuarantineItem: (id) => request('POST', `/mail-node/quarantine/${encodeURIComponent(id)}/learn-spam`),
+    // Writes every quarantine setting of mailcow (the screen warns first).
+    applyQuarantineNodeSettings: () => request('POST', '/mail-node/quarantine/node-settings', { confirm: true }),
+    getQuarantineSettings: () => request('GET', '/mail-node/quarantine/settings'),
+    saveQuarantineSettings: (data) => request('PUT', '/mail-node/quarantine/settings', data),
+    // "Why is this letter in Spam": rspamd's verdict on a letter of a node mailbox.
+    spamVerdict: (messageId) => request('GET', `/mail-node/messages/${encodeURIComponent(messageId)}/spam-verdict`),
   },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),

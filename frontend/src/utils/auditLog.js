@@ -35,6 +35,10 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.queue_action': 'admin.audit.actionMailNodeQueueAction',
   'mail_node.alert_raised': 'admin.audit.actionMailNodeAlertRaised',
   'mail_node.alert_cleared': 'admin.audit.actionMailNodeAlertCleared',
+  'mail_node.quarantine_released': 'admin.audit.actionMailNodeQuarantineReleased',
+  'mail_node.quarantine_deleted': 'admin.audit.actionMailNodeQuarantineDeleted',
+  'mail_node.quarantine_learned_spam': 'admin.audit.actionMailNodeQuarantineLearnedSpam',
+  'mail_node.quarantine_settings_applied': 'admin.audit.actionMailNodeQuarantineSettingsApplied',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -85,6 +89,8 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   tenantTxt: 'admin.audit.fieldTenantTxt',
   dkimSelector1Cname: 'admin.audit.fieldDkimSelector1Cname',
   dkimSelector2Cname: 'admin.audit.fieldDkimSelector2Cname',
+  // Who sees the node's quarantine (settings 'quarantine').
+  userView: 'admin.audit.fieldQuarantineUserView',
 });
 
 // The settings a mail_node.config_changed entry is about.
@@ -93,6 +99,7 @@ const SETTINGS_DETAIL_KEYS = Object.freeze({
   eop: 'admin.audit.detailEopSettingsChanged',
   domain_dns: 'admin.audit.detailDomainDnsExpectedChanged',
   alerts: 'admin.audit.detailAlertSettingsChanged',
+  quarantine: 'admin.audit.detailQuarantineSettingsChanged',
 });
 
 // A mail_node.dns_checked entry: an administrator's check of everything (the node's status and how
@@ -335,6 +342,27 @@ export function auditDetail(entry) {
         key: DOMAIN_STATE_CHANGE_KEYS[details.how] ?? 'admin.audit.detailDomainStepConfirmed',
         values: { domain: details.domain ?? '' },
         valueKeys: { from: domainStateKey(details.from), to: domainStateKey(details.to) },
+      };
+    // A letter of the node's quarantine an administrator released (delivered to its mailbox and
+    // trained as ham; warnings: what the node said went wrong after it went out) or deleted.
+    // "Delete and train as spam" reads like a release: the letter, then what the node warned about.
+    case 'mail_node.quarantine_released':
+    case 'mail_node.quarantine_learned_spam':
+    case 'mail_node.quarantine_deleted': {
+      const values = { sender: details.sender ?? '', rcpt: details.rcpt ?? '', score: details.score ?? '' };
+      if (entry.action === 'mail_node.quarantine_deleted') return { key: 'admin.audit.detailQuarantineDeleted', values };
+      const warnings = Array.isArray(details.warnings) && details.warnings.length ? details.warnings.join('; ') : '';
+      return warnings
+        ? { key: 'admin.audit.detailQuarantineReleasedWarnings', values: { ...values, warnings } }
+        : { key: 'admin.audit.detailQuarantineReleased', values };
+    }
+    // The panel wrote mailcow's quarantine settings: the first time or again, with the values.
+    case 'mail_node.quarantine_settings_applied':
+      return {
+        key: details.reapplied ? 'admin.audit.detailQuarantineSettingsReapplied' : 'admin.audit.detailQuarantineSettingsApplied',
+        values: {
+          maxSize: details.maxSize ?? '', retention: details.retentionSize ?? '', maxAge: details.maxAge ?? '', format: details.releaseFormat ?? '',
+        },
       };
     case 'mail_node.domain_identity_acknowledged':
       return {

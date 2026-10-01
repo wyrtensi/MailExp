@@ -254,7 +254,7 @@ function findSnippetPart(structure) {
 // Decode a body part Buffer using the given transfer encoding and charset.
 // Mirrors the same function in imapManager.js — kept local to avoid a
 // circular import (messageParser is imported by imapManager).
-function decodeBodyPart(buf, encoding, charset) {
+export function decodeBodyPart(buf, encoding, charset) {
   const enc = (encoding || '').toLowerCase();
   let cs = (charset || 'utf-8').toLowerCase().trim().replace(/^['"]|['"]$/g, '');
   if (!cs || cs === 'us-ascii' || cs === 'ascii') cs = 'utf-8';

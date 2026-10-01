@@ -74,6 +74,10 @@ const CONCRETE_PATH = {
   '/mail-node/queue/:param:param': '/mail-node/queue/D3A1F2B4C5',
   '/mail-node/alerts': '/mail-node/alerts',
   '/mail-node/eop/budget': '/mail-node/eop/budget',
+  '/mail-node/quarantine': '/mail-node/quarantine',
+  '/mail-node/quarantine/:param': '/mail-node/quarantine/41',
+  '/mail-node/quarantine/settings': '/mail-node/quarantine/settings',
+  '/mail-node/messages/:param/spam-verdict': '/mail-node/messages/demo-fx-02-00-00/spam-verdict',
   '/accounts/:param/folders': '/accounts/demo-sales/folders',
   '/accounts/:param/aliases': '/accounts/demo-sales/aliases',
   '/accounts/:param/node-aliases': '/accounts/demo-fx-02/node-aliases',
@@ -480,6 +484,16 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   assert.equal(dnsDomain.domain, 'coverage.demo.mailexpert.local');
   const expected = await answer('/mail-node/domains/:param/dns-expected', 'PUT', '/mail-node/domains/coverage.demo.mailexpert.local/dns-expected', { expectedMx: 'coverage-demo.mail.protection.outlook.com' });
   assert.deepEqual(expected.fields, ['mx']);
+  const released = await answer('/mail-node/quarantine/:param/release', 'POST', '/mail-node/quarantine/40/release');
+  assert.equal(released.learned, true);
+  assert.deepEqual(await answer('/mail-node/quarantine/:param', 'DELETE', '/mail-node/quarantine/38'), { ok: true });
+  const learned = await answer('/mail-node/quarantine/:param/learn-spam', 'POST', '/mail-node/quarantine/41/learn-spam');
+  assert.equal(learned.ok, true);
+  const nodeSettings = await answer('/mail-node/quarantine/node-settings', 'POST', '/mail-node/quarantine/node-settings', { confirm: true });
+  assert.equal(nodeSettings.nodeSettings.release_format, 'raw');
+  assert.ok(nodeSettings.nodeSettingsAppliedAt);
+  const quarantineSettings = await answer('/mail-node/quarantine/settings', 'PUT', '/mail-node/quarantine/settings', { userView: false });
+  assert.equal(quarantineSettings.userView, false);
   await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });
 });
 

@@ -148,4 +148,17 @@ describe('Stacked letters in safe view (R-41)', () => {
     assert.equal(notice(el), null);
     assert.ok(el.querySelector('iframe'));
   });
+
+  // R-20: rspamd's verdict on request, for a letter in Spam of a mail node mailbox only.
+  const ask = (el) => [...el.querySelectorAll('button')].find(b => b.textContent === 'message.spamVerdict.ask');
+  test('offers "why in Spam" only for a letter in Spam of a node mailbox', async () => {
+    assert.equal(ask(card('junk')), undefined, 'not for a mailbox outside the node');
+    await React.act(async () => {
+      root.render(React.createElement(ConversationThread, {
+        conversation: CONVERSATION, currentId: 'open', onOpen: () => {}, spamFolderPaths: new Set(['Junk']), nodeMailbox: true,
+      }));
+    });
+    assert.ok(ask(card('junk')), 'a node mailbox letter in Spam offers it');
+    assert.equal(ask(card('plain')), undefined, 'not outside Spam');
+  });
 });

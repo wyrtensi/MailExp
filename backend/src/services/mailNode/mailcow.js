@@ -713,3 +713,188 @@ export async function getContainers(cfg) {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+// ── Quarantine and rspamd history (R-20)───────────────────────────────────────────────────────
+// mailcow keeps a copy of every letter rspamd rejected or marked as spam ("reject", "add header",
+// "rewrite subject"; data/conf/rspamd/local.d/metadata_exporter.conf) in its quarantine table, one
+// row per final mailbox. The panel lists, shows, releases and deletes those rows; what it reads of
+// a letter reaches the screen only through the panel's safe text view (services/mailNode/quarantine.js).
+// The quarantine settings (edit/quarantine) are left alone: the API has no call to read them, and
+// edit/quarantine writes every setting from the body, resetting the ones left out (retention,
+// excluded domains, notification sender and template; functions.quarantine.inc.php, 'settings').
+
+// mailcow's symbols come in two shapes: a quarantine row keeps rspamd's list [{ name, score,
+// options }] as a JSON string, the history a map { NAME: { name, score, options, description } }.
+// One list of { name, score, options, description }, the order mailcow's own screens use: positive
+// scores highest first, then negative ones, zero last.
+export function normalizeSymbols(value) {
+  let data = value;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return []; }
+  }
+  if (!data || typeof data !== 'object') return [];
+  const entries = Array.isArray(data)
+    ? data.map((s) => [s?.name, s])
+    : Object.entries(data).map(([name, s]) => [s?.name ?? name, s]);
+  return entries
+    .filter(([name, s]) => typeof name === 'string' && name && s && typeof s === 'object')
+    .map(([name, s]) => ({
+      name,
+      score: Number.isFinite(Number(s.score)) ? Number(s.score) : 0,
+      options: Array.isArray(s.options) ? s.options.slice(0, 20).map(String) : [],
+      description: typeof s.description === 'string' ? s.description : null,
+    }))
+    .sort((a, b) => (a.score === 0) - (b.score === 0) || b.score - a.score);
+}
+
+const finiteOrNull = (value) => (
+  value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value)
+);
+
+// The quarantine without the letters (get/quarantine/all; [] when empty), newest first, with
+// `created` as an ISO time (mailcow sends seconds since the epoch here). virus: rspamd found one.
+export async function listQuarantine(cfg) {
+  return asList(await request(cfg, 'GET', 'get/quarantine/all'))
+    .filter((q) => q && Number.isInteger(Number(q.id)))
+    .map((q) => ({
+      id: Number(q.id),
+      qid: String(q.qid ?? ''),
+      subject: String(q.subject ?? ''),
+      score: finiteOrNull(q.score),
+      sender: String(q.sender ?? ''),
+      rcpt: String(q.rcpt ?? '').toLowerCase(),
+      action: String(q.action ?? ''),
+      created: Number(q.created) > 0 ? new Date(Number(q.created) * 1000).toISOString() : null,
+      notified: Number(q.notified) === 1,
+      virus: Number(q.virus_flag) > 0,
+    }))
+    .sort((a, b) => b.id - a.id);
+}
+
+// One quarantine row with its letter (get/quarantine/<id>), or null when there is none. `msg` is the
+// letter as mailcow stored it; `created` is mailcow's own DATETIME text, in the node's time zone.
+export async function getQuarantineItem(cfg, id) {
+  const data = await request(cfg, 'GET', `get/quarantine/${encodeURIComponent(id)}`);
+  const item = Array.isArray(data) ? data[0] : data;
+  if (!item || typeof item !== 'object' || !Number.isInteger(Number(item.id))) return null;
+  return {
+    id: Number(item.id),
+    qid: String(item.qid ?? ''),
+    subject: String(item.subject ?? ''),
+    score: finiteOrNull(item.score),
+    ip: item.ip && item.ip !== 'unknown' ? String(item.ip) : null,
+    action: String(item.action ?? ''),
+    symbols: normalizeSymbols(item.symbols),
+    sender: String(item.sender ?? ''),
+    rcpt: String(item.rcpt ?? '').toLowerCase(),
+    user: item.user && item.user !== 'unknown' ? String(item.user) : null,
+    created: item.created ? String(item.created) : null,
+    msg: typeof item.msg === 'string' ? item.msg : '',
+  };
+}
+
+// Release: mailcow hands the letter to Postfix on its port 590 (past rspamd) for the mailbox,
+// deletes the row and then trains rspamd with it as ham. The API's "learnham" runs the same code,
+// so the panel offers the one action. The answer has a success per step; training that fails after
+// the letter went out is a warning, not a failure. Returns { learned, warnings }.
+export async function releaseQuarantineItem(cfg, id) {
+  const items = asList(await request(cfg, 'POST', 'edit/qitem', { items: [id], attr: { action: 'release' } }, { judge: false }))
+    .filter((item) => item && typeof item === 'object');
+  const said = (word) => items.some((item) => item.type === 'success' && Array.isArray(item.msg) && item.msg[0] === word);
+  if (!said('item_released')) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+  return {
+    learned: said('learned_ham'),
+    warnings: items.filter((item) => item.type !== 'success').map((item) => messageOf(item) || item.type),
+  };
+}
+
+// "Delete and train as spam" (edit/qitem learnspam): mailcow deletes the row first, then trains
+// rspamd with the letter as spam and adds its fuzzy hash. A failed training comes back as a danger
+// item after the row is gone, so it is a warning here; only a row that was not touched (no such
+// entry, access_denied) is a refusal. Returns { learned, warnings }.
+const LEARN_SPAM_AFTER_DELETE = new Set(['qlearn_spam', 'spam_learn_error', 'fuzzy_learn_error']);
+export async function learnSpamQuarantineItem(cfg, id) {
+  const items = asList(await request(cfg, 'POST', 'edit/qitem', { items: [id], attr: { action: 'learnspam' } }, { judge: false }))
+    .filter((item) => item && typeof item === 'object');
+  const word = (item) => (Array.isArray(item.msg) ? item.msg[0] : item.msg);
+  if (!items.some((item) => LEARN_SPAM_AFTER_DELETE.has(word(item)))) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+  return {
+    learned: items.some((item) => item.type === 'success' && word(item) === 'qlearn_spam'),
+    warnings: items.filter((item) => item.type !== 'success').map((item) => messageOf(item) || item.type),
+  };
+}
+
+// The quarantine settings the panel writes when an administrator asks it to (edit/quarantine
+// 'settings'). That call writes every setting from the body and resets the ones left out, and the
+// API cannot read them back, so the panel always sends all of them: letters up to 10 MiB, 20 kept
+// per mailbox, 365 days, no excluded domains, release as the original letter ("raw": the panel's
+// texts about releasing assume it), and empty notification fields, for which mailcow falls back to
+// its own defaults (quarantine_notify.py: sender quarantine@localhost, its subject and template,
+// no score limit for notifications).
+export const QUARANTINE_NODE_SETTINGS = Object.freeze({
+  max_size: 10,
+  retention_size: 20,
+  max_age: 365,
+  max_score: '',
+  exclude_domains: [],
+  release_format: 'raw',
+  sender: '',
+  subject: '',
+  bcc: '',
+  redirect: '',
+  html_tmpl: '',
+});
+
+export async function writeQuarantineSettings(cfg) {
+  const items = asList(await request(cfg, 'POST', 'edit/quarantine', {
+    items: ['none'], attr: { action: 'settings', ...QUARANTINE_NODE_SETTINGS },
+  }, { judge: false })).filter((item) => item && typeof item === 'object');
+  if (!items.some((item) => item.type === 'success' && messageOf(item) === 'saved_settings')) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+}
+
+// delete/qitem answers success for an id it has no row for, too.
+export async function deleteQuarantineItem(cfg, id) {
+  const items = asList(await request(cfg, 'POST', 'delete/qitem', [id], { judge: false }))
+    .filter((item) => item && typeof item === 'object');
+  if (!items.some((item) => item.type === 'success')) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+}
+
+// rspamd's history of the last `rows` letters it checked (get/logs/rspamd-history/<rows>; mailcow
+// keeps 1000, local.d/history_redis.conf), newest first, with `time` as an ISO time. A history row
+// carries no queue id: it is matched to a letter by Message-ID, recipient and time.
+// Symbols keep their name, score and description only: a symbol's options (URLs, addresses) are
+// not needed for a verdict and would make the cached history large.
+const lowerList = (value) => (Array.isArray(value) ? value.map((v) => String(v).toLowerCase()) : []);
+const HISTORY_TIMEOUT_MS = 20000;
+export async function getRspamdHistory(cfg, rows) {
+  const data = await request(cfg, 'GET', `get/logs/rspamd-history/${rows}`, undefined, { timeoutMs: HISTORY_TIMEOUT_MS });
+  return asList(data)
+    .filter((r) => r && typeof r === 'object' && !Array.isArray(r))
+    .map((r) => ({
+      messageId: r['message-id'] ? String(r['message-id']) : null,
+      time: Number(r.unix_time) > 0 ? new Date(Number(r.unix_time) * 1000).toISOString() : null,
+      score: finiteOrNull(r.score),
+      requiredScore: finiteOrNull(r.required_score),
+      // The scores from which rspamd marks a letter as spam and rejects it ({ "add header": 8,
+      // reject: 15, greylist: 7 } on mailcow).
+      spamScore: finiteOrNull(r.thresholds?.['add header'] ?? r.thresholds?.['rewrite subject']),
+      rejectScore: finiteOrNull(r.thresholds?.reject ?? r.required_score),
+      action: String(r.action ?? ''),
+      skipped: r.is_skipped === true,
+      symbols: normalizeSymbols(r.symbols).map(({ name, score, description }) => ({ name, score, description })),
+      ip: r.ip ? String(r.ip) : null,
+      senderSmtp: String(r.sender_smtp ?? '').toLowerCase(),
+      senderMime: String(r.sender_mime ?? '').toLowerCase(),
+      rcptSmtp: lowerList(r.rcpt_smtp),
+      rcptMime: lowerList(r.rcpt_mime),
+      subject: String(r.subject ?? ''),
+    }));
+}
