@@ -3,7 +3,7 @@ import { query } from '../db.js';
 import { encrypt, decrypt } from '../encryption.js';
 import { safeFetch } from '../safeFetch.js';
 
-// The mail node: a mailcow server that MailExpert creates, disables and re-enables mailboxes on.
+// The mail node: a mailcow server that MailExpert creates and deletes mailboxes on.
 // MailExpert stores only its host name (<MAIL_HOST>), never an IP: IMAP and SMTP of every mailbox
 // and the API at https://<MAIL_HOST>/api/v1 all go by that name, so moving the node is a DNS change.
 
@@ -19,11 +19,13 @@ const REQUEST_TIMEOUT_MS = 15000;
 const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const LOCAL_PART_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 
+// status: the HTTP status the panel answers with; a failure of the node itself is 502.
 export class MailNodeError extends Error {
-  constructor(code, message) {
+  constructor(code, message, status = 502) {
     super(message);
     this.name = 'MailNodeError';
     this.code = code;
+    this.status = status;
   }
 }
 
@@ -87,17 +89,21 @@ export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUr
   `, [MAIL_NODE_PROVIDER, { mailHost, apiKey: encrypt(apiKey), quotaMb, diskPingUrl }]);
 }
 
-// mailcow answers 200 even when it refuses: a write returns [{ type: 'success' | 'danger' |
-// 'error', msg }], so the body decides. The message names the refusal (e.g. 'object_exists').
+const messageOf = (item) => (Array.isArray(item.msg) ? item.msg.join(' ') : String(item.msg ?? ''));
+
+// mailcow answers 200 even when it refuses: a write returns [{ type: 'success' | 'warning' |
+// 'danger' | 'error', msg }], so the body decides. The message names the refusal (e.g.
+// 'object_exists').
 function refusal(body) {
   const items = Array.isArray(body) ? body : [body];
   const failed = items.find((item) => item && typeof item === 'object' && item.type && item.type !== 'success');
   if (!failed) return null;
-  const msg = Array.isArray(failed.msg) ? failed.msg.join(' ') : String(failed.msg ?? '');
-  return msg || 'refused';
+  return messageOf(failed) || 'refused';
 }
 
-async function request(cfg, method, path, body) {
+// judge: false leaves the answer of a POST to the caller (delete/mailbox mixes warnings with its
+// success).
+async function request(cfg, method, path, body, { judge = true } = {}) {
   let res;
   try {
     // allowPrivate: on a one-server install <MAIL_HOST> resolves to this host's own address.
@@ -124,7 +130,7 @@ async function request(cfg, method, path, body) {
   } catch {
     throw new MailNodeError('mail_node_failed', 'The mail node did not answer with JSON');
   }
-  const refused = method === 'POST' ? refusal(data) : null;
+  const refused = method === 'POST' && judge ? refusal(data) : null;
   if (refused) throw new MailNodeError('mail_node_refused', `The mail node refused: ${refused}`);
   return data;
 }
@@ -206,12 +212,20 @@ function editMailbox(cfg, email, attr) {
   return request(cfg, 'POST', 'edit/mailbox', { items: [email], attr });
 }
 
-// Creates the mailbox, or takes over one that already exists (disabled by a delete in MailExpert,
-// or made by hand in mailcow): it is enabled with a new password only MailExpert knows.
+// Creates the mailbox, or takes over an active one made by hand in mailcow: it is enabled with a
+// new password only MailExpert knows and keeps its letters. A mailbox deleted in MailExpert is gone
+// from the node (deleteMailbox), so creating the address again makes a new, empty one. A disabled
+// mailbox on the node is refused instead of taken over: an older MailExpert only disabled the
+// mailboxes it deleted, so its old letters would come back with it, and one disabled by hand may
+// hold letters nobody here owns. An administrator deletes it in mailcow, or enables it there to
+// have it taken over.
 export async function provisionMailbox(cfg, { localPart, domain, name }) {
   const email = `${localPart}@${domain}`;
   const password = generateMailboxPassword();
   const existing = await getMailbox(cfg, email);
+  if (existing?.state === 0) {
+    throw new MailNodeError('mailbox_disabled_on_node', 'The mail node has a disabled mailbox with this address: delete it in mailcow first', 409);
+  }
   if (existing) {
     await editMailbox(cfg, email, { active: 1, password, password2: password, force_pw_update: 0 });
   } else {
@@ -236,6 +250,22 @@ export async function setMailboxPassword(cfg, email, password = generateMailboxP
 // the letters already received stay on disk.
 export async function disableMailbox(cfg, email) {
   await editMailbox(cfg, email, { active: 0 });
+}
+
+// Deletes the mailbox on the node with its mail. delete/mailbox takes a JSON array of addresses;
+// mailcow drops the mailbox and everything tied to it from its database and moves the maildir to
+// /var/vmail/_garbage, where it is purged once older than MAILDIR_GC_TIME minutes. It answers
+// [success] once the mailbox is gone, with a warning before it when the maildir could not be moved
+// (the mailbox is deleted all the same and its mail stays where it was, so a mailbox made again
+// at the address would show it), and [danger access_denied] for an address it has no mailbox for.
+// Returns the warnings; throws a refusal when no success came back.
+export async function deleteMailbox(cfg, email) {
+  const items = asList(await request(cfg, 'POST', 'delete/mailbox', [email], { judge: false }))
+    .filter((item) => item && typeof item === 'object');
+  if (!items.some((item) => item.type === 'success')) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+  return { warnings: items.filter((item) => item.type === 'warning').map((item) => messageOf(item) || 'warning') };
 }
 
 export async function setMailboxQuota(cfg, email, quotaMb) {

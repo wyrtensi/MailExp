@@ -9,9 +9,9 @@ const dbState = { db: null };
 vi.mock('../db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
 
 const {
-  DOMAIN_STATES, MANUAL_STEPS, UNKNOWN_STATE, adoptDomain, adoptDomainsWithMailboxes, bindNodeIdentities,
-  canCreateMailboxes, confirmStep, getDomainRow, isRecreated, listDomainRows, markReady, mergeDomains,
-  nextStep, nodeRefusal, recordCreatedDomain,
+  DOMAIN_STATES, MANUAL_STEPS, UNKNOWN_STATE, acknowledgeNodeIdentity, adoptDomain, adoptDomainsWithMailboxes,
+  bindNodeIdentities, canCreateMailboxes, confirmStep, getDomainRow, isRecreated, listDomainRows, markReady,
+  mergeDomains, nextStep, nodeRefusal, recordCreatedDomain, restartOnboarding,
 } = await import('./domains.js');
 
 const ADMIN = '60000000-0000-4000-8000-000000000001';
@@ -145,17 +145,15 @@ describe('the onboarding state machine', () => {
     });
   });
 
-  it('adopts again a domain deleted on the node and made again by hand, starting over', async () => {
+  it('never overwrites a row by adoption, whatever the node reports', async () => {
     await recordCreatedDomain({ domain: 'remade.example', userId: ADMIN, maxMailboxes: 10 });
     await markReady({ domain: 'remade.example', userId: ADMIN });
     await db.query("UPDATE mail_node_domains SET node_created = '2026-09-01 10:00:00', relayhost_id = 3 WHERE domain = 'remade.example'");
-    expect(await adoptDomain({ domain: 'remade.example', userId: OTHER, nodeCreated: '2026-09-30 12:00:00' })).toBe(true);
+    expect(await adoptDomain({ domain: 'remade.example', userId: OTHER, nodeCreated: '2026-09-30 12:00:00' })).toBe(false);
+    expect(await adoptDomain({ domain: 'remade.example', userId: OTHER, nodeCreated: null })).toBe(false);
     const [row] = await listDomainRows();
-    expect(row).toMatchObject({ state: 'node_created', origin: 'adopted', steps: {}, addedBy: 'other', nodeCreated: '2026-09-30 12:00:00' });
-    expect((await db.query("SELECT relayhost_id FROM mail_node_domains WHERE domain = 'remade.example'")).rows[0].relayhost_id).toBeNull();
-    // Without a node identity on either side the panel cannot tell, so the row stays.
-    await db.query("UPDATE mail_node_domains SET node_created = NULL WHERE domain = 'remade.example'");
-    expect(await adoptDomain({ domain: 'remade.example', userId: ADMIN, nodeCreated: '2026-10-01 09:00:00' })).toBe(false);
+    expect(row).toMatchObject({ state: 'ready', origin: 'created', addedBy: 'admin@example.com', nodeCreated: '2026-09-01 10:00:00' });
+    expect((await db.query("SELECT relayhost_id FROM mail_node_domains WHERE domain = 'remade.example'")).rows[0].relayhost_id).toBe(3);
   });
 
   it('binds rows not bound yet to the node identity the first time the node lists the domain', async () => {
@@ -212,15 +210,117 @@ describe('adoptDomainsWithMailboxes (startup)', () => {
 });
 
 describe('the node identity of a row', () => {
-  it('tells a domain made again on the node from the one onboarded, only when both sides know', () => {
+  it('warns of a domain made again on the node only when both sides know a time, and refuses nothing for it', () => {
     const row = { state: 'ready', nodeCreated: '2026-09-01 10:00:00' };
     expect(isRecreated(row, { created: '2026-09-30 12:00:00' })).toBe(true);
     expect(isRecreated(row, { created: '2026-09-01 10:00:00' })).toBe(false);
     expect(isRecreated(row, { created: null })).toBe(false);
     expect(isRecreated({ state: 'ready', nodeCreated: null }, { created: '2026-09-30 12:00:00' })).toBe(false);
-    expect(nodeRefusal(row, undefined)).toBe('domain_not_on_node');
-    expect(nodeRefusal(row, { created: '2026-09-30 12:00:00' })).toBe('domain_recreated');
-    expect(nodeRefusal(row, { created: '2026-09-01 10:00:00' })).toBeNull();
+    expect(nodeRefusal(undefined)).toBe('domain_not_on_node');
+    expect(nodeRefusal({ created: '2026-09-30 12:00:00' })).toBeNull();
+    expect(nodeRefusal({ created: null })).toBeNull();
+  });
+
+  it('binds nothing and changes no row when the node lists no domain, other domains, no creation times or another time', async () => {
+    await recordCreatedDomain({ domain: 'unbound.example', userId: ADMIN, maxMailboxes: 10 });
+    await recordCreatedDomain({ domain: 'bound.example', userId: ADMIN, maxMailboxes: 10 });
+    await markReady({ domain: 'bound.example', userId: ADMIN });
+    await db.query("UPDATE mail_node_domains SET node_created = '2026-09-01 10:00:00' WHERE domain = 'bound.example'");
+    const snapshot = async () => (await db.query('SELECT * FROM mail_node_domains ORDER BY domain')).rows;
+    const before = await snapshot();
+    for (const node of [
+      [],
+      [{ domain: 'other.example', created: '2026-09-30 12:00:00' }],
+      [{ domain: 'unbound.example', created: null }, { domain: 'bound.example', created: null }],
+      [{ domain: 'bound.example', created: '2026-12-31 00:00:00' }],
+    ]) {
+      const rows = await bindNodeIdentities(node, await listDomainRows());
+      expect(rows.map((r) => [r.domain, r.state, r.nodeCreated])).toEqual([
+        ['bound.example', 'ready', '2026-09-01 10:00:00'], ['unbound.example', 'node_created', null],
+      ]);
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('accepts the time the node reports now, changing nothing else', async () => {
+    await recordCreatedDomain({ domain: 'moved.example', userId: ADMIN, maxMailboxes: 10 });
+    await markReady({ domain: 'moved.example', userId: ADMIN });
+    await db.query("UPDATE mail_node_domains SET node_created = '2026-09-01 10:00:00', relayhost_id = 4 WHERE domain = 'moved.example'");
+    expect(await acknowledgeNodeIdentity({ domain: 'moved.example', nodeCreated: '2026-09-30 12:00:00' }))
+      .toEqual({ from: '2026-09-01 10:00:00', to: '2026-09-30 12:00:00' });
+    const [row] = await listDomainRows();
+    expect(row).toMatchObject({ state: 'ready', nodeCreated: '2026-09-30 12:00:00' });
+    expect(row.steps.ready).toMatchObject({ markedReady: true });
+    expect((await db.query("SELECT relayhost_id FROM mail_node_domains WHERE domain = 'moved.example'")).rows[0].relayhost_id).toBe(4);
+    expect(await acknowledgeNodeIdentity({ domain: 'moved.example', nodeCreated: '2026-09-30 12:00:00' })).toEqual({ error: 'domain_not_recreated' });
+    expect(await acknowledgeNodeIdentity({ domain: 'missing.example', nodeCreated: '2026-09-30 12:00:00' })).toEqual({ error: 'domain_not_found' });
+  });
+});
+
+describe('restartOnboarding', () => {
+  it('starts a domain over from any state, keeping where it came from and the owner\'s choices', async () => {
+    await recordCreatedDomain({ domain: 'again.example', userId: ADMIN, maxMailboxes: 30 });
+    await markReady({ domain: 'again.example', userId: ADMIN });
+    await db.query(`UPDATE mail_node_domains SET state = 'authoritative', relayhost_id = 7, dns_check = '{"mx": true}',
+      dns_checked_at = NOW(), tenant = '{"verified": true}', accepted_domain_type = 'Authoritative',
+      expected_mx = '["mx.example"]', node_created = '2026-09-01 10:00:00', dkim_mode = 'eop', mailbox_send_limit = 20
+      WHERE domain = 'again.example'`);
+    expect(await restartOnboarding({ domain: 'again.example', userId: OTHER })).toEqual({ from: 'authoritative', to: 'node_created' });
+    const [row] = await listDomainRows();
+    expect(row).toMatchObject({
+      state: 'node_created', steps: {}, origin: 'created', addedBy: 'admin@example.com', maxMailboxes: 30, nodeCreated: null,
+    });
+    const { rows: [raw] } = await db.query(`SELECT relayhost_id, dns_check, dns_checked_at, tenant, accepted_domain_type,
+      expected_mx, dkim_mode, mailbox_send_limit, state_changed_by FROM mail_node_domains WHERE domain = 'again.example'`);
+    expect(raw).toEqual({
+      relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: null,
+      expected_mx: [], dkim_mode: 'eop', mailbox_send_limit: 20, state_changed_by: OTHER,
+    });
+    expect(await restartOnboarding({ domain: 'missing.example', userId: ADMIN })).toEqual({ error: 'domain_not_found' });
+  });
+
+  it('leaves the mailboxes of the domain and their cached letters alone, on restart and on adding the domain again', async () => {
+    await recordCreatedDomain({ domain: 'kept.example', userId: ADMIN, maxMailboxes: 10 });
+    await markReady({ domain: 'kept.example', userId: ADMIN });
+    const { rows: [account] } = await db.query(
+      `INSERT INTO email_accounts (added_by, name, email_address, mail_node) VALUES ($1, 'Info', 'info@kept.example', true) RETURNING id`,
+      [ADMIN],
+    );
+    await db.query("INSERT INTO folders (account_id, path, name) VALUES ($1, 'INBOX', 'INBOX')", [account.id]);
+    await db.query(
+      `INSERT INTO messages (account_id, uid, folder, message_id, from_email) VALUES ($1, 1, 'INBOX', '<a@kept.example>', 'x@example.com'),
+         ($1, 2, 'INBOX', '<b@kept.example>', 'y@example.com')`,
+      [account.id],
+    );
+    const snapshot = async () => ({
+      accounts: (await db.query('SELECT * FROM email_accounts ORDER BY id')).rows,
+      folders: (await db.query('SELECT * FROM folders ORDER BY id')).rows,
+      messages: (await db.query('SELECT * FROM messages ORDER BY id')).rows,
+    });
+    const before = await snapshot();
+    expect(before.messages).toHaveLength(2);
+    await restartOnboarding({ domain: 'kept.example', userId: ADMIN });
+    expect(await snapshot()).toEqual(before);
+    await recordCreatedDomain({ domain: 'kept.example', userId: OTHER, maxMailboxes: 20 });
+    expect(await snapshot()).toEqual(before);
+    expect(await stateOf('kept.example')).toBe('node_created');
+  });
+});
+
+describe('no automatic removal of domain rows', () => {
+  it('has no statement in the panel that deletes a mail_node_domains row', async () => {
+    const { readdir, readFile } = await import('node:fs/promises');
+    const { fileURLToPath } = await import('node:url');
+    const { join } = await import('node:path');
+    const root = fileURLToPath(new URL('../../', import.meta.url));
+    const files = (await readdir(root, { recursive: true })).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'));
+    const offenders = [];
+    for (const file of files) {
+      const text = await readFile(join(root, file), 'utf8');
+      if (/DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains/i.test(text)) offenders.push(file);
+    }
+    expect(files.length).toBeGreaterThan(50);
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -251,12 +351,39 @@ describe('mergeDomains', () => {
     ]);
   });
 
-  it('shows a domain made again on the node as unknown, not in the old row state', () => {
+  it('keeps the state of a domain made again on the node, with both creation times for the warning', () => {
     const rows = [{ domain: 'b.example', state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, maxMailboxes: 500, nodeCreated: '2026-09-01 10:00:00' }];
     const [, b] = mergeDomains([node[1], { ...node[0], created: '2026-09-30 12:00:00' }], rows);
-    expect(b).toMatchObject({ domain: 'b.example', state: 'unknown', recreated: true, nextStep: null, origin: null, steps: {} });
+    expect(b).toMatchObject({
+      domain: 'b.example', state: 'ready', origin: 'created', recreated: true, nodeCreated: '2026-09-01 10:00:00', created: '2026-09-30 12:00:00',
+    });
     const [, same] = mergeDomains([node[1], { ...node[0], created: '2026-09-01 10:00:00' }], rows);
     expect(same.state).toBe('ready');
     expect(same.recreated).toBeUndefined();
+    const [, unknownTime] = mergeDomains([node[1], { ...node[0], created: null }], rows);
+    expect(unknownTime.state).toBe('ready');
+    expect(unknownTime.recreated).toBeUndefined();
+  });
+
+  it('shows every row with its state and the node unknown when the node could not be read', () => {
+    const rows = [
+      { domain: 'b.example', state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, maxMailboxes: 500, nodeCreated: 'x' },
+      { domain: 'a.example', state: 'dns_ok', origin: 'adopted', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, maxMailboxes: null },
+    ];
+    expect(mergeDomains(null, rows)).toEqual([
+      {
+        domain: 'a.example', active: null, maxMailboxes: null, mailboxes: null, onNode: null,
+        state: 'dns_ok', origin: 'adopted', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, nextStep: 'tenant_verified',
+      },
+      {
+        domain: 'b.example', active: null, maxMailboxes: 500, mailboxes: null, onNode: null,
+        state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, nextStep: null,
+      },
+    ]);
+  });
+
+  it('shows every row as off the node, not gone, when the node lists no domain at all', () => {
+    const rows = [{ domain: 'b.example', state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, maxMailboxes: 500 }];
+    expect(mergeDomains([], rows)).toEqual([expect.objectContaining({ domain: 'b.example', state: 'ready', onNode: false })]);
   });
 });

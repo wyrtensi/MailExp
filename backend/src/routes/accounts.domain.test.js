@@ -30,6 +30,7 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
       email: `${localPart}@${domain}`, password: 'generated-password', reused: false,
     })),
     disableMailbox: vi.fn(async () => {}),
+    deleteMailbox: vi.fn(async () => ({ warnings: [] })),
     getMailbox: vi.fn(async () => null),
   };
 });
@@ -45,7 +46,9 @@ import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { recordAudit } from '../services/auditLog.js';
-import { MailNodeError, disableMailbox, getMailbox, listDomains, provisionMailbox } from '../services/mailNode/mailcow.js';
+import {
+  MailNodeError, deleteMailbox, disableMailbox, getMailbox, listDomains, provisionMailbox,
+} from '../services/mailNode/mailcow.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
@@ -157,12 +160,33 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(provisionMailbox).not.toHaveBeenCalled();
   });
 
-  it('refuses a ready domain that was deleted on the node and made again by hand', async () => {
+  it('creates a mailbox on a ready domain whose node creation time differs: that only warns administrators', async () => {
     listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, created: '2026-09-30 08:00:00' }]);
     const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
-    expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe('domain_not_ready');
+    expect(res.status).toBe(200);
+    expect(provisionMailbox).toHaveBeenCalledTimes(1);
+  });
+
+  it('creates a mailbox on a ready domain the node lists without a creation time', async () => {
+    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, created: null }]);
+    expect((await post({ kind: 'domain', localPart: 'info', domain: 'example.com' })).status).toBe(200);
+  });
+
+  it('refuses a mailbox while the node cannot be read, without writing anything', async () => {
+    listDomains.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe('mail_node_unreachable');
     expect(provisionMailbox).not.toHaveBeenCalled();
+    expect(inserted).toBeNull();
+  });
+
+  it('refuses an address the node holds as a disabled mailbox, with its own code', async () => {
+    provisionMailbox.mockRejectedValueOnce(new MailNodeError('mailbox_disabled_on_node', 'The mail node has a disabled mailbox with this address: delete it in mailcow first', 409));
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('mailbox_disabled_on_node');
+    expect(inserted).toBeNull();
   });
 
   it('creates a mailbox on an authoritative domain too', async () => {
@@ -195,75 +219,114 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(inserted).toBeNull();
   });
 
-  it('disables the new mailbox again when the account row cannot be written', async () => {
+  it('deletes the new mailbox again when the account row cannot be written, and only disables one taken over', async () => {
     query.mockImplementation(async (sql) => {
       if (sql.includes('INSERT INTO email_accounts')) throw new Error('db down');
       return { rows: [] };
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+    let res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+    expect(res.status).toBe(500);
+    expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
+    expect(disableMailbox).not.toHaveBeenCalled();
+    provisionMailbox.mockResolvedValueOnce({ email: 'desk@example.com', password: 'p', reused: true });
+    res = await post({ kind: 'domain', localPart: 'desk', domain: 'example.com' });
     errorSpy.mockRestore();
     expect(res.status).toBe(500);
-    expect(disableMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
+    expect(disableMailbox).toHaveBeenCalledWith(CFG, 'desk@example.com');
+    expect(deleteMailbox).toHaveBeenCalledTimes(1);
   });
 
   describe('DELETE', () => {
     const del = () => fetch(`${base}/api/accounts/${ID}`, { method: 'DELETE' });
 
-    it('disables a mail node mailbox on the node, then deletes the row', async () => {
+    const nodeRow = () => query.mockImplementation(async (sql) => (
+      sql.startsWith('SELECT id, email_address, mail_node')
+        ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
+        : { rows: [] }
+    ));
+    const rowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE'));
+
+    it('deletes a mail node mailbox on the node with its mail, then deletes the row', async () => {
       const order = [];
-      disableMailbox.mockImplementationOnce(async () => { order.push('disable'); });
+      deleteMailbox.mockImplementationOnce(async () => { order.push('node'); return { warnings: [] }; });
       query.mockImplementation(async (sql) => {
         if (sql.startsWith('SELECT id, email_address, mail_node')) return { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] };
-        if (sql.startsWith('DELETE')) order.push('delete');
+        if (sql.startsWith('DELETE')) order.push('row');
         return { rows: [] };
       });
       const res = await del();
       expect(res.status).toBe(200);
-      expect(disableMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
-      expect(order).toEqual(['disable', 'delete']);
+      expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
+      expect(disableMailbox).not.toHaveBeenCalled();
+      expect(order).toEqual(['node', 'row']);
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountEmail: 'info@example.com', action: 'mailbox.deleted', details: { mailNode: true },
       });
     });
 
-    it('keeps the row when the node cannot disable the mailbox', async () => {
-      disableMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ECONNREFUSED)'));
-      query.mockImplementation(async (sql) => (
-        sql.startsWith('SELECT id, email_address, mail_node')
-          ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
-          : { rows: [] }
-      ));
+    it('journals the node warning when the mailbox went but its maildir stayed', async () => {
+      deleteMailbox.mockResolvedValueOnce({ warnings: ['Could not move maildir to garbage collector: command failed'] });
+      nodeRow();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const res = await del();
-      expect(res.status).toBe(502);
-      expect((await res.json()).code).toBe('mail_node_unreachable');
-      expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(false);
+      warnSpy.mockRestore();
+      expect(res.status).toBe(200);
+      expect(rowDeleted()).toBe(true);
+      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+        action: 'mailbox.deleted',
+        details: { mailNode: true, nodeWarnings: ['Could not move maildir to garbage collector: command failed'] },
+      }));
+    });
+
+    for (const [name, err] of [
+      ['is unreachable', new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ECONNREFUSED)')],
+      ['answers an error', new MailNodeError('mail_node_failed', 'The mail node answered HTTP 500')],
+      ['refuses the key', new MailNodeError('mail_node_auth', 'The mail node refused the API key')],
+    ]) {
+      it(`keeps the row and answers the node error when the node ${name}`, async () => {
+        deleteMailbox.mockRejectedValueOnce(err);
+        nodeRow();
+        const res = await del();
+        expect(res.status).toBe(502);
+        expect(await res.json()).toEqual({ error: err.message, code: err.code });
+        expect(rowDeleted()).toBe(false);
+        expect(recordAudit).not.toHaveBeenCalled();
+      });
+    }
+
+    it('keeps the row without a mail node configured', async () => {
+      node.cfg = null;
+      nodeRow();
+      const res = await del();
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mail_node_not_configured');
+      expect(deleteMailbox).not.toHaveBeenCalled();
+      expect(rowDeleted()).toBe(false);
     });
 
     it('deletes the row when the node refuses because the mailbox is gone', async () => {
-      disableMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: access_denied'));
+      deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: access_denied'));
       getMailbox.mockResolvedValueOnce(null);
-      query.mockImplementation(async (sql) => (
-        sql.startsWith('SELECT id, email_address, mail_node')
-          ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
-          : { rows: [] }
-      ));
+      nodeRow();
       const res = await del();
       expect(res.status).toBe(200);
-      expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(true);
+      expect(rowDeleted()).toBe(true);
+      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.deleted', details: { mailNode: true } }));
     });
 
-    it('keeps the row when the node refuses and the mailbox is still there', async () => {
-      disableMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: something'));
+    it('keeps the row when the node refuses and the mailbox is still there, or cannot be looked up', async () => {
+      deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: something'));
       getMailbox.mockResolvedValueOnce({ email: 'info@example.com', active: true });
-      query.mockImplementation(async (sql) => (
-        sql.startsWith('SELECT id, email_address, mail_node')
-          ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
-          : { rows: [] }
-      ));
-      const res = await del();
+      nodeRow();
+      let res = await del();
       expect(res.status).toBe(502);
-      expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(false);
+      deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: something'));
+      getMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
+      res = await del();
+      expect(res.status).toBe(502);
+      expect((await res.json()).code).toBe('mail_node_refused');
+      expect(rowDeleted()).toBe(false);
     });
 
     it('deletes any other mailbox without calling the node', async () => {
@@ -274,6 +337,7 @@ describe('domain mailboxes in /api/accounts', () => {
       ));
       const res = await del();
       expect(res.status).toBe(200);
+      expect(deleteMailbox).not.toHaveBeenCalled();
       expect(disableMailbox).not.toHaveBeenCalled();
       expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(true);
     });
@@ -300,6 +364,29 @@ describe('domain mailboxes in /api/accounts', () => {
         expect((await res.json()).code).toBe('mail_node_connection_locked');
       }
       expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE'))).toBe(false);
+    });
+
+    it('refuses to disable a mail node mailbox: it is deleted instead', async () => {
+      for (const enabled of [false, 0]) {
+        const res = await put({ enabled });
+        expect(res.status).toBe(400);
+        expect((await res.json()).code).toBe('mail_node_disable_unsupported');
+      }
+      expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE'))).toBe(false);
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('lets a mail node mailbox paused before stay paused or be resumed', async () => {
+      query.mockImplementation(async () => ({ rows: [{ ...STORED, enabled: false }] }));
+      expect((await put({ enabled: false })).status).toBe(200);
+      expect((await put({ enabled: true })).status).toBe(200);
+    });
+
+    it('still lets any other mailbox be disabled', async () => {
+      query.mockImplementation(async () => ({ rows: [{ ...STORED, mail_node: false, enabled: true }] }));
+      const res = await put({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(query.mock.calls.some(([sql]) => sql.startsWith('UPDATE'))).toBe(true);
     });
 
     it('accepts the form resending the unchanged server settings with a new name', async () => {

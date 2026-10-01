@@ -20,9 +20,10 @@ import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/thread
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
 import {
-  MailNodeError, disableMailbox, getMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart, provisionMailbox,
+  MailNodeError, deleteMailbox, disableMailbox, getMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart,
+  provisionMailbox,
 } from '../services/mailNode/mailcow.js';
-import { canCreateMailboxes, getDomainRow, isRecreated } from '../services/mailNode/domains.js';
+import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
 import { mailNodeFailure, refuse as refuseMailNode } from './mailNode.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
@@ -180,7 +181,9 @@ async function createDomainMailboxNow(req, res) {
 
   const taken = await query('SELECT 1 FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
   if (taken.rows.length) return res.status(409).json({ error: 'This mailbox is already in MailExpert', code: 'mailbox_exists' });
-  // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does.
+  // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does. A
+  // node creation time other than the one the row is bound to is only a warning for administrators
+  // (services/mailNode/domains.js isRecreated) and does not stop it.
   const panelDomain = await getDomainRow(domain);
   if (!canCreateMailboxes(panelDomain?.state)) return refuseMailNode(res, 'domain_not_ready');
 
@@ -190,8 +193,6 @@ async function createDomainMailboxNow(req, res) {
     if (!onNode?.active) {
       return res.status(400).json({ error: 'The mail node has no such active domain', code: 'domain_unknown' });
     }
-    // Made again on the node by hand: not the domain that was onboarded.
-    if (isRecreated(panelDomain, onNode)) return refuseMailNode(res, 'domain_not_ready');
     created = await provisionMailbox(cfg, { localPart, domain, name });
   } catch (err) {
     return mailNodeFailure(res, err);
@@ -214,8 +215,10 @@ async function createDomainMailboxNow(req, res) {
     }));
   } catch (err) {
     console.error('Domain mailbox insert error:', err);
-    // Nobody else knows the new password: leave the mailbox disabled rather than active and unused.
-    await disableMailbox(cfg, email).catch((e) => console.error(`Could not disable ${email} on the mail node: ${e.message}`));
+    // Nobody else knows the new password. A mailbox made just now is deleted again, so the address
+    // can be created later; one taken over keeps its letters and is only disabled.
+    const undo = created.reused ? disableMailbox(cfg, email) : deleteMailbox(cfg, email);
+    await undo.catch((e) => console.error(`Could not undo ${email} on the mail node: ${e.message}`));
     return res.status(500).json({ error: 'Failed to add account' });
   }
 
@@ -316,6 +319,12 @@ router.put('/:id', async (req, res) => {
   // values, so only a real change is refused.
   if (stored.mail_node && changedConnectionFields(stored, updates).length) {
     return res.status(400).json({ error: 'The server settings of a mail node mailbox cannot be changed', code: 'mail_node_connection_locked' });
+  }
+  // A mail node mailbox has no "Disable" (owner decision D-14): it is deleted, with its mail, or it
+  // stays. Only turning one off is refused, so a form resending the value and a mailbox paused
+  // before this rule (which may be resumed) still go through.
+  if (stored.mail_node && 'enabled' in updates && !updates.enabled && stored.enabled !== false) {
+    return res.status(400).json({ error: 'A mail node mailbox cannot be disabled: delete it instead', code: 'mail_node_disable_unsupported' });
   }
 
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
@@ -475,20 +484,28 @@ router.delete('/:id', async (req, res) => {
     );
     if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
 
-    // A mail node mailbox is only disabled there. The row stays when that fails: deleting it would
-    // leave an active mailbox whose password nobody has.
+    // A mail node mailbox is deleted on the node first, with its mail (owner decision: a mailbox
+    // deleted in the panel takes its mail with it). The row stays when that fails: deleting it
+    // would leave a mailbox on the node whose password nobody has.
+    let nodeWarnings = [];
     if (check.rows[0].mail_node) {
       const cfg = await getMailNodeConfig();
       if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
       try {
-        await disableMailbox(cfg, check.rows[0].email_address);
+        ({ warnings: nodeWarnings } = await deleteMailbox(cfg, check.rows[0].email_address));
       } catch (err) {
         if (!(err instanceof MailNodeError)) throw err;
-        // mailcow refuses to edit a mailbox that is gone (removed by hand, or another node): then
-        // nothing is left active and the row may go.
+        // mailcow refuses to delete a mailbox it does not have (removed by hand, or another node):
+        // then nothing is left there and the row may go.
         const gone = err.code === 'mail_node_refused'
           && await getMailbox(cfg, check.rows[0].email_address).then((m) => m === null, () => false);
         if (!gone) return mailNodeFailure(res, err);
+      }
+      // The mailbox is gone, but mailcow could not move its maildir away: the letters stay on the
+      // node's disk until an administrator removes them, and would show in a mailbox made again at
+      // this address.
+      if (nodeWarnings.length) {
+        console.warn(`Mail node deleted ${redactEmail(check.rows[0].email_address)} with warnings: ${nodeWarnings.join('; ')}`);
       }
     }
 
@@ -517,7 +534,7 @@ router.delete('/:id', async (req, res) => {
       actorUserId: req.session.userId,
       accountEmail: check.rows[0].email_address,
       action: 'mailbox.deleted',
-      details: { mailNode: !!check.rows[0].mail_node },
+      details: { mailNode: !!check.rows[0].mail_node, ...(nodeWarnings.length ? { nodeWarnings } : {}) },
     });
     imapManager.disconnectAccount(id).catch(err =>
       console.error(`Disconnect error after delete for ${id}:`, err.message)

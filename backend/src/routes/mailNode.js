@@ -23,6 +23,7 @@ import {
   setMailboxQuota,
 } from '../services/mailNode/mailcow.js';
 import {
+  acknowledgeNodeIdentity,
   adoptDomain,
   bindNodeIdentities,
   canCreateMailboxes,
@@ -33,6 +34,7 @@ import {
   mergeDomains,
   nodeRefusal,
   recordCreatedDomain,
+  restartOnboarding,
 } from '../services/mailNode/domains.js';
 import {
   EOP_FIELDS,
@@ -69,7 +71,7 @@ const ERRORS = {
   domain_not_found: [404, 'The panel does not know this domain'],
   domain_known: [409, 'The panel knows this domain already'],
   domain_already_ready: [409, 'The domain is ready already'],
-  domain_recreated: [409, 'The node has another domain of this name now, made again by hand: adopt it again'],
+  domain_not_recreated: [409, 'The node reports the creation time the panel knows already'],
   step_invalid: [400, 'No such onboarding step'],
   step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
   eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
@@ -87,9 +89,10 @@ export function refuse(res, code) {
   return res.status(status).json({ error, code });
 }
 
-// A mailcow failure: 502, the node's own message and a code the screens translate.
+// A mailcow failure: 502 (or the status the error carries), the node's own message and a code the
+// screens translate.
 export function mailNodeFailure(res, err) {
-  if (err instanceof MailNodeError) return res.status(502).json({ error: err.message, code: err.code });
+  if (err instanceof MailNodeError) return res.status(err.status ?? 502).json({ error: err.message, code: err.code });
   throw err;
 }
 
@@ -149,15 +152,24 @@ router.put('/config', requireAdmin, async (req, res) => {
 
 // The node's domains with the panel's onboarding state of each ('unknown' for a domain the panel
 // has no record of). An administrator sees them all; everyone else only those a mailbox can be
-// created on.
+// created on. When the node cannot be read, an administrator still gets every domain the panel
+// knows (onNode: null) and the node's error beside them, never an empty list; everyone else gets
+// the error, since no mailbox can be created then anyway. Reading the node never changes a row
+// beyond binding an empty node identity.
 router.get('/domains', async (req, res) => {
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
   let onNode;
+  let nodeError;
   try {
     onNode = await listDomains(cfg);
   } catch (err) {
-    return mailNodeFailure(res, err);
+    if (!(err instanceof MailNodeError)) throw err;
+    nodeError = err;
+  }
+  if (nodeError) {
+    if (!(await isAdmin(req))) return mailNodeFailure(res, nodeError);
+    return res.json({ domains: mergeDomains(null, await listDomainRows()), node: { error: nodeError.message, code: nodeError.code } });
   }
   const domains = mergeDomains(onNode, await bindNodeIdentities(onNode, await listDomainRows()));
   if (await isAdmin(req)) return res.json({ domains });
@@ -187,8 +199,8 @@ router.post('/domains', requireAdmin, async (req, res) => {
   res.json({ ok: true, domain, state: 'node_created' });
 });
 
-// Takes in a domain made on the node by hand, or one made again there after the panel onboarded
-// it: it starts at node_created like a new one, bound to the node's identity of the domain.
+// Takes in a domain made on the node by hand that the panel has no row for: it starts at
+// node_created like a new one, bound to the node's identity of the domain.
 router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
@@ -209,29 +221,39 @@ router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
   res.json({ ok: true, domain, state: 'node_created' });
 });
 
-// Answers the refusal and returns true when the row may not move: the panel has no row, the node
-// no longer has the domain, or has another one of that name. A stale row only changes by adoption.
-async function refusedByNode(res, domain) {
+// The node's record of one domain for a route that acts on a known row: answers the refusal and
+// returns null when the panel has no row, the node is not set up or cannot be read, or the node
+// does not list the domain. A refusal never changes the row.
+async function nodeDomainFor(res, domain) {
   const row = await getDomainRow(domain);
   if (!row) {
     refuse(res, 'domain_not_found');
-    return true;
+    return null;
   }
   const cfg = await getMailNodeConfig();
   if (!cfg) {
     refuse(res, 'mail_node_not_configured');
-    return true;
+    return null;
   }
   let onNode;
   try {
     onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
   } catch (err) {
     mailNodeFailure(res, err);
-    return true;
+    return null;
   }
-  const why = nodeRefusal(row, onNode);
-  if (why) refuse(res, why);
-  return !!why;
+  const why = nodeRefusal(onNode);
+  if (why) {
+    refuse(res, why);
+    return null;
+  }
+  return { row, onNode };
+}
+
+// Answers the refusal and returns true when "Done" or "mark ready" may not move the row: see
+// nodeDomainFor. A node creation time other than the bound one is only a warning and moves on.
+async function refusedByNode(res, domain) {
+  return !(await nodeDomainFor(res, domain));
 }
 
 function stateChanged(req, res, domain, result, how) {
@@ -259,6 +281,33 @@ router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
   if (await refusedByNode(res, domain)) return undefined;
   const result = await markReady({ domain, userId: req.session.userId });
   return stateChanged(req, res, domain, result, 'marked_ready');
+});
+
+// "Restart onboarding": the domain goes back to node_created with no confirmed steps and nothing the
+// node or the tenant held, keeping the owner's DKIM mode and send limit. Its mailboxes stay as they
+// are. Needs no answer from the node: it only resets the panel's record.
+router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  const result = await restartOnboarding({ domain, userId: req.session.userId });
+  return stateChanged(req, res, domain, result, 'restarted');
+});
+
+// The administrator accepts the creation time the node reports now for a domain whose time differs
+// from the one the panel is bound to (the warning in the domain list). The state stays as it is.
+router.post('/domains/:domain/acknowledge', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  const found = await nodeDomainFor(res, domain);
+  if (!found) return undefined;
+  if (!found.onNode.created) return refuse(res, 'domain_not_recreated');
+  const result = await acknowledgeNodeIdentity({ domain, nodeCreated: found.onNode.created });
+  if (result.error) return refuse(res, result.error);
+  recordAudit({
+    actorUserId: req.session.userId, action: 'mail_node.domain_identity_acknowledged',
+    details: { domain, from: result.from, to: result.to },
+  });
+  return res.json({ ok: true, domain });
 });
 
 function eopAnswer(settings) {
