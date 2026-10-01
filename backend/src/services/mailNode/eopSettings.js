@@ -1,4 +1,5 @@
 import { query } from '../db.js';
+import { isIP } from 'node:net';
 import { isUuid } from '../../utils/uuid.js';
 import { parseHostName, parseWholeNumber } from './mailcow.js';
 
@@ -6,8 +7,9 @@ import { parseHostName, parseWholeNumber } from './mailcow.js';
 // 'mail_node_eop'): the next hop of the node (<EOP_HOST>) with the TLS Postfix must use toward it,
 // the name on the node's client certificate (<MAIL_HOST>), who signs DKIM, the send limit of a
 // mailbox, the tenant's external recipient limit (TERRL, read by hand from the EAC report) and how
-// the panel will reach the tenant. The next hop, its TLS, DKIM and the send limit are applied to the
-// node through the mailcow API (services/mailNode/nodeApply.js); the tenant fields are only kept.
+// the panel will reach the tenant, and the node's public address the DNS check compares DNS with.
+// The next hop, its TLS, DKIM and the send limit are applied to the node through the mailcow API
+// (services/mailNode/nodeApply.js); the tenant fields and the node address are only kept.
 //
 // None of these is a secret: the tenant and application ids and the certificate thumbprint only
 // name things, and the application's certificate with its password stays in the tenant worker's
@@ -51,6 +53,7 @@ export const EOP_DEFAULTS = Object.freeze({
   tenantId: null,
   appId: null,
   certThumbprint: null,
+  nodeIp: null,
 });
 export const EOP_FIELDS = Object.freeze(Object.keys(EOP_DEFAULTS));
 
@@ -70,6 +73,15 @@ export function parseTlsParameters(value) {
   return text.split(' ').every((token) => /^[a-z][a-z0-9_]*=[!-~]+$/i.test(token)) ? text : null;
 }
 
+// The node's public IPv4 address (<NODE_IP>). Nothing connects by it (the panel reaches the node by
+// its name): the DNS check compares the node's A and PTR records and SPF with it
+// (services/mailNode/dnsCheck.js). IPv4 only: the node runs with IPv6 off (decision D-13).
+function parseIpv4(value) {
+  if (typeof value !== 'string') return null;
+  const ip = value.trim();
+  return isIP(ip) === 4 ? ip : null;
+}
+
 function parseGuid(value) {
   const id = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return isUuid(id) ? id : null;
@@ -87,6 +99,7 @@ const PARSERS = {
   tenantId: [parseGuid, 'tenant_id_invalid', true],
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
+  nodeIp: [parseIpv4, 'node_ip_invalid', true],
 };
 
 const isBlank = (value) => value === null || (typeof value === 'string' && value.trim() === '');

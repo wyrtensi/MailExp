@@ -19,6 +19,7 @@ import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
+import { startDnsCheckJob } from './services/mailNode/dnsCheckJob.js';
 import { startMailboxDeletionJob } from './services/mailNode/mailboxDeletion.js';
 import { adoptDomainsWithMailboxes } from './services/mailNode/domains.js';
 import mailRoutes from './routes/mail.js';
@@ -300,6 +301,10 @@ imapManager.startSnoozeWatcher();
 
 // Read the mail node's disk every 10 minutes and ping the administrator's check URL.
 startMailNodeDiskWatch();
+
+// Check the mail node's DNS and certificate and every domain's DNS every six hours; the first run
+// comes a few minutes after the start, so the start never waits for DNS.
+startDnsCheckJob();
 
 // Delete, on the node and here, the mail node mailboxes whose asked-for deletion date has come.
 startMailboxDeletionJob({ disconnect: (accountId) => imapManager.disconnectAccount(accountId) });

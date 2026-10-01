@@ -365,16 +365,17 @@ describe('mergeDomains', () => {
     expect(mergeDomains(node, rows)).toEqual([
       {
         domain: 'a.example', active: true, maxMailboxes: 500, mailboxes: 0, onNode: true,
-        state: 'unknown', origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, nextStep: null,
+        state: 'unknown', origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, dns: null, expected: null, nextStep: null,
       },
       {
         domain: 'b.example', active: true, maxMailboxes: 500, mailboxes: 2, onNode: true,
         state: 'dns_ok', origin: 'created', addedAt: 't1', addedBy: 'admin@example.com', stateChangedAt: 't2', steps: { dns_ok: {} }, apply: null,
-        nextStep: 'tenant_verified',
+        dns: null, expected: null, nextStep: 'tenant_verified',
       },
       {
         domain: 'gone.example', active: false, maxMailboxes: 0, mailboxes: 0, onNode: false,
-        state: 'ready', origin: 'existing_mailboxes', addedAt: 't3', addedBy: null, stateChangedAt: 't3', steps: {}, apply: null, nextStep: null,
+        state: 'ready', origin: 'existing_mailboxes', addedAt: 't3', addedBy: null, stateChangedAt: 't3', steps: {}, apply: null, dns: null,
+        expected: null, nextStep: null,
       },
     ]);
   });
@@ -401,11 +402,11 @@ describe('mergeDomains', () => {
     expect(mergeDomains(null, rows)).toEqual([
       {
         domain: 'a.example', active: null, maxMailboxes: null, mailboxes: null, onNode: null,
-        state: 'dns_ok', origin: 'adopted', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, nextStep: 'tenant_verified',
+        state: 'dns_ok', origin: 'adopted', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, dns: null, expected: null, nextStep: 'tenant_verified',
       },
       {
         domain: 'b.example', active: null, maxMailboxes: 500, mailboxes: null, onNode: null,
-        state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, nextStep: null,
+        state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, dns: null, expected: null, nextStep: null,
       },
     ]);
   });

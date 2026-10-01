@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { recordAudit } from '../auditLog.js';
+import { parseHostName } from './mailcow.js';
 
 // The panel's record of the mail node's domains and their onboarding (table mail_node_domains,
 // migration 0079). The node lists the domains it has; this table says which of them the panel
@@ -46,6 +47,31 @@ function toDomain(row) {
     maxMailboxes: row.max_mailboxes ?? null,
     nodeCreated: row.node_created ?? null,
     apply: applyOf(row),
+    dns: dnsOf(row),
+    expected: expectedOf(row),
+  };
+}
+
+// The last DNS check of the domain (services/mailNode/dnsCheckJob.js): when it ran, its overall
+// status and each check. Null before the first one.
+function dnsOf(row) {
+  if (!row.dns_check) return null;
+  return {
+    at: row.dns_checked_at ?? row.dns_check.at ?? null, overall: row.dns_check.overall ?? null,
+    trigger: row.dns_check.trigger ?? null, checks: row.dns_check.checks ?? [],
+  };
+}
+
+// What the domain must publish that the panel cannot read yet: the MX the tenant gives it, the
+// tenant's verification TXT and the EOP DKIM selector CNAMEs, entered by hand until the tenant
+// driver reads them (kept in `tenant` with source 'manual').
+function expectedOf(row) {
+  const tenant = row.tenant ?? {};
+  return {
+    mx: row.expected_mx ?? [],
+    tenantTxt: tenant.verificationTxt ?? null,
+    dkimSelector1Cname: tenant.dkimSelector1Cname ?? null,
+    dkimSelector2Cname: tenant.dkimSelector2Cname ?? null,
   };
 }
 
@@ -59,7 +85,8 @@ function applyOf(row) {
 export async function listDomainRows() {
   const { rows } = await query(`
     SELECT d.domain, d.state, d.origin, d.added_at, d.state_changed_at, d.steps, d.max_mailboxes, d.node_created,
-           d.apply_result, d.applied_at, COALESCE(NULLIF(u.email, ''), u.username) AS added_by_email
+           d.apply_result, d.applied_at, d.dns_check, d.dns_checked_at, d.expected_mx, d.tenant,
+           COALESCE(NULLIF(u.email, ''), u.username) AS added_by_email
       FROM mail_node_domains d
       LEFT JOIN users u ON u.id = d.added_by
      ORDER BY d.domain`);
@@ -111,9 +138,12 @@ export function mergeDomains(nodeDomains, rows) {
   const panel = (row) => (row
     ? {
       state: row.state, origin: row.origin, addedAt: row.addedAt, addedBy: row.addedBy, stateChangedAt: row.stateChangedAt,
-      steps: row.steps, apply: row.apply ?? null,
+      steps: row.steps, apply: row.apply ?? null, dns: row.dns ?? null, expected: row.expected ?? null,
     }
-    : { state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null });
+    : {
+      state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, dns: null,
+      expected: null,
+    });
   const listed = nodeDomains ?? [];
   const merged = listed.map((d) => {
     const row = known.get(d.domain);
@@ -164,6 +194,76 @@ export async function recordCreatedDomain({ domain, userId, maxMailboxes }) {
     RETURNING (SELECT state FROM old) AS from_state, (SELECT steps FROM old) AS from_steps
   `, [domain, userId, maxMailboxes]);
   return { from: rows[0]?.from_state ?? null, steps: rows[0]?.from_steps ?? null };
+}
+
+// The most MX hosts a domain is expected to publish.
+export const MAX_EXPECTED_MX = 10;
+// mailcow and DNS hosts take a TXT string of up to 255 characters; a verification value is far
+// shorter (MS=ms12345678).
+const MAX_TENANT_TXT = 255;
+
+const blank = (value) => value === null || (typeof value === 'string' && value.trim() === '');
+
+// The values as an administrator sends them (PUT /domains/:domain/dns-expected): { values } with the
+// fields sent, checked (an empty one is null, or [] for the MX), or { error } with the refusal code.
+// expectedMx: host names as an array or separated by commas, spaces or new lines.
+export function parseExpectedValues(body) {
+  const values = {};
+  if (body?.expectedMx !== undefined) {
+    const parts = Array.isArray(body.expectedMx) ? body.expectedMx : String(body.expectedMx ?? '').split(/[\s,;]+/);
+    const mx = [];
+    for (const part of parts) {
+      if (blank(part)) continue;
+      const host = parseHostName(String(part).replace(/\.$/, ''));
+      if (!host) return { error: 'expected_mx_invalid' };
+      if (!mx.includes(host)) mx.push(host);
+    }
+    if (mx.length > MAX_EXPECTED_MX) return { error: 'expected_mx_invalid' };
+    values.mx = mx;
+  }
+  if (body?.tenantTxt !== undefined) {
+    const text = blank(body.tenantTxt) ? null : String(body.tenantTxt).trim();
+    if (text && (text.length > MAX_TENANT_TXT || !/^[ -~]+$/.test(text) || text.includes('"'))) return { error: 'tenant_txt_invalid' };
+    values.tenantTxt = text;
+  }
+  for (const field of ['dkimSelector1Cname', 'dkimSelector2Cname']) {
+    if (body?.[field] === undefined) continue;
+    if (blank(body[field])) {
+      values[field] = null;
+      continue;
+    }
+    const host = parseHostName(String(body[field]).replace(/\.$/, ''));
+    if (!host) return { error: 'dkim_cname_invalid' };
+    values[field] = host;
+  }
+  return { values };
+}
+
+// The values the domain must publish, as an administrator enters them until the tenant driver
+// reads them: expectedMx (host names), tenantTxt (the verification TXT) and the two EOP DKIM
+// selector CNAMEs. Each field sent replaces the stored one (empty clears it); a field left out
+// stays. Returns { fields } with the names of the fields that changed, or { error }.
+export async function setExpectedValues({ domain, values }) {
+  const { rows } = await query('SELECT expected_mx, tenant FROM mail_node_domains WHERE domain = $1 FOR UPDATE', [domain]);
+  if (!rows.length) return { error: 'domain_not_found' };
+  const before = expectedOf(rows[0]);
+  const after = {
+    mx: values.mx ?? before.mx,
+    tenantTxt: values.tenantTxt !== undefined ? values.tenantTxt : before.tenantTxt,
+    dkimSelector1Cname: values.dkimSelector1Cname !== undefined ? values.dkimSelector1Cname : before.dkimSelector1Cname,
+    dkimSelector2Cname: values.dkimSelector2Cname !== undefined ? values.dkimSelector2Cname : before.dkimSelector2Cname,
+  };
+  const fields = Object.keys(after).filter((key) => JSON.stringify(after[key]) !== JSON.stringify(before[key]));
+  if (!fields.length) return { fields };
+  await query(`
+    UPDATE mail_node_domains
+       SET expected_mx = $2::jsonb,
+           tenant = COALESCE(tenant, '{}'::jsonb) || jsonb_build_object(
+             'verificationTxt', $3::text, 'dkimSelector1Cname', $4::text, 'dkimSelector2Cname', $5::text, 'source', 'manual'),
+           updated_at = NOW()
+     WHERE domain = $1
+  `, [domain, JSON.stringify(after.mx), after.tenantTxt, after.dkimSelector1Cname, after.dkimSelector2Cname]);
+  return { fields };
 }
 
 // An administrator takes in a domain made on the node by hand, one the panel has no row for. Its
