@@ -1798,7 +1798,11 @@ export async function demoRequest(method, path, body = {}) {
       if (error) throw demoError('Panel addresses must be IP addresses or networks', error);
       const changed = networks.join() !== demoPanelIps.join();
       demoPanelIps = networks;
-      if (changed) return { ok: true, apply: demoApplyNode() };
+      // As on the server, the apply runs after the answer; the demo has it done at once.
+      if (changed) {
+        demoApplyNode();
+        return { ok: true, applying: true };
+      }
     }
     return { ok: true };
   }
@@ -1868,7 +1872,9 @@ export async function demoRequest(method, path, body = {}) {
     if (settings.sendLimitPerHour) {
       mailNodeMailboxes = mailNodeMailboxes.map(m => ({ ...m, rateLimitDefault: { value: settings.sendLimitPerHour, frame: 'h' } }));
     }
-    return applied ? { ...eopSettingsAnswer(), apply: demoApplyNode() } : eopSettingsAnswer();
+    if (!applied) return eopSettingsAnswer();
+    demoApplyNode();
+    return { ...eopSettingsAnswer(), applying: true };
   }
   if (verb === 'GET' && pathname === '/mail-node/mailboxes') {
     return clone({ disk: { usedPercent: 41, used: '16G', total: '40G', warn: false }, mailboxes: mailNodeMailboxes });

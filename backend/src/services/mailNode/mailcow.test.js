@@ -26,6 +26,8 @@ import {
   joinTxtChunks,
   listRelayhosts,
   listTlsPolicies,
+  deleteRelayhost,
+  unwhitelistFail2ban,
   parseNetwork,
   parseNetworkList,
   setDomainRelayhost,
@@ -340,8 +342,10 @@ describe('node settings requests', () => {
   it('accepts the panel addresses as IPs or networks, never the whole internet', () => {
     expect(parseNetwork(' 203.0.113.10 ')).toBe('203.0.113.10');
     expect(parseNetwork('203.0.113.0/28')).toBe('203.0.113.0/28');
+    expect(parseNetwork('203.0.113.0/24')).toBe('203.0.113.0/24');
     expect(parseNetwork('2001:DB8::/64')).toBe('2001:db8::/64');
-    for (const bad of ['0.0.0.0/0', '10.0.0.0/7', '::/0', '2001:db8::/15', '203.0.113.10/33', '203.0.113.10/x', 'mail.example.com', '1.2.3.4/24/1', '', null]) {
+    expect(parseNetwork('2001:db8::/48')).toBe('2001:db8::/48');
+    for (const bad of ['0.0.0.0/0', '10.0.0.0/8', '203.0.0.0/23', '::/0', '2001:db8::/47', '203.0.113.10/33', '203.0.113.10/x', 'mail.example.com', '1.2.3.4/24/1', '', null]) {
       expect(parseNetwork(bad), String(bad)).toBeNull();
     }
     expect(parseNetworkList('203.0.113.10, 198.51.100.0/24\n203.0.113.10')).toEqual({ networks: ['203.0.113.10', '198.51.100.0/24'] });
@@ -386,10 +390,49 @@ describe('node settings requests', () => {
     ]));
     const list = await listRelayhosts(CFG);
     expect(list).toEqual([
-      { id: 1, hostname: 'relay.example.net', hasLogin: true, active: true },
-      { id: 2, hostname: 'eop.example.net', hasLogin: false, active: false },
+      { id: 1, hostname: 'relay.example.net', hasLogin: true, active: true, usedByDomains: [], usedByMailboxes: [] },
+      { id: 2, hostname: 'eop.example.net', hasLogin: false, active: false, usedByDomains: [], usedByMailboxes: [] },
     ]);
     expect(JSON.stringify(list)).not.toContain('clear-text-secret');
+    safeFetch.mockResolvedValueOnce(answer([{ id: 3, hostname: 'eop.example.net', username: '', active: '1', used_by_domains: 'a.example, B.example', used_by_mailboxes: 'x@a.example' }]));
+    expect(await listRelayhosts(CFG)).toEqual([
+      { id: 3, hostname: 'eop.example.net', hasLogin: false, active: true, usedByDomains: ['a.example', 'b.example'], usedByMailboxes: ['x@a.example'] },
+    ]);
+    safeFetch.mockResolvedValueOnce(answer(OK));
+    await deleteRelayhost(CFG, 3);
+    expect(calls().at(-1)).toMatchObject({ url: 'https://mail.example.com/api/v1/delete/relayhost', body: [3] });
+  });
+
+  it('reads one domain\'s mailboxes with a longer timeout, and marks a timeout', async () => {
+    safeFetch.mockResolvedValueOnce(answer([]));
+    await listMailboxes(CFG, { domain: 'a.example' });
+    expect(calls()[0].url).toBe('https://mail.example.com/api/v1/get/mailbox/all/a.example');
+    safeFetch.mockRejectedValueOnce(Object.assign(new Error('aborted'), { name: 'TimeoutError' }));
+    const slow = await listMailboxes(CFG).catch((e) => e);
+    expect(slow).toMatchObject({ code: 'mail_node_unreachable', timeout: true });
+    safeFetch.mockRejectedValueOnce(Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }));
+    expect(await listMailboxes(CFG).catch((e) => e)).toMatchObject({ code: 'mail_node_unreachable', timeout: false });
+  });
+
+  it('takes networks out of the fail2ban whitelist with every other field sent back as it was', async () => {
+    const f2b = {
+      ban_time: 1800, max_ban_time: 10000, ban_time_increment: true, max_attempts: 10, retry_window: 600,
+      netban_ipv4: 32, netban_ipv6: 128, manage_external: 0, whitelist: '198.51.100.7\n203.0.113.10', blacklist: '192.0.2.1',
+    };
+    safeFetch.mockResolvedValueOnce(answer(f2b)).mockResolvedValueOnce(answer([{ type: 'success', msg: 'f2b_modified' }]));
+    expect(await unwhitelistFail2ban(CFG, ['203.0.113.10'])).toEqual(['203.0.113.10']);
+    expect(calls()[1].body).toEqual({
+      items: ['none'],
+      attr: {
+        ban_time: 1800, max_ban_time: 10000, max_attempts: 10, retry_window: 600, netban_ipv4: 32, netban_ipv6: 128,
+        ban_time_increment: '1', manage_external: 0, whitelist: '198.51.100.7', blacklist: '192.0.2.1',
+      },
+    });
+    // Nothing to take out: nothing is written.
+    safeFetch.mockReset();
+    safeFetch.mockResolvedValueOnce(answer(f2b));
+    expect(await unwhitelistFail2ban(CFG, ['192.0.2.50'])).toEqual([]);
+    expect(calls()).toHaveLength(1);
   });
 
   it('joins a DKIM record split in quoted pieces of 255 characters', () => {

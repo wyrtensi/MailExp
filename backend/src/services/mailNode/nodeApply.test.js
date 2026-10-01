@@ -8,7 +8,9 @@ const fake = vi.hoisted(() => ({ current: null }));
 vi.mock('../db.js', () => ({ query: vi.fn() }));
 vi.mock('../safeFetch.js', () => ({ safeFetch: (url, options) => fake.current.fetch(url, options) }));
 
-const { PREFILTER_CAT, PREFILTER_SFV, buildPrefilter, defaultRateLimit, runApply, runPrefilterApply } = await import('./nodeApply.js');
+const {
+  PREFILTER_ALWAYS_CAT, PREFILTER_CAT, PREFILTER_SFV, buildPrefilter, defaultRateLimit, runApply, runPrefilterApply,
+} = await import('./nodeApply.js');
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
 const EOP = { eopHost: 'eop.example.net', tlsPolicy: 'secure', tlsPolicyParameters: null, dkimMode: 'mailcow', sendLimitPerHour: 50 };
@@ -90,8 +92,53 @@ describe('runApply', () => {
       { item: 'relayhost', target: null, status: 'skipped', code: 'eop_host_missing' },
       { item: 'fail2ban', target: null, status: 'skipped', code: 'panel_ips_missing' },
     ]);
-    expect(result.domains[0].items[0]).toEqual({ item: 'domain_relayhost', target: 'a.example', status: 'skipped', code: 'eop_host_missing' });
+    expect(result.domains[0].items[0]).toEqual({ item: 'domain_relayhost', target: 'a.example', status: 'skipped', code: 'eop_host_missing', current: 'none' });
     expect(mc.node.relayhosts).toEqual([]);
+  });
+
+  it('with the EOP host cleared shows what the panel set before and unbinds nothing', async () => {
+    const first = await runApply(CFG, { eop: EOP, domains: [domainInput()] });
+    mc.writes.length = 0;
+    const result = await runApply(CFG, { eop: { ...EOP, eopHost: null }, domains: [domainInput()], owned: first.owned });
+    expect(result.node.slice(0, 2)).toEqual([
+      { item: 'tls_policy', target: null, status: 'skipped', code: 'eop_host_missing', current: 'eop.example.net: secure' },
+      { item: 'relayhost', target: null, status: 'skipped', code: 'eop_host_missing', current: 'eop.example.net (2)' },
+    ]);
+    expect(result.domains[0].items[0]).toMatchObject({ status: 'skipped', code: 'eop_host_missing', current: 'eop.example.net (2)' });
+    expect(mc.node.domains['a.example'].relayhost).toBe(2);
+    expect(mc.writes).toEqual([]);
+  });
+
+  it('removes what it made for the previous EOP host: the TLS entry, and the relayhost once nothing uses it', async () => {
+    mc.node.domains['hand.example'] = { relayhost: 0 };
+    const first = await runApply(CFG, { eop: EOP, domains: [domainInput()] });
+    expect(first.owned).toEqual({ tls: [{ id: 1, dest: 'eop.example.net' }], relayhosts: [{ id: 2, hostname: 'eop.example.net' }], fail2ban: [] });
+    // A domain the panel does not know sends through the panel's relayhost too.
+    mc.node.domains['hand.example'].relayhost = 2;
+    const moved = await runApply(CFG, { eop: { ...EOP, eopHost: 'new.example.net' }, domains: [domainInput()], owned: first.owned });
+    expect(moved.node.slice(-2)).toEqual([
+      { item: 'previous_tls_policy', target: 'eop.example.net', status: 'changed', from: 'secure', to: null },
+      { item: 'previous_relayhost', target: 'eop.example.net', status: 'skipped', code: 'relayhost_in_use', current: 'hand.example' },
+    ]);
+    expect(mc.node.tls.map((t) => t.dest)).toEqual(['new.example.net']);
+    expect(mc.node.domains['a.example'].relayhost).toBe(4);
+    expect(mc.node.domains['hand.example'].relayhost).toBe(2);
+    expect(moved.owned.relayhosts).toEqual([{ id: 2, hostname: 'eop.example.net' }, { id: 4, hostname: 'new.example.net' }]);
+    // Once nothing sends through it any more, the next run deletes it.
+    mc.node.domains['hand.example'].relayhost = 0;
+    const later = await runApply(CFG, { eop: { ...EOP, eopHost: 'new.example.net' }, domains: [domainInput()], owned: moved.owned });
+    expect(later.node.at(-1)).toEqual({ item: 'previous_relayhost', target: 'eop.example.net', status: 'changed', from: 'eop.example.net (2)', to: null });
+    expect(mc.node.relayhosts.map((r) => r.hostname)).toEqual(['new.example.net']);
+    expect(later.owned).toEqual({ tls: [{ id: 3, dest: 'new.example.net' }], relayhosts: [{ id: 4, hostname: 'new.example.net' }], fail2ban: [] });
+  });
+
+  it('never removes a TLS entry or relayhost it did not make', async () => {
+    mc.node.tls.push({ id: 7, dest: 'old.example.net', policy: 'secure', parameters: '', active: '1' });
+    mc.node.relayhosts.push({ id: 8, hostname: 'old.example.net', username: '', password: '', active: '1' });
+    const result = await runApply(CFG, { eop: EOP, domains: [domainInput()] });
+    expect(result.node.map((i) => i.item)).not.toContain('previous_tls_policy');
+    expect(mc.node.tls.map((t) => t.id)).toContain(7);
+    expect(mc.node.relayhosts.map((r) => r.id)).toContain(8);
   });
 
   it('adds only the missing panel addresses to the fail2ban whitelist and changes nothing else', async () => {
@@ -100,6 +147,27 @@ describe('runApply', () => {
     expect(result.node.find((i) => i.item === 'fail2ban')).toEqual({ item: 'fail2ban', target: '203.0.113.10, 2001:db8::/64', status: 'changed', to: '2001:db8::/64' });
     expect(mc.writes.find((w) => w.path === 'edit/fail2ban').body).toEqual({ items: ['2001:db8::/64'], attr: { action: 'whitelist' } });
     expect(mc.node.fail2ban).toMatchObject({ whitelist: '198.51.100.7\n2001:db8::/64\n203.0.113.10', ban_time_increment: true, max_attempts: 10 });
+  });
+
+  it('takes out of the fail2ban whitelist only an address the panel added itself', async () => {
+    mc.node.fail2ban.whitelist = '198.51.100.7';
+    const first = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.10', '198.51.100.7'] });
+    expect(first.owned.fail2ban).toEqual(['203.0.113.10']);
+    const result = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.20'], owned: first.owned });
+    expect(result.node.find((i) => i.item === 'fail2ban')).toEqual({
+      item: 'fail2ban', target: '203.0.113.20', status: 'changed', from: '203.0.113.10', to: '203.0.113.20',
+    });
+    // The administrator's address stays; every other field of fail2ban too.
+    expect(mc.node.fail2ban).toMatchObject({
+      whitelist: '198.51.100.7\n203.0.113.20', ban_time_increment: true, manage_external: 0, max_attempts: 10, ban_time: 1800, blacklist: '',
+    });
+    expect(result.owned.fail2ban).toEqual(['203.0.113.20']);
+    const plain = mc.writes.find((w) => w.path === 'edit/fail2ban' && w.body.attr.action === undefined);
+    expect(plain.body.attr).toMatchObject({ ban_time_increment: '1', manage_external: 0, whitelist: '198.51.100.7\n203.0.113.20' });
+    // The setting cleared: the panel's own address goes as well.
+    const cleared = await runApply(CFG, { eop: EOP, panelIps: [], owned: result.owned });
+    expect(cleared.node.find((i) => i.item === 'fail2ban')).toMatchObject({ status: 'changed', from: '203.0.113.20' });
+    expect(mc.node.fail2ban.whitelist).toBe('198.51.100.7');
   });
 
   describe('DKIM', () => {
@@ -159,6 +227,33 @@ describe('runApply', () => {
       ]);
     });
 
+    it('reads only the domain\'s mailboxes, and none for a domain without panel mailboxes', async () => {
+      await runApply(CFG, { eop: EOP, node: false, domains: [domainInput(), { ...domainInput(), domain: 'b.example', accounts: [] }] });
+      const lists = mc.writes.length;
+      expect(lists).toBeGreaterThan(0);
+      const calls = [];
+      const fetch = mc.fetch;
+      mc.fetch = (url, options) => { calls.push(url.replace(/^https:\/\/[^/]+\/api\/v1\//, '')); return fetch(url, options); };
+      await runApply(CFG, { eop: EOP, node: false, domains: [domainInput(), { ...domainInput(), domain: 'b.example', accounts: [] }] });
+      expect(calls.filter((c) => c.startsWith('get/mailbox/'))).toEqual(['get/mailbox/all/a.example']);
+    });
+
+    it('goes on with the run when one read times out, and stops at the second timeout', async () => {
+      mc.node.domains['b.example'] = { relayhost: 0 };
+      mc.node.slow = ['get/mailbox/all/a.example'];
+      let result = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.10'], domains: [domainInput(), { ...domainInput(), domain: 'b.example', accounts: [] }] });
+      expect(result.domains[0].items.find((i) => i.item === 'mailbox_limits')).toEqual({
+        item: 'mailbox_limits', target: 'a.example', status: 'failed', code: 'mail_node_unreachable', detail: 'timeout',
+      });
+      expect(result.domains[1].items.every((i) => i.status !== 'failed')).toBe(true);
+      mc.node.slow = ['get/tls-policy-map/all', 'get/relayhost/all'];
+      result = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.10'], domains: [domainInput()] });
+      expect(result.node.map((i) => [i.item, i.status, i.detail ?? null])).toEqual([
+        ['tls_policy', 'failed', 'timeout'], ['relayhost', 'failed', 'timeout'],
+        ['fail2ban', 'failed', null], ['prefilter', 'failed', null],
+      ]);
+    });
+
     it('takes the domain\'s limit over the EOP settings\' one, per hour', () => {
       expect(defaultRateLimit({ sendLimitPerHour: 50 }, null)).toEqual({ value: 50, frame: 'h' });
       expect(defaultRateLimit({ sendLimitPerHour: 50 }, 20)).toEqual({ value: 20, frame: 'h' });
@@ -192,31 +287,70 @@ describe('runApply', () => {
 });
 
 describe('the spam filing rule', () => {
-  it('files spam, rule spam, blocked senders, spam, bulk and phishing categories into Junk, never a quarantine release', () => {
+  const RULE = [
+    '# BEGIN MailExpert: EOP verdicts to Junk (managed by MailExpert, do not edit)',
+    'if anyof (',
+    '  header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(PHSH|HPHSH|HPHISH|MALW)[[:space:]]*(;|$)",',
+    '  allof (',
+    '    not header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:SKQ[[:space:]]*(;|$)",',
+    '    anyof (',
+    '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:(SPM|SKS|SKB)[[:space:]]*(;|$)",',
+    '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(SPM|HSPM|BULK|SPOOF)[[:space:]]*(;|$)"',
+    '    )',
+    '  )',
+    ') {',
+    '  fileinto "Junk";',
+    '  stop;',
+    '}',
+    '# END MailExpert: EOP verdicts',
+  ].join('\n');
+
+  it('files phishing and malware always, and spam, bulk and spoofing unless released from quarantine (D-2, D-11)', () => {
+    expect(PREFILTER_ALWAYS_CAT).toEqual(['PHSH', 'HPHSH', 'HPHISH', 'MALW']);
     expect(PREFILTER_SFV).toEqual(['SPM', 'SKS', 'SKB']);
-    expect(PREFILTER_CAT).toEqual(['SPM', 'HSPM', 'PHSH', 'HPHSH', 'HPHISH', 'BULK']);
+    expect(PREFILTER_CAT).toEqual(['SPM', 'HSPM', 'BULK', 'SPOOF']);
     const script = buildPrefilter('');
     expect(script).toContain('require ["fileinto", "regex"];');
-    expect(script).toContain('header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:(SPM|SKS|SKB)[[:space:]]*(;|$)"');
-    expect(script).toContain('header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(SPM|HSPM|PHSH|HPHSH|HPHISH|BULK)[[:space:]]*(;|$)"');
-    expect(script).toContain('not header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:SKQ[[:space:]]*(;|$)"');
-    expect(script).toContain('  fileinto "Junk";\n  stop;\n');
+    expect(script.endsWith(`${RULE}\n`)).toBe(true);
   });
 
-  // The rule's regular expressions as POSIX ERE the way Pigeonhole runs them (case-insensitive):
-  // JavaScript reads [[:space:]] as \s here.
-  const matches = (header, name, values) => new RegExp(`(^|;)\\s*${name}:(${values.join('|')})\\s*(;|$)`, 'i').test(header);
-  const toJunk = (header) => (matches(header, 'SFV', PREFILTER_SFV) || matches(header, 'CAT', PREFILTER_CAT)) && !matches(header, 'SFV', ['SKQ']);
+  // The rule as Pigeonhole runs it, from the generated script itself: its four regular expressions in
+  // order (phishing and malware; released from quarantine; the spam verdicts; the spam categories),
+  // as POSIX ERE matched case-insensitively (the default comparator i;ascii-casemap), combined the way
+  // the script's anyof / allof / not combine them. [[:space:]] reads as \s in JavaScript.
+  const regexes = [...buildPrefilter('').matchAll(/header :regex "X-Forefront-Antispam-Report" "([^"]*)"/g)]
+    .map((m) => new RegExp(m[1].replaceAll('[[:space:]]', '\\s'), 'i'));
+  const toJunk = (header) => {
+    const [always, released, verdict, category] = regexes.map((re) => re.test(header));
+    return always || (!released && (verdict || category));
+  };
 
-  it('matches whole fields only, also in a folded header', () => {
-    expect(toJunk('CIP:198.51.100.1;CTRY:;LANG:en;SCL:5;SRV:;IPV:NLI;SFV:SPM;H:x;PTR:;CAT:SPM;SFS:(13230040);DIR:INB;')).toBe(true);
-    expect(toJunk('CIP:198.51.100.1;SFV:NSPM;H:x;CAT:NONE;')).toBe(false);
-    expect(toJunk('CIP:198.51.100.1;SFV:NSPM;CAT:BULK;')).toBe(true);
-    expect(toJunk('SFV:SKQ;CAT:SPM;')).toBe(false);
-    expect(toJunk('CIP:198.51.100.1;SFV:SPMX;CAT:SPMTEST;XSFV:SPM;')).toBe(false);
-    // Unfolded, a folded header keeps a blank after the ";" where it was broken.
-    expect(toJunk('CIP:198.51.100.1;CTRY:;LANG:en; SFV:SKS;H:x;')).toBe(true);
-    expect(toJunk('SFV:NSPM;CAT:HPHSH')).toBe(true);
+  it('has the four tests the rule combines', () => {
+    expect(regexes).toHaveLength(4);
+  });
+
+  it('decides by whole fields, also in a folded header', () => {
+    const cases = [
+      ['CIP:198.51.100.1;CTRY:;LANG:en;SCL:5;SRV:;IPV:NLI;SFV:SPM;H:x;PTR:;CAT:SPM;SFS:(13230040);DIR:INB;', true],
+      ['CIP:198.51.100.1;SFV:NSPM;H:x;CAT:NONE;', false],
+      ['CIP:198.51.100.1;SFV:NSPM;CAT:BULK;', true],
+      ['SFV:NSPM;CAT:SPOOF;', true],
+      ['SFV:NSPM;CAT:MALW;', true],
+      ['SFV:NSPM;CAT:HPHSH', true],
+      // Released from quarantine: phishing and malware still go to Junk, spam does not.
+      ['SFV:SKQ;CAT:PHSH;', true],
+      ['SFV:SKQ;CAT:HPHISH;', true],
+      ['SFV:SKQ;CAT:MALW;', true],
+      ['SFV:SKQ;CAT:SPM;', false],
+      ['SFV:SKQ;CAT:BULK;', false],
+      ['SFV:SKQ;CAT:SPOOF;', false],
+      ['CIP:198.51.100.1;SFV:SPMX;CAT:SPMTEST;XSFV:SPM;XCAT:PHSH;CAT:PHSHX', false],
+      // Unfolded, a folded header keeps a blank after the ";" where it was broken.
+      ['CIP:198.51.100.1;CTRY:;LANG:en; SFV:SKS;H:x;', true],
+      ['CIP:198.51.100.1; CAT:PHSH ;SFV:SKQ', true],
+      ['sfv:spm', true],
+    ];
+    for (const [header, junk] of cases) expect(toJunk(header), header).toBe(junk);
   });
 
   it('keeps whatever else the prefilter holds and is built the same from its own output', () => {
@@ -240,6 +374,28 @@ describe('the spam filing rule', () => {
     expect(mc.writes.filter((w) => w.path === 'add/global-filter')).toHaveLength(1);
     expect(mc.writes[0].body).toEqual({ filter_type: 'prefilter', script_data: mc.node.prefilter });
     expect(statuses((await runApply(CFG, { eop: EOP })).node).prefilter).toBe('ok');
+  });
+
+  it('takes a block written twice out in one pass, and refuses markers that do not pair up', () => {
+    const once = buildPrefilter('keep;');
+    const twice = `${once}\n${buildPrefilter('')}`;
+    expect(buildPrefilter(twice)).toBe(once);
+    const noEnd = once.replace('# END MailExpert: EOP verdicts\n', '');
+    expect(() => buildPrefilter(noEnd)).toThrow(expect.objectContaining({ code: 'prefilter_markers_broken' }));
+    const noBegin = once.replace('# BEGIN MailExpert: extensions of the EOP verdict rule (managed by MailExpert, do not edit)\n', '');
+    expect(() => buildPrefilter(noBegin)).toThrow(expect.objectContaining({ code: 'prefilter_markers_broken' }));
+  });
+
+  it('writes nothing to a prefilter with broken markers and reports it', async () => {
+    mc.node.prefilter = buildPrefilter('keep;').replace('# END MailExpert: extensions\n', '');
+    expect(await runPrefilterApply(CFG)).toMatchObject({ item: 'prefilter', status: 'failed', code: 'prefilter_markers_broken' });
+    expect(statuses((await runApply(CFG, { eop: EOP })).node).prefilter).toBe('failed');
+    expect(mc.writes.filter((w) => w.path === 'add/global-filter')).toEqual([]);
+  });
+
+  it('reads the rule back after writing it: mailcow may answer written without writing', async () => {
+    mc.node.prefilterLost = true;
+    expect(await runPrefilterApply(CFG)).toMatchObject({ item: 'prefilter', status: 'failed', code: 'prefilter_not_written' });
   });
 
   it('counts a rule written while Dovecot did not restart as changed, with the reason', async () => {

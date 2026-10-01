@@ -1950,7 +1950,7 @@
     },
     "mailNode": {
       "title": "Почтовый узел",
-      "description": "Сервер mailcow, на котором MailExpert создаёт ящики на ваших доменах. Удаление такого ящика в MailExpert только отключает его там.",
+      "description": "Сервер mailcow, на котором MailExpert создаёт ящики на ваших доменах. Удаление такого ящика назначается на дату: ящик работает указанное ниже число дней, затем MailExpert удаляет его на узле навсегда вместе с почтой.",
       "hostLabel": "Имя почтового узла",
       "hostPh": "mail.example.ru",
       "hostNote": "Имя, а не IP: ящики подключаются к нему по IMAP и SMTP, API — https://<имя>/api/v1. Поэтому переезд узла — это смена DNS.",
@@ -2060,7 +2060,7 @@
       "deleteAfterLabel": "Сколько дней ящик работает после запроса на удаление",
       "deleteAfterNote": "От 1 до {{max}}. Новое значение действует для удалений, запрошенных после изменения; уже назначенные даты не сдвигаются.",
       "errorDeleteAfterDays": "Введите целое число дней от 1 до 90.",
-      "errorPanelIps": "Адреса панели — до 10 IP-адресов или сетей, например 203.0.113.10 или 203.0.113.0/28.",
+      "errorPanelIps": "Адреса панели — до 10 IP-адресов или сетей не шире /24 (IPv4) и /48 (IPv6), например 203.0.113.10 или 203.0.113.0/28.",
       "errorRateLimit": "Лимит отправки — целое число писем от 1 до 10000.",
       "applyCodeEopHostMissing": "не задан хост EOP",
       "applyCodePanelIpsMissing": "не заданы адреса панели",
@@ -2115,7 +2115,14 @@
       "sendLimitColumn": "Лимит отправки",
       "panelIpsLabel": "Адреса панели для fail2ban",
       "panelIpsPh": "203.0.113.10",
-      "panelIpsNote": "Адреса, с которых панель ходит на узел, как их видит узел. fail2ban узла их никогда не банит, чтобы неудачные входы одного ящика не отрезали панель. До 10, через запятую."
+      "panelIpsNote": "Адреса, с которых панель ходит на узел, как их видит узел. fail2ban узла их никогда не банит, чтобы неудачные входы одного ящика не отрезали панель. До 10, через запятую.",
+      "savedApplying": "Сохранено. Узел получает настройки панели сейчас; результат появится в разделе EOP при следующей загрузке.",
+      "applyCodePrefilterMarkersBroken": "в prefilter узла блок MailExpert без конечной метки: исправьте его в mailcow, ничего не записано",
+      "applyCodePrefilterNotWritten": "mailcow ответил, что правило записано, но на узле его нет",
+      "applyCodeRelayhostInUse": "оставлен: через него ещё отправляет что-то другое",
+      "applyItemPreviousTlsPolicy": "Политика TLS прежнего хоста EOP",
+      "applyItemPreviousRelayhost": "Relayhost прежнего хоста EOP",
+      "applyCurrent": "сейчас: {{current}}"
     },
     "eop": {
       "title": "Почта через EOP",
@@ -2129,7 +2136,7 @@
       "dkimModeMailcow": "mailcow (узел)",
       "dkimModeEop": "Только EOP",
       "dkimModeNote": "Подписывает mailcow, пока проверка на тенанте не покажет, что EOP подписывает почту, пересланную с узла.",
-      "sendLimitLabel": "Лимит отправки нового ящика, писем в час",
+      "sendLimitLabel": "Лимит отправки каждого ящика без своего лимита, писем в час",
       "sendLimitNote": "Останавливает взломанный ящик раньше, чем он заблокирует общий коннектор. До {{max}}; администратор меняет его для отдельного ящика.",
       "terrlLabel": "Лимит внешних получателей тенанта (TERRL)",
       "terrlNote": "Уникальные внешние получатели за 24 часа на весь тенант, из отчёта EAC. Необязательно.",
@@ -2155,18 +2162,18 @@
       "tlsPolicyLabel": "TLS до хоста EOP",
       "tlsPolicyNote": "Запись TLS Policy Map mailcow для этого имени. secure для *.mail.protection.outlook.com; для хоста под mx.microsoft выбор между secure, dane и «без записи» решает проверка на тенанте.",
       "tlsPolicySecure": "secure: проверенный сертификат, имя хоста",
-      "tlsPolicyDane": "dane: DANE, если у хоста есть TLSA, иначе TLS без проверки",
+      "tlsPolicyDane": "dane: DANE, если у хоста есть TLSA, иначе TLS по возможности (возможна передача открытым текстом)",
       "tlsPolicyDaneOnly": "dane-only: DANE обязателен",
       "tlsPolicyVerify": "verify: проверенный сертификат, имя из параметров",
       "tlsPolicyFingerprint": "fingerprint: отпечаток сертификата (стенд)",
       "tlsPolicyEncrypt": "encrypt: TLS обязателен, сертификат не проверяется (стенд)",
-      "tlsPolicyDefault": "Без записи: по умолчанию mailcow (DANE, MTA-STS)",
+      "tlsPolicyDefault": "Без записи: по умолчанию mailcow (MTA-STS или DANE, иначе TLS по возможности, возможен открытый текст)",
       "tlsParametersLabel": "Параметры политики TLS",
       "tlsParametersPh": "match=nexthop:dot-nexthop",
-      "tlsParametersNote": "Необязательные атрибуты Postfix, name=value через пробел. Для fingerprint нужен match=<отпечаток SHA-256>.",
-      "savedApplied": "Настройки EOP сохранены и применены к узлу: результат ниже.",
+      "tlsParametersNote": "Необязательные атрибуты Postfix, name=value через пробел, до 255 символов. match= принимает hostname, nexthop, dot-nexthop или имена хостов для secure и verify, отпечатки SHA-256 (пары hex) для fingerprint, где он обязателен, и не принимается для остальных политик. Смена политики очищает поле.",
       "errorTlsPolicy": "Выберите политику TLS из списка.",
-      "errorTlsParameters": "Параметры — пары name=value через пробел; для fingerprint нужен match=<отпечаток>."
+      "errorTlsParameters": "Параметры — пары name=value до 255 символов, подходящие к политике (см. подсказку).",
+      "savedApplying": "Настройки EOP сохранены. Узел получает их сейчас; результат появится здесь при следующей загрузке."
     }
   },
   "blockList": {

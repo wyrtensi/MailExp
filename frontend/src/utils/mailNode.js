@@ -119,6 +119,9 @@ const ERROR_KEYS = {
   dkim_delete_unconfirmed: 'admin.mailNode.applyCodeDkimDeleteUnconfirmed',
   prefilter_differs: 'admin.mailNode.applyCodePrefilterDiffers',
   dovecot_restart_failed: 'admin.mailNode.applyCodeDovecotRestartFailed',
+  prefilter_markers_broken: 'admin.mailNode.applyCodePrefilterMarkersBroken',
+  prefilter_not_written: 'admin.mailNode.applyCodePrefilterNotWritten',
+  relayhost_in_use: 'admin.mailNode.applyCodeRelayhostInUse',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -331,10 +334,12 @@ const parseGuid = (value) => {
   const id = String(value).trim().toLowerCase();
   return GUID_PATTERN.test(id) ? id : null;
 };
-// Postfix policy attributes: name=value pairs separated by single spaces (backend eopSettings.js).
+// Postfix policy attributes: name=value pairs separated by single spaces, up to 255 characters
+// (mailcow's column; backend eopSettings.js).
+export const MAX_TLS_PARAMETERS = 255;
 export function parseTlsParameters(value) {
   const text = String(value ?? '').trim().replace(/\s+/g, ' ');
-  if (!text || text.length > 500) return null;
+  if (!text || text.length > MAX_TLS_PARAMETERS) return null;
   return text.split(' ').every((token) => /^[a-z][a-z0-9_]*=[!-~]+$/i.test(token)) ? text : null;
 }
 const parseThumbprint = (value) => {
@@ -374,11 +379,25 @@ export function normalizeEopSettings(body) {
 
 // What the settings as a whole refuse once merged with the stored ones (backend
 // eopSettingsConflict), or null: a fingerprint policy checks nothing without the fingerprint.
-export function eopSettingsConflict(settings) {
-  if (settings?.tlsPolicy === 'fingerprint' && !/(^| )match=/.test(settings?.tlsPolicyParameters ?? '')) {
-    return 'tls_parameters_invalid';
+const NAME_STRATEGIES = ['hostname', 'nexthop', 'dot-nexthop'];
+const FINGERPRINT_PATTERN = /^[0-9A-F]{2}(?::[0-9A-F]{2}){15,63}$/i;
+const matchItem = (item) => NAME_STRATEGIES.includes(item) || HOST_PATTERN.test(item.replace(/^\./, '').toLowerCase());
+
+// Whether the parameters fit the policy (backend tlsParametersFit): secure and verify match only by
+// name (hostname, nexthop, dot-nexthop or host names); fingerprint needs match= with fingerprints
+// (hex pairs, "|"-separated); the other levels check no name, so match= there is refused.
+export function tlsParametersFit(policy, parameters) {
+  const tokens = parameters ? String(parameters).trim().split(/\s+/) : [];
+  const matches = tokens.filter((t) => t.startsWith('match=')).map((t) => t.slice('match='.length));
+  if (policy === 'fingerprint') {
+    return matches.length > 0 && matches.every((m) => m.split('|').every((fp) => FINGERPRINT_PATTERN.test(fp)));
   }
-  return null;
+  if (policy === 'secure' || policy === 'verify') return matches.every((m) => m.split(':').every(matchItem));
+  return matches.length === 0;
+}
+
+export function eopSettingsConflict(settings) {
+  return tlsParametersFit(settings?.tlsPolicy, settings?.tlsPolicyParameters ?? '') ? null : 'tls_parameters_invalid';
 }
 
 // The error key for the EOP settings form, or null. Empty optional fields are fine.
@@ -389,7 +408,7 @@ export function eopSettingsError(form) {
 }
 
 // One address or network for the node's fail2ban whitelist, as the server takes it (backend
-// mailcow.js parseNetwork): an IPv4 or IPv6 address, or one with a prefix of /8 to /32 (IPv4) or
+// mailcow.js parseNetwork): an IPv4 or IPv6 address, or one with a prefix of /24 to /32 (IPv4) or
 // /16 to /128 (IPv6). Lowercased; null for anything else.
 const IPV4_PATTERN = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 function ipFamily(address) {
@@ -410,7 +429,7 @@ export function parseNetwork(value) {
   if (prefix === undefined) return address;
   if (!/^\d{1,3}$/.test(prefix)) return null;
   const bits = Number(prefix);
-  const [min, max] = family === 4 ? [8, 32] : [16, 128];
+  const [min, max] = family === 4 ? [24, 32] : [48, 128];
   return bits >= min && bits <= max ? `${address}/${bits}` : null;
 }
 
@@ -432,6 +451,8 @@ export function parseNetworkList(value) {
 
 // Spelled out literally so the i18n coverage test finds them.
 const APPLY_ITEM_KEYS = {
+  previous_tls_policy: 'admin.mailNode.applyItemPreviousTlsPolicy',
+  previous_relayhost: 'admin.mailNode.applyItemPreviousRelayhost',
   tls_policy: 'admin.mailNode.applyItemTlsPolicy',
   relayhost: 'admin.mailNode.applyItemRelayhost',
   fail2ban: 'admin.mailNode.applyItemFail2ban',

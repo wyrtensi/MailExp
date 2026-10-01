@@ -4,6 +4,7 @@ vi.mock('../db.js', () => ({ query: vi.fn() }));
 
 import {
   EOP_DEFAULTS, TLS_POLICIES, eopSettingsConflict, parseEopSettings, parseTlsParameters, tenantConfigured, tenantDriverActive,
+  tlsParametersFit,
 } from './eopSettings.js';
 
 const TENANT = '11111111-2222-4333-8444-555555555555';
@@ -60,7 +61,7 @@ describe('parseEopSettings', () => {
       [{ tlsPolicy: '' }, 'tls_policy_invalid'],
       [{ tlsPolicyParameters: 'match' }, 'tls_parameters_invalid'],
       [{ tlsPolicyParameters: 'match=a=b x' }, 'tls_parameters_invalid'],
-      [{ tlsPolicyParameters: `match=${'A'.repeat(500)}` }, 'tls_parameters_invalid'],
+      [{ tlsPolicyParameters: `match=${'A'.repeat(250)}` }, 'tls_parameters_invalid'],
     ];
     for (const [body, code] of cases) expect(parseEopSettings(body), JSON.stringify(body)).toEqual({ error: code });
   });
@@ -80,10 +81,40 @@ describe('the TLS policy for the next hop', () => {
     expect(parseTlsParameters(7)).toBeNull();
   });
 
-  it('wants the fingerprint with the fingerprint policy', () => {
+  it('caps the parameters at 255 characters, as mailcow stores them', () => {
+    expect(parseTlsParameters(`match=${'a'.repeat(249)}`)).toHaveLength(255);
+    expect(parseTlsParameters(`match=${'a'.repeat(250)}`)).toBeNull();
+  });
+
+  const SHA256 = Array.from({ length: 32 }, () => 'E2').join(':');
+
+  it('wants the fingerprint with the fingerprint policy, as hex pairs', () => {
     expect(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: null })).toBe('tls_parameters_invalid');
     expect(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'ciphers=high' })).toBe('tls_parameters_invalid');
-    expect(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'ciphers=high match=AB:CD' })).toBeNull();
+    expect(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB:CD' })).toBe('tls_parameters_invalid');
+    expect(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=nexthop' })).toBe('tls_parameters_invalid');
+    expect(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: `ciphers=high match=${SHA256}` })).toBeNull();
+    expect(tlsParametersFit('fingerprint', `match=${SHA256}|${SHA256.toLowerCase()}`)).toBe(true);
+  });
+
+  it('lets secure and verify match by name strategies and host names only', () => {
+    for (const policy of ['secure', 'verify']) {
+      expect(tlsParametersFit(policy, ''), policy).toBe(true);
+      expect(tlsParametersFit(policy, 'match=nexthop:dot-nexthop'), policy).toBe(true);
+      expect(tlsParametersFit(policy, 'match=hostname ciphers=high'), policy).toBe(true);
+      expect(tlsParametersFit(policy, 'match=.mail.protection.outlook.com:contoso-com.mail.protection.outlook.com'), policy).toBe(true);
+      expect(tlsParametersFit(policy, `match=${SHA256}`), policy).toBe(false);
+      expect(tlsParametersFit(policy, 'match=whatever!'), policy).toBe(false);
+    }
+  });
+
+  it('refuses match= with the policies that check no name', () => {
+    for (const policy of ['encrypt', 'dane', 'dane-only', 'default']) {
+      expect(tlsParametersFit(policy, ''), policy).toBe(true);
+      expect(tlsParametersFit(policy, 'protocols=>=TLSv1.2'), policy).toBe(true);
+      expect(tlsParametersFit(policy, 'match=nexthop'), policy).toBe(false);
+      expect(eopSettingsConflict({ tlsPolicy: policy, tlsPolicyParameters: `match=${SHA256}` }), policy).toBe('tls_parameters_invalid');
+    }
     expect(eopSettingsConflict({ tlsPolicy: 'secure', tlsPolicyParameters: null })).toBeNull();
   });
 });

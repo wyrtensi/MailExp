@@ -58,6 +58,7 @@ import {
   applyDomain,
   applyNode,
   applyPrefilter,
+  applyInBackground,
   applyQuietly,
   defaultRateLimit,
   getNodeApplyResult,
@@ -105,7 +106,7 @@ const ERRORS = {
   app_id_invalid: [400, 'Application ID must be a GUID'],
   thumbprint_invalid: [400, 'Certificate thumbprint must be 40 hexadecimal characters'],
   tls_policy_invalid: [400, 'TLS policy must be secure, dane, dane-only, verify, fingerprint, encrypt or default'],
-  tls_parameters_invalid: [400, 'TLS policy parameters must be name=value pairs; the fingerprint policy needs match=<fingerprint>'],
+  tls_parameters_invalid: [400, 'TLS policy parameters must be name=value pairs up to 255 characters that fit the policy: match= takes hostname, nexthop, dot-nexthop or host names for secure and verify, fingerprints for fingerprint (required), and nothing for the other policies'],
   panel_ips_invalid: [400, `Panel addresses must be up to ${MAX_PANEL_IPS} IP addresses or networks such as 203.0.113.10 or 203.0.113.0/28`],
   rate_limit_invalid: [400, `Send limit must be a whole number of messages from 1 to ${MAX_SEND_LIMIT_PER_HOUR} per second, minute, hour or day`],
 };
@@ -191,11 +192,11 @@ router.put('/config', requireAdmin, async (req, res) => {
   configAudit(req, 'node', changed);
   // Read the disk (and ping) right away instead of at the next scheduled run.
   checkMailNodeDisk().catch((err) => console.error('Mail node disk check failed:', err.message));
-  // Another node, key or panel address: the node gets the panel's settings at once.
-  const apply = changed.some((field) => ['mailHost', 'apiKey', 'panelIps'].includes(field))
-    ? await applyQuietly(() => applyNode({ userId: req.session.userId, trigger: 'node_settings' }))
-    : null;
-  res.json({ ok: true, ...(apply ? { apply } : {}) });
+  // Another node, key or panel address: the node gets the panel's settings right after the answer,
+  // so the save never waits for a node that does not answer; the result shows on the next load.
+  const applying = changed.some((field) => ['mailHost', 'apiKey', 'panelIps'].includes(field));
+  res.json({ ok: true, ...(applying ? { applying } : {}) });
+  if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'node_settings' }));
 });
 
 // The node's domains with the panel's onboarding state of each ('unknown' for a domain the panel
@@ -436,8 +437,8 @@ router.get('/eop', requireAdmin, async (req, res) => {
 const NODE_APPLIED_FIELDS = Object.freeze(['eopHost', 'tlsPolicy', 'tlsPolicyParameters', 'dkimMode', 'sendLimitPerHour']);
 
 // Checked and kept; the next hop, its TLS, the DKIM mode and the send limit are applied to the node
-// (a run that never deletes a DKIM key nor writes the spam filing rule). The tenant fields are only
-// kept until the tenant driver comes.
+// (a run that never deletes a DKIM key nor writes the spam filing rule). TLS policy parameters must
+// fit the policy (eopSettingsConflict). The tenant fields are only kept until the tenant driver comes.
 router.put('/eop', requireAdmin, async (req, res) => {
   const { settings, error } = parseEopSettings(req.body);
   if (error) return refuse(res, error);
@@ -448,10 +449,10 @@ router.put('/eop', requireAdmin, async (req, res) => {
   await saveEopSettings(settings);
   const changed = EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]);
   configAudit(req, 'eop', changed);
-  const apply = changed.some((field) => NODE_APPLIED_FIELDS.includes(field)) && (await getMailNodeConfig())
-    ? await applyQuietly(() => applyNode({ userId: req.session.userId, trigger: 'eop_settings' }))
-    : null;
-  res.json({ ...eopAnswer(merged), ...(apply ? { apply } : {}) });
+  // Applied right after the answer, as for the node settings.
+  const applying = changed.some((field) => NODE_APPLIED_FIELDS.includes(field)) && !!(await getMailNodeConfig());
+  res.json({ ...eopAnswer(merged), ...(applying ? { applying } : {}) });
+  if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'eop_settings' }));
 });
 
 // The send limit a mailbox gets when nobody set its own, for each domain of the given addresses.
@@ -555,7 +556,11 @@ router.put('/mailboxes/:id/rate-limit', requireAdmin, async (req, res) => {
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  await query('UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE id = $1', [req.params.id, value, frame]);
+  // Every row of the address: two rows for one mailcow mailbox share its limit.
+  await query(
+    'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
+    [email, value, frame],
+  );
   recordAudit({
     actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.rate_limit_changed',
     details: { ...limit, override: !clear, from: overrideOf(rows[0]) },

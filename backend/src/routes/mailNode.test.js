@@ -102,6 +102,9 @@ describe('/api/mail-node', () => {
     panel.eop = null;
   });
 
+  // An apply started after the answer (applyInBackground) runs on the next turn of the event loop.
+  const settled = () => new Promise((resolve) => { setImmediate(() => setImmediate(resolve)); });
+
   const call = (method, path, body) => fetch(`${base}/api/mail-node${path}`, {
     method,
     headers: { 'Content-Type': 'application/json' },
@@ -128,7 +131,8 @@ describe('/api/mail-node', () => {
       actorUserId: 'user-1', action: 'mail_node.config_changed',
       details: { settings: 'node', fields: ['mailHost', 'apiKey', 'quotaMb', 'diskPingUrl', 'deleteAfterDays', 'panelIps'] },
     });
-    // A new node gets the panel's settings at once.
+    // A new node gets the panel's settings right after the answer.
+    await settled();
     expect(applyNode).toHaveBeenCalledWith({ userId: 'user-1', trigger: 'node_settings' });
     expect(JSON.stringify(recordAudit.mock.calls)).not.toContain('new-key');
   });
@@ -165,17 +169,16 @@ describe('/api/mail-node', () => {
     const res = await call('PUT', '/config', {
       mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, panelIps: '203.0.113.10, 2001:DB8::/64\n203.0.113.10',
     });
-    expect(await res.json()).toEqual({
-      ok: true, apply: { at: '2026-10-01T10:00:00.000Z', node: [{ item: 'prefilter', target: null, status: 'ok' }], domains: [] },
-    });
+    expect(await res.json()).toEqual({ ok: true, applying: true });
     expect(saveMailNodeConfig).toHaveBeenCalledWith(expect.objectContaining({ panelIps: ['203.0.113.10', '2001:db8::/64'] }));
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { settings: 'node', fields: ['panelIps'] } }));
+    await settled();
     expect(applyNode).toHaveBeenCalledWith({ userId: 'user-1', trigger: 'node_settings' });
     // Left out, the stored addresses stay.
     node.cfg = { ...CFG, panelIps: ['203.0.113.10'] };
     await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120 });
     expect(saveMailNodeConfig).toHaveBeenLastCalledWith(expect.objectContaining({ panelIps: ['203.0.113.10'] }));
-    for (const bad of ['mail.example.com', '0.0.0.0/0', '10.0.0.1/7', '::/0', '203.0.113.10/33', 'x/24']) {
+    for (const bad of ['mail.example.com', '0.0.0.0/0', '10.0.0.0/16', '2001:db8::/32', '::/0', '203.0.113.10/33', 'x/24']) {
       const refused = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', panelIps: bad });
       expect(refused.status, bad).toBe(400);
       expect((await refused.json()).code).toBe('panel_ips_invalid');
@@ -183,12 +186,17 @@ describe('/api/mail-node', () => {
     expect(saveMailNodeConfig).toHaveBeenCalledTimes(2);
   });
 
-  it('saves the settings even when applying them to the node fails', async () => {
-    applyNode.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ECONNREFUSED)'));
+  it('answers the save without waiting for the apply, which may fail on its own', async () => {
+    let finish;
+    applyNode.mockImplementationOnce(() => new Promise((resolve, reject) => { finish = reject; }));
     const res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', panelIps: '203.0.113.10' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toEqual({ ok: true, applying: true });
     expect(saveMailNodeConfig).toHaveBeenCalled();
+    await settled();
+    expect(applyNode).toHaveBeenCalledTimes(1);
+    finish(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
+    await settled();
   });
 
   it('asks for the key again when the host changes, so the stored key never goes to a new host', async () => {
@@ -558,38 +566,55 @@ describe('/api/mail-node', () => {
       expect(saveEopSettings).toHaveBeenCalledWith(saved);
       expect(await res.json()).toEqual({
         ...EOP_DEFAULTS, ...saved, tenantConfigured: false, tenantDriverActive: false,
-        apply: { at: '2026-10-01T10:00:00.000Z', node: [{ item: 'prefilter', target: null, status: 'ok' }], domains: [] },
+        applying: true,
       });
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', action: 'mail_node.config_changed',
         details: { settings: 'eop', fields: ['eopHost', 'certificateHost', 'terrl', 'tenantId'] },
       });
-      // The next hop changed: the node gets it at once.
+      // The next hop changed: the node gets it right after the answer.
+      await settled();
       expect(applyNode).toHaveBeenCalledWith({ userId: 'user-1', trigger: 'eop_settings' });
     });
 
     it('applies nothing when only tenant fields change, or while the node is not set up', async () => {
       await call('PUT', '/eop', { terrl: '48248', tenantId: TENANT });
-      expect(applyNode).not.toHaveBeenCalled();
       node.cfg = null;
       const res = await call('PUT', '/eop', { eopHost: 'contoso-com.mail.protection.outlook.com' });
       expect(res.status).toBe(200);
+      expect((await res.json()).applying).toBeUndefined();
+      await settled();
       expect(applyNode).not.toHaveBeenCalled();
     });
 
     it('keeps the TLS policy for the next hop and checks it with its parameters', async () => {
-      let res = await call('PUT', '/eop', { tlsPolicy: 'fingerprint', tlsPolicyParameters: '  match=AB:CD   ' });
+      let res = await call('PUT', '/eop', { tlsPolicy: 'fingerprint', tlsPolicyParameters: '  match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A   ' });
       expect(res.status).toBe(200);
-      expect(saveEopSettings).toHaveBeenCalledWith({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB:CD' });
+      expect(saveEopSettings).toHaveBeenCalledWith({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' });
+      await settled();
       expect(applyNode).toHaveBeenCalledWith({ userId: 'user-1', trigger: 'eop_settings' });
       // A fingerprint policy without the fingerprint checks nothing: refused, also against the stored parameters.
       res = await call('PUT', '/eop', { tlsPolicy: 'fingerprint' });
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe('tls_parameters_invalid');
-      panel.eop = { ...EOP_DEFAULTS, tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB:CD' };
+      panel.eop = { ...EOP_DEFAULTS, tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' };
       res = await call('PUT', '/eop', { tlsPolicyParameters: '' });
       expect((await res.json()).code).toBe('tls_parameters_invalid');
-      expect(saveEopSettings).toHaveBeenCalledTimes(1);
+      // Parameters that do not fit the policy: a name for fingerprint, a fingerprint for secure,
+      // match= for encrypt, the stored fingerprint left behind when the policy changes.
+      res = await call('PUT', '/eop', { tlsPolicyParameters: 'match=nexthop' });
+      expect((await res.json()).code).toBe('tls_parameters_invalid');
+      panel.eop = null;
+      for (const body of [{ tlsPolicy: 'secure', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' }, { tlsPolicy: 'encrypt', tlsPolicyParameters: 'match=nexthop' }]) {
+        res = await call('PUT', '/eop', body);
+        expect((await res.json()).code, body.tlsPolicy).toBe('tls_parameters_invalid');
+      }
+      panel.eop = { ...EOP_DEFAULTS, tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' };
+      res = await call('PUT', '/eop', { tlsPolicy: 'encrypt' });
+      expect((await res.json()).code).toBe('tls_parameters_invalid');
+      res = await call('PUT', '/eop', { tlsPolicy: 'secure', tlsPolicyParameters: 'match=nexthop:dot-nexthop' });
+      expect(res.status).toBe(200);
+      expect(saveEopSettings).toHaveBeenCalledTimes(2);
     });
 
     it('refuses a bad value before saving anything', async () => {
@@ -642,7 +667,11 @@ describe('/api/mail-node', () => {
       const res = await call('PUT', `/mailboxes/${ID}/rate-limit`, { value: '200', frame: 'd' });
       expect(await res.json()).toEqual({ ok: true, rateLimit: { value: 200, frame: 'd' }, rateLimitOverride: { value: 200, frame: 'd' } });
       expect(setMailboxRateLimit).toHaveBeenCalledWith(CFG, ['info@example.com'], { value: 200, frame: 'd' });
-      expect(query).toHaveBeenCalledWith('UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE id = $1', [ID, 200, 'd']);
+      // Every row of the address gets it.
+      expect(query).toHaveBeenCalledWith(
+        'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
+        ['info@example.com', 200, 'd'],
+      );
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.rate_limit_changed',
         details: { value: 200, frame: 'd', override: true, from: null },
@@ -655,7 +684,10 @@ describe('/api/mail-node', () => {
       const res = await call('PUT', `/mailboxes/${ID}/rate-limit`, { value: null });
       expect(await res.json()).toEqual({ ok: true, rateLimit: { value: 30, frame: 'h' }, rateLimitOverride: null });
       expect(setMailboxRateLimit).toHaveBeenCalledWith(CFG, ['info@example.com'], { value: 30, frame: 'h' });
-      expect(query).toHaveBeenCalledWith('UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE id = $1', [ID, null, null]);
+      expect(query).toHaveBeenCalledWith(
+        'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
+        ['info@example.com', null, null],
+      );
       expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
         details: { value: 30, frame: 'h', override: false, from: { value: 200, frame: 'd' } },
       }));

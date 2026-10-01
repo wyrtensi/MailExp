@@ -56,8 +56,9 @@ function toForm(settings) {
 
 // Settings -> Integrations -> "EOP" (admins only), next to the mail node: how the node's mail goes
 // through Microsoft EOP. The next hop with its TLS policy, the DKIM mode and the send limit are
-// applied to the node through the mailcow API (saving them applies them; "Apply settings" does it
-// again for the node and every domain), and the last result is shown item by item. The spam filing
+// applied to the node through the mailcow API (saving them starts an apply after the answer, shown
+// on the next load; "Apply settings" does it again for the node and every domain and waits for it),
+// and the last result is shown item by item. The spam filing
 // rule is written only by its own button, after a warning: it restarts Dovecot on the node. Until
 // the panel works with the tenant itself (the server's tenantDriverActive, false until the tenant
 // driver exists), the domains' onboarding is done by hand, so this section also lists the domains
@@ -113,6 +114,8 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   }, [showChecklist, loadDomains, revision]);
 
   const set = (field) => (e) => setForm({ ...form, [field]: e.target.value });
+  // Parameters belong to a policy (a fingerprint, a name to match): another policy starts without them.
+  const setPolicy = (e) => setForm({ ...form, tlsPolicy: e.target.value, tlsPolicyParameters: '' });
   const formErrorKey = eopSettingsError(form);
 
   const save = async () => {
@@ -120,7 +123,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     setError(null);
     setNotice(null);
     try {
-      const { apply, ...saved } = await api.mailNode.saveEopSettings({
+      const { applying, ...saved } = await api.mailNode.saveEopSettings({
         ...Object.fromEntries(TEXT_FIELDS.map((field) => [field, form[field].trim()])),
         tlsPolicy: form.tlsPolicy,
         dkimMode: form.dkimMode,
@@ -128,12 +131,8 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       });
       setStored(saved);
       setForm(toForm(saved));
-      // A change the node gets was applied right away: its result replaces the last one.
-      if (apply) {
-        setApplied({ at: apply.at, items: apply.node ?? [] });
-        domainChanged();
-      }
-      setNotice(apply ? 'admin.eop.savedApplied' : 'admin.eop.saved');
+      // A change the node gets is applied after the answer: its result shows on the next load.
+      setNotice(applying ? 'admin.eop.savedApplying' : 'admin.eop.saved');
     } catch (err) {
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
     } finally {
@@ -196,7 +195,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
           </label>
           <label>
             <span style={labelStyle}>{t('admin.eop.tlsPolicyLabel')}</span>
-            <select value={form.tlsPolicy} onChange={set('tlsPolicy')} style={{ ...fieldStyle, maxWidth: 420 }}>
+            <select value={form.tlsPolicy} onChange={setPolicy} style={{ ...fieldStyle, maxWidth: 420 }}>
               {Object.entries(TLS_POLICY_KEYS).map(([policy, key]) => <option key={policy} value={policy}>{t(key)}</option>)}
             </select>
             <span style={hintStyle}>{t('admin.eop.tlsPolicyNote')}</span>

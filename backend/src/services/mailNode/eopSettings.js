@@ -23,13 +23,22 @@ export const DEFAULT_SEND_LIMIT_PER_HOUR = 50;
 export const MAX_SEND_LIMIT_PER_HOUR = 10000;
 export const MAX_TERRL = 10000000;
 // The TLS Policy Map entry for <EOP_HOST> (Postfix smtp_tls_policy_maps levels), or 'default' for
-// none: mailcow's own default then (DANE, then MTA-STS through postfix-tlspol). Which one a tenant
-// needs depends on the form of its host name (eop-panel-requirements.md, sections 2.3 and 6,
-// experiment 4): 'secure' for *.mail.protection.outlook.com; 'encrypt' and 'fingerprint' are what a
-// test stand without a public CA can check. Levels that send mail without TLS are not offered.
+// none: mailcow's own default then (MTA-STS through postfix-tlspol, else DANE where the host
+// publishes TLSA, else opportunistic TLS: unverified, and cleartext when the host offers no TLS).
+// 'dane' falls back the same way without TLSA. Which one a tenant needs depends on the form of its
+// host name (eop-panel-requirements.md, sections 2.3 and 6, experiment 4): 'secure' for
+// *.mail.protection.outlook.com; 'encrypt' and 'fingerprint' are what a test stand without a public
+// CA can check. The levels 'none' and 'may' are not offered.
 export const TLS_POLICIES = Object.freeze(['secure', 'dane', 'dane-only', 'verify', 'fingerprint', 'encrypt', 'default']);
 export const DEFAULT_TLS_POLICY = 'secure';
-const MAX_TLS_PARAMETERS = 500;
+// mailcow keeps the parameters in a VARCHAR(255).
+export const MAX_TLS_PARAMETERS = 255;
+// What secure and verify may match the server certificate against besides host names (Postfix
+// TLS_README): the MX host name, the next hop, and the next hop's subdomains.
+const NAME_STRATEGIES = Object.freeze(['hostname', 'nexthop', 'dot-nexthop']);
+// A certificate or public key fingerprint: hex pairs separated by colons (16 pairs for MD5, 20 for
+// SHA-1, 32 for SHA-256).
+const FINGERPRINT_RE = /^[0-9A-F]{2}(?::[0-9A-F]{2}){15,63}$/i;
 
 export const EOP_DEFAULTS = Object.freeze({
   eopHost: null,
@@ -101,13 +110,25 @@ export function parseEopSettings(body) {
   return { settings };
 }
 
-// What the settings as a whole refuse once merged with the stored ones, or null: a fingerprint
-// policy checks nothing without the fingerprint to match.
-export function eopSettingsConflict(settings) {
-  if (settings.tlsPolicy === 'fingerprint' && !/(^| )match=/.test(settings.tlsPolicyParameters ?? '')) {
-    return 'tls_parameters_invalid';
+const matchItem = (item) => NAME_STRATEGIES.includes(item) || !!parseHostName(item.replace(/^\./, ''));
+
+// Whether the parameters fit the policy: secure and verify match only by name (hostname, nexthop,
+// dot-nexthop or host names, ":"-separated); fingerprint needs match= with fingerprints
+// ("|"-separated); the other levels check no name, so match= there is a mistake.
+export function tlsParametersFit(policy, parameters) {
+  const tokens = parameters ? parameters.split(' ') : [];
+  const matches = tokens.filter((t) => t.startsWith('match=')).map((t) => t.slice('match='.length));
+  if (policy === 'fingerprint') {
+    return matches.length > 0 && matches.every((m) => m.split('|').every((fp) => FINGERPRINT_RE.test(fp)));
   }
-  return null;
+  if (policy === 'secure' || policy === 'verify') return matches.every((m) => m.split(':').every(matchItem));
+  return matches.length === 0;
+}
+
+// What the settings as a whole refuse once merged with the stored ones, or null: parameters that do
+// not fit the policy (a fingerprint policy without the fingerprint checks nothing).
+export function eopSettingsConflict(settings) {
+  return tlsParametersFit(settings.tlsPolicy, settings.tlsPolicyParameters ?? '') ? null : 'tls_parameters_invalid';
 }
 
 // The stored settings over the defaults.

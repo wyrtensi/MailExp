@@ -114,7 +114,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     setNotice(null);
     try {
       await action();
-      if (noticeKey) setNotice(noticeKey);
+      if (noticeKey) setNotice((current) => current ?? noticeKey);
     } catch (err) {
       fail(err);
     } finally {
@@ -124,7 +124,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
 
   const configErrorKey = mailNodeConfigError(form, { hasStoredKey: !!stored?.configured });
   const saveConfig = () => run(async () => {
-    await api.mailNode.saveConfig({
+    const saved = await api.mailNode.saveConfig({
       mailHost: form.mailHost.trim(), apiKey: form.apiKey, quotaMb: Number(form.quotaMb), diskPingUrl: form.diskPingUrl.trim(),
       deleteAfterDays: Number(form.deleteAfterDays),
       panelIps: form.panelIps,
@@ -133,6 +133,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     setStored(cfg);
     setForm((f) => ({ ...f, apiKey: cfg.apiKey }));
     await refreshDomains();
+    // Another node, key or panel address is applied to the node after the answer.
+    if (saved?.applying) setNotice('admin.mailNode.savedApplying');
   }, 'admin.mailNode.saved');
 
   const domainMailboxes = parseWholeNumber(newDomain.mailboxes, 1, MAX_DOMAIN_MAILBOXES);

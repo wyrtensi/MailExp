@@ -31,6 +31,7 @@ import {
   applyStatusKey,
   dkimDeleteWaiting,
   eopSettingsConflict,
+  tlsParametersFit,
   parseNetwork,
   parseNetworkList,
   parseTlsParameters,
@@ -382,9 +383,26 @@ describe('the TLS policy for the next hop', () => {
 
   it('wants the fingerprint with the fingerprint policy, also in the form', () => {
     assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: null }), 'tls_parameters_invalid');
-    assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB' }), null);
+    assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB' }), 'tls_parameters_invalid');
+    assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' }), null);
     assert.equal(eopSettingsError({ tlsPolicy: 'fingerprint', tlsPolicyParameters: '', dkimMode: 'mailcow', sendLimitPerHour: '50' }), 'admin.eop.errorTlsParameters');
     assert.equal(eopSettingsError({ tlsPolicy: 'secure', tlsPolicyParameters: '', dkimMode: 'mailcow', sendLimitPerHour: '50' }), null);
+  });
+});
+
+describe('TLS parameters per policy, as the server checks them', () => {
+  it('takes names for secure and verify, fingerprints for fingerprint, and no match= otherwise', () => {
+    assert.equal(tlsParametersFit('secure', 'match=nexthop:dot-nexthop'), true);
+    assert.equal(tlsParametersFit('verify', 'match=.mail.protection.outlook.com'), true);
+    assert.equal(tlsParametersFit('secure', 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A'), false);
+    assert.equal(tlsParametersFit('fingerprint', 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A|E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A'), true);
+    assert.equal(tlsParametersFit('fingerprint', 'match=nexthop'), false);
+    assert.equal(tlsParametersFit('fingerprint', ''), false);
+    for (const policy of ['encrypt', 'dane', 'dane-only', 'default']) {
+      assert.equal(tlsParametersFit(policy, ''), true, policy);
+      assert.equal(tlsParametersFit(policy, 'match=nexthop'), false, policy);
+    }
+    assert.deepEqual(normalizeEopSettings({ tlsPolicyParameters: `match=${'a'.repeat(250)}` }), { error: 'tls_parameters_invalid' });
   });
 });
 
@@ -392,7 +410,9 @@ describe('the panel addresses for fail2ban', () => {
   it('takes IP addresses and networks, never the whole internet', () => {
     assert.equal(parseNetwork(' 203.0.113.10 '), '203.0.113.10');
     assert.equal(parseNetwork('2001:DB8::/64'), '2001:db8::/64');
-    for (const bad of ['0.0.0.0/0', '10.0.0.0/7', '::/0', '203.0.113.256', '203.0.113.10/33', 'mail.example.com', 'a:b:c']) {
+    assert.equal(parseNetwork('203.0.113.0/24'), '203.0.113.0/24');
+    assert.equal(parseNetwork('2001:db8::/48'), '2001:db8::/48');
+    for (const bad of ['0.0.0.0/0', '10.0.0.0/8', '203.0.0.0/23', '2001:db8::/47', '::/0', '203.0.113.256', '203.0.113.10/33', 'mail.example.com', 'a:b:c']) {
       assert.equal(parseNetwork(bad), null, bad);
     }
     assert.deepEqual(parseNetworkList('203.0.113.10, 198.51.100.0/24\n203.0.113.10'), { networks: ['203.0.113.10', '198.51.100.0/24'] });

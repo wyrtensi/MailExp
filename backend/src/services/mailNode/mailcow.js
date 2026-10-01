@@ -22,17 +22,22 @@ export const MAX_DOMAIN_MAILBOXES = 10000;
 // Addresses of the panel the node's fail2ban must never ban (services/mailNode/nodeApply.js).
 export const MAX_PANEL_IPS = 10;
 const REQUEST_TIMEOUT_MS = 15000;
+// Listing a domain's mailboxes with their send limits: mailcow reads each mailbox's details one by
+// one, which takes long on a domain with hundreds of mailboxes.
+const MAILBOX_LIST_TIMEOUT_MS = 60000;
 
 const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const LOCAL_PART_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 
-// status: the HTTP status the panel answers with; a failure of the node itself is 502.
+// status: the HTTP status the panel answers with; a failure of the node itself is 502. timeout: the
+// node did not answer in time (code mail_node_unreachable all the same: a write may have been done).
 export class MailNodeError extends Error {
-  constructor(code, message, status = 502) {
+  constructor(code, message, status = 502, { timeout = false } = {}) {
     super(message);
     this.name = 'MailNodeError';
     this.code = code;
     this.status = status;
+    this.timeout = timeout;
   }
 }
 
@@ -62,7 +67,7 @@ export function generateMailboxPassword() {
 }
 
 // One address or network the panel connects to the node from, as mailcow's fail2ban takes it: an
-// IPv4 or IPv6 address, or one with a prefix (/8 to /32 for IPv4, /16 to /128 for IPv6, so a
+// IPv4 or IPv6 address, or one with a prefix (/24 to /32 for IPv4, /48 to /128 for IPv6, so a
 // mistake cannot exempt the whole internet). Lowercased; null for anything else.
 export function parseNetwork(value) {
   if (typeof value !== 'string') return null;
@@ -74,7 +79,7 @@ export function parseNetwork(value) {
   if (prefix === undefined) return address;
   if (!/^\d{1,3}$/.test(prefix)) return null;
   const bits = Number(prefix);
-  const [min, max] = family === 4 ? [8, 32] : [16, 128];
+  const [min, max] = family === 4 ? [24, 32] : [48, 128];
   return bits >= min && bits <= max ? `${address}/${bits}` : null;
 }
 
@@ -156,7 +161,7 @@ function refusal(body) {
 
 // judge: false leaves the answer of a POST to the caller (delete/mailbox mixes warnings with its
 // success).
-async function request(cfg, method, path, body, { judge = true } = {}) {
+async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   let res;
   try {
     // allowPrivate: on a one-server install <MAIL_HOST> resolves to this host's own address.
@@ -168,10 +173,11 @@ async function request(cfg, method, path, body, { judge = true } = {}) {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     }, { allowPrivate: true, requireHttps: true });
   } catch (err) {
-    throw new MailNodeError('mail_node_unreachable', `The mail node is unreachable (${err?.code || err?.name || 'error'})`);
+    const timeout = err?.name === 'TimeoutError';
+    throw new MailNodeError('mail_node_unreachable', `The mail node is unreachable (${err?.code || err?.name || 'error'})`, 502, { timeout });
   }
   if (res.status === 401 || res.status === 403) {
     throw new MailNodeError('mail_node_auth', 'The mail node refused the API key');
@@ -271,13 +277,23 @@ export async function deleteTlsPolicy(cfg, id) {
 // mailcow's relayhosts ("sender-dependent transports"), without their passwords: get/relayhost/all
 // sends them in clear text, and the panel never keeps, shows or logs them. hasLogin: the entry
 // authenticates with SASL (a username is set).
+// usedByDomains, usedByMailboxes: what sends through the entry (mailcow lists them comma-separated).
+const usedBy = (value) => String(value ?? '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
 export async function listRelayhosts(cfg) {
   return asList(await request(cfg, 'GET', 'get/relayhost/all')).map((r) => ({
     id: Number(r.id),
     hostname: String(r.hostname ?? '').trim().toLowerCase(),
     hasLogin: String(r.username ?? '').trim() !== '',
     active: Number(r.active) === 1,
+    usedByDomains: usedBy(r.used_by_domains),
+    usedByMailboxes: usedBy(r.used_by_mailboxes),
   })).filter((r) => r.hostname && Number.isInteger(r.id));
+}
+
+// delete/relayhost also sets every domain that used it back to no relayhost: the panel deletes only
+// an entry nothing uses (services/mailNode/nodeApply.js).
+export async function deleteRelayhost(cfg, id) {
+  await request(cfg, 'POST', 'delete/relayhost', [id]);
 }
 
 // Without a username mailcow turns no SASL on for the entry; mailcow sets it active itself.
@@ -377,6 +393,33 @@ export async function whitelistFail2ban(cfg, networks) {
   await request(cfg, 'POST', 'edit/fail2ban', { items: networks, attr: { action: 'whitelist' } });
 }
 
+// Takes networks out of the whitelist. mailcow has no action for that (its actions add to the
+// whitelist or the blacklist, or unban), so this is the plain edit/fail2ban with every field read
+// back from get/fail2ban first: it replaces the whole whitelist and blacklist and resets
+// ban_time_increment and manage_external unless they are sent. Returns the networks removed.
+export async function unwhitelistFail2ban(cfg, networks) {
+  const now = await request(cfg, 'GET', 'get/fail2ban');
+  if (!now || typeof now !== 'object' || Array.isArray(now)) {
+    throw new MailNodeError('mail_node_failed', 'The mail node did not report its fail2ban settings');
+  }
+  const drop = new Set(networks.map((n) => n.toLowerCase()));
+  const listed = String(now.whitelist ?? '').split(/[\s,;]+/).filter(Boolean);
+  const kept = listed.filter((n) => !drop.has(n.toLowerCase()));
+  if (kept.length === listed.length) return [];
+  await request(cfg, 'POST', 'edit/fail2ban', {
+    items: ['none'],
+    attr: {
+      ban_time: now.ban_time, max_ban_time: now.max_ban_time, max_attempts: now.max_attempts,
+      retry_window: now.retry_window, netban_ipv4: now.netban_ipv4, netban_ipv6: now.netban_ipv6,
+      ban_time_increment: now.ban_time_increment === true || String(now.ban_time_increment) === '1' ? '1' : '0',
+      manage_external: Number(now.manage_external) > 0 ? 1 : 0,
+      whitelist: kept.join('\n'),
+      blacklist: String(now.blacklist ?? ''),
+    },
+  });
+  return listed.filter((n) => drop.has(n.toLowerCase()));
+}
+
 function mailboxInfo(m) {
   return {
     email: String(m.username ?? '').toLowerCase(),
@@ -418,8 +461,10 @@ function mailboxRateLimit(m) {
   return Number.isInteger(value) && value > 0 && RATE_LIMIT_FRAMES.includes(frame) ? { value, frame } : null;
 }
 
-export async function listMailboxes(cfg) {
-  return asList(await request(cfg, 'GET', 'get/mailbox/all'))
+// domain: only that domain's mailboxes (get/mailbox/all/<domain>), read with a longer timeout.
+export async function listMailboxes(cfg, { domain } = {}) {
+  const path = domain ? `get/mailbox/all/${encodeURIComponent(domain)}` : 'get/mailbox/all';
+  return asList(await request(cfg, 'GET', path, undefined, domain ? { timeoutMs: MAILBOX_LIST_TIMEOUT_MS } : {}))
     .filter((m) => m.username)
     .map((m) => ({ ...mailboxInfo(m), rateLimit: mailboxRateLimit(m) }));
 }
@@ -450,8 +495,8 @@ export async function provisionMailbox(cfg, { localPart, domain, name, rateLimit
     // "apply" of the domain's settings, so it does not undo the takeover.
     if (rateLimit) {
       await setMailboxRateLimit(cfg, [email], rateLimit)
-        .then(({ failed }) => failed.length && console.error(`Mail node kept no send limit for ${email}`))
-        .catch((err) => console.error(`Mail node send limit for ${email} failed: ${err.code}`));
+        .then(({ failed }) => failed.length && console.error('Mail node kept no send limit for a mailbox it took over'))
+        .catch((err) => console.error(`Mail node send limit for a mailbox it took over failed: ${err.code}`));
     }
   } else {
     await request(cfg, 'POST', 'add/mailbox', {

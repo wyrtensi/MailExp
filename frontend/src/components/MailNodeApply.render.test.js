@@ -186,16 +186,27 @@ describe('EopSection — node settings', () => {
     assert.equal(buttons(host, 'common.save')[0].disabled, true);
     const parameters = [...host.querySelectorAll('input')].find((input) => input.placeholder === 'admin.eop.tlsParametersPh');
     await setValue(parameters, 'match=AB:CD');
+    assert.ok(host.textContent.includes('admin.eop.errorTlsParameters'), 'a fingerprint must be hex pairs');
+    await setValue(parameters, 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A');
     assert.equal(buttons(host, 'common.save')[0].disabled, false);
     answers['PUT /api/mail-node/eop'] = {
-      ...EOP, tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB:CD',
-      apply: { at, node: [{ item: 'tls_policy', target: EOP.eopHost, status: 'changed', from: 'secure', to: 'fingerprint match=AB:CD' }], domains: [] },
+      ...EOP, tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A', applying: true,
     };
     await click(buttons(host, 'common.save')[0]);
     const put = calls.find((c) => c.method === 'PUT' && c.path === '/api/mail-node/eop');
     assert.equal(put.body.tlsPolicy, 'fingerprint');
-    assert.equal(put.body.tlsPolicyParameters, 'match=AB:CD');
-    assert.ok(host.textContent.includes('admin.eop.savedApplied'));
+    assert.equal(put.body.tlsPolicyParameters, 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A');
+    assert.ok(host.textContent.includes('admin.eop.savedApplying'));
+  });
+
+  test('clears the parameters when the policy changes', async () => {
+    answers['GET /api/mail-node/eop'] = { ...EOP, tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' };
+    const host = await mount(React.createElement(EopSection));
+    const parameters = () => [...host.querySelectorAll('input')].find((input) => input.placeholder === 'admin.eop.tlsParametersPh');
+    assert.equal(parameters().value, 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A');
+    await setValue(host.querySelectorAll('select')[0], 'secure');
+    assert.equal(parameters().value, '');
+    assert.equal(buttons(host, 'common.save')[0].disabled, false);
   });
 });
 

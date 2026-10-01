@@ -35,6 +35,9 @@ export default function MailNodeApplyResult({ result }) {
             {item.status === 'changed' && (item.from !== undefined || item.to !== undefined) && !item.counts && (
               <span style={{ ...noteStyle, marginLeft: 8 }}>{t('admin.mailNode.applyFromTo', { from: shown(item.from), to: shown(item.to) })}</span>
             )}
+            {item.current && (
+              <span style={{ ...noteStyle, marginLeft: 8 }}>{t('admin.mailNode.applyCurrent', { current: item.current })}</span>
+            )}
             {item.counts && (
               <span style={{ ...noteStyle, marginLeft: 8 }}>{t('admin.mailNode.applyCounts', item.counts)}</span>
             )}

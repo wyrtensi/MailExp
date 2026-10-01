@@ -354,14 +354,18 @@ test('the demo keeps the TLS policy of the next hop and applies a change to the 
   assert.equal((await demoRequest('GET', '/mail-node/eop')).tlsPolicy, 'secure');
   await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'none' }), err => err.code === 'tls_policy_invalid');
   await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'fingerprint' }), err => err.code === 'tls_parameters_invalid');
-  const saved = await demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'fingerprint', tlsPolicyParameters: ' match=AB:CD ' });
-  assert.equal(saved.tlsPolicyParameters, 'match=AB:CD');
-  assert.deepEqual(saved.apply.node[0], {
-    item: 'tls_policy', target: 'demo-mailexpert-local.mail.protection.outlook.com', status: 'changed', from: 'secure', to: 'fingerprint match=AB:CD',
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB:CD' }), err => err.code === 'tls_parameters_invalid');
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'encrypt', tlsPolicyParameters: 'match=nexthop' }), err => err.code === 'tls_parameters_invalid');
+  const saved = await demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'fingerprint', tlsPolicyParameters: ' match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A ' });
+  assert.equal(saved.tlsPolicyParameters, 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A');
+  assert.equal(saved.applying, true);
+  assert.deepEqual((await demoRequest('GET', '/mail-node/apply')).node.items[0], {
+    item: 'tls_policy', target: 'demo-mailexpert-local.mail.protection.outlook.com', status: 'changed', from: 'secure', to: 'fingerprint match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A',
   });
   const back = await demoRequest('PUT', '/mail-node/eop', { tlsPolicy: 'secure', tlsPolicyParameters: '' });
-  assert.equal(back.apply.node[0].to, 'secure');
-  assert.equal((await demoRequest('PUT', '/mail-node/eop', { terrl: '1000' })).apply, undefined);
+  assert.equal(back.applying, true);
+  assert.equal((await demoRequest('GET', '/mail-node/apply')).node.items[0].to, 'secure');
+  assert.equal((await demoRequest('PUT', '/mail-node/eop', { terrl: '1000' })).applying, undefined);
 });
 
 test('the demo sets a mailbox\'s own send limit and its default again, refusing bad ones', async () => {
@@ -380,7 +384,9 @@ test('the demo keeps the panel addresses for fail2ban, checked like the server',
   assert.deepEqual((await demoRequest('GET', '/mail-node/config')).panelIps, ['203.0.113.10']);
   await assert.rejects(() => demoRequest('PUT', '/mail-node/config', { panelIps: '0.0.0.0/0' }), err => err.code === 'panel_ips_invalid');
   const saved = await demoRequest('PUT', '/mail-node/config', { panelIps: '203.0.113.10, 198.51.100.0/24' });
-  assert.ok(saved.apply.node.some(i => i.item === 'fail2ban'));
+  assert.equal(saved.applying, true);
+  assert.ok((await demoRequest('GET', '/mail-node/apply')).node.items.some(i => i.item === 'fail2ban'));
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/config', { panelIps: '203.0.0.0/23' }), err => err.code === 'panel_ips_invalid');
   assert.deepEqual((await demoRequest('GET', '/mail-node/config')).panelIps, ['203.0.113.10', '198.51.100.0/24']);
 });
 

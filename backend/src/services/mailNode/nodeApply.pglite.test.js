@@ -92,7 +92,11 @@ describe('applyNode', () => {
     expect(b.items.find((i) => i.item === 'dkim')).toMatchObject({ status: 'skipped', code: 'dkim_delete_unconfirmed' });
     expect(mc.node.dkim['b.example']).toBeDefined();
 
-    expect(await getNodeApplyResult()).toEqual({ at: result.at, items: result.node });
+    // With what the panel itself made on the node, to take it away when the EOP host changes.
+    expect(await getNodeApplyResult()).toEqual({
+      at: result.at, items: result.node,
+      owned: { tls: [{ id: 1, dest: 'eop.example.net' }], relayhosts: [{ id: 2, hostname: 'eop.example.net' }], fail2ban: ['203.0.113.10'] },
+    });
     const a = await domainRow('a.example');
     expect(a.relayhost_id).toBe(mc.node.relayhosts[0].id);
     expect(a.apply_result.items.map((i) => i.status)).toEqual(['changed', 'ok', 'changed']);
@@ -135,6 +139,27 @@ describe('applyNode', () => {
     await db.query('DELETE FROM integration_config');
     await expect(applyNode({ userId: ADMIN })).rejects.toMatchObject({ code: 'mail_node_not_configured' });
     expect(await applyQuietly(() => applyNode({ userId: ADMIN }))).toBeNull();
+  });
+
+  it('removes what it made for the previous EOP host on the next run, keeping the record across runs', async () => {
+    await applyNode({ userId: ADMIN });
+    await saveEopSettings({ eopHost: 'new.example.net' });
+    const moved = await applyNode({ userId: ADMIN, trigger: 'eop_settings' });
+    expect(moved.node.filter((i) => i.item.startsWith('previous_')).map((i) => [i.item, i.status])).toEqual([
+      ['previous_tls_policy', 'changed'], ['previous_relayhost', 'changed'],
+    ]);
+    expect(mc.node.tls.map((t) => t.dest)).toEqual(['new.example.net']);
+    expect(mc.node.relayhosts.map((r) => r.hostname)).toEqual(['new.example.net']);
+    // A domain run keeps the record a node run made.
+    await applyDomain({ domain: 'a.example', userId: ADMIN });
+    expect((await getNodeApplyResult()).owned.relayhosts).toEqual([{ id: 4, hostname: 'new.example.net' }]);
+  });
+
+  it('applies one limit per address when the panel holds a mailbox twice, the administrator\'s first', async () => {
+    await addAccount('two@a.example', { limit: { value: 7, frame: 'm' } });
+    await applyDomain({ domain: 'a.example', userId: ADMIN });
+    expect(mc.node.mailboxes.find((m) => m.username === 'two@a.example').rl).toEqual({ value: '7', frame: 'm' });
+    expect(mc.writes.filter((w) => w.path === 'edit/rl-mbox').flatMap((w) => w.body.items).filter((e) => e === 'two@a.example')).toHaveLength(1);
   });
 
   it('never runs twice at once: the relayhost is added once', async () => {

@@ -24,8 +24,12 @@ export function createFakeMailcow(initial = {}) {
       netban_ipv4: 32, netban_ipv6: 128, banlist_id: 'b1', manage_external: 0, whitelist: '', blacklist: '',
     },
     restartFails: false,
+    // add/global-filter answers "written" without writing (the file is missing in mailcow).
+    prefilterLost: false,
     splitDkim: false,
     refuse: {},
+    // Paths that time out once each (the request's AbortSignal fires).
+    slow: [],
     ...initial,
   };
   let nextId = 1;
@@ -40,9 +44,18 @@ export function createFakeMailcow(initial = {}) {
 
   function get(path) {
     if (path === 'get/tls-policy-map/all') return node.tls.length ? node.tls : {};
-    if (path === 'get/relayhost/all') return node.relayhosts.length ? node.relayhosts : {};
-    if (path === 'get/mailbox/all') {
-      return node.mailboxes.map((m) => ({
+    if (path === 'get/relayhost/all') {
+      return node.relayhosts.length
+        ? node.relayhosts.map((r) => ({
+          ...r,
+          used_by_domains: Object.keys(node.domains).filter((d) => node.domains[d].relayhost === r.id).join(', '),
+          used_by_mailboxes: '',
+        }))
+        : {};
+    }
+    if (path === 'get/mailbox/all' || path.startsWith('get/mailbox/all/')) {
+      const domain = path.startsWith('get/mailbox/all/') ? decodeURIComponent(path.slice('get/mailbox/all/'.length)) : null;
+      return node.mailboxes.filter((m) => !domain || m.username.endsWith(`@${domain}`)).map((m) => ({
         username: m.username, active: '1', active_int: 1, quota: 5368709120, quota_used: 0,
         rl: m.rl ?? false, rl_scope: m.rl ? 'mailbox' : 'domain',
       }));
@@ -81,6 +94,10 @@ export function createFakeMailcow(initial = {}) {
       case 'add/relayhost':
         node.relayhosts.push({ id: nextId++, hostname: body.hostname, username: body.username ?? '', password: body.password ?? '', active: '1' });
         return [success('relayhost_added', '')];
+      case 'delete/relayhost':
+        node.relayhosts = node.relayhosts.filter((r) => !body.map(Number).includes(r.id));
+        for (const d of Object.values(node.domains)) if (body.map(Number).includes(d.relayhost)) d.relayhost = 0;
+        return [success('relayhost_removed', String(body[0]))];
       case 'edit/relayhost': {
         const entry = node.relayhosts.find((r) => r.id === Number(body.items[0]));
         entry.active = String(body.attr.active);
@@ -104,11 +121,27 @@ export function createFakeMailcow(initial = {}) {
           return success('rl_saved', email);
         });
       case 'add/global-filter':
-        node.prefilter = body.script_data;
+        if (!node.prefilterLost) node.prefilter = body.script_data;
         return node.restartFails
           ? [{ type: 'warning', msg: 'dovecot_restart_failed' }, success('global_filter_written')]
           : [success('dovecot_restart_success'), success('global_filter_written')];
       case 'edit/fail2ban': {
+        if (body.attr.action !== 'whitelist') {
+          // The plain edit: every field from the request, ban_time_increment and manage_external
+          // reset when left out (functions.fail2ban.inc.php).
+          const a = body.attr;
+          node.fail2ban = {
+            ...node.fail2ban,
+            ban_time: Number(a.ban_time ?? node.fail2ban.ban_time), max_ban_time: Number(a.max_ban_time ?? node.fail2ban.max_ban_time),
+            max_attempts: Number(a.max_attempts ?? node.fail2ban.max_attempts), retry_window: Number(a.retry_window ?? node.fail2ban.retry_window),
+            netban_ipv4: Number(a.netban_ipv4 ?? node.fail2ban.netban_ipv4), netban_ipv6: Number(a.netban_ipv6 ?? node.fail2ban.netban_ipv6),
+            ban_time_increment: String(a.ban_time_increment) === '1',
+            manage_external: Number(a.manage_external ?? 0) > 0 ? 1 : 0,
+            whitelist: a.whitelist ?? node.fail2ban.whitelist,
+            blacklist: a.blacklist ?? node.fail2ban.blacklist,
+          };
+          return [success('f2b_modified')];
+        }
         const listed = node.fail2ban.whitelist ? node.fail2ban.whitelist.split('\n') : [];
         for (const network of body.items) if (!listed.includes(network)) listed.push(network);
         node.fail2ban.whitelist = listed.sort().join('\n');
@@ -123,6 +156,11 @@ export function createFakeMailcow(initial = {}) {
   async function fetch(url, options) {
     if (node.down) throw Object.assign(new Error('connect'), { code: 'ECONNREFUSED' });
     const path = url.replace(/^https:\/\/[^/]+\/api\/v1\//, '');
+    const slow = node.slow.indexOf(path);
+    if (slow >= 0) {
+      node.slow.splice(slow, 1);
+      throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    }
     if (options.method === 'GET') {
       const body = get(path);
       return body === null ? answer({ type: 'error', msg: 'route not found' }, 404) : answer(body);
