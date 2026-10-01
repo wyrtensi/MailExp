@@ -1,6 +1,6 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
-import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady, normalizeEopSettings } from '../utils/mailNode.js';
+import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady, canRestartOnboarding, normalizeEopSettings } from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
   {
@@ -786,11 +786,16 @@ function withoutRecreatedWarning(name) {
 
 // Adopt, "Done", "mark ready", "restart onboarding" and accepting the node's creation time, with
 // the same refusals as the server (routes/mailNode.js).
-function changeMailNodeDomain(action, raw, step) {
+function changeMailNodeDomain(action, raw, step, body) {
   const domain = mailNodeDomainByName(raw);
   const now = new Date().toISOString();
   if (action === 'acknowledge') {
+    // As the server: the time the administrator saw is required and must still be the node's; a
+    // row without the warning (not bound yet, or bound to this time) has nothing to accept.
+    if (typeof body?.created !== 'string' || !body.created) throw demoError('The creation time shown for the domain is required', 'node_created_required');
     if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+    if (!domain.created) throw demoError('The node reports the creation time the panel knows already', 'domain_not_recreated');
+    if (domain.created !== body.created) throw demoError('The node reports another creation time than the one shown: reload the list', 'domain_node_changed');
     if (!domain.recreated) throw demoError('The node reports the creation time the panel knows already', 'domain_not_recreated');
     withoutRecreatedWarning(domain.domain);
     return mailNodeDomains.find(d => d.domain === domain.domain);
@@ -803,6 +808,7 @@ function changeMailNodeDomain(action, raw, step) {
   }
   if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
   if (action === 'restart') {
+    if (!canRestartOnboarding(domain)) throw demoError('The domain is at the first step with nothing to clear', 'domain_nothing_to_restart');
     // Mailboxes on the domain stay; the node identity is bound again, so the warning goes too.
     withoutRecreatedWarning(domain.domain);
     return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {} });
@@ -1223,6 +1229,16 @@ export async function demoRequest(method, path, body = {}) {
     mailNodeMailboxes = mailNodeMailboxes.filter(m => m.accountId !== id);
     return { ok: true };
   }
+  // The node's aliases that deliver to a node mailbox, for its delete confirmation. The demo's sales
+  // mailbox has one, so the confirmation shows the line about it.
+  const nodeAliasesMatch = pathname.match(/^\/accounts\/([^/]+)\/node-aliases$/);
+  if (verb === 'GET' && nodeAliasesMatch) {
+    const account = accountFor(decodeURIComponent(nodeAliasesMatch[1]));
+    if (!account) throw demoError('Account not found');
+    if (!account.mail_node) throw demoError('Mail node mailbox not found', 'mailbox_not_found');
+    const [local, domain] = normalizeEmail(account.email_address).split('@');
+    return { aliases: local === 'sales' ? [{ address: `orders@${domain}`, onlyTarget: true }] : [] };
+  }
   const reconnectMatch = pathname.match(/^\/accounts\/([^/]+)\/reconnect$/);
   if (verb === 'POST' && reconnectMatch) {
     const account = accountFor(decodeURIComponent(reconnectMatch[1]));
@@ -1635,7 +1651,7 @@ export async function demoRequest(method, path, body = {}) {
   const domainAction = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(adopt|ready|restart|acknowledge|steps\/([^/]+))$/);
   if (verb === 'POST' && domainAction) {
     const action = domainAction[2].startsWith('steps/') ? 'step' : domainAction[2];
-    const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]));
+    const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]), body);
     return { ok: true, domain: changed.domain, state: changed.state };
   }
   if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();

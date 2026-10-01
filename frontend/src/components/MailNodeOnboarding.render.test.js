@@ -203,7 +203,8 @@ describe('MailNodeDomainOnboarding — node trouble never hides or resets a doma
     assert.equal(buttons(remade, 'admin.mailNode.stepDone').length, 1, 'Done still works on it');
     answers['POST /api/mail-node/domains/remade.example/acknowledge'] = { ok: true, domain: 'remade.example' };
     await click(buttons(remade, 'admin.mailNode.acknowledge')[0]);
-    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/domains/remade.example/acknowledge'));
+    const sent = calls.find((c) => c.method === 'POST' && c.path === '/api/mail-node/domains/remade.example/acknowledge');
+    assert.deepEqual(sent.body, { created: '2026-09-30 12:00:00' }, 'the time the administrator saw goes with it');
     const gone = host.querySelector('[data-domain-onboarding="gone.example"]');
     assert.ok(gone.textContent.includes('admin.mailNode.domainNotOnNode'));
     assert.equal(buttons(gone, 'admin.mailNode.stepDone').length, 0);
@@ -271,11 +272,19 @@ describe('MailNodeDomainOnboarding — restart onboarding', () => {
     assert.equal(changed, 1);
   });
 
-  test('offers no restart for a domain the panel does not know', async () => {
+  test('offers no restart for a domain the panel does not know, or one with nothing to clear', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: [...DOMAINS, domainRow('fresh.example', 'node_created', { nextStep: 'node_configured' })],
+    };
     const host = await mount(React.createElement(MailNodeSection));
     await click(buttons(host, 'admin.mailNode.showDetails')[2]);
     const detail = host.querySelector('[data-domain-onboarding="manual.example"]');
     assert.equal(buttons(detail, 'admin.mailNode.restart').length, 0);
+    // The open row's button now reads "hide": the fresh domain is the third "show" button.
+    await click(buttons(host, 'admin.mailNode.showDetails')[2]);
+    const fresh = host.querySelector('[data-domain-onboarding="fresh.example"]');
+    assert.ok(fresh, 'the fresh domain opens');
+    assert.equal(buttons(fresh, 'admin.mailNode.restart').length, 0);
   });
 });
 

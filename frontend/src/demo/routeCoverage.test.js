@@ -70,6 +70,7 @@ const CONCRETE_PATH = {
   '/mail-node/eop': '/mail-node/eop',
   '/accounts/:param/folders': '/accounts/demo-sales/folders',
   '/accounts/:param/aliases': '/accounts/demo-sales/aliases',
+  '/accounts/:param/node-aliases': '/accounts/demo-fx-02/node-aliases',
   '/mail/messages': '/mail/messages?accountId=demo-sales&folder=INBOX',
   '/mail/messages/:param': '/mail/messages/demo-001',
   '/mail/messages/:param/sender-history': '/mail/messages/demo-001/sender-history?limit=5',
@@ -437,7 +438,7 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   assert.equal(ready.state, 'ready');
   const adopted = await answer('/mail-node/domains/:param/adopt', 'POST', '/mail-node/domains/legacy.demo.mailexpert.local/adopt');
   assert.equal(adopted.state, 'node_created');
-  const acknowledged = await answer('/mail-node/domains/:param/acknowledge', 'POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge');
+  const acknowledged = await answer('/mail-node/domains/:param/acknowledge', 'POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge', { created: '2026-09-29 16:40:00' });
   assert.equal(acknowledged.state, 'ready');
   const restarted = await answer('/mail-node/domains/:param/restart', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/restart');
   assert.equal(restarted.state, 'node_created');

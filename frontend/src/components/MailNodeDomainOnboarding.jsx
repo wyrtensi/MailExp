@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
   canMarkReady,
+  canRestartOnboarding,
   domainStateKey,
   mailNodeErrorDetail,
   mailNodeErrorKey,
@@ -101,7 +102,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
         <div role="status" data-domain-recreated={domain.domain} style={warningBoxStyle}>
           <div>{t('admin.mailNode.recreatedNote', { was: domain.nodeCreated ?? '', now: domain.created ?? '' })}</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
-            <button type="button" onClick={() => run(() => api.mailNode.acknowledgeDomainNode(domain.domain))} disabled={busy} style={buttonStyle}>
+            <button type="button" onClick={() => run(() => api.mailNode.acknowledgeDomainNode(domain.domain, domain.created))} disabled={busy} style={buttonStyle}>
               {t('admin.mailNode.acknowledge')}
             </button>
             <span style={noteStyle}>{t('admin.mailNode.acknowledgeNote')}</span>
@@ -148,7 +149,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
           </div>
         </div>
       )}
-      {confirming !== 'restart' && (
+      {canRestartOnboarding(domain) && confirming !== 'restart' && (
         <div style={{ marginTop: 10 }}>
           <button type="button" onClick={() => setConfirming('restart')} disabled={busy} style={buttonStyle}>
             {t('admin.mailNode.restart')}

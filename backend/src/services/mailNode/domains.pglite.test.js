@@ -254,6 +254,10 @@ describe('the node identity of a row', () => {
     expect((await db.query("SELECT relayhost_id FROM mail_node_domains WHERE domain = 'moved.example'")).rows[0].relayhost_id).toBe(4);
     expect(await acknowledgeNodeIdentity({ domain: 'moved.example', nodeCreated: '2026-09-30 12:00:00' })).toEqual({ error: 'domain_not_recreated' });
     expect(await acknowledgeNodeIdentity({ domain: 'missing.example', nodeCreated: '2026-09-30 12:00:00' })).toEqual({ error: 'domain_not_found' });
+    // A row not bound yet has no warning: the next listing binds it, accepting does not.
+    await recordCreatedDomain({ domain: 'unbound.example', userId: ADMIN, maxMailboxes: 10 });
+    expect(await acknowledgeNodeIdentity({ domain: 'unbound.example', nodeCreated: '2026-09-30 12:00:00' })).toEqual({ error: 'domain_not_recreated' });
+    expect((await getDomainRow('unbound.example')).nodeCreated).toBeNull();
   });
 });
 
@@ -265,7 +269,9 @@ describe('restartOnboarding', () => {
       dns_checked_at = NOW(), tenant = '{"verified": true}', accepted_domain_type = 'Authoritative',
       expected_mx = '["mx.example"]', node_created = '2026-09-01 10:00:00', dkim_mode = 'eop', mailbox_send_limit = 20
       WHERE domain = 'again.example'`);
-    expect(await restartOnboarding({ domain: 'again.example', userId: OTHER })).toEqual({ from: 'authoritative', to: 'node_created' });
+    const before = (await listDomainRows())[0].steps;
+    expect(await restartOnboarding({ domain: 'again.example', userId: OTHER })).toEqual({ from: 'authoritative', to: 'node_created', steps: before });
+    expect(before.ready).toMatchObject({ userId: ADMIN, markedReady: true });
     const [row] = await listDomainRows();
     expect(row).toMatchObject({
       state: 'node_created', steps: {}, origin: 'created', addedBy: 'admin@example.com', maxMailboxes: 30, nodeCreated: null,
@@ -277,6 +283,19 @@ describe('restartOnboarding', () => {
       expected_mx: [], dkim_mode: 'eop', mailbox_send_limit: 20, state_changed_by: OTHER,
     });
     expect(await restartOnboarding({ domain: 'missing.example', userId: ADMIN })).toEqual({ error: 'domain_not_found' });
+    // Now at the first step with nothing to clear: refused, nothing changes.
+    expect(await restartOnboarding({ domain: 'again.example', userId: ADMIN })).toEqual({ error: 'domain_nothing_to_restart' });
+    const { rows: [after] } = await db.query("SELECT state_changed_by FROM mail_node_domains WHERE domain = 'again.example'");
+    expect(after.state_changed_by).toBe(OTHER);
+  });
+
+  it('says which state and steps a known domain had when it is added to the node again', async () => {
+    expect(await recordCreatedDomain({ domain: 'twice.example', userId: ADMIN, maxMailboxes: 10 })).toEqual({ from: null, steps: null });
+    await confirmStep({ domain: 'twice.example', step: 'node_configured', userId: ADMIN });
+    const before = await recordCreatedDomain({ domain: 'twice.example', userId: OTHER, maxMailboxes: 20 });
+    expect(before.from).toBe('node_configured');
+    expect(before.steps.node_configured).toMatchObject({ userId: ADMIN, email: 'admin@example.com' });
+    expect(await stateOf('twice.example')).toBe('node_created');
   });
 
   it('leaves the mailboxes of the domain and their cached letters alone, on restart and on adding the domain again', async () => {
@@ -320,6 +339,14 @@ describe('no automatic removal of domain rows', () => {
       if (/DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains/i.test(text)) offenders.push(file);
     }
     expect(files.length).toBeGreaterThan(50);
+    // The migrations too: the table is new (0079), so no migration may delete its rows.
+    const migrations = fileURLToPath(new URL('../../../migrations/', import.meta.url));
+    const sqlFiles = (await readdir(migrations)).filter((f) => f.endsWith('.sql'));
+    expect(sqlFiles).toContain('0079_mail_node_domains.sql');
+    for (const file of sqlFiles) {
+      const text = await readFile(join(migrations, file), 'utf8');
+      if (/DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains|DROP\s+TABLE[^;]*mail_node_domains/i.test(text)) offenders.push(file);
+    }
     expect(offenders).toEqual([]);
   });
 });

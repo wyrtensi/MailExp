@@ -140,14 +140,18 @@ const RESTART_SET = `
 
 // A domain the panel just created on the node. Adding a domain again after it was removed from the
 // node starts its onboarding over: the node lost its settings with it. The node identity is bound
-// when the panel next lists the domains.
+// when the panel next lists the domains. Returns the state and the confirmed steps the row had
+// before (from: null, steps: null for a domain the panel did not know), for the journal.
 export async function recordCreatedDomain({ domain, userId, maxMailboxes }) {
-  await query(`
+  const { rows } = await query(`
+    WITH old AS (SELECT state, steps FROM mail_node_domains WHERE domain = $1)
     INSERT INTO mail_node_domains (domain, state, origin, added_by, max_mailboxes, state_changed_by)
     VALUES ($1, 'node_created', 'created', $2, $3, $2)
     ON CONFLICT (domain) DO UPDATE
     SET ${RESTART_SET}, added_by = $2, added_at = NOW(), origin = 'created', max_mailboxes = $3
+    RETURNING (SELECT state FROM old) AS from_state, (SELECT steps FROM old) AS from_steps
   `, [domain, userId, maxMailboxes]);
+  return { from: rows[0]?.from_state ?? null, steps: rows[0]?.from_steps ?? null };
 }
 
 // An administrator takes in a domain made on the node by hand, one the panel has no row for. Its
@@ -164,31 +168,42 @@ export async function adoptDomain({ domain, userId, nodeCreated = null }) {
   return rows.length > 0;
 }
 
+// A row at the first step with nothing confirmed and nothing recorded about the node or the tenant:
+// restarting it would change nothing.
+const PRISTINE = `state = 'node_created' AND steps = '{}'::jsonb AND relayhost_id IS NULL AND dns_check IS NULL
+  AND dns_checked_at IS NULL AND tenant IS NULL AND accepted_domain_type IS NULL AND expected_mx = '[]'::jsonb`;
+
 // "Restart onboarding": an administrator starts a domain's onboarding over, from any state. Where
-// the domain came from, who added it and its mailbox limit stay. Answers { from, to } or { error }.
+// the domain came from, who added it and its mailbox limit stay. Answers { from, to, steps } with
+// the steps that were confirmed before (who and when, for the journal), or { error }:
+// domain_nothing_to_restart for a row that has nothing to clear.
 export async function restartOnboarding({ domain, userId }) {
   const { rows } = await query(`
-    WITH old AS (SELECT domain, state FROM mail_node_domains WHERE domain = $1 FOR UPDATE)
+    WITH old AS (
+      SELECT domain, state, steps, (${PRISTINE}) AS pristine FROM mail_node_domains WHERE domain = $1 FOR UPDATE
+    )
     UPDATE mail_node_domains d
        SET ${RESTART_SET}
       FROM old
-     WHERE d.domain = old.domain
-    RETURNING old.state AS from_state
+     WHERE d.domain = old.domain AND NOT old.pristine
+    RETURNING old.state AS from_state, old.steps AS from_steps
   `, [domain, userId]);
-  if (!rows.length) return { error: 'domain_not_found' };
-  return { from: rows[0].from_state, to: 'node_created' };
+  if (!rows.length) return { error: (await getDomainRow(domain)) ? 'domain_nothing_to_restart' : 'domain_not_found' };
+  return { from: rows[0].from_state, to: 'node_created', steps: rows[0].from_steps ?? {} };
 }
 
 // An administrator accepts the creation time the node reports now (a mailcow that prints it another
 // way, or a domain made again by hand whose settings were applied again): the row is bound to it and
-// the warning goes. Nothing else changes. Answers { from, to } or { error }.
+// the warning goes. Nothing else changes. Only a row with the warning, one bound to another time,
+// is changed: a row not bound yet is bound by the next listing, not here (domain_not_recreated).
+// Answers { from, to } or { error }.
 export async function acknowledgeNodeIdentity({ domain, nodeCreated }) {
   const { rows } = await query(`
     WITH old AS (SELECT domain, node_created FROM mail_node_domains WHERE domain = $1 FOR UPDATE)
     UPDATE mail_node_domains d
        SET node_created = $2::text, updated_at = NOW()
       FROM old
-     WHERE d.domain = old.domain AND old.node_created IS DISTINCT FROM $2::text
+     WHERE d.domain = old.domain AND old.node_created IS NOT NULL AND old.node_created <> $2::text
     RETURNING old.node_created AS from_created
   `, [domain, nodeCreated]);
   if (!rows.length) return { error: (await getDomainRow(domain)) ? 'domain_not_recreated' : 'domain_not_found' };

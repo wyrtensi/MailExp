@@ -218,16 +218,21 @@ test('the demo keeps a domain whose node creation time differs ready, and lets a
   // Mailboxes are still created on it.
   const account = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'desk', domain: 'branch.demo.mailexpert.local', name: '' });
   assert.equal(account.email_address, 'desk@branch.demo.mailexpert.local');
-  await demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge');
+  const acknowledge = (body) => demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge', body);
+  await assert.rejects(() => acknowledge({}), err => err.code === 'node_created_required');
+  await assert.rejects(() => acknowledge({ created: '2026-01-01 00:00:00' }), err => err.code === 'domain_node_changed');
+  await acknowledge({ created: before.created });
   const accepted = await branch();
   assert.equal(accepted.state, 'ready');
   assert.equal(accepted.recreated, undefined);
-  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge'), err => err.code === 'domain_not_recreated');
+  await assert.rejects(() => acknowledge({ created: before.created }), err => err.code === 'domain_not_recreated');
   const restarted = await demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/restart');
   assert.equal(restarted.state, 'node_created');
   const after = await branch();
   assert.deepEqual(after.steps, {});
   assert.equal(after.nextStep, 'node_configured');
+  // Nothing left to clear: refused, as on the server.
+  await assert.rejects(() => demoRequest('POST', '/mail-node/domains/branch.demo.mailexpert.local/restart'), err => err.code === 'domain_nothing_to_restart');
   // The mailbox made on it stays.
   assert.ok((await demoRequest('GET', '/accounts')).some(a => a.id === account.id));
   await assert.rejects(() => demoRequest('POST', '/mail-node/domains/legacy.demo.mailexpert.local/restart'), err => err.code === 'domain_not_found');
@@ -246,6 +251,14 @@ test('the demo deletes a mail node mailbox with its mail, and the address can be
   assert.equal(await count(), before - 1);
   const again = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'gone', domain: 'demo.mailexpert.local', name: '' });
   assert.equal((await letters(again.id)).length, 1, 'only the new welcome letter');
+});
+
+test('the demo lists the node aliases of a mail node mailbox for its delete confirmation', async () => {
+  const sales = (await demoRequest('GET', '/accounts')).find(a => a.mail_node && a.email_address.startsWith('sales@'));
+  const { aliases } = await demoRequest('GET', `/accounts/${encodeURIComponent(sales.id)}/node-aliases`);
+  assert.deepEqual(aliases, [{ address: `orders@${sales.email_address.split('@')[1]}`, onlyTarget: true }]);
+  const other = (await demoRequest('GET', '/accounts')).find(a => !a.mail_node);
+  await assert.rejects(() => demoRequest('GET', `/accounts/${encodeURIComponent(other.id)}/node-aliases`), err => err.code === 'mailbox_not_found');
 });
 
 test('the demo refuses to disable a mail node mailbox but not a connected one', async () => {

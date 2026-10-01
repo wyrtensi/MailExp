@@ -29,8 +29,8 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
     provisionMailbox: vi.fn(async (_cfg, { localPart, domain }) => ({
       email: `${localPart}@${domain}`, password: 'generated-password', reused: false,
     })),
-    disableMailbox: vi.fn(async () => {}),
     deleteMailbox: vi.fn(async () => ({ warnings: [] })),
+    listAliasesTo: vi.fn(async () => []),
     getMailbox: vi.fn(async () => null),
   };
 });
@@ -47,7 +47,7 @@ import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { recordAudit } from '../services/auditLog.js';
 import {
-  MailNodeError, deleteMailbox, disableMailbox, getMailbox, listDomains, provisionMailbox,
+  MailNodeError, deleteMailbox, getMailbox, listAliasesTo, listDomains, provisionMailbox,
 } from '../services/mailNode/mailcow.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
@@ -219,30 +219,50 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(inserted).toBeNull();
   });
 
-  it('deletes the new mailbox again when the account row cannot be written, and only disables one taken over', async () => {
+  it('deletes the new mailbox again when the account row cannot be written', async () => {
     query.mockImplementation(async (sql) => {
       if (sql.includes('INSERT INTO email_accounts')) throw new Error('db down');
       return { rows: [] };
     });
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    let res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
-    expect(res.status).toBe(500);
-    expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
-    expect(disableMailbox).not.toHaveBeenCalled();
-    provisionMailbox.mockResolvedValueOnce({ email: 'desk@example.com', password: 'p', reused: true });
-    res = await post({ kind: 'domain', localPart: 'desk', domain: 'example.com' });
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
     errorSpy.mockRestore();
     expect(res.status).toBe(500);
-    expect(disableMailbox).toHaveBeenCalledWith(CFG, 'desk@example.com');
-    expect(deleteMailbox).toHaveBeenCalledTimes(1);
+    expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
+  });
+
+  it('leaves a mailbox it took over active when the row cannot be written, so a retry takes it over again', async () => {
+    let failInsert = true;
+    const baseline = query.getMockImplementation();
+    query.mockImplementation(async (sql, params) => {
+      if (sql.includes('INSERT INTO email_accounts') && failInsert) throw new Error('db down');
+      return baseline(sql, params);
+    });
+    provisionMailbox.mockResolvedValue({ email: 'desk@example.com', password: 'p', reused: true });
+    try {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let res = await post({ kind: 'domain', localPart: 'desk', domain: 'example.com' });
+      errorSpy.mockRestore();
+      expect(res.status).toBe(500);
+      // Nothing undone on the node: no delete, and the mailbox is not disabled either.
+      expect(deleteMailbox).not.toHaveBeenCalled();
+      failInsert = false;
+      res = await post({ kind: 'domain', localPart: 'desk', domain: 'example.com' });
+      expect(res.status).toBe(200);
+      expect(provisionMailbox).toHaveBeenCalledTimes(2);
+    } finally {
+      provisionMailbox.mockReset().mockImplementation(async (_cfg, { localPart, domain }) => ({
+        email: `${localPart}@${domain}`, password: 'generated-password', reused: false,
+      }));
+    }
   });
 
   describe('DELETE', () => {
     const del = () => fetch(`${base}/api/accounts/${ID}`, { method: 'DELETE' });
 
-    const nodeRow = () => query.mockImplementation(async (sql) => (
+    const nodeRow = (extra = {}) => query.mockImplementation(async (sql) => (
       sql.startsWith('SELECT id, email_address, mail_node')
-        ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] }
+        ? { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true, imap_host: 'mail.example.com', ...extra }] }
         : { rows: [] }
     ));
     const rowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE'));
@@ -251,14 +271,13 @@ describe('domain mailboxes in /api/accounts', () => {
       const order = [];
       deleteMailbox.mockImplementationOnce(async () => { order.push('node'); return { warnings: [] }; });
       query.mockImplementation(async (sql) => {
-        if (sql.startsWith('SELECT id, email_address, mail_node')) return { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true }] };
+        if (sql.startsWith('SELECT id, email_address, mail_node')) return { rows: [{ id: ID, email_address: 'info@example.com', mail_node: true, imap_host: 'mail.example.com' }] };
         if (sql.startsWith('DELETE')) order.push('row');
         return { rows: [] };
       });
       const res = await del();
       expect(res.status).toBe(200);
       expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
-      expect(disableMailbox).not.toHaveBeenCalled();
       expect(order).toEqual(['node', 'row']);
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountEmail: 'info@example.com', action: 'mailbox.deleted', details: { mailNode: true },
@@ -294,6 +313,36 @@ describe('domain mailboxes in /api/accounts', () => {
         expect(recordAudit).not.toHaveBeenCalled();
       });
     }
+
+    it('keeps the row of a mailbox on another host than the node the settings name now', async () => {
+      nodeRow({ imap_host: 'old-node.example.com' });
+      const res = await del();
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mail_node_host_mismatch');
+      expect(deleteMailbox).not.toHaveBeenCalled();
+      expect(rowDeleted()).toBe(false);
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('lists the node aliases that deliver to the mailbox for the confirmation', async () => {
+      listAliasesTo.mockResolvedValueOnce([{ address: 'sales@example.com', onlyTarget: true }]);
+      nodeRow();
+      let res = await fetch(`${base}/api/accounts/${ID}/node-aliases`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ aliases: [{ address: 'sales@example.com', onlyTarget: true }] });
+      expect(listAliasesTo).toHaveBeenCalledWith(CFG, 'info@example.com');
+      nodeRow({ imap_host: 'old-node.example.com' });
+      res = await fetch(`${base}/api/accounts/${ID}/node-aliases`);
+      expect((await res.json()).code).toBe('mail_node_host_mismatch');
+      nodeRow({ mail_node: false });
+      res = await fetch(`${base}/api/accounts/${ID}/node-aliases`);
+      expect(res.status).toBe(404);
+      nodeRow();
+      listAliasesTo.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
+      res = await fetch(`${base}/api/accounts/${ID}/node-aliases`);
+      expect(res.status).toBe(502);
+      expect(listAliasesTo).toHaveBeenCalledTimes(2);
+    });
 
     it('keeps the row without a mail node configured', async () => {
       node.cfg = null;
@@ -338,7 +387,6 @@ describe('domain mailboxes in /api/accounts', () => {
       const res = await del();
       expect(res.status).toBe(200);
       expect(deleteMailbox).not.toHaveBeenCalled();
-      expect(disableMailbox).not.toHaveBeenCalled();
       expect(query.mock.calls.some(([sql]) => sql.startsWith('DELETE'))).toBe(true);
     });
   });

@@ -20,11 +20,11 @@ import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/thread
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
 import {
-  MailNodeError, deleteMailbox, disableMailbox, getMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart,
+  MailNodeError, deleteMailbox, getMailbox, getMailNodeConfig, listAliasesTo, listDomains, parseHostName, parseLocalPart,
   provisionMailbox,
 } from '../services/mailNode/mailcow.js';
 import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
-import { mailNodeFailure, refuse as refuseMailNode } from './mailNode.js';
+import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 
@@ -216,9 +216,12 @@ async function createDomainMailboxNow(req, res) {
   } catch (err) {
     console.error('Domain mailbox insert error:', err);
     // Nobody else knows the new password. A mailbox made just now is deleted again, so the address
-    // can be created later; one taken over keeps its letters and is only disabled.
-    const undo = created.reused ? disableMailbox(cfg, email) : deleteMailbox(cfg, email);
-    await undo.catch((e) => console.error(`Could not undo ${email} on the mail node: ${e.message}`));
+    // can be created later. One taken over stays as it is, active with its letters: disabling it
+    // would make every retry refuse it as a disabled mailbox, and taking it over again on a retry
+    // sets a new password anyway.
+    if (!created.reused) {
+      await deleteMailbox(cfg, email).catch((e) => console.error(`Could not undo ${email} on the mail node: ${e.message}`));
+    }
     return res.status(500).json({ error: 'Failed to add account' });
   }
 
@@ -475,14 +478,55 @@ router.put('/:id', async (req, res) => {
   }
 });
 
+// Whether only administrators may delete a mail node mailbox, which takes its mail with it. Off:
+// everyone signed in may delete any mailbox, one on the mail node too (accounts.shared.test.js).
+// The owner is deciding (R-04); switching it on is this flag together with the one of the same name
+// in the frontend (utils/mailNode.js), which hides the delete button.
+const NODE_MAILBOX_DELETE_ADMIN_ONLY = false;
+
+// Who may delete a mailbox (and see what deleting a node mailbox would take with it).
+async function mayDeleteAccount(req, row) {
+  if (!row.mail_node || !NODE_MAILBOX_DELETE_ADMIN_ONLY) return true;
+  const { rows } = await query('SELECT is_admin FROM users WHERE id = $1', [req.session.userId]);
+  return !!rows[0]?.is_admin;
+}
+
+// The node mailboxes MailExpert knows are all on the host the node settings name. A row on another
+// host (the settings were pointed at another node since) must not be acted on through this node:
+// the same address there is another mailbox.
+function refusedOtherHost(res, row, cfg) {
+  if (!onOtherMailHost(row, cfg)) return false;
+  refuseMailNode(res, 'mail_node_host_mismatch');
+  return true;
+}
+
+// The aliases on the node that deliver to a node mailbox, for the delete confirmation: deleting the
+// mailbox deletes those that deliver only to it and takes it out of the others. Open to whoever may
+// delete the mailbox.
+router.get('/:id/node-aliases', async (req, res) => {
+  const { rows } = await query('SELECT id, email_address, mail_node, imap_host FROM email_accounts WHERE id = $1', [req.params.id]);
+  if (!rows.length) return res.status(404).json({ error: 'Account not found' });
+  if (!rows[0].mail_node) return refuseMailNode(res, 'mailbox_not_found');
+  if (!(await mayDeleteAccount(req, rows[0]))) return res.status(403).json({ error: 'Admin access required' });
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
+  if (refusedOtherHost(res, rows[0], cfg)) return undefined;
+  try {
+    return res.json({ aliases: await listAliasesTo(cfg, rows[0].email_address) });
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+});
+
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const check = await query(
-      'SELECT id, email_address, mail_node, oauth_provider, oauth_refresh_token, oauth_access_token FROM email_accounts WHERE id = $1',
+      'SELECT id, email_address, mail_node, imap_host, oauth_provider, oauth_refresh_token, oauth_access_token FROM email_accounts WHERE id = $1',
       [id]
     );
     if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+    if (!(await mayDeleteAccount(req, check.rows[0]))) return res.status(403).json({ error: 'Admin access required' });
 
     // A mail node mailbox is deleted on the node first, with its mail (owner decision: a mailbox
     // deleted in the panel takes its mail with it). The row stays when that fails: deleting it
@@ -491,6 +535,7 @@ router.delete('/:id', async (req, res) => {
     if (check.rows[0].mail_node) {
       const cfg = await getMailNodeConfig();
       if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
+      if (refusedOtherHost(res, check.rows[0], cfg)) return undefined;
       try {
         ({ warnings: nodeWarnings } = await deleteMailbox(cfg, check.rows[0].email_address));
       } catch (err) {

@@ -42,7 +42,7 @@ import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
-import { mailNodeErrorKey } from '../utils/mailNode.js';
+import { canDeleteAccount, mailNodeErrorKey, nodeAliasesNote } from '../utils/mailNode.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
@@ -543,9 +543,18 @@ function AccountsTab() {
     setEditTarget(null);
   };
 
-  const handleDelete = (id) => {
+  const handleDelete = async (id) => {
     const account = accounts.find(a => a.id === id);
     const onNode = account?.mail_node === true;
+    // The node's aliases that deliver to the mailbox go with it (or lose it as a target): the
+    // confirmation names them. A node that does not answer in time only leaves the list out.
+    let aliases = [];
+    if (onNode) {
+      const timeout = new Promise((resolve) => { setTimeout(() => resolve(null), 5000); });
+      const found = await Promise.race([api.getNodeAliases(id).catch(() => null), timeout]);
+      aliases = found?.aliases ?? [];
+    }
+    const note = nodeAliasesNote(aliases).map((part) => t(part.key, part.values)).join(' ');
     setConfirmDialog({
       title: t('admin.accounts.deleteTitle'),
       // A mailbox on the mail node is deleted there too, with all its mail: the address must be typed
@@ -553,6 +562,7 @@ function AccountsTab() {
       // the provider.
       message: onNode ? t('admin.accounts.deleteMailNodeMessage', { email: account.email_address }) : t('admin.accounts.deleteMessage'),
       ...(onNode ? { requireTyped: account.email_address, typedLabel: t('admin.accounts.deleteMailNodeTypeLabel', { email: account.email_address }) } : {}),
+      ...(note ? { note } : {}),
       confirmLabel: onNode ? t('admin.accounts.deleteMailNodeConfirm') : t('common.remove'),
       onConfirm: async () => {
         try {
@@ -1187,12 +1197,14 @@ function AccountsTab() {
                   <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
                 </svg>
               </IconBtn>
-              <IconBtn onClick={() => handleDelete(account.id)} title={t('common.remove')} danger>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="3 6 5 6 21 6"/>
-                  <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
-                </svg>
-              </IconBtn>
+              {canDeleteAccount(account, { isAdmin }) && (
+                <IconBtn onClick={() => handleDelete(account.id)} title={t('common.remove')} danger>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="3 6 5 6 21 6"/>
+                    <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+                  </svg>
+                </IconBtn>
+              )}
             </div>
           </div>
 

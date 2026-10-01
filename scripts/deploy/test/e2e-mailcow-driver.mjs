@@ -178,8 +178,14 @@ assert.equal(r.status, 200, JSON.stringify(r.data));
 const recreated = await nodeMailbox(`support@${DOMAIN}`);
 assert.equal(Number(recreated.active_int ?? recreated.active), 1);
 const again = await connected(`support@${DOMAIN}`);
-await panel('POST', '/mail/sync', { accountId: again.id });
-await sleep(10000);
+// A fresh letter proves the new mailbox has synced; only then is the old letter's absence telling.
+const fresh = `e2e after re-creation ${Date.now()}`;
+r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: fresh, body: 'To the new mailbox.' });
+assert.equal(r.status, 200, JSON.stringify(r.data));
+await until('the fresh letter in the new support INBOX', async () => {
+  await panel('POST', '/mail/sync', { accountId: again.id });
+  return (await inbox(again.id)).find((m) => m.subject === fresh);
+}, 180000);
 assert.equal((await inbox(again.id)).some((m) => m.subject === subject), false, 'the old letter came back');
 const parkedPassword = 'Parked-password-1!';
 const parked = await mailcow('POST', 'add/mailbox', {

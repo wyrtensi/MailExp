@@ -971,7 +971,7 @@
         "domainConfirmSenderAlt": "Or as",
         "senderNameInvalid": "A sender name cannot contain line breaks.",
         "domainErrorNotReady": "This domain has not finished its onboarding yet: an administrator marks it ready in Settings, Integrations, Mail node.",
-        "domainErrorDisabledOnNode": "The mail node has a disabled mailbox with this address, with letters an earlier version left there. An administrator deletes it in mailcow first, or enables it there to take it over with its letters."
+        "domainErrorDisabledOnNode": "A mailbox with this address exists on the mail node but is disabled (by an earlier delete or by hand). An administrator can enable it in mailcow, so that it is taken over with its letters, or delete it there."
       },
       "presetYahoo": "Yahoo Mail",
       "presetIcloud": "iCloud",
@@ -1019,12 +1019,14 @@
       "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing.",
       "deleteTitle": "Remove mailbox?",
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
-      "deleteMailNodeMessage": "The mailbox {{email}} and all its mail are deleted from MailExpert and from the mail server. This cannot be undone. Mail sent to the address afterwards is refused.",
+      "deleteMailNodeMessage": "The mailbox {{email}} and all its mail are deleted from MailExpert and from the mail server. On the server, aliases that deliver only to this mailbox are deleted with it, the mailbox is taken out of other aliases, and its send-as rights, sync jobs and filters go too. This cannot be undone. Mail sent to the address afterwards is refused.",
       "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here.",
       "mailNodeBadge": "Mail node",
       "deleteMailNodeTypeLabel": "Type {{email}} to confirm.",
       "deleteMailNodeConfirm": "Delete mailbox and mail",
-      "mailNodeDisableUnsupported": "A mailbox on the mail node cannot be disabled: delete it instead."
+      "mailNodeDisableUnsupported": "A mailbox on the mail node cannot be disabled: delete it instead.",
+      "deleteMailNodeAliasesDeleted": "Aliases deleted with it: {{list}}.",
+      "deleteMailNodeAliasesChanged": "Aliases that stop delivering to it: {{list}}."
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1836,7 +1838,8 @@
       "actionMailNodeDomainIdentityAcknowledged": "Domain creation time accepted",
       "detailDomainRestarted": "{{domain}}: onboarding started over from {{from}}",
       "detailDomainIdentityAcknowledged": "{{domain}}: the node's creation time {{to}} accepted (was {{from}})",
-      "detailMailNodeMailboxWarnings": "Mailbox on the mail node, deleted there; the node warned: {{warnings}}"
+      "detailMailNodeMailboxWarnings": "Mailbox on the mail node, deleted there; the node warned: {{warnings}}",
+      "detailDomainAddedAgain": "{{domain}} added to the node again, up to {{mailboxes}} mailboxes: onboarding started over from {{from}}"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -1976,7 +1979,10 @@
       "domainsNodeUnreachable": "The mail node could not list its domains ({{reason}}). The domains below are the panel's record, unchanged; their state on the node is unknown until it answers again.",
       "nodeUnknown": "Node not answering",
       "recreatedBadge": "Check: created again on the node?",
-      "errorDomainNotRecreated": "The node reports the creation time the panel knows already: nothing to accept."
+      "errorDomainNotRecreated": "The node reports the creation time the panel knows already: nothing to accept.",
+      "errorDomainNodeChanged": "The node reports another creation time than the one shown: reload the list and check again.",
+      "errorNothingToRestart": "The domain is at the first step with nothing to clear.",
+      "errorHostMismatch": "This mailbox is on another mail host than the one in the mail node settings: nothing was changed."
     },
     "eop": {
       "title": "Mail through EOP",

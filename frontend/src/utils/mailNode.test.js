@@ -7,7 +7,11 @@ import {
   normalizeEopSettings,
   onboardingSteps,
   domainMailboxFormError,
+  canDeleteAccount,
+  canRestartOnboarding,
   deleteConfirmationMatches,
+  nodeAliasesNote,
+  NODE_MAILBOX_DELETE_ADMIN_ONLY,
   domainMailboxTaken,
   senderNameError,
   senderNamesPayload,
@@ -167,6 +171,9 @@ describe('errors', () => {
     assert.equal(mailNodeErrorKey('domain_not_recreated'), 'admin.mailNode.errorDomainNotRecreated');
     assert.equal(mailNodeErrorKey('mailbox_disabled_on_node'), 'admin.accounts.add.domainErrorDisabledOnNode');
     assert.equal(mailNodeErrorKey('mail_node_disable_unsupported'), 'admin.accounts.mailNodeDisableUnsupported');
+    assert.equal(mailNodeErrorKey('domain_node_changed'), 'admin.mailNode.errorDomainNodeChanged');
+    assert.equal(mailNodeErrorKey('domain_nothing_to_restart'), 'admin.mailNode.errorNothingToRestart');
+    assert.equal(mailNodeErrorKey('mail_node_host_mismatch'), 'admin.mailNode.errorHostMismatch');
   });
 
   it('shows the node words of a refusal only', () => {
@@ -216,6 +223,43 @@ describe('deleteConfirmationMatches', () => {
     }
     assert.equal(deleteConfirmationMatches('', ''), false);
     assert.equal(deleteConfirmationMatches(' ', null), false);
+  });
+});
+
+describe('who may delete a mailbox', () => {
+  it('lets everyone delete any mailbox while the owner has not made node mailboxes admin-only', () => {
+    assert.equal(NODE_MAILBOX_DELETE_ADMIN_ONLY, false);
+    assert.equal(canDeleteAccount({ mail_node: true }, { isAdmin: false }), true);
+    assert.equal(canDeleteAccount({ mail_node: false }, { isAdmin: false }), true);
+    assert.equal(canDeleteAccount(null, { isAdmin: true }), false);
+  });
+});
+
+describe('nodeAliasesNote', () => {
+  it('names the aliases deleted with the mailbox and those that only lose it', () => {
+    assert.deepEqual(nodeAliasesNote([]), []);
+    assert.deepEqual(nodeAliasesNote(undefined), []);
+    assert.deepEqual(nodeAliasesNote([
+      { address: 'orders@example.com', onlyTarget: true },
+      { address: 'team@example.com', onlyTarget: false },
+      { address: 'all@example.com', onlyTarget: false },
+    ]), [
+      { key: 'admin.accounts.deleteMailNodeAliasesDeleted', values: { list: 'orders@example.com' } },
+      { key: 'admin.accounts.deleteMailNodeAliasesChanged', values: { list: 'team@example.com, all@example.com' } },
+    ]);
+    assert.deepEqual(nodeAliasesNote([{ address: 'orders@example.com', onlyTarget: true }]), [
+      { key: 'admin.accounts.deleteMailNodeAliasesDeleted', values: { list: 'orders@example.com' } },
+    ]);
+  });
+});
+
+describe('canRestartOnboarding', () => {
+  it('offers a restart only when there is something to clear', () => {
+    assert.equal(canRestartOnboarding({ state: 'ready', steps: {} }), true);
+    assert.equal(canRestartOnboarding({ state: 'node_created', steps: {} }), false);
+    assert.equal(canRestartOnboarding({ state: 'node_created', steps: { node_configured: {} } }), true);
+    assert.equal(canRestartOnboarding({ state: 'node_created', steps: {}, recreated: true }), true);
+    assert.equal(canRestartOnboarding({ state: 'unknown', steps: {} }), false);
   });
 });
 

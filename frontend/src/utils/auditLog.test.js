@@ -145,6 +145,13 @@ describe('auditDetail', () => {
       { key: 'admin.audit.detailDomainAdded', values: { domain: 'new.example', mailboxes: 50 } },
     );
     assert.deepEqual(
+      auditDetail({ action: 'mail_node.domain_added', details: { domain: 'new.example', mailboxes: 50, from: 'dns_ok', steps: {} } }),
+      {
+        key: 'admin.audit.detailDomainAddedAgain', values: { domain: 'new.example', mailboxes: 50 },
+        valueKeys: { from: 'admin.mailNode.stateDnsOk' },
+      },
+    );
+    assert.deepEqual(
       auditDetail({ action: 'mail_node.domain_adopted', details: { domain: 'stage.test', state: 'ready', origin: 'existing_mailboxes' } }),
       { key: 'admin.audit.detailDomainAdoptedWithMailboxes', values: { domain: 'stage.test' } },
     );

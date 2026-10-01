@@ -1,20 +1,30 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { deleteConfirmationMatches } from '../utils/mailNode.js';
 
 // Shared confirm overlay (replaces window.confirm everywhere). A dialog with `requireTyped` (a mail
 // node mailbox's address) also asks for that text typed out in full, like deleting a repository on
 // GitHub: the confirm button stays disabled until it matches, ignoring case and outer spaces.
-// `typedLabel` is the line above that field.
+// `typedLabel` is the line above that field. `note` is an optional second paragraph (the aliases
+// that go with a node mailbox). Escape closes the dialog unless the action is running.
 export default function ConfirmOverlay({ dialog, onClose }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [typed, setTyped] = useState('');
+  const titleId = useId();
+  const messageId = useId();
 
   // Clear transient state whenever a different dialog is opened, so a previous
   // failure or typed text never leaks into the next confirmation.
   useEffect(() => { setBusy(false); setError(''); setTyped(''); }, [dialog]);
+
+  useEffect(() => {
+    if (!dialog || busy) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dialog, busy, onClose]);
 
   if (!dialog) return null;
   const typedOk = !dialog.requireTyped || deleteConfirmationMatches(typed, dialog.requireTyped);
@@ -48,18 +58,23 @@ export default function ConfirmOverlay({ dialog, onClose }) {
       padding: 24,
       animation: 'backdrop-enter var(--motion-fast) var(--ease-standard) both',
     }} onClick={busy ? undefined : onClose}>
-      <div style={{
+      <div role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={messageId} style={{
         background: 'var(--bg-secondary)', border: '1px solid var(--border-subtle)',
         borderRadius: 12, padding: '24px 24px 20px', maxWidth: 360, width: '100%',
         boxShadow: 'var(--shadow-modal)',
         animation: 'modal-enter var(--motion-normal) var(--ease-emphasized) both',
       }} onClick={e => e.stopPropagation()}>
-        <p style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+        <p id={titleId} style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
           {dialog.title}
         </p>
-        <p style={{ margin: dialog.requireTyped ? '0 0 14px' : '0 0 20px', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+        <p id={messageId} style={{ margin: dialog.requireTyped || dialog.note ? '0 0 14px' : '0 0 20px', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
           {dialog.message}
         </p>
+        {dialog.note && (
+          <p data-confirm-note style={{ margin: dialog.requireTyped ? '0 0 14px' : '0 0 20px', fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.5 }}>
+            {dialog.note}
+          </p>
+        )}
         {dialog.requireTyped && (
           <label style={{ display: 'block', marginBottom: 16 }}>
             <span style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
@@ -67,6 +82,7 @@ export default function ConfirmOverlay({ dialog, onClose }) {
             </span>
             <input
               data-confirm-typed
+              autoFocus
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && typedOk && !busy) runConfirm(); }}

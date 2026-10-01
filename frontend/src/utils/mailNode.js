@@ -69,6 +69,10 @@ const ERROR_KEYS = {
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
   domain_not_recreated: 'admin.mailNode.errorDomainNotRecreated',
+  domain_node_changed: 'admin.mailNode.errorDomainNodeChanged',
+  node_created_required: 'admin.mailNode.errorDomainNodeChanged',
+  domain_nothing_to_restart: 'admin.mailNode.errorNothingToRestart',
+  mail_node_host_mismatch: 'admin.mailNode.errorHostMismatch',
   mailbox_disabled_on_node: 'admin.accounts.add.domainErrorDisabledOnNode',
   mail_node_disable_unsupported: 'admin.accounts.mailNodeDisableUnsupported',
   step_invalid: 'admin.mailNode.errorStepOutOfOrder',
@@ -159,11 +163,43 @@ export function onboardingSteps(domain) {
   });
 }
 
+// Whether only administrators may delete a mail node mailbox, which takes its mail with it. Off:
+// everyone signed in may delete any mailbox today. The owner is deciding (R-04); switching it on is
+// this flag together with NODE_MAILBOX_DELETE_ADMIN_ONLY in the backend (routes/accounts.js).
+export const NODE_MAILBOX_DELETE_ADMIN_ONLY = false;
+
+// Whether the screen offers to delete this mailbox.
+export function canDeleteAccount(account, { isAdmin = false } = {}) {
+  if (!account) return false;
+  return !(account.mail_node === true && NODE_MAILBOX_DELETE_ADMIN_ONLY) || isAdmin;
+}
+
+// The sentences the delete confirmation adds about the node's aliases that deliver to the mailbox
+// (GET /api/accounts/:id/node-aliases): those delivering only to it are deleted with it, the others
+// stop delivering to it. Only the kinds there are; an empty list when there are none.
+export function nodeAliasesNote(aliases) {
+  const list = Array.isArray(aliases) ? aliases : [];
+  const names = (onlyTarget) => list.filter((a) => !!a.onlyTarget === onlyTarget).map((a) => a.address).join(', ');
+  const deleted = names(true);
+  const changed = names(false);
+  return [
+    ...(deleted ? [{ key: 'admin.accounts.deleteMailNodeAliasesDeleted', values: { list: deleted } }] : []),
+    ...(changed ? [{ key: 'admin.accounts.deleteMailNodeAliasesChanged', values: { list: changed } }] : []),
+  ];
+}
+
 // Deleting a mail node mailbox takes its mail with it, so the confirmation asks for the address
 // typed out in full: it matches ignoring case and the spaces around it.
 export function deleteConfirmationMatches(typed, expected) {
   const want = String(expected ?? '').trim().toLowerCase();
   return want !== '' && String(typed ?? '').trim().toLowerCase() === want;
+}
+
+// Whether "Restart onboarding" would change anything: not for a domain at the first step with no
+// step confirmed and no warning about the node (the server refuses it too).
+export function canRestartOnboarding(domain) {
+  if (!domain || !DOMAIN_STATES.includes(domain.state)) return false;
+  return domain.state !== 'node_created' || Object.keys(domain.steps ?? {}).length > 0 || !!domain.recreated;
 }
 
 // A domain the panel knows that has not reached 'ready' yet: an administrator may mark it ready.

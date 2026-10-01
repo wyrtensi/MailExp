@@ -15,11 +15,11 @@ import {
   MailNodeError,
   addDomain,
   deleteMailbox,
-  disableMailbox,
   generateMailboxPassword,
   getMailbox,
   getDiskStatus,
   getMailNodeConfig,
+  listAliasesTo,
   listDomains,
   listMailboxes,
   parseHostName,
@@ -238,14 +238,27 @@ describe('API requests', () => {
     expect((await deleteMailbox(CFG, 'info@example.com').catch((e) => e)).code).toBe('mail_node_unreachable');
   });
 
-  it('disables a mailbox and sets its quota through edit/mailbox', async () => {
+  it('sets the quota of a mailbox through edit/mailbox', async () => {
     safeFetch.mockResolvedValue(answer(OK));
-    await disableMailbox(CFG, 'info@example.com');
     await setMailboxQuota(CFG, 'info@example.com', 10240);
-    expect(calls().map((c) => c.body)).toEqual([
-      { items: ['info@example.com'], attr: { active: 0 } },
-      { items: ['info@example.com'], attr: { quota: 10240 } },
+    expect(calls().map((c) => c.body)).toEqual([{ items: ['info@example.com'], attr: { quota: 10240 } }]);
+  });
+
+  it('lists the aliases that deliver to a mailbox, telling those it is the only target of', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { address: 'Sales@example.com', goto: 'info@example.com' },
+      { address: 'team@example.com', goto: 'desk@example.com,INFO@example.com' },
+      { address: 'other@example.com', goto: 'desk@example.com' },
+      { address: 'info@example.com', goto: 'info@example.com' },
+      { address: '@example.com', goto: 'catchall@example.com' },
+    ]));
+    expect(await listAliasesTo(CFG, 'info@example.com')).toEqual([
+      { address: 'sales@example.com', onlyTarget: true },
+      { address: 'team@example.com', onlyTarget: false },
     ]);
+    expect(calls()[0].url).toBe('https://mail.example.com/api/v1/get/alias/all');
+    safeFetch.mockResolvedValueOnce(answer({}));
+    expect(await listAliasesTo(CFG, 'info@example.com')).toEqual([]);
   });
 
   it('reads what besides the password decides whether a mailbox may sign in', async () => {

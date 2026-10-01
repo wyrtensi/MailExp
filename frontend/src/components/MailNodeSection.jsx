@@ -63,6 +63,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     if (d.status === 'fulfilled') {
       setDomains(d.value?.domains ?? []);
       setDomainsNodeError(d.value?.node ?? null);
+    } else {
+      setDomainsNodeError(null);
     }
     if (o.status === 'fulfilled') setOverview(o.value);
     const failed = [d, o].find((r) => r.status === 'rejected');
@@ -229,7 +231,12 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                             {t(domainStateKey(d.state))}
                           </span>
                           {d.recreated && (
-                            <span data-recreated-badge style={{ fontSize: 11, color: 'var(--amber)' }}>{t('admin.mailNode.recreatedBadge')}</span>
+                            <span data-recreated-badge style={{
+                              fontSize: 11, fontWeight: 500, color: 'var(--text-primary)', padding: '1px 7px', borderRadius: 20,
+                              border: '1px solid var(--amber)', background: 'rgba(251,191,36,0.14)',
+                            }}>
+                              {t('admin.mailNode.recreatedBadge')}
+                            </span>
                           )}
                           <button
                             type="button"

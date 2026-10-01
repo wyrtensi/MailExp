@@ -77,6 +77,9 @@ describe('ConfirmOverlay', () => {
     let confirmed = 0;
     const { host, closed } = await mount({ title: 'Remove?', message: 'Gone for every user.', confirmLabel: 'Remove', onConfirm: async () => { confirmed += 1; } });
     assert.equal(host.querySelector('[data-confirm-typed]'), null);
+    const dialog = host.querySelector('[role="dialog"]');
+    assert.equal(dialog.getAttribute('aria-modal'), 'true');
+    assert.equal(dom.window.document.getElementById(dialog.getAttribute('aria-labelledby')).textContent, 'Remove?');
     const button = host.querySelector('[data-confirm-button]');
     assert.equal(button.disabled, false);
     await click(button);
@@ -93,6 +96,7 @@ describe('ConfirmOverlay', () => {
     });
     assert.ok(host.textContent.includes('Type info@example.com to confirm.'));
     const input = host.querySelector('[data-confirm-typed]');
+    assert.equal(dom.window.document.activeElement, input, 'the address field takes the focus');
     const button = host.querySelector('[data-confirm-button]');
     assert.equal(button.disabled, true, 'disabled before anything is typed');
     await click(button);
@@ -105,6 +109,18 @@ describe('ConfirmOverlay', () => {
     assert.equal(host.querySelector('[data-confirm-button]').disabled, false);
     await click(host.querySelector('[data-confirm-button]'));
     assert.equal(confirmed, 1);
+    assert.equal(closed.count, 1);
+  });
+
+  test('shows the note about the aliases, and Escape closes the dialog', async () => {
+    const { host, closed } = await mount({
+      title: 'Remove?', message: 'm', note: 'Aliases deleted with it: orders@example.com.', requireTyped: 'info@example.com', typedLabel: 'l',
+      onConfirm: async () => {},
+    });
+    assert.equal(host.querySelector('[data-confirm-note]').textContent, 'Aliases deleted with it: orders@example.com.');
+    await React.act(async () => {
+      dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
     assert.equal(closed.count, 1);
   });
 

@@ -72,6 +72,10 @@ const ERRORS = {
   domain_known: [409, 'The panel knows this domain already'],
   domain_already_ready: [409, 'The domain is ready already'],
   domain_not_recreated: [409, 'The node reports the creation time the panel knows already'],
+  domain_node_changed: [409, 'The node reports another creation time than the one shown: reload the list'],
+  node_created_required: [400, 'The creation time shown for the domain is required'],
+  domain_nothing_to_restart: [409, 'The domain is at the first step with nothing to clear'],
+  mail_node_host_mismatch: [409, 'The mailbox is on another mail host than the one in the mail node settings'],
   step_invalid: [400, 'No such onboarding step'],
   step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
   eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
@@ -87,6 +91,11 @@ const ERRORS = {
 export function refuse(res, code) {
   const [status, error] = ERRORS[code];
   return res.status(status).json({ error, code });
+}
+
+// Whether a node mailbox row is on another host than the node the settings name now.
+export function onOtherMailHost(row, cfg) {
+  return String(row.imap_host ?? '').trim().toLowerCase() !== cfg.mailHost;
 }
 
 // A mailcow failure: 502 (or the status the error carries), the node's own message and a code the
@@ -194,8 +203,13 @@ router.post('/domains', requireAdmin, async (req, res) => {
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  await recordCreatedDomain({ domain, userId: req.session.userId, maxMailboxes: mailboxes });
-  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.domain_added', details: { domain, mailboxes } });
+  // A domain the panel knew already (removed on the node and added again) starts over: the journal
+  // keeps the state and the confirmed steps it had.
+  const before = await recordCreatedDomain({ domain, userId: req.session.userId, maxMailboxes: mailboxes });
+  recordAudit({
+    actorUserId: req.session.userId, action: 'mail_node.domain_added',
+    details: { domain, mailboxes, ...(before?.from ? { from: before.from, steps: before.steps ?? {} } : {}) },
+  });
   res.json({ ok: true, domain, state: 'node_created' });
 });
 
@@ -260,7 +274,7 @@ function stateChanged(req, res, domain, result, how) {
   if (result.error) return refuse(res, result.error);
   recordAudit({
     actorUserId: req.session.userId, action: 'mail_node.domain_state_changed',
-    details: { domain, from: result.from, to: result.to, how },
+    details: { domain, from: result.from, to: result.to, how, ...(result.steps ? { steps: result.steps } : {}) },
   });
   return res.json({ ok: true, domain, state: result.to });
 }
@@ -285,7 +299,8 @@ router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
 
 // "Restart onboarding": the domain goes back to node_created with no confirmed steps and nothing the
 // node or the tenant held, keeping the owner's DKIM mode and send limit. Its mailboxes stay as they
-// are. Needs no answer from the node: it only resets the panel's record.
+// are. Needs no answer from the node: it only resets the panel's record. The journal keeps the
+// steps that were confirmed (who and when). A domain with nothing to clear is refused.
 router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
@@ -294,13 +309,18 @@ router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
 });
 
 // The administrator accepts the creation time the node reports now for a domain whose time differs
-// from the one the panel is bound to (the warning in the domain list). The state stays as it is.
+// from the one the panel is bound to (the warning in the domain list). The body names the time the
+// administrator saw ({ created }); if the node reports another one by now, nothing is accepted. The
+// state stays as it is.
 router.post('/domains/:domain/acknowledge', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
+  const seen = typeof req.body?.created === 'string' ? req.body.created : '';
+  if (!seen) return refuse(res, 'node_created_required');
   const found = await nodeDomainFor(res, domain);
   if (!found) return undefined;
   if (!found.onNode.created) return refuse(res, 'domain_not_recreated');
+  if (found.onNode.created !== seen) return refuse(res, 'domain_node_changed');
   const result = await acknowledgeNodeIdentity({ domain, nodeCreated: found.onNode.created });
   if (result.error) return refuse(res, result.error);
   recordAudit({
@@ -366,11 +386,12 @@ router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {
   const quotaMb = parseWholeNumber(req.body?.quotaMb, 1, MAX_QUOTA_MB);
   if (!quotaMb) return refuse(res, 'quota_invalid');
   const { rows } = await query(
-    'SELECT email_address FROM email_accounts WHERE id = $1 AND mail_node = true', [req.params.id]
+    'SELECT email_address, imap_host FROM email_accounts WHERE id = $1 AND mail_node = true', [req.params.id]
   );
   if (!rows.length) return refuse(res, 'mailbox_not_found');
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
+  if (onOtherMailHost(rows[0], cfg)) return refuse(res, 'mail_node_host_mismatch');
   // The quota before the change, read from the node, goes into the journal.
   let before;
   try {

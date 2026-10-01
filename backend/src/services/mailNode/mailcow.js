@@ -246,15 +246,26 @@ export async function setMailboxPassword(cfg, email, password = generateMailboxP
   return password;
 }
 
-// mailcow active 0: mail to it is refused as for an unknown recipient and nobody can sign in;
-// the letters already received stay on disk.
-export async function disableMailbox(cfg, email) {
-  await editMailbox(cfg, email, { active: 0 });
+// The node's aliases that deliver to the mailbox, which delete/mailbox changes too: an alias whose
+// only target is the mailbox is deleted with it (onlyTarget), the mailbox is taken out of the
+// targets of any other. Sorted by address.
+export async function listAliasesTo(cfg, email) {
+  const target = String(email).toLowerCase();
+  return asList(await request(cfg, 'GET', 'get/alias/all'))
+    .map((a) => ({
+      address: String(a.address ?? '').toLowerCase(),
+      targets: String(a.goto ?? '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean),
+    }))
+    .filter((a) => a.address && a.address !== target && a.targets.includes(target))
+    .map((a) => ({ address: a.address, onlyTarget: a.targets.length === 1 }))
+    .sort((a, b) => a.address.localeCompare(b.address));
 }
 
 // Deletes the mailbox on the node with its mail. delete/mailbox takes a JSON array of addresses;
-// mailcow drops the mailbox and everything tied to it from its database and moves the maildir to
-// /var/vmail/_garbage, where it is purged once older than MAILDIR_GC_TIME minutes. It answers
+// mailcow drops the mailbox and everything tied to it from its database (aliases that deliver only
+// to it, its place in other aliases' targets, its send-as rights, sync jobs and filters) and moves
+// the maildir to /var/vmail/_garbage, where it is purged once older than MAILDIR_GC_TIME minutes.
+// It answers
 // [success] once the mailbox is gone, with a warning before it when the maildir could not be moved
 // (the mailbox is deleted all the same and its mail stays where it was, so a mailbox made again
 // at the address would show it), and [danger access_denied] for an address it has no mailbox for.

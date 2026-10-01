@@ -168,7 +168,14 @@ export function auditDetail(entry) {
         }
         : null;
     case 'mail_node.domain_added':
-      return { key: 'admin.audit.detailDomainAdded', values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' } };
+      // from: the state of a domain the panel knew, added to the node again and so started over.
+      return details.from
+        ? {
+          key: 'admin.audit.detailDomainAddedAgain',
+          values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' },
+          valueKeys: { from: domainStateKey(details.from) },
+        }
+        : { key: 'admin.audit.detailDomainAdded', values: { domain: details.domain ?? '', mailboxes: details.mailboxes ?? '' } };
     case 'mail_node.domain_adopted':
       return {
         key: details.origin === 'existing_mailboxes' ? 'admin.audit.detailDomainAdoptedWithMailboxes' : 'admin.audit.detailDomainAdopted',
