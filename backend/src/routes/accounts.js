@@ -25,6 +25,7 @@ import {
 } from '../services/mailNode/mailcow.js';
 import { cancelDeletion, requestDeletion } from '../services/mailNode/mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
+import { newMailboxRateLimit } from '../services/mailNode/nodeApply.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
@@ -201,7 +202,9 @@ async function createDomainMailboxNow(req, res) {
     if (!onNode?.active) {
       return res.status(400).json({ error: 'The mail node has no such active domain', code: 'domain_unknown' });
     }
-    created = await provisionMailbox(cfg, { localPart, domain, name });
+    // The send limit a mailbox of the domain gets (R-10): the domain's, else the EOP settings'.
+    const rateLimit = await newMailboxRateLimit(domain);
+    created = await provisionMailbox(cfg, { localPart, domain, name, rateLimit });
   } catch (err) {
     return mailNodeFailure(res, err);
   }

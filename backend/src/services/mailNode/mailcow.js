@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 import { query } from '../db.js';
 import { encrypt, decrypt } from '../encryption.js';
 import { safeFetch } from '../safeFetch.js';
@@ -18,6 +19,8 @@ export const DEFAULT_DOMAIN_MAILBOXES = 500;
 export const DEFAULT_DELETE_AFTER_DAYS = 5;
 export const MAX_DELETE_AFTER_DAYS = 90;
 export const MAX_DOMAIN_MAILBOXES = 10000;
+// Addresses of the panel the node's fail2ban must never ban (services/mailNode/nodeApply.js).
+export const MAX_PANEL_IPS = 10;
 const REQUEST_TIMEOUT_MS = 15000;
 
 const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -58,6 +61,37 @@ export function generateMailboxPassword() {
   return `${randomBytes(24).toString('base64url')}aA1!`;
 }
 
+// One address or network the panel connects to the node from, as mailcow's fail2ban takes it: an
+// IPv4 or IPv6 address, or one with a prefix (/8 to /32 for IPv4, /16 to /128 for IPv6, so a
+// mistake cannot exempt the whole internet). Lowercased; null for anything else.
+export function parseNetwork(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim().toLowerCase();
+  const [address, prefix, extra] = text.split('/');
+  if (extra !== undefined) return null;
+  const family = isIP(address);
+  if (!family) return null;
+  if (prefix === undefined) return address;
+  if (!/^\d{1,3}$/.test(prefix)) return null;
+  const bits = Number(prefix);
+  const [min, max] = family === 4 ? [8, 32] : [16, 128];
+  return bits >= min && bits <= max ? `${address}/${bits}` : null;
+}
+
+// The panel's addresses as an administrator types them (separated by commas, spaces or new lines,
+// or as an array): { networks } without repeats, or { error } with the refusal code.
+export function parseNetworkList(value) {
+  const parts = Array.isArray(value) ? value : String(value ?? '').split(/[\s,;]+/);
+  const networks = [];
+  for (const part of parts) {
+    if (typeof part === 'string' && !part.trim()) continue;
+    const network = parseNetwork(part);
+    if (!network) return { error: 'panel_ips_invalid' };
+    if (!networks.includes(network)) networks.push(network);
+  }
+  return networks.length > MAX_PANEL_IPS ? { error: 'panel_ips_invalid' } : { networks };
+}
+
 // The stored node settings with the API key decrypted, or null until an administrator saves them.
 export async function getMailNodeConfig() {
   const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [MAIL_NODE_PROVIDER]);
@@ -69,6 +103,7 @@ export async function getMailNodeConfig() {
     quotaMb: parseWholeNumber(cfg.quotaMb, 1, MAX_QUOTA_MB) ?? DEFAULT_QUOTA_MB,
     diskPingUrl: cfg.diskPingUrl || null,
     deleteAfterDays: storedDeleteAfterDays(cfg),
+    panelIps: parseNetworkList(cfg.panelIps ?? []).networks ?? [],
   };
 }
 
@@ -95,7 +130,7 @@ export function parsePingUrl(value) {
 
 // Merges into the stored settings: a field this form does not send (a later stage's) survives a
 // save, while each field it sends, a cleared ping URL (null) too, replaces the stored one.
-export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUrl = null, deleteAfterDays }) {
+export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUrl = null, deleteAfterDays, panelIps }) {
   await query(`
     INSERT INTO integration_config (provider, config)
     VALUES ($1, $2)
@@ -103,6 +138,7 @@ export async function saveMailNodeConfig({ mailHost, apiKey, quotaMb, diskPingUr
     SET config = integration_config.config || EXCLUDED.config, updated_at = NOW()
   `, [MAIL_NODE_PROVIDER, {
     mailHost, apiKey: encrypt(apiKey), quotaMb, diskPingUrl, ...(deleteAfterDays ? { deleteAfterDays } : {}),
+    ...(panelIps ? { panelIps } : {}),
   }]);
 }
 
@@ -175,7 +211,9 @@ export async function listDomains(cfg) {
 // Every mailbox the domain may hold counts at the per-mailbox maximum in the domain total, so
 // mailcow's "sum of mailbox quotas <= domain quota" rule never refuses a mailbox or a quota raise.
 // The total is only a number: like any quota it reserves no disk.
-export async function addDomain(cfg, { domain, mailboxes }) {
+// dkimKeySize: the DKIM key mailcow makes with the domain (selector "dkim"), or 0 for none (the
+// tenant signs, services/mailNode/nodeApply.js). Left out, mailcow's domain template decides.
+export async function addDomain(cfg, { domain, mailboxes, dkimKeySize }) {
   await request(cfg, 'POST', 'add/domain', {
     domain,
     description: 'Added by MailExpert',
@@ -187,7 +225,156 @@ export async function addDomain(cfg, { domain, mailboxes }) {
     quota: mailboxes * MAX_QUOTA_MB,
     backupmx: 0,
     relay_all_recipients: 0,
+    ...(dkimKeySize === undefined ? {} : { key_size: dkimKeySize, dkim_selector: DKIM_SELECTOR }),
   });
+}
+
+// The node's own record of one domain: the relayhost it sends through (mailcow's id, 0 for none).
+// Null when the node has no such domain.
+export async function getDomain(cfg, domain) {
+  const data = await request(cfg, 'GET', `get/domain/${encodeURIComponent(domain)}`);
+  const item = Array.isArray(data) ? data[0] : data;
+  if (!item || !(item.domain_name ?? item.domain)) return null;
+  return { domain: String(item.domain_name ?? item.domain).toLowerCase(), relayhost: Number(item.relayhost ?? 0) || 0 };
+}
+
+// edit/domain takes the attributes it is given and keeps every other one as it is.
+export async function setDomainRelayhost(cfg, domain, relayhostId) {
+  await request(cfg, 'POST', 'edit/domain', { items: [domain], attr: { relayhost: relayhostId } });
+}
+
+// mailcow's TLS Policy Map (get/tls-policy-map/all): the TLS a next hop gets, keyed by the next hop
+// exactly as Postfix spells it. mailcow keeps the policy as typed; the panel compares it lowercased.
+export async function listTlsPolicies(cfg) {
+  return asList(await request(cfg, 'GET', 'get/tls-policy-map/all')).map((p) => ({
+    id: Number(p.id),
+    dest: String(p.dest ?? '').toLowerCase(),
+    policy: String(p.policy ?? '').toLowerCase(),
+    parameters: String(p.parameters ?? ''),
+    active: Number(p.active) === 1,
+  })).filter((p) => p.dest && Number.isInteger(p.id));
+}
+
+// add/tls-policy-map makes a disabled entry unless active is sent.
+export async function addTlsPolicy(cfg, { dest, policy, parameters }) {
+  await request(cfg, 'POST', 'add/tls-policy-map', { dest, policy, parameters, active: 1 });
+}
+
+export async function editTlsPolicy(cfg, id, { dest, policy, parameters }) {
+  await request(cfg, 'POST', 'edit/tls-policy-map', { items: [id], attr: { dest, policy, parameters, active: 1 } });
+}
+
+export async function deleteTlsPolicy(cfg, id) {
+  await request(cfg, 'POST', 'delete/tls-policy-map', [id]);
+}
+
+// mailcow's relayhosts ("sender-dependent transports"), without their passwords: get/relayhost/all
+// sends them in clear text, and the panel never keeps, shows or logs them. hasLogin: the entry
+// authenticates with SASL (a username is set).
+export async function listRelayhosts(cfg) {
+  return asList(await request(cfg, 'GET', 'get/relayhost/all')).map((r) => ({
+    id: Number(r.id),
+    hostname: String(r.hostname ?? '').trim().toLowerCase(),
+    hasLogin: String(r.username ?? '').trim() !== '',
+    active: Number(r.active) === 1,
+  })).filter((r) => r.hostname && Number.isInteger(r.id));
+}
+
+// Without a username mailcow turns no SASL on for the entry; mailcow sets it active itself.
+export async function addRelayhost(cfg, hostname) {
+  await request(cfg, 'POST', 'add/relayhost', { hostname });
+}
+
+export async function enableRelayhost(cfg, id) {
+  await request(cfg, 'POST', 'edit/relayhost', { items: [id], attr: { active: 1 } });
+}
+
+// DKIM: mailcow keeps one key and one selector per domain. The selector the panel makes keys with.
+export const DKIM_SELECTOR = 'dkim';
+export const DKIM_KEY_SIZE = 2048;
+
+// The TXT value of a DKIM record as one string: mailcow (SPLIT_DKIM_255) and DNS answers may give it
+// as quoted pieces of up to 255 characters separated by spaces ("v=DKIM1;..." "...").
+export function joinTxtChunks(value) {
+  const text = String(value ?? '').trim();
+  if (!text.startsWith('"')) return text;
+  return [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, '$1')).join('');
+}
+
+// The domain's DKIM key as DNS must publish it: { selector, name, txt, length }, or null when
+// mailcow has no key for it. The private key is never read.
+export async function getDkim(cfg, domain) {
+  const data = await request(cfg, 'GET', `get/dkim/${encodeURIComponent(domain)}`);
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !data.dkim_txt) return null;
+  const selector = String(data.dkim_selector || DKIM_SELECTOR);
+  return {
+    selector,
+    name: `${selector}._domainkey.${domain}`,
+    txt: joinTxtChunks(data.dkim_txt),
+    length: data.length ? String(data.length) : null,
+  };
+}
+
+export async function addDkim(cfg, domain) {
+  await request(cfg, 'POST', 'add/dkim', { domains: domain, dkim_selector: DKIM_SELECTOR, key_size: DKIM_KEY_SIZE });
+}
+
+export async function deleteDkim(cfg, domain) {
+  await request(cfg, 'POST', 'delete/dkim', [domain]);
+}
+
+export const RATE_LIMIT_FRAMES = Object.freeze(['s', 'm', 'h', 'd']);
+
+// Sets one send limit on several mailboxes: edit/rl-mbox answers one entry per mailbox and goes on
+// past a refusal, so the answer is read per mailbox. Returns { done, failed } (addresses), with the
+// node's words for the refusals in `reason`.
+export async function setMailboxRateLimit(cfg, emails, { value, frame }) {
+  const items = asList(await request(cfg, 'POST', 'edit/rl-mbox', {
+    items: emails, attr: { rl_value: String(value), rl_frame: frame },
+  }, { judge: false })).filter((item) => item && typeof item === 'object');
+  const saved = new Set(items
+    .filter((item) => item.type === 'success' && Array.isArray(item.msg))
+    .map((item) => String(item.msg[1] ?? '').toLowerCase()));
+  const done = emails.filter((email) => saved.has(email.toLowerCase()));
+  const failed = emails.filter((email) => !saved.has(email.toLowerCase()));
+  return { done, failed, reason: failed.length ? (refusal(items) ?? 'refused') : null };
+}
+
+// The global Sieve filter mailcow runs before every mailbox's own ("prefilter", the file
+// global_sieve_before), as text: '' when it is empty.
+export async function getPrefilter(cfg) {
+  const data = await request(cfg, 'GET', 'get/global_filters/prefilter');
+  return typeof data === 'string' ? data : '';
+}
+
+// Writes the whole prefilter and restarts dovecot-mailcow, which drops every IMAP session. mailcow
+// writes the file first: a failed restart comes back as a warning next to the success, and the
+// script takes effect at Dovecot's next start. Returns { restarted }; throws a refusal (an invalid
+// script, an unwritable file) when no success came back.
+export async function setPrefilter(cfg, script) {
+  const items = asList(await request(cfg, 'POST', 'add/global-filter', {
+    filter_type: 'prefilter', script_data: script,
+  }, { judge: false })).filter((item) => item && typeof item === 'object');
+  if (!items.some((item) => item.type === 'success' && messageOf(item) === 'global_filter_written')) {
+    throw new MailNodeError('mail_node_refused', `The mail node refused: ${refusal(items) ?? 'refused'}`);
+  }
+  return { restarted: !items.some((item) => item.type !== 'success') };
+}
+
+// The networks fail2ban on the node never bans (get/fail2ban "whitelist", one per line).
+export async function getFail2banWhitelist(cfg) {
+  const data = await request(cfg, 'GET', 'get/fail2ban');
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new MailNodeError('mail_node_failed', 'The mail node did not report its fail2ban settings');
+  }
+  return String(data.whitelist ?? '').split(/[\s,;]+/).map((n) => n.trim().toLowerCase()).filter(Boolean);
+}
+
+// Adds networks to the whitelist and changes nothing else. edit/fail2ban with action "whitelist"
+// adds each network it is given (and lifts a ban on it); the plain edit/fail2ban instead replaces the
+// whole whitelist and resets ban_time_increment and manage_external when they are left out.
+export async function whitelistFail2ban(cfg, networks) {
+  await request(cfg, 'POST', 'edit/fail2ban', { items: networks, attr: { action: 'whitelist' } });
 }
 
 function mailboxInfo(m) {
@@ -221,8 +408,20 @@ export async function getMailbox(cfg, email) {
   };
 }
 
+// The mailbox's own send limit as mailcow keeps it for its SASL login, { value, frame }, or null.
+// A limit mailcow reports from the domain (rl_scope 'domain') is one bucket the whole domain shares,
+// not the mailbox's.
+function mailboxRateLimit(m) {
+  if (m.rl_scope !== 'mailbox' || !m.rl || typeof m.rl !== 'object') return null;
+  const value = Number(m.rl.value);
+  const frame = String(m.rl.frame ?? '');
+  return Number.isInteger(value) && value > 0 && RATE_LIMIT_FRAMES.includes(frame) ? { value, frame } : null;
+}
+
 export async function listMailboxes(cfg) {
-  return asList(await request(cfg, 'GET', 'get/mailbox/all')).filter((m) => m.username).map(mailboxInfo);
+  return asList(await request(cfg, 'GET', 'get/mailbox/all'))
+    .filter((m) => m.username)
+    .map((m) => ({ ...mailboxInfo(m), rateLimit: mailboxRateLimit(m) }));
 }
 
 function editMailbox(cfg, email, attr) {
@@ -236,7 +435,9 @@ function editMailbox(cfg, email, attr) {
 // mailboxes it deleted, so its old letters would come back with it, and one disabled by hand may
 // hold letters nobody here owns. An administrator deletes it in mailcow, or enables it there to
 // have it taken over.
-export async function provisionMailbox(cfg, { localPart, domain, name }) {
+// rateLimit: the mailbox's send limit, { value, frame } (services/mailNode/nodeApply.js); a
+// mailbox taken over gets it too.
+export async function provisionMailbox(cfg, { localPart, domain, name, rateLimit = null }) {
   const email = `${localPart}@${domain}`;
   const password = generateMailboxPassword();
   const existing = await getMailbox(cfg, email);
@@ -245,10 +446,18 @@ export async function provisionMailbox(cfg, { localPart, domain, name }) {
   }
   if (existing) {
     await editMailbox(cfg, email, { active: 1, password, password2: password, force_pw_update: 0 });
+    // The mailbox is taken over already: a limit the node did not take is set again by the next
+    // "apply" of the domain's settings, so it does not undo the takeover.
+    if (rateLimit) {
+      await setMailboxRateLimit(cfg, [email], rateLimit)
+        .then(({ failed }) => failed.length && console.error(`Mail node kept no send limit for ${email}`))
+        .catch((err) => console.error(`Mail node send limit for ${email} failed: ${err.code}`));
+    }
   } else {
     await request(cfg, 'POST', 'add/mailbox', {
       local_part: localPart, domain, name, password, password2: password,
       quota: cfg.quotaMb, active: 1, force_pw_update: 0,
+      ...(rateLimit ? { rl_value: String(rateLimit.value), rl_frame: rateLimit.frame } : {}),
     });
   }
   return { email, password, reused: !!existing };

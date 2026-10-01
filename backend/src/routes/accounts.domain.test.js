@@ -40,6 +40,8 @@ vi.mock('../services/mailNode/mailboxDeletion.js', () => ({
   requestDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', days: 5 })),
   cancelDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' })),
 }));
+// The send limit a new mailbox gets (services/mailNode/nodeApply.js, covered against PGlite there).
+vi.mock('../services/mailNode/nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })) }));
 // The panel's onboarding state of each domain: only ready (and authoritative) ones take mailboxes.
 const domainStates = vi.hoisted(() => new Map());
 vi.mock('../services/mailNode/domains.js', async (importActual) => ({
@@ -111,7 +113,9 @@ describe('domain mailboxes in /api/accounts', () => {
     const body = await res.json();
     expect(body).toMatchObject({ id: ID, email_address: 'info@example.com', mail_node: true });
     expect(JSON.stringify(body)).not.toContain('generated-password');
-    expect(provisionMailbox).toHaveBeenCalledWith(CFG, { localPart: 'info', domain: 'example.com', name: 'Info desk' });
+    expect(provisionMailbox).toHaveBeenCalledWith(CFG, {
+      localPart: 'info', domain: 'example.com', name: 'Info desk', rateLimit: { value: 50, frame: 'h' },
+    });
     expect(inserted.params).toEqual(['user-1', 'Info desk', 'info@example.com', 'mail.example.com', 'enc:generated-password', null]);
     expect(aliasInserted).toBeNull();
     expect(body.aliases).toEqual([]);
@@ -200,7 +204,9 @@ describe('domain mailboxes in /api/accounts', () => {
     listDomains.mockResolvedValueOnce([{ domain: 'dbeb.example', active: true }]);
     const res = await post({ kind: 'domain', localPart: 'info', domain: 'dbeb.example' });
     expect(res.status).toBe(200);
-    expect(provisionMailbox).toHaveBeenCalledWith(CFG, { localPart: 'info', domain: 'dbeb.example', name: 'info@dbeb.example' });
+    expect(provisionMailbox).toHaveBeenCalledWith(CFG, {
+      localPart: 'info', domain: 'dbeb.example', name: 'info@dbeb.example', rateLimit: { value: 50, frame: 'h' },
+    });
   });
 
   it('refuses a bad local part, a ready domain the node lacks or has inactive, and an address already added', async () => {

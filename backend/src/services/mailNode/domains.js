@@ -45,13 +45,21 @@ function toDomain(row) {
     steps: row.steps ?? {},
     maxMailboxes: row.max_mailboxes ?? null,
     nodeCreated: row.node_created ?? null,
+    apply: applyOf(row),
   };
+}
+
+// The last "apply" of the domain's node settings (services/mailNode/nodeApply.js): when it ran, each
+// item's outcome and the DKIM record mailcow publishes. Null before the first one.
+function applyOf(row) {
+  if (!row.apply_result) return null;
+  return { at: row.applied_at ?? null, items: row.apply_result.items ?? [], dkim: row.apply_result.dkim ?? null };
 }
 
 export async function listDomainRows() {
   const { rows } = await query(`
     SELECT d.domain, d.state, d.origin, d.added_at, d.state_changed_at, d.steps, d.max_mailboxes, d.node_created,
-           COALESCE(NULLIF(u.email, ''), u.username) AS added_by_email
+           d.apply_result, d.applied_at, COALESCE(NULLIF(u.email, ''), u.username) AS added_by_email
       FROM mail_node_domains d
       LEFT JOIN users u ON u.id = d.added_by
      ORDER BY d.domain`);
@@ -101,8 +109,11 @@ export async function bindNodeIdentities(nodeDomains, rows) {
 export function mergeDomains(nodeDomains, rows) {
   const known = new Map(rows.map((row) => [row.domain, row]));
   const panel = (row) => (row
-    ? { state: row.state, origin: row.origin, addedAt: row.addedAt, addedBy: row.addedBy, stateChangedAt: row.stateChangedAt, steps: row.steps }
-    : { state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {} });
+    ? {
+      state: row.state, origin: row.origin, addedAt: row.addedAt, addedBy: row.addedBy, stateChangedAt: row.stateChangedAt,
+      steps: row.steps, apply: row.apply ?? null,
+    }
+    : { state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null });
   const listed = nodeDomains ?? [];
   const merged = listed.map((d) => {
     const row = known.get(d.domain);
@@ -129,14 +140,15 @@ export function mergeDomains(nodeDomains, rows) {
 }
 
 // Starting the onboarding over clears everything that described the domain as it was on the node
-// and in the tenant: relayhost, DNS and tenant results, the accepted domain type, the expected MX
-// and the node identity (bound again when the panel next lists the domains). The domain's DKIM
-// mode and send limit stay: they are the owner's choices for the domain, applied again to the node
-// domain, not something the node held. Mailboxes on the domain are not touched.
+// and in the tenant: relayhost, the last apply of its node settings, DNS and tenant results, the
+// accepted domain type, the expected MX and the node identity (bound again when the panel next lists
+// the domains). The domain's DKIM mode and send limit stay: they are the owner's choices for the
+// domain, applied again to the node domain, not something the node held. Mailboxes on the domain are
+// not touched.
 const RESTART_SET = `
   state = 'node_created', steps = '{}', state_changed_by = $2, state_changed_at = NOW(), updated_at = NOW(),
-  relayhost_id = NULL, dns_check = NULL, dns_checked_at = NULL, tenant = NULL, accepted_domain_type = NULL,
-  expected_mx = '[]', node_created = NULL`;
+  relayhost_id = NULL, apply_result = NULL, applied_at = NULL, dns_check = NULL, dns_checked_at = NULL, tenant = NULL,
+  accepted_domain_type = NULL, expected_mx = '[]', node_created = NULL`;
 
 // A domain the panel just created on the node. Adding a domain again after it was removed from the
 // node starts its onboarding over: the node lost its settings with it. The node identity is bound

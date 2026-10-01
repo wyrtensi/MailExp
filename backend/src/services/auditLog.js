@@ -6,11 +6,11 @@ import { query } from './db.js';
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
-  'mailbox.quota_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
+  'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
   'message.sent', 'message.deleted', 'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
   'access.sync_aborted',
   'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
-  'mail_node.domain_identity_acknowledged',
+  'mail_node.domain_identity_acknowledged', 'mail_node.applied',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 
