@@ -165,7 +165,19 @@ describe('auditDetail', () => {
         action: 'mail_node.dns_checked',
         details: { scope: 'all', trigger: 'manual', overall: 'ok', from: null, counts: { ok: 2, warning: 1, error: 1 }, errorDomains: ['b.example'] },
       }),
-      { key: 'admin.audit.detailDnsCheckedAll', values: { ok: 2, warning: 1, error: 1, domains: 'b.example' }, valueKeys: { overall: 'admin.mailNode.dnsStatusOk' } },
+      { key: 'admin.audit.detailDnsCheckedAll', values: { ok: 2, warning: 1, error: 1, lookupFailed: 0, domains: 'b.example' }, valueKeys: { overall: 'admin.mailNode.dnsStatusOk' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.dns_checked', details: { scope: 'domain', domain: 'a.example', lookupFailed: true, code: 'dns_lookup_failed' } }),
+      { key: 'admin.audit.detailDnsCheckLookupFailed', values: { scope: 'a.example', code: 'dns_lookup_failed' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.dns_checked', details: { scope: 'node', lookupFailed: true, code: 'dns_resolver_invalid' } }),
+      { key: 'admin.audit.detailDnsCheckLookupFailed', values: { code: 'dns_resolver_invalid' }, valueKeys: { scope: 'admin.audit.detailDnsScopeNode' } },
+    );
+    assert.equal(
+      auditDetail({ action: 'mail_node.dns_checked', details: { scope: 'all', lookupFailed: true, code: 'dns_lookup_failed', counts: {} } }).key,
+      'admin.audit.detailDnsCheckedAllFailed',
     );
     assert.deepEqual(
       auditDetail({

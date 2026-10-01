@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeApplyResult from './MailNodeApplyResult.jsx';
-import MailNodeDnsResult from './MailNodeDnsResult.jsx';
+import MailNodeDnsResult, { CopyButton } from './MailNodeDnsResult.jsx';
 import {
   DNS_STATUS_COLORS,
   canMarkReady,
@@ -68,22 +68,11 @@ const recordStyle = {
 // server joins mailcow's 255-character pieces), with a button that copies the value.
 function DkimRecord({ dkim }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(dkim.txt);
-      setCopied(true);
-    } catch {
-      setCopied(false);
-    }
-  };
   return (
     <div data-dkim-record={dkim.name} style={{ marginTop: 8 }}>
       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('admin.mailNode.dkimRecord', { name: dkim.name })}</div>
       <code style={recordStyle}>{dkim.txt}</code>
-      <button type="button" onClick={copy} style={{ ...buttonStyle, marginTop: 6 }}>
-        {copied ? t('admin.mailNode.dkimCopied') : t('admin.mailNode.dkimCopy')}
-      </button>
+      <CopyButton value={dkim.txt} style={{ ...buttonStyle, marginTop: 6 }} />
     </div>
   );
 }

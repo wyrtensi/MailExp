@@ -538,4 +538,21 @@ describe('the DNS checks', () => {
     assert.equal(expectedValuesError({ expectedMx: 'not a host' }), 'admin.mailNode.errorExpectedMx');
     assert.equal(expectedValuesError(expectedForm(null)), null);
   });
+
+  it('takes the selector CNAME targets EOP really gives, with "_" in their labels', () => {
+    assert.deepEqual(normalizeExpectedValues({ dkimSelector1Cname: 'Selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft.' }), {
+      values: { dkimSelector1Cname: 'selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft' },
+    });
+    assert.deepEqual(normalizeExpectedValues({ dkimSelector2Cname: 'selector2._domainkey.contoso.dkim_mail' }), { error: 'dkim_cname_invalid' });
+    assert.deepEqual(normalizeExpectedValues({ expectedMx: 'mx_1.example.com' }), { error: 'expected_mx_invalid' });
+  });
+
+  it('says when the last check could not ask DNS, and checks the node address with the node settings', () => {
+    assert.equal(dnsVerdictKey({ dns: { overall: 'ok', lookupFailed: { code: 'dns_lookup_failed' } } }), 'admin.mailNode.dnsVerdictLookupFailed');
+    assert.equal(hasDnsErrors({ state: 'ready', dns: { overall: null, checks: [], lookupFailed: { code: 'dns_lookup_failed' } } }), false);
+    const form = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: '5120', diskPingUrl: '' };
+    assert.equal(mailNodeConfigError({ ...form, nodeIp: '' }), null);
+    assert.equal(mailNodeConfigError({ ...form, nodeIp: '203.0.113.10' }), null);
+    assert.equal(mailNodeConfigError({ ...form, nodeIp: '2001:db8::10' }), 'admin.eop.errorNodeIp');
+  });
 });

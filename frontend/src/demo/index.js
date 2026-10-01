@@ -1034,8 +1034,8 @@ function changeMailNodeDomain(action, raw, step, body) {
     if (!canRestartOnboarding(domain)) throw demoError('The domain is at the first step with nothing to clear', 'domain_nothing_to_restart');
     // Mailboxes on the domain stay; the node identity is bound again, so the warning goes too.
     withoutRecreatedWarning(domain.domain);
-    // As on the server, the DNS result and the values entered by hand go with the restart.
-    return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {}, dns: null, expected: noExpected() });
+    // As on the server, the DNS result goes with the restart; the values entered by hand stay.
+    return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {}, dns: null });
   }
   if (action === 'ready') {
     if (!canMarkReady(domain)) throw demoError('The domain is ready already', 'domain_already_ready');
@@ -1903,10 +1903,16 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && pathname === '/mail-node/config') {
     return {
       configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '',
-      deleteAfterDays: demoDeleteAfterDays, panelIps: [...demoPanelIps],
+      deleteAfterDays: demoDeleteAfterDays, panelIps: [...demoPanelIps], nodeIp: demoEopSettings.nodeIp ?? '',
     };
   }
   if (verb === 'PUT' && pathname === '/mail-node/config') {
+    // The node's address, kept with the EOP settings as on the server.
+    if (body?.nodeIp !== undefined) {
+      const { settings, error } = normalizeEopSettings({ nodeIp: body.nodeIp });
+      if (error) throw demoError('Node address must be an IPv4 address', error);
+      demoEopSettings = { ...demoEopSettings, ...settings };
+    }
     // The days before a deletion, checked as the server does (1 to 90); dates already set stay.
     if (body?.deleteAfterDays !== undefined) {
       const days = parseWholeNumber(body.deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS);
@@ -1970,7 +1976,11 @@ export async function demoRequest(method, path, body = {}) {
   // The DNS checks: the node's last result, "Check now" for everything and for one domain, and the
   // values a domain must publish, checked as the server checks them (utils/mailNode.js mirrors it).
   if (verb === 'GET' && pathname === '/mail-node/dns-check') return clone({ node: demoNodeDns });
-  if (verb === 'POST' && pathname === '/mail-node/dns-check') return clone(demoCheckAll('manual'));
+  // The server runs it in the background and answers at once; the demo has it done by then.
+  if (verb === 'POST' && pathname === '/mail-node/dns-check') {
+    demoCheckAll('manual');
+    return { ok: true, started: true, running: true };
+  }
   const domainDns = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(dns-check|dns-expected)$/);
   if (domainDns && ((verb === 'POST' && domainDns[2] === 'dns-check') || (verb === 'PUT' && domainDns[2] === 'dns-expected'))) {
     const domain = mailNodeDomainByName(domainDns[1]);

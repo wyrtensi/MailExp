@@ -49,7 +49,7 @@ const dnsBadgeStyle = badgeStyle('var(--red)', 'rgba(239,68,68,0.12)');
 
 const EMPTY_FORM = {
   mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '', deleteAfterDays: String(DEFAULT_DELETE_AFTER_DAYS),
-  panelIps: '',
+  panelIps: '', nodeIp: '',
 };
 // Spelled out literally so the i18n coverage test finds them.
 const RATE_STATE_KEYS = {
@@ -111,6 +111,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
           mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl,
           deleteAfterDays: String(cfg.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS),
           panelIps: (cfg.panelIps ?? []).join(', '),
+          nodeIp: cfg.nodeIp ?? '',
         });
       })
       .catch(fail);
@@ -143,6 +144,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
       mailHost: form.mailHost.trim(), apiKey: form.apiKey, quotaMb: Number(form.quotaMb), diskPingUrl: form.diskPingUrl.trim(),
       deleteAfterDays: Number(form.deleteAfterDays),
       panelIps: form.panelIps,
+      nodeIp: form.nodeIp.trim(),
     });
     const cfg = await api.mailNode.getConfig();
     setStored(cfg);
@@ -181,12 +183,12 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     return `${p.value} ${t(p.unitKey)}`;
   };
 
-  // "Check now": the node and every domain the panel knows; the lists reload with the results.
+  // "Check now": the node and every domain the panel knows, in the background on the server; the
+  // results show on the next load.
   const checkDns = () => run(async () => {
-    const result = await api.mailNode.checkDns();
-    setNodeDns(result?.node ?? null);
-    await refreshDomains();
-  }, 'admin.mailNode.dnsCheckDone');
+    const answer = await api.mailNode.checkDns();
+    setNotice(answer?.started === false ? 'admin.mailNode.dnsCheckRunning' : 'admin.mailNode.dnsCheckStarted');
+  });
 
   const disk = overview?.disk;
   const quotaGb = quotaMbInGb(form.quotaMb);
@@ -216,6 +218,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
             <span style={labelStyle}>{t('admin.mailNode.hostLabel')}</span>
             <input value={form.mailHost} onChange={(e) => setForm({ ...form, mailHost: e.target.value })} spellCheck={false} placeholder={t('admin.mailNode.hostPh')} style={monoFieldStyle} />
             <span style={hintStyle}>{t('admin.mailNode.hostNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.mailNode.nodeIpLabel')}</span>
+            <input value={form.nodeIp} onChange={(e) => setForm({ ...form, nodeIp: e.target.value })} spellCheck={false} placeholder={t('admin.mailNode.nodeIpPh')} style={{ ...monoFieldStyle, maxWidth: 240 }} />
+            <span style={hintStyle}>{t('admin.mailNode.nodeIpNote')}</span>
           </label>
           <label>
             <span style={labelStyle}>{t('admin.mailNode.apiKeyLabel')}</span>

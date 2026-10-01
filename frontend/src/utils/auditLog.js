@@ -91,12 +91,19 @@ const SETTINGS_DETAIL_KEYS = Object.freeze({
 function dnsCheckedDetail(details) {
   const overall = dnsStatusKey(details.overall);
   const names = (list) => (Array.isArray(list) ? list.map((check) => dnsCheckKey(check)) : []);
+  // A check that could not ask DNS: no result, only why.
+  if (details.lookupFailed) {
+    if (details.scope === 'all') return { key: 'admin.audit.detailDnsCheckedAllFailed', values: { code: details.code ?? '' } };
+    return details.scope === 'domain'
+      ? { key: 'admin.audit.detailDnsCheckLookupFailed', values: { scope: details.domain ?? '', code: details.code ?? '' } }
+      : { key: 'admin.audit.detailDnsCheckLookupFailed', values: { code: details.code ?? '' }, valueKeys: { scope: 'admin.audit.detailDnsScopeNode' } };
+  }
   if (details.scope === 'all') {
     const counts = details.counts ?? {};
     return {
       key: 'admin.audit.detailDnsCheckedAll',
       values: {
-        ok: counts.ok ?? 0, warning: counts.warning ?? 0, error: counts.error ?? 0,
+        ok: counts.ok ?? 0, warning: counts.warning ?? 0, error: counts.error ?? 0, lookupFailed: counts.lookupFailed ?? 0,
         domains: Array.isArray(details.errorDomains) && details.errorDomains.length ? details.errorDomains.join(', ') : '—',
       },
       valueKeys: { overall },

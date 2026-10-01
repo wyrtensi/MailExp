@@ -129,7 +129,7 @@ const SAME_VALUE_ALLOWED = {
   'admin.eop.guidPh':                        'any', // 00000000-0000-0000-0000-000000000000
   'admin.eop.tlsParametersPh':               'any', // match=nexthop:dot-nexthop (Postfix syntax)
   'admin.mailNode.panelIpsPh':               'any', // 203.0.113.10
-  'admin.eop.nodeIpPh':                      'any', // 203.0.113.10
+  'admin.mailNode.nodeIpPh':                 'any', // 203.0.113.10
   'admin.mailNode.dnsExpectedTenantTxtPh':   'any', // MS=ms12345678 (the tenant's record format)
   'admin.mailNode.dnsCheckMx':               'any', // MX — DNS record type
   'admin.mailNode.dnsCheckSpf':              'any', // SPF — protocol name

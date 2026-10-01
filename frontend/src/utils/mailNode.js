@@ -313,7 +313,7 @@ export function parseWholeNumber(value, min, max) {
 }
 
 // The error key for the settings form, or null.
-export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays, panelIps }, { hasStoredKey = false } = {}) {
+export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays, panelIps, nodeIp }, { hasStoredKey = false } = {}) {
   if (!HOST_PATTERN.test(String(mailHost ?? '').trim().toLowerCase())) return 'admin.mailNode.errorHost';
   if (!String(apiKey ?? '').trim() && !hasStoredKey) return 'admin.mailNode.errorApiKey';
   if (parseWholeNumber(quotaMb, 1, MAX_QUOTA_MB) == null) return 'admin.mailNode.errorQuota';
@@ -323,6 +323,7 @@ export function mailNodeConfigError({ mailHost, apiKey, quotaMb, diskPingUrl, de
     return 'admin.mailNode.errorDeleteAfterDays';
   }
   if (panelIps !== undefined && parseNetworkList(panelIps).error) return 'admin.mailNode.errorPanelIps';
+  if (nodeIp !== undefined && normalizeEopSettings({ nodeIp }).error) return 'admin.eop.errorNodeIp';
   return null;
 }
 
@@ -620,6 +621,9 @@ const DNS_CODE_KEYS = {
   starttls_unavailable: 'admin.mailNode.dnsCodeStarttlsUnavailable',
   starttls_refused: 'admin.mailNode.dnsCodeStarttlsRefused',
   cert_handshake_failed: 'admin.mailNode.dnsCodeCertHandshakeFailed',
+  spf_pass_all: 'admin.mailNode.dnsCodeSpfPassAll',
+  spf_neutral_all: 'admin.mailNode.dnsCodeSpfNeutralAll',
+  check_failed: 'admin.mailNode.dnsCodeCheckFailed',
 };
 // What the line of the domain's "DNS is right" step says about the latest check.
 const DNS_VERDICT_KEYS = {
@@ -652,8 +656,9 @@ export function dnsCodeValues(check) {
 }
 
 // The latest check of a domain next to its "DNS is right" step: only information, the step stays
-// a person's confirmation.
+// a person's confirmation. A check that could not ask DNS says so; the result before still counts.
 export function dnsVerdictKey(domain) {
+  if (domain?.dns?.lookupFailed) return 'admin.mailNode.dnsVerdictLookupFailed';
   return DNS_VERDICT_KEYS[domain?.dns?.overall] ?? DNS_VERDICT_KEYS.none;
 }
 
@@ -689,6 +694,14 @@ const expectedHost = (value) => {
   const text = String(value ?? '').trim().toLowerCase().replace(/\.$/, '');
   return HOST_PATTERN.test(text) ? text : null;
 };
+// The target of an EOP DKIM selector CNAME (backend domains.js parseCnameTarget), such as
+// selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft: labels other than the last may
+// hold "_".
+const CNAME_TARGET_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z]{2,63}$/;
+const cnameTarget = (value) => {
+  const text = String(value ?? '').trim().toLowerCase().replace(/\.$/, '');
+  return CNAME_TARGET_PATTERN.test(text) ? text : null;
+};
 
 // The values as the server takes them (backend domains.js parseExpectedValues): { values } with the
 // fields sent (an empty one is null, or [] for the MX), or { error } with the refusal code. The demo
@@ -718,7 +731,7 @@ export function normalizeExpectedValues(body) {
       values[field] = null;
       continue;
     }
-    const host = expectedHost(body[field]);
+    const host = cnameTarget(body[field]);
     if (!host) return { error: 'dkim_cname_invalid' };
     values[field] = host;
   }

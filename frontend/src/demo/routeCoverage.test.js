@@ -471,7 +471,7 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   const prefilter = await answer('/mail-node/apply/prefilter', 'POST', '/mail-node/apply/prefilter');
   assert.equal(prefilter.item, 'prefilter');
   const dnsAll = await answer('/mail-node/dns-check', 'POST', '/mail-node/dns-check');
-  assert.ok(dnsAll.node?.checks?.length && Array.isArray(dnsAll.domains));
+  assert.equal(dnsAll.started, true);
   const dnsDomain = await answer('/mail-node/domains/:param/dns-check', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/dns-check');
   assert.equal(dnsDomain.domain, 'coverage.demo.mailexpert.local');
   const expected = await answer('/mail-node/domains/:param/dns-expected', 'PUT', '/mail-node/domains/coverage.demo.mailexpert.local/dns-expected', { expectedMx: 'coverage-demo.mail.protection.outlook.com' });

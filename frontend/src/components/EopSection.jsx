@@ -42,7 +42,7 @@ const TLS_POLICY_KEYS = {
 };
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 
-const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'nodeIp', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
+const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
 
 // The stored settings as the form edits them: every field a string.
 function toForm(settings) {
@@ -210,11 +210,15 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             {textField('certificateHost', { placeholder: t('admin.mailNode.hostPh') })}
             <span style={hintStyle}>{t('admin.eop.certificateHostNote')}</span>
           </label>
-          <label>
-            <span style={labelStyle}>{t('admin.eop.nodeIpLabel')}</span>
-            {textField('nodeIp', { placeholder: t('admin.eop.nodeIpPh') })}
-            <span style={hintStyle}>{t('admin.eop.nodeIpNote')}</span>
-          </label>
+          {/* The node's address is kept here but edited next to the node's name in "Mail node", so moving
+              the node changes both in one place. */}
+          <div data-eop-node-ip>
+            <span style={labelStyle}>{t('admin.mailNode.nodeIpLabel')}</span>
+            <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: 'JetBrains Mono, monospace' }}>
+              {stored.nodeIp || t('admin.eop.nodeIpNotSet')}
+            </span>
+            <span style={hintStyle}>{t('admin.eop.nodeIpReadOnlyNote')}</span>
+          </div>
           <label>
             <span style={labelStyle}>{t('admin.eop.dkimModeLabel')}</span>
             <select value={form.dkimMode} onChange={set('dkimMode')} style={{ ...fieldStyle, maxWidth: 320 }}>

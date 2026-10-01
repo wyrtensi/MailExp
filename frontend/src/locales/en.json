@@ -1887,10 +1887,13 @@
       "fieldDkimSelector1Cname": "Selector1CNAME",
       "fieldDkimSelector2Cname": "Selector2CNAME",
       "detailDomainDnsExpectedChanged": "{{domain}}, values to publish: {{fields}}",
-      "detailDnsCheckedAll": "Node: {{overall}}; domains ok {{ok}}, with warnings {{warning}}, with errors {{error}} ({{domains}})",
+      "detailDnsCheckedAll": "Node: {{overall}}; domains ok {{ok}}, with warnings {{warning}}, with errors {{error}} ({{domains}}), not checked {{lookupFailed}}",
       "detailDnsCheckedDomain": "{{domain}}: {{from}} → {{overall}}; errors: {{errors}}; warnings: {{warnings}}",
       "detailDnsCheckedNode": "Node: {{from}} → {{overall}}; errors: {{errors}}; warnings: {{warnings}}",
-      "detailDnsCheckedFirst": "first check"
+      "detailDnsCheckedFirst": "first check",
+      "detailDnsCheckLookupFailed": "{{scope}}: the check could not ask DNS ({{code}})",
+      "detailDnsCheckedAllFailed": "Node and domains: the check could not ask DNS ({{code}})",
+      "detailDnsScopeNode": "Node"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -2025,7 +2028,7 @@
       "acknowledgeNote": "When the domain is set up on the node as it should be. If not, restart its onboarding instead.",
       "restart": "Restart onboarding",
       "restartNote": "Back to the first step. Mailboxes on the domain and their mail stay.",
-      "restartConfirm": "Start the onboarding of {{domain}} over? The confirmed steps and what the panel recorded about the domain on the node and in the tenant are cleared; the DKIM mode and the send limit stay. Mailboxes on the domain and their mail are not touched. Until the domain is ready again, no new mailbox can be created on it. The change is journaled.",
+      "restartConfirm": "Start the onboarding of {{domain}} over? The confirmed steps and what the panel recorded about the domain on the node and in the tenant are cleared; the DKIM mode, the send limit and the values to publish you entered (expected MX, verification TXT, selector CNAMEs) stay. Mailboxes on the domain and their mail are not touched. Until the domain is ready again, no new mailbox can be created on it. The change is journaled.",
       "nodeUnreachableNote": "The mail node could not be asked about this domain now: the panel's record is shown as it is and nothing in it changed.",
       "domainsNodeUnreachable": "The mail node could not list its domains ({{reason}}). The domains below are the panel's record, unchanged; their state on the node is unknown until it answers again.",
       "nodeUnknown": "Node not answering",
@@ -2107,7 +2110,6 @@
       "dnsNever": "Not checked yet.",
       "dnsCheckNow": "Check now",
       "dnsCheckAll": "Check DNS now: node and every domain",
-      "dnsCheckDone": "DNS checked.",
       "dnsCheckedAt": "Checked {{at}}:",
       "dnsRecord": "Publish in DNS: {{name}} {{type}}",
       "dnsKeyFromLastApply": "The node did not answer: compared with the key the last apply saw.",
@@ -2170,10 +2172,10 @@
       "dnsCodeMtaStsPublished": "The domain publishes an MTA-STS policy ({{found}}). Its mx: lines must name the EOP MX, not the node: mailcow's own policy names the node, and senders that honour it would stop delivering. Check https://mta-sts.<domain>/.well-known/mta-sts.txt.",
       "dnsCodeLookupFailed": "The lookup of {{name}} failed ({{detail}}): nothing could be compared. Check again later or check the resolver.",
       "dnsCodeResolverInvalid": "DNS_CHECK_RESOLVER is not an IP address (with an optional port): no lookup was made.",
-      "dnsCodeNodeIpMissing": "The node address is not set in the EOP settings, so A, PTR and SPF cannot be compared with it. DNS has: {{found}}.",
+      "dnsCodeNodeIpMissing": "The node address is not set (Mail node settings, next to the host), so A, PTR and SPF cannot be compared with it. DNS has: {{found}}.",
       "dnsCodeAMissing": "The node name has no A record: nothing reaches the node by name. Publish the record below.",
       "dnsCodeAMismatch": "The node name points elsewhere than the node address. DNS has: {{found}}; must be only: {{expected}}.",
-      "dnsCodePtrMissing": "The node address has no PTR record. Ask the hosting provider to set it to the node name.",
+      "dnsCodePtrMissing": "The node address has no PTR record. Mail leaves through EOP, so nothing breaks, but ask the hosting provider to set it to the node name.",
       "dnsCodePtrMismatch": "The PTR of the node address is not the node name. DNS has: {{found}}; must be: {{expected}}. Ask the hosting provider to change it.",
       "dnsCodeAaaaPresent": "The node name has an AAAA record ({{found}}), but the node runs with IPv6 off: senders that try it first lose time before IPv4. Remove the AAAA.",
       "dnsCodeCertExpired": "The certificate on port 587 has expired: EOP refuses the node's mail. Renew it on the node.",
@@ -2184,7 +2186,20 @@
       "dnsCodeCertUnreachable": "Port 587 of the node did not answer ({{detail}}): the certificate could not be read.",
       "dnsCodeStarttlsUnavailable": "Port 587 of the node offers no STARTTLS: mail would go unencrypted.",
       "dnsCodeStarttlsRefused": "Port 587 of the node refused STARTTLS: {{detail}}.",
-      "dnsCodeCertHandshakeFailed": "The TLS handshake on port 587 failed ({{detail}})."
+      "dnsCodeCertHandshakeFailed": "The TLS handshake on port 587 failed ({{detail}}).",
+      "copyFailed": "Could not copy: select the value and copy it",
+      "dnsLookupFailedKept": "The check of {{at}} could not ask DNS ({{reason}}). Shown below is the last check that could.",
+      "dnsLookupFailedNone": "The check of {{at}} could not ask DNS ({{reason}}), and no check has yet.",
+      "dnsDmarcInherited": "The domain has no DMARC record of its own: the one of {{domain}} covers it.",
+      "dnsCodeSpfPassAll": "SPF ends with +all: anyone may send mail as the domain and pass SPF. End it with -all or ~all.",
+      "dnsCodeSpfNeutralAll": "SPF ends with ?all: it says nothing about mail from anywhere else, so it protects nothing. End it with -all or ~all.",
+      "dnsCodeCheckFailed": "The check failed inside the panel ({{detail}}). Check again; if it repeats, look at the panel log.",
+      "dnsVerdictLookupFailed": "DNS check could not run last time; see the DNS block below",
+      "dnsCheckStarted": "The DNS check of the node and every domain runs in the background: reload the page in a minute to see the results.",
+      "dnsCheckRunning": "A DNS check of the node and every domain is already running: reload the page in a minute to see the results.",
+      "nodeIpLabel": "Node address (IPv4)",
+      "nodeIpPh": "203.0.113.10",
+      "nodeIpNote": "The public address of the node. Only the DNS check uses it (A and PTR of the node name; SPF must not list it); the panel still connects by name. Change it together with the host when the node moves. Optional."
     },
     "eop": {
       "title": "Mail through EOP",
@@ -2237,9 +2252,8 @@
       "errorTlsParameters": "Parameters must be name=value pairs up to 255 characters that fit the policy (see the hint).",
       "savedApplying": "EOP settings saved. The node gets them now; the result shows here on the next load.",
       "errorNodeIp": "The node address must be an IPv4 address such as 203.0.113.10.",
-      "nodeIpLabel": "Node address (IPv4)",
-      "nodeIpPh": "203.0.113.10",
-      "nodeIpNote": "The public address of the mail node. Only the DNS check uses it: A and PTR of the node name, and SPF must not list it. The panel still connects by name. Optional."
+      "nodeIpNotSet": "not set",
+      "nodeIpReadOnlyNote": "Set in \"Mail node\" next to the node host, so a move of the node changes both in one place."
     }
   },
   "blockList": {

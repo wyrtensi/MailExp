@@ -140,6 +140,22 @@ async function setValue(element, value) {
 const checks = (root) => [...root.querySelectorAll('[data-dns-check]')].map((li) => [li.getAttribute('data-dns-check'), li.getAttribute('data-dns-status')]);
 
 describe('MailNodeDomainOnboarding — DNS of the domain', () => {
+  test('copies a record, says so to screen readers, and says so when copying fails', async () => {
+    const host = await mount(React.createElement(MailNodeDomainOnboarding, { domain: READY, onChanged: () => {} }));
+    const button = host.querySelector('[data-dns-record] button');
+    assert.equal(button.getAttribute('aria-live'), 'polite');
+    let copied = null;
+    const clipboard = (writeText) => Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { writeText } } });
+    clipboard(async (value) => { copied = value; });
+    await click(button);
+    assert.equal(copied, `0 ${MX}`);
+    assert.equal(button.getAttribute('data-copy-state'), 'copied');
+    clipboard(async () => { throw new Error('denied'); });
+    await click(button);
+    assert.equal(button.getAttribute('data-copy-state'), 'failed');
+    assert.equal(button.textContent, 'admin.mailNode.copyFailed');
+  });
+
   test('shows each check with why, the record to publish for a check that is not ok, and checks again on request', async () => {
     let changed = 0;
     const host = await mount(React.createElement(MailNodeDomainOnboarding, { domain: READY, onChanged: () => { changed += 1; } }));
@@ -189,11 +205,19 @@ describe('MailNodeDomainOnboarding — DNS of the domain', () => {
     assert.equal(buttons(form, 'common.save')[0].disabled, true);
     await setValue(inputs[0], `${MX}, ready-example.mx.microsoft`);
     await setValue(inputs[1], 'MS=ms12345678');
+    // The selector targets EOP really gives hold "_" in their labels.
+    await setValue(inputs[2], 'selector1-ready-example._domainkey.contoso.n-v1.dkim.mail.microsoft');
+    assert.equal(buttons(form, 'common.save')[0].disabled, false);
+    await setValue(inputs[3], 'selector2_bad');
+    assert.ok(form.textContent.includes('admin.mailNode.errorDkimCname'));
+    await setValue(inputs[3], 'selector2-ready-example._domainkey.contoso.n-v1.dkim.mail.microsoft');
     answers['PUT /api/mail-node/domains/ready.example/dns-expected'] = { ok: true, domain: 'ready.example', fields: ['mx', 'tenantTxt'], dns: OK_DNS };
     await click(buttons(form, 'common.save')[0]);
     const put = calls.find((c) => c.method === 'PUT' && c.path === '/api/mail-node/domains/ready.example/dns-expected');
     assert.deepEqual(put.body, {
-      expectedMx: `${MX}, ready-example.mx.microsoft`, tenantTxt: 'MS=ms12345678', dkimSelector1Cname: '', dkimSelector2Cname: '',
+      expectedMx: `${MX}, ready-example.mx.microsoft`, tenantTxt: 'MS=ms12345678',
+      dkimSelector1Cname: 'selector1-ready-example._domainkey.contoso.n-v1.dkim.mail.microsoft',
+      dkimSelector2Cname: 'selector2-ready-example._domainkey.contoso.n-v1.dkim.mail.microsoft',
     });
     assert.equal(host.querySelector('[data-dns-expected-form]'), null, 'the form closes once saved');
   });
@@ -217,18 +241,44 @@ describe('MailNodeSection — node DNS and the warnings of the domain list', () 
     assert.equal(host.querySelector('[data-dns-badge]'), null);
   });
 
-  test('shows the node\'s name and certificate checks and checks the node and every domain on request', async () => {
+  test('shows the node\'s name and certificate checks and starts a check of everything in the background', async () => {
     const host = await mount(React.createElement(MailNodeSection));
     const block = host.querySelector('[data-node-dns]');
     assert.deepEqual(checks(block), [['node_a', 'ok'], ['node_ptr', 'ok'], ['node_aaaa', 'warning'], ['cert_chain', 'error']]);
     assert.ok(block.textContent.includes('admin.mailNode.dnsCodeCertChainIncomplete'));
-    answers['POST /api/mail-node/dns-check'] = { at, node: OK_DNS, domains: [] };
-    answers['GET /api/mail-node/dns-check'] = { node: OK_DNS };
-    answers['GET /api/mail-node/domains'] = { domains: [PENDING_ERRORS, { ...READY, dns: OK_DNS }] };
+    answers['POST /api/mail-node/dns-check'] = { ok: true, started: true, running: true };
     await click(buttons(block, 'admin.mailNode.dnsCheckAll')[0]);
     assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/dns-check'));
-    assert.deepEqual(checks(host.querySelector('[data-node-dns]')), [['mx', 'ok']]);
-    assert.equal(host.querySelector('[data-dns-badge]'), null, 'the list reloads with the new results');
-    assert.ok(host.textContent.includes('admin.mailNode.dnsCheckDone'));
+    assert.ok(host.textContent.includes('admin.mailNode.dnsCheckStarted'), 'the results come on the next load');
+    answers['POST /api/mail-node/dns-check'] = { ok: true, started: false, running: true };
+    await click(buttons(host.querySelector('[data-node-dns]'), 'admin.mailNode.dnsCheckAll')[0]);
+    assert.ok(host.textContent.includes('admin.mailNode.dnsCheckRunning'));
+  });
+
+  test('keeps a domain whose last check could not ask DNS out of the warnings, and says why', async () => {
+    const lookupFailed = { at, code: 'dns_lookup_failed', detail: 'ETIMEOUT', checks: [{ check: 'mx', name: 'ready.example', detail: 'ETIMEOUT' }] };
+    answers['GET /api/mail-node/domains'] = { domains: [{ ...READY, dns: { at: null, overall: null, checks: [], lookupFailed } }] };
+    answers['GET /api/mail-node/dns-check'] = { node: OK_DNS };
+    const host = await mount(React.createElement(MailNodeSection));
+    assert.equal(host.querySelector('[data-dns-badge]'), null);
+    assert.equal(host.querySelector('[data-dns-summary]'), null);
+    const detail = await mount(React.createElement(MailNodeDomainOnboarding, { domain: { ...READY, dns: { ...ERROR_DNS, lookupFailed } } }));
+    const note = detail.querySelector('[data-dns-lookup-failed]');
+    assert.equal(note.getAttribute('data-dns-lookup-failed'), 'dns_lookup_failed');
+    assert.ok(note.textContent.includes('admin.mailNode.dnsLookupFailedKept'));
+    assert.deepEqual(checks(detail), [['mx', 'error'], ['spf', 'ok'], ['tenant_txt', 'warning']], 'the result before stays on screen');
+  });
+
+  test('edits the node address next to the node host', async () => {
+    answers['GET /api/mail-node/config'] = { ...answers['GET /api/mail-node/config'], nodeIp: '203.0.113.10' };
+    const host = await mount(React.createElement(MailNodeSection));
+    const input = [...host.querySelectorAll('input')].find((i) => i.placeholder === 'admin.mailNode.nodeIpPh');
+    assert.equal(input.value, '203.0.113.10');
+    await setValue(input, 'mail.example.com');
+    assert.ok(host.textContent.includes('admin.eop.errorNodeIp'));
+    await setValue(input, '198.51.100.20');
+    answers['PUT /api/mail-node/config'] = { ok: true };
+    await click(buttons(host, 'admin.mailNode.saveAndCheck')[0]);
+    assert.equal(calls.find((c) => c.method === 'PUT' && c.path === '/api/mail-node/config').body.nodeIp, '198.51.100.20');
   });
 });
