@@ -294,7 +294,8 @@ describe('EopSection', () => {
     const values = [...host.querySelectorAll('input')].map((input) => input.value);
     assert.ok(values.includes('contoso-com.mail.protection.outlook.com'));
     assert.ok(values.includes('50'));
-    assert.equal(host.querySelector('select').value, 'mailcow');
+    const selects = [...host.querySelectorAll('select')].map((select) => select.value);
+    assert.deepEqual(selects, ['secure', 'mailcow'], 'the TLS policy for the next hop, then the DKIM mode');
     assert.ok(host.textContent.includes('admin.eop.checklistTitle'));
     const listed = [...host.querySelectorAll('[data-domain-onboarding]')].map((el) => el.getAttribute('data-domain-onboarding'));
     assert.deepEqual(listed, ['pending.example', 'manual.example']);

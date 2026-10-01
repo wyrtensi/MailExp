@@ -27,6 +27,18 @@ import {
   selectableDomains,
   sizeParts,
   usagePercent,
+  applyItemKey,
+  applyStatusKey,
+  dkimDeleteWaiting,
+  eopSettingsConflict,
+  tlsParametersFit,
+  parseNetwork,
+  parseNetworkList,
+  parseTlsParameters,
+  prefilterPending,
+  rateFrameKey,
+  rateLimitError,
+  rateLimitState,
 } from './mailNode.js';
 
 describe('domainMailboxFormError', () => {
@@ -357,5 +369,100 @@ describe('sender names', () => {
     assert.deepEqual(senderNamesPayload({ senderName: 'Sales', senderNameAlt: 'sales' }), { senderName: 'Sales' });
     assert.deepEqual(senderNamesPayload({ senderName: '', senderNameAlt: '' }), {});
     assert.deepEqual(senderNamesPayload({ senderNameAlt: 'Ivan' }), { senderNameAlt: 'Ivan' });
+  });
+});
+
+describe('the TLS policy for the next hop', () => {
+  it('checks the policy and its parameters as the server does', () => {
+    assert.deepEqual(normalizeEopSettings({ tlsPolicy: 'dane', tlsPolicyParameters: '' }), { settings: { tlsPolicy: 'dane', tlsPolicyParameters: null } });
+    assert.deepEqual(normalizeEopSettings({ tlsPolicy: 'none' }), { error: 'tls_policy_invalid' });
+    assert.deepEqual(normalizeEopSettings({ tlsPolicyParameters: 'match' }), { error: 'tls_parameters_invalid' });
+    assert.equal(parseTlsParameters('  match=nexthop:dot-nexthop   ciphers=high '), 'match=nexthop:dot-nexthop ciphers=high');
+    assert.equal(parseTlsParameters('=x'), null);
+  });
+
+  it('wants the fingerprint with the fingerprint policy, also in the form', () => {
+    assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: null }), 'tls_parameters_invalid');
+    assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=AB' }), 'tls_parameters_invalid');
+    assert.equal(eopSettingsConflict({ tlsPolicy: 'fingerprint', tlsPolicyParameters: 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A' }), null);
+    assert.equal(eopSettingsError({ tlsPolicy: 'fingerprint', tlsPolicyParameters: '', dkimMode: 'mailcow', sendLimitPerHour: '50' }), 'admin.eop.errorTlsParameters');
+    assert.equal(eopSettingsError({ tlsPolicy: 'secure', tlsPolicyParameters: '', dkimMode: 'mailcow', sendLimitPerHour: '50' }), null);
+  });
+});
+
+describe('TLS parameters per policy, as the server checks them', () => {
+  it('takes names for secure and verify, fingerprints for fingerprint, and no match= otherwise', () => {
+    assert.equal(tlsParametersFit('secure', 'match=nexthop:dot-nexthop'), true);
+    assert.equal(tlsParametersFit('verify', 'match=.mail.protection.outlook.com'), true);
+    assert.equal(tlsParametersFit('secure', 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A'), false);
+    assert.equal(tlsParametersFit('fingerprint', 'match=E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A|E2:67:08:C1:02:E1:AB:0B:F9:61:F7:CD:AD:0E:AB:F0:7C:94:67:EB:BC:85:BA:A0:50:68:17:4B:65:67:C9:0A'), true);
+    assert.equal(tlsParametersFit('fingerprint', 'match=nexthop'), false);
+    assert.equal(tlsParametersFit('fingerprint', ''), false);
+    for (const policy of ['encrypt', 'dane', 'dane-only', 'default']) {
+      assert.equal(tlsParametersFit(policy, ''), true, policy);
+      assert.equal(tlsParametersFit(policy, 'match=nexthop'), false, policy);
+    }
+    assert.deepEqual(normalizeEopSettings({ tlsPolicyParameters: `match=${'a'.repeat(250)}` }), { error: 'tls_parameters_invalid' });
+  });
+});
+
+describe('the panel addresses for fail2ban', () => {
+  it('takes IP addresses and networks, never the whole internet', () => {
+    assert.equal(parseNetwork(' 203.0.113.10 '), '203.0.113.10');
+    assert.equal(parseNetwork('2001:DB8::/64'), '2001:db8::/64');
+    assert.equal(parseNetwork('203.0.113.0/24'), '203.0.113.0/24');
+    assert.equal(parseNetwork('2001:db8::/48'), '2001:db8::/48');
+    for (const bad of ['0.0.0.0/0', '10.0.0.0/8', '203.0.0.0/23', '2001:db8::/47', '::/0', '203.0.113.256', '203.0.113.10/33', 'mail.example.com', 'a:b:c']) {
+      assert.equal(parseNetwork(bad), null, bad);
+    }
+    assert.deepEqual(parseNetworkList('203.0.113.10, 198.51.100.0/24\n203.0.113.10'), { networks: ['203.0.113.10', '198.51.100.0/24'] });
+    assert.deepEqual(parseNetworkList(''), { networks: [] });
+    assert.deepEqual(parseNetworkList('203.0.113.10 nope'), { error: 'panel_ips_invalid' });
+  });
+
+  it('refuses the node settings with a bad address', () => {
+    const form = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: '5120', diskPingUrl: '' };
+    assert.equal(mailNodeConfigError({ ...form, panelIps: '203.0.113.10' }), null);
+    assert.equal(mailNodeConfigError({ ...form, panelIps: 'everyone' }), 'admin.mailNode.errorPanelIps');
+    assert.equal(mailNodeErrorKey('panel_ips_invalid'), 'admin.mailNode.errorPanelIps');
+  });
+});
+
+describe('the result of applying the settings to the node', () => {
+  it('names each item, outcome and code', () => {
+    assert.equal(applyItemKey('tls_policy'), 'admin.mailNode.applyItemTlsPolicy');
+    assert.equal(applyItemKey('mailbox_limits'), 'admin.mailNode.applyItemMailboxLimits');
+    assert.equal(applyItemKey('future_item'), 'future_item');
+    assert.equal(applyStatusKey('pending'), 'admin.mailNode.applyStatusPending');
+    assert.equal(applyStatusKey('weird'), 'admin.mailNode.applyStatusFailed');
+    assert.equal(mailNodeErrorKey('dkim_delete_unconfirmed'), 'admin.mailNode.applyCodeDkimDeleteUnconfirmed');
+    assert.equal(mailNodeErrorKey('dovecot_restart_failed'), 'admin.mailNode.applyCodeDovecotRestartFailed');
+  });
+
+  it('tells when the spam rule or a DKIM deletion waits for the administrator', () => {
+    assert.equal(prefilterPending({ items: [{ item: 'prefilter', status: 'pending' }] }), true);
+    assert.equal(prefilterPending({ items: [{ item: 'prefilter', status: 'ok' }] }), false);
+    assert.equal(prefilterPending(null), false);
+    assert.equal(dkimDeleteWaiting({ apply: { items: [{ item: 'dkim', status: 'skipped', code: 'dkim_delete_unconfirmed' }] } }), true);
+    assert.equal(dkimDeleteWaiting({ apply: { items: [{ item: 'dkim', status: 'ok' }] } }), false);
+    assert.equal(dkimDeleteWaiting({ apply: null }), false);
+  });
+});
+
+describe('send limits', () => {
+  it('checks an administrator\'s limit', () => {
+    assert.equal(rateLimitError({ value: '50', frame: 'h' }), null);
+    assert.equal(rateLimitError({ value: '0', frame: 'h' }), 'admin.mailNode.errorRateLimit');
+    assert.equal(rateLimitError({ value: '10001', frame: 'h' }), 'admin.mailNode.errorRateLimit');
+    assert.equal(rateLimitError({ value: '5', frame: 'w' }), 'admin.mailNode.errorRateLimit');
+    assert.equal(rateFrameKey('d'), 'admin.mailNode.rateFrameD');
+  });
+
+  it('tells an own limit, the default, and a node that holds another one', () => {
+    const def = { value: 50, frame: 'h' };
+    assert.equal(rateLimitState({ rateLimit: def, rateLimitOverride: null, rateLimitDefault: def }), 'default');
+    assert.equal(rateLimitState({ rateLimit: { value: 9, frame: 'm' }, rateLimitOverride: { value: 9, frame: 'm' }, rateLimitDefault: def }), 'own');
+    assert.equal(rateLimitState({ rateLimit: null, rateLimitOverride: null, rateLimitDefault: def }), 'differs');
+    assert.equal(rateLimitState({ rateLimit: def, rateLimitOverride: { value: 9, frame: 'm' }, rateLimitDefault: def }), 'differs');
   });
 });

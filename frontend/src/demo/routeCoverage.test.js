@@ -68,6 +68,7 @@ const CONCRETE_PATH = {
   '/mail-node/domains': '/mail-node/domains',
   '/mail-node/mailboxes': '/mail-node/mailboxes',
   '/mail-node/eop': '/mail-node/eop',
+  '/mail-node/apply': '/mail-node/apply',
   '/accounts/:param/folders': '/accounts/demo-sales/folders',
   '/accounts/:param/aliases': '/accounts/demo-sales/aliases',
   '/accounts/:param/node-aliases': '/accounts/demo-fx-02/node-aliases',
@@ -456,6 +457,18 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   } else {
     coveredWritePatterns.add('PUT /mail-node/mailboxes/:param/quota'); // no fixture mailbox this run; shape already covered in demo/index.test.js
   }
+  if (mailboxes.mailboxes[0]) {
+    const limit = await answer('/mail-node/mailboxes/:param/rate-limit', 'PUT', `/mail-node/mailboxes/${mailboxes.mailboxes[0].accountId}/rate-limit`, { value: 20, frame: 'h' });
+    assert.deepEqual(limit.rateLimitOverride, { value: 20, frame: 'h' });
+  } else {
+    coveredWritePatterns.add('PUT /mail-node/mailboxes/:param/rate-limit'); // no fixture mailbox this run; shape already covered in demo/index.test.js
+  }
+  const node = await answer('/mail-node/apply', 'POST', '/mail-node/apply');
+  assert.ok(Array.isArray(node.node) && Array.isArray(node.domains));
+  const domainApply = await answer('/mail-node/domains/:param/apply', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/apply', { confirmDkimDelete: false });
+  assert.equal(domainApply.domain, 'coverage.demo.mailexpert.local');
+  const prefilter = await answer('/mail-node/apply/prefilter', 'POST', '/mail-node/apply/prefilter');
+  assert.equal(prefilter.item, 'prefilter');
   await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });
 });
 

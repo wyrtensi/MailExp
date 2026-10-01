@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
+import MailNodeApplyResult from './MailNodeApplyResult.jsx';
 import {
   canMarkReady,
   canRestartOnboarding,
+  dkimDeleteWaiting,
   domainStateKey,
   mailNodeErrorDetail,
   mailNodeErrorKey,
@@ -39,18 +41,50 @@ const ORIGIN_KEYS = {
 };
 
 const when = (at) => (at ? new Date(at).toLocaleString() : '');
+const subTitleStyle = { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', margin: '14px 0 4px' };
+const recordStyle = {
+  display: 'block', marginTop: 4, padding: '6px 8px', borderRadius: 6, background: 'var(--bg-tertiary)',
+  fontFamily: 'JetBrains Mono, monospace', fontSize: 11, wordBreak: 'break-all', userSelect: 'all', color: 'var(--text-primary)',
+};
+
+// The DKIM record mailcow signs the domain's mail with, as DNS must publish it (one string: the
+// server joins mailcow's 255-character pieces), with a button that copies the value.
+function DkimRecord({ dkim }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(dkim.txt);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <div data-dkim-record={dkim.name} style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('admin.mailNode.dkimRecord', { name: dkim.name })}</div>
+      <code style={recordStyle}>{dkim.txt}</code>
+      <button type="button" onClick={copy} style={{ ...buttonStyle, marginTop: 6 }}>
+        {copied ? t('admin.mailNode.dkimCopied') : t('admin.mailNode.dkimCopy')}
+      </button>
+    </div>
+  );
+}
 
 // One mail node domain's onboarding (GET /api/mail-node/domains row): its state, where it came from
 // and the checklist of steps up to "ready". An administrator adopts an unknown domain, confirms the
 // next step with "Done", marks the domain ready for a pilot or a stand without a tenant, or starts
 // its onboarding over; when the node reports another creation time for the domain, a warning offers
-// to accept it. The server journals each. `onChanged` runs after any of them so the lists reload.
-// Nothing here ever hides the domain or changes its state on its own.
+// to accept it. Below, the domain's node settings: the last apply (relayhost, DKIM, the send limits
+// of its mailboxes) with the DKIM record to publish, "Apply settings", and, when the tenant signs
+// and mailcow still has a key, deleting that key after a confirmation. The server journals each.
+// `onChanged` runs after any of them so the lists reload. Nothing here ever hides the domain or
+// changes its state on its own.
 export default function MailNodeDomainOnboarding({ domain, onChanged }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  // null, 'ready' or 'restart': the action waiting for its second confirmation.
+  // null, 'ready', 'restart' or 'dkim': the action waiting for its second confirmation.
   const [confirming, setConfirming] = useState(null);
 
   const run = async (action) => {
@@ -170,6 +204,46 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
           </div>
         </div>
       )}
+      <div data-domain-apply={domain.domain}>
+        <div style={subTitleStyle}>{t('admin.mailNode.domainApplyTitle')}</div>
+        {domain.apply
+          ? <MailNodeApplyResult result={domain.apply} />
+          : <div style={noteStyle}>{t('admin.mailNode.applyNever')}</div>}
+        {domain.apply?.dkim && <DkimRecord dkim={domain.apply.dkim} />}
+        {actionable && (
+          <div style={{ marginTop: 8 }}>
+            <button type="button" onClick={() => run(() => api.mailNode.applyDomain(domain.domain))} disabled={busy} style={buttonStyle}>
+              {t('admin.mailNode.applyButton')}
+            </button>
+          </div>
+        )}
+        {actionable && dkimDeleteWaiting(domain) && confirming !== 'dkim' && (
+          <div role="status" data-dkim-delete-waiting style={warningBoxStyle}>
+            <div>{t('admin.mailNode.dkimDeleteNote')}</div>
+            <button type="button" onClick={() => setConfirming('dkim')} disabled={busy} style={{ ...buttonStyle, marginTop: 8 }}>
+              {t('admin.mailNode.dkimDelete')}
+            </button>
+          </div>
+        )}
+        {confirming === 'dkim' && (
+          <div style={confirmBoxStyle}>
+            <div style={{ fontSize: 12, color: 'var(--text-primary)' }}>{t('admin.mailNode.dkimDeleteConfirm', { domain: domain.domain })}</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => run(() => api.mailNode.applyDomain(domain.domain, { confirmDkimDelete: true }))}
+                disabled={busy}
+                style={dangerButtonStyle}
+              >
+                {t('admin.mailNode.dkimDelete')}
+              </button>
+              <button type="button" onClick={() => setConfirming(null)} disabled={busy} style={buttonStyle}>
+                {t('common.cancel')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
       {errorLine}
     </div>
   );

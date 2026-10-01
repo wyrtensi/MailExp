@@ -13,8 +13,27 @@ import {
   DEFAULT_QUOTA_MB,
   MAX_QUOTA_MB,
   MailNodeError,
+  addDkim,
   addDomain,
+  addTlsPolicy,
+  deleteDkim,
   deleteMailbox,
+  editTlsPolicy,
+  getDkim,
+  getDomain,
+  getFail2banWhitelist,
+  getPrefilter,
+  joinTxtChunks,
+  listRelayhosts,
+  listTlsPolicies,
+  deleteRelayhost,
+  unwhitelistFail2ban,
+  parseNetwork,
+  parseNetworkList,
+  setDomainRelayhost,
+  setMailboxRateLimit,
+  setPrefilter,
+  whitelistFail2ban,
   generateMailboxPassword,
   getMailbox,
   getDiskStatus,
@@ -96,7 +115,9 @@ describe('stored settings', () => {
     expect(stored).toEqual({ mailHost: 'mail.example.com', apiKey: 'enc:api-key-1', quotaMb: 2048, diskPingUrl: null });
 
     query.mockResolvedValueOnce({ rows: [{ config: stored }] });
-    expect(await getMailNodeConfig()).toEqual({ mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null, deleteAfterDays: 5 });
+    expect(await getMailNodeConfig()).toEqual({
+      mailHost: 'mail.example.com', apiKey: 'api-key-1', quotaMb: 2048, diskPingUrl: null, deleteAfterDays: 5, panelIps: [],
+    });
   });
 
   it('falls back to the default quota when the stored one is unusable', async () => {
@@ -304,7 +325,7 @@ describe('API requests', () => {
 
   it('lists mailboxes with quota in MB and usage in bytes', async () => {
     safeFetch.mockResolvedValueOnce(answer([{ username: 'Info@example.com', active_int: 1, active: '1', quota: 5368709120, quota_used: 1048576 }]));
-    expect(await listMailboxes(CFG)).toEqual([{ email: 'info@example.com', active: true, quotaMb: 5120, usedBytes: 1048576 }]);
+    expect(await listMailboxes(CFG)).toEqual([{ email: 'info@example.com', active: true, quotaMb: 5120, usedBytes: 1048576, rateLimit: null }]);
   });
 
   it('reads the mail disk from status/vmail', async () => {
@@ -312,5 +333,183 @@ describe('API requests', () => {
     expect(await getDiskStatus(CFG)).toEqual({ usedPercent: 28, used: '11G', total: '41G' });
     safeFetch.mockResolvedValueOnce(answer({ type: 'info' }));
     expect((await getDiskStatus(CFG).catch((e) => e)).code).toBe('mail_node_failed');
+  });
+});
+
+describe('node settings requests', () => {
+  const path = (call) => call.url.replace('https://mail.example.com/api/v1/', '');
+
+  it('accepts the panel addresses as IPs or networks, never the whole internet', () => {
+    expect(parseNetwork(' 203.0.113.10 ')).toBe('203.0.113.10');
+    expect(parseNetwork('203.0.113.0/28')).toBe('203.0.113.0/28');
+    expect(parseNetwork('203.0.113.0/24')).toBe('203.0.113.0/24');
+    expect(parseNetwork('2001:DB8::/64')).toBe('2001:db8::/64');
+    expect(parseNetwork('2001:db8::/48')).toBe('2001:db8::/48');
+    for (const bad of ['0.0.0.0/0', '10.0.0.0/8', '203.0.0.0/23', '::/0', '2001:db8::/47', '203.0.113.10/33', '203.0.113.10/x', 'mail.example.com', '1.2.3.4/24/1', '', null]) {
+      expect(parseNetwork(bad), String(bad)).toBeNull();
+    }
+    expect(parseNetworkList('203.0.113.10, 198.51.100.0/24\n203.0.113.10')).toEqual({ networks: ['203.0.113.10', '198.51.100.0/24'] });
+    expect(parseNetworkList(['203.0.113.10'])).toEqual({ networks: ['203.0.113.10'] });
+    expect(parseNetworkList('')).toEqual({ networks: [] });
+    expect(parseNetworkList('203.0.113.10, nope')).toEqual({ error: 'panel_ips_invalid' });
+    expect(parseNetworkList(Array.from({ length: 11 }, (_, i) => `203.0.113.${i}`))).toEqual({ error: 'panel_ips_invalid' });
+  });
+
+  it('creates a domain with the DKIM key the mode asks for', async () => {
+    safeFetch.mockResolvedValue(answer(OK));
+    await addDomain(CFG, { domain: 'a.example', mailboxes: 10, dkimKeySize: 0 });
+    await addDomain(CFG, { domain: 'b.example', mailboxes: 10, dkimKeySize: 2048 });
+    expect(calls()[0].body).toMatchObject({ key_size: 0, dkim_selector: 'dkim' });
+    expect(calls()[1].body).toMatchObject({ key_size: 2048, dkim_selector: 'dkim' });
+  });
+
+  it('reads and sets the relayhost of a domain with edit/domain and nothing else', async () => {
+    safeFetch.mockResolvedValueOnce(answer({ domain_name: 'a.example', relayhost: '4' })).mockResolvedValueOnce(answer({}));
+    expect(await getDomain(CFG, 'a.example')).toEqual({ domain: 'a.example', relayhost: 4 });
+    expect(await getDomain(CFG, 'gone.example')).toBeNull();
+    safeFetch.mockResolvedValueOnce(answer(OK));
+    await setDomainRelayhost(CFG, 'a.example', 4);
+    expect(calls().map(path)).toEqual(['get/domain/a.example', 'get/domain/gone.example', 'edit/domain']);
+    expect(calls()[2].body).toEqual({ items: ['a.example'], attr: { relayhost: 4 } });
+  });
+
+  it('lists TLS policy entries and always sends active when adding or changing one', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ id: 3, dest: 'EOP.example.net', policy: 'Secure', parameters: null, active: '0' }]));
+    expect(await listTlsPolicies(CFG)).toEqual([{ id: 3, dest: 'eop.example.net', policy: 'secure', parameters: '', active: false }]);
+    safeFetch.mockResolvedValue(answer(OK));
+    await addTlsPolicy(CFG, { dest: 'eop.example.net', policy: 'secure', parameters: '' });
+    await editTlsPolicy(CFG, 3, { dest: 'eop.example.net', policy: 'encrypt', parameters: '' });
+    expect(calls()[1].body).toEqual({ dest: 'eop.example.net', policy: 'secure', parameters: '', active: 1 });
+    expect(calls()[2].body).toEqual({ items: [3], attr: { dest: 'eop.example.net', policy: 'encrypt', parameters: '', active: 1 } });
+  });
+
+  it('lists relayhosts without their passwords', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { id: '1', hostname: 'relay.example.net ', username: 'user', password: 'clear-text-secret', active: '1' },
+      { id: '2', hostname: 'eop.example.net', username: '', password: '', active: '0' },
+    ]));
+    const list = await listRelayhosts(CFG);
+    expect(list).toEqual([
+      { id: 1, hostname: 'relay.example.net', hasLogin: true, active: true, usedByDomains: [], usedByMailboxes: [] },
+      { id: 2, hostname: 'eop.example.net', hasLogin: false, active: false, usedByDomains: [], usedByMailboxes: [] },
+    ]);
+    expect(JSON.stringify(list)).not.toContain('clear-text-secret');
+    safeFetch.mockResolvedValueOnce(answer([{ id: 3, hostname: 'eop.example.net', username: '', active: '1', used_by_domains: 'a.example, B.example', used_by_mailboxes: 'x@a.example' }]));
+    expect(await listRelayhosts(CFG)).toEqual([
+      { id: 3, hostname: 'eop.example.net', hasLogin: false, active: true, usedByDomains: ['a.example', 'b.example'], usedByMailboxes: ['x@a.example'] },
+    ]);
+    safeFetch.mockResolvedValueOnce(answer(OK));
+    await deleteRelayhost(CFG, 3);
+    expect(calls().at(-1)).toMatchObject({ url: 'https://mail.example.com/api/v1/delete/relayhost', body: [3] });
+  });
+
+  it('reads one domain\'s mailboxes with a longer timeout, and marks a timeout', async () => {
+    safeFetch.mockResolvedValueOnce(answer([]));
+    await listMailboxes(CFG, { domain: 'a.example' });
+    expect(calls()[0].url).toBe('https://mail.example.com/api/v1/get/mailbox/all/a.example');
+    safeFetch.mockRejectedValueOnce(Object.assign(new Error('aborted'), { name: 'TimeoutError' }));
+    const slow = await listMailboxes(CFG).catch((e) => e);
+    expect(slow).toMatchObject({ code: 'mail_node_unreachable', timeout: true });
+    safeFetch.mockRejectedValueOnce(Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }));
+    expect(await listMailboxes(CFG).catch((e) => e)).toMatchObject({ code: 'mail_node_unreachable', timeout: false });
+  });
+
+  it('takes networks out of the fail2ban whitelist with every other field sent back as it was', async () => {
+    const f2b = {
+      ban_time: 1800, max_ban_time: 10000, ban_time_increment: true, max_attempts: 10, retry_window: 600,
+      netban_ipv4: 32, netban_ipv6: 128, manage_external: 0, whitelist: '198.51.100.7\n203.0.113.10', blacklist: '192.0.2.1',
+    };
+    safeFetch.mockResolvedValueOnce(answer(f2b)).mockResolvedValueOnce(answer([{ type: 'success', msg: 'f2b_modified' }]));
+    expect(await unwhitelistFail2ban(CFG, ['203.0.113.10'])).toEqual(['203.0.113.10']);
+    expect(calls()[1].body).toEqual({
+      items: ['none'],
+      attr: {
+        ban_time: 1800, max_ban_time: 10000, max_attempts: 10, retry_window: 600, netban_ipv4: 32, netban_ipv6: 128,
+        ban_time_increment: '1', manage_external: 0, whitelist: '198.51.100.7', blacklist: '192.0.2.1',
+      },
+    });
+    // Nothing to take out: nothing is written.
+    safeFetch.mockReset();
+    safeFetch.mockResolvedValueOnce(answer(f2b));
+    expect(await unwhitelistFail2ban(CFG, ['192.0.2.50'])).toEqual([]);
+    expect(calls()).toHaveLength(1);
+  });
+
+  it('joins a DKIM record split in quoted pieces of 255 characters', () => {
+    expect(joinTxtChunks('"v=DKIM1;k=rsa;p=AAA" "BBB"')).toBe('v=DKIM1;k=rsa;p=AAABBB');
+    expect(joinTxtChunks('v=DKIM1;k=rsa;p=AAA')).toBe('v=DKIM1;k=rsa;p=AAA');
+    expect(joinTxtChunks(' "a\\"b" ')).toBe('a"b');
+  });
+
+  it('reads the DKIM record of a domain, never the private key, and adds or deletes the key', async () => {
+    safeFetch.mockResolvedValueOnce(answer({ pubkey: 'AAA', length: '2048', dkim_txt: '"v=DKIM1;p=AA" "A"', dkim_selector: 'dkim', privkey: 'PRIVATE' }));
+    expect(await getDkim(CFG, 'a.example')).toEqual({ selector: 'dkim', name: 'dkim._domainkey.a.example', txt: 'v=DKIM1;p=AAA', length: '2048' });
+    safeFetch.mockResolvedValueOnce(answer({}));
+    expect(await getDkim(CFG, 'a.example')).toBeNull();
+    safeFetch.mockResolvedValue(answer(OK));
+    await addDkim(CFG, 'a.example');
+    await deleteDkim(CFG, 'a.example');
+    expect(calls().slice(2).map((c) => [path(c), c.body])).toEqual([
+      ['add/dkim', { domains: 'a.example', dkim_selector: 'dkim', key_size: 2048 }],
+      ['delete/dkim', ['a.example']],
+    ]);
+  });
+
+  it('sets one send limit on several mailboxes and tells the ones the node refused', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { type: 'success', msg: ['rl_saved', 'a@example.com'] },
+      { type: 'danger', msg: 'access_denied' },
+    ]));
+    expect(await setMailboxRateLimit(CFG, ['a@example.com', 'b@example.com'], { value: 50, frame: 'h' })).toEqual({
+      done: ['a@example.com'], failed: ['b@example.com'], reason: 'access_denied',
+    });
+    expect(calls()[0].body).toEqual({ items: ['a@example.com', 'b@example.com'], attr: { rl_value: '50', rl_frame: 'h' } });
+  });
+
+  it('lists the send limit a mailbox has of its own, not the domain\'s', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { username: 'a@example.com', active: '1', quota: 0, rl: { value: '50', frame: 'h' }, rl_scope: 'mailbox' },
+      { username: 'b@example.com', active: '1', quota: 0, rl: { value: '500', frame: 'd' }, rl_scope: 'domain' },
+      { username: 'c@example.com', active: '1', quota: 0, rl: false, rl_scope: 'domain' },
+    ]));
+    expect((await listMailboxes(CFG)).map((m) => m.rateLimit)).toEqual([{ value: 50, frame: 'h' }, null, null]);
+  });
+
+  it('gives a taken-over mailbox its send limit too, and a new one in add/mailbox', async () => {
+    safeFetch
+      .mockResolvedValueOnce(answer({ username: 'info@example.com', active: '1', quota: 0 }))
+      .mockResolvedValueOnce(answer(OK))
+      .mockResolvedValueOnce(answer([{ type: 'success', msg: ['rl_saved', 'info@example.com'] }]));
+    await provisionMailbox(CFG, { localPart: 'info', domain: 'example.com', name: 'Info', rateLimit: { value: 50, frame: 'h' } });
+    expect(calls().map(path)).toEqual(['get/mailbox/info%40example.com', 'edit/mailbox', 'edit/rl-mbox']);
+    safeFetch.mockReset();
+    safeFetch.mockResolvedValueOnce(answer({})).mockResolvedValueOnce(answer(OK));
+    await provisionMailbox(CFG, { localPart: 'new', domain: 'example.com', name: 'New', rateLimit: { value: 50, frame: 'h' } });
+    expect(calls()[1].body).toMatchObject({ rl_value: '50', rl_frame: 'h' });
+  });
+
+  it('reads and writes the prefilter, a failed Dovecot restart being a written rule', async () => {
+    safeFetch.mockResolvedValueOnce(answer('# script\n')).mockResolvedValueOnce(answer({}));
+    expect(await getPrefilter(CFG)).toBe('# script\n');
+    expect(await getPrefilter(CFG)).toBe('');
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: 'dovecot_restart_success' }, { type: 'success', msg: 'global_filter_written' }]));
+    expect(await setPrefilter(CFG, 'keep;\n')).toEqual({ restarted: true });
+    expect(calls()[2].body).toEqual({ filter_type: 'prefilter', script_data: 'keep;\n' });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'warning', msg: 'dovecot_restart_failed' }, { type: 'success', msg: 'global_filter_written' }]));
+    expect(await setPrefilter(CFG, 'keep;\n')).toEqual({ restarted: false });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['sieve_error', 'line 1'] }]));
+    await expect(setPrefilter(CFG, 'bad')).rejects.toMatchObject({ code: 'mail_node_refused', message: 'The mail node refused: sieve_error line 1' });
+  });
+
+  it('reads the fail2ban whitelist and adds to it with the whitelist action only', async () => {
+    safeFetch.mockResolvedValueOnce(answer({ ban_time: 1800, whitelist: '198.51.100.7\n2001:DB8::/64', blacklist: '' }));
+    expect(await getFail2banWhitelist(CFG)).toEqual(['198.51.100.7', '2001:db8::/64']);
+    safeFetch.mockResolvedValueOnce(answer([]));
+    await expect(getFail2banWhitelist(CFG)).rejects.toMatchObject({ code: 'mail_node_failed' });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['object_modified', '203.0.113.10'] }]));
+    await whitelistFail2ban(CFG, ['203.0.113.10']);
+    expect(calls()[2].body).toEqual({ items: ['203.0.113.10'], attr: { action: 'whitelist' } });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['network_host_invalid', 'x'] }]));
+    await expect(whitelistFail2ban(CFG, ['x'])).rejects.toMatchObject({ code: 'mail_node_refused' });
   });
 });

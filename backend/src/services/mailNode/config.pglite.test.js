@@ -37,6 +37,7 @@ describe('saveMailNodeConfig', () => {
     });
     expect(await getMailNodeConfig()).toEqual({
       mailHost: 'mail.example.com', apiKey: 'second', quotaMb: 1024, diskPingUrl: 'https://hc.example.com/p/2', deleteAfterDays: 5,
+      panelIps: [],
     });
   });
 

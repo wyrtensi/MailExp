@@ -9,12 +9,16 @@ import {
   MAX_DELETE_AFTER_DAYS,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
+  RATE_LIMIT_FRAMES,
   domainStateKey,
   mailNodeConfigError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
   parseWholeNumber,
   quotaMbInGb,
+  rateFrameKey,
+  rateLimitError,
+  rateLimitState,
   sizeParts,
   usagePercent,
 } from '../utils/mailNode.js';
@@ -37,11 +41,18 @@ const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var
 
 const EMPTY_FORM = {
   mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '', deleteAfterDays: String(DEFAULT_DELETE_AFTER_DAYS),
+  panelIps: '',
+};
+// Spelled out literally so the i18n coverage test finds them.
+const RATE_STATE_KEYS = {
+  own: 'admin.mailNode.rateLimitOwn',
+  default: 'admin.mailNode.rateLimitDefault',
+  differs: 'admin.mailNode.rateLimitDiffers',
 };
 
 // Settings -> Integrations -> "Mail node" (admins only): the mailcow server MailExpert creates
-// domain mailboxes on, its domains with their onboarding, the mail disk and the quota of every
-// mailbox made there. The EOP section next to it changes domains too: `revision` goes up after any
+// domain mailboxes on, the panel's own addresses for the node's fail2ban whitelist, its domains with
+// their onboarding, the mail disk and the quota and send limit of every mailbox made there. The EOP section next to it changes domains too: `revision` goes up after any
 // such change, and this section tells it about its own through `onDomainsChanged`.
 export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
@@ -53,6 +64,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const [overview, setOverview] = useState(null);
   const [newDomain, setNewDomain] = useState({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
   const [quotaEdits, setQuotaEdits] = useState({});
+  // A send limit being edited per mailbox: { value, frame }.
+  const [limitEdits, setLimitEdits] = useState({});
   const [openDomain, setOpenDomain] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -82,6 +95,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
         setForm({
           mailHost: cfg.mailHost, apiKey: cfg.apiKey, quotaMb: String(cfg.quotaMb), diskPingUrl: cfg.diskPingUrl,
           deleteAfterDays: String(cfg.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS),
+          panelIps: (cfg.panelIps ?? []).join(', '),
         });
       })
       .catch(fail);
@@ -100,7 +114,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     setNotice(null);
     try {
       await action();
-      if (noticeKey) setNotice(noticeKey);
+      if (noticeKey) setNotice((current) => current ?? noticeKey);
     } catch (err) {
       fail(err);
     } finally {
@@ -110,14 +124,17 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
 
   const configErrorKey = mailNodeConfigError(form, { hasStoredKey: !!stored?.configured });
   const saveConfig = () => run(async () => {
-    await api.mailNode.saveConfig({
+    const saved = await api.mailNode.saveConfig({
       mailHost: form.mailHost.trim(), apiKey: form.apiKey, quotaMb: Number(form.quotaMb), diskPingUrl: form.diskPingUrl.trim(),
       deleteAfterDays: Number(form.deleteAfterDays),
+      panelIps: form.panelIps,
     });
     const cfg = await api.mailNode.getConfig();
     setStored(cfg);
     setForm((f) => ({ ...f, apiKey: cfg.apiKey }));
     await refreshDomains();
+    // Another node, key or panel address is applied to the node after the answer.
+    if (saved?.applying) setNotice('admin.mailNode.savedApplying');
   }, 'admin.mailNode.saved');
 
   const domainMailboxes = parseWholeNumber(newDomain.mailboxes, 1, MAX_DOMAIN_MAILBOXES);
@@ -126,6 +143,17 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     setNewDomain({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
     await refreshDomains();
   }, 'admin.mailNode.domainAdded');
+
+  // An administrator's send limit, or { value: null } to go back to the default.
+  const saveLimit = (accountId, limit) => run(async () => {
+    await api.mailNode.setRateLimit(accountId, limit);
+    setLimitEdits((l) => ({ ...l, [accountId]: undefined }));
+    await loadNode();
+  }, 'admin.mailNode.rateLimitSaved');
+
+  const limitText = (limit) => (limit
+    ? t('admin.mailNode.rateLimitValue', { value: limit.value, frame: t(rateFrameKey(limit.frame)) })
+    : t('admin.mailNode.rateLimitNone'));
 
   const saveQuota = (accountId) => run(async () => {
     await api.mailNode.setQuota(accountId, Number(quotaEdits[accountId]));
@@ -177,6 +205,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
             <span style={labelStyle}>{t('admin.mailNode.deleteAfterLabel')}</span>
             <input inputMode="numeric" value={form.deleteAfterDays} onChange={(e) => setForm({ ...form, deleteAfterDays: e.target.value })} style={{ ...fieldStyle, maxWidth: 160 }} />
             <span style={hintStyle}>{t('admin.mailNode.deleteAfterNote', { max: MAX_DELETE_AFTER_DAYS })}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.mailNode.panelIpsLabel')}</span>
+            <input value={form.panelIps} onChange={(e) => setForm({ ...form, panelIps: e.target.value })} spellCheck={false} placeholder={t('admin.mailNode.panelIpsPh')} style={monoFieldStyle} />
+            <span style={hintStyle}>{t('admin.mailNode.panelIpsNote')}</span>
           </label>
           <div>
             <button type="button" onClick={saveConfig} disabled={busy || !!configErrorKey} style={primaryButtonStyle}>
@@ -302,6 +335,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                   <th style={headCellStyle}>{t('admin.mailNode.addressColumn')}</th>
                   <th style={headCellStyle}>{t('admin.mailNode.usageColumn')}</th>
                   <th style={headCellStyle}>{t('admin.mailNode.quotaColumn')}</th>
+                  <th style={headCellStyle}>{t('admin.mailNode.sendLimitColumn')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -336,6 +370,56 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                             )}
                           </span>
                         )}
+                      </td>
+                      <td style={cellStyle} data-send-limit={m.email}>
+                        {m.onNode && (() => {
+                          const state = rateLimitState(m);
+                          const limitEdit = limitEdits[m.accountId];
+                          const current = m.rateLimitOverride ?? m.rateLimitDefault ?? { value: '', frame: 'h' };
+                          const draft = limitEdit ?? { value: String(current.value ?? ''), frame: current.frame ?? 'h' };
+                          return (
+                            <span style={{ display: 'grid', gap: 4 }}>
+                              <span data-limit-state={state} style={{ fontSize: 12, color: state === 'differs' ? 'var(--amber)' : 'var(--text-primary)' }}>
+                                {limitText(m.rateLimit)}{' '}
+                                <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                                  {t(RATE_STATE_KEYS[state], { limit: limitText(m.rateLimitOverride ?? m.rateLimitDefault) })}
+                                </span>
+                              </span>
+                              <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <input
+                                  aria-label={t('admin.mailNode.sendLimitColumn')}
+                                  inputMode="numeric"
+                                  value={draft.value}
+                                  onChange={(e) => setLimitEdits({ ...limitEdits, [m.accountId]: { ...draft, value: e.target.value } })}
+                                  style={{ ...fieldStyle, width: 70, padding: '5px 8px' }}
+                                />
+                                <select
+                                  aria-label={t('admin.mailNode.rateFrameLabel')}
+                                  value={draft.frame}
+                                  onChange={(e) => setLimitEdits({ ...limitEdits, [m.accountId]: { ...draft, frame: e.target.value } })}
+                                  style={{ ...fieldStyle, width: 'auto', padding: '5px 8px' }}
+                                >
+                                  {RATE_LIMIT_FRAMES.map((frame) => <option key={frame} value={frame}>{t(rateFrameKey(frame))}</option>)}
+                                </select>
+                                {limitEdit != null && (
+                                  <button
+                                    type="button"
+                                    onClick={() => saveLimit(m.accountId, { value: Number(draft.value), frame: draft.frame })}
+                                    disabled={busy || !!rateLimitError(draft)}
+                                    style={buttonStyle}
+                                  >
+                                    {t('common.save')}
+                                  </button>
+                                )}
+                                {m.rateLimitOverride && limitEdit == null && (
+                                  <button type="button" onClick={() => saveLimit(m.accountId, { value: null })} disabled={busy} style={buttonStyle}>
+                                    {t('admin.mailNode.rateLimitUseDefault')}
+                                  </button>
+                                )}
+                              </span>
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );

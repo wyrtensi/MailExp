@@ -9,9 +9,12 @@ import {
   DEFAULT_DOMAIN_MAILBOXES,
   DEFAULT_QUOTA_MB,
   MAX_DELETE_AFTER_DAYS,
+  MAX_PANEL_IPS,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
+  DKIM_KEY_SIZE,
   MailNodeError,
+  RATE_LIMIT_FRAMES,
   addDomain,
   getDiskStatus,
   getMailbox,
@@ -19,10 +22,12 @@ import {
   listDomains,
   listMailboxes,
   parseHostName,
+  parseNetworkList,
   parsePingUrl,
   parseWholeNumber,
   saveMailNodeConfig,
   setMailboxQuota,
+  setMailboxRateLimit,
 } from '../services/mailNode/mailcow.js';
 import {
   acknowledgeNodeIdentity,
@@ -42,17 +47,28 @@ import {
   EOP_FIELDS,
   MAX_SEND_LIMIT_PER_HOUR,
   MAX_TERRL,
+  eopSettingsConflict,
   getEopSettings,
   parseEopSettings,
   saveEopSettings,
   tenantConfigured,
   tenantDriverActive,
 } from '../services/mailNode/eopSettings.js';
+import {
+  applyDomain,
+  applyNode,
+  applyPrefilter,
+  applyInBackground,
+  applyQuietly,
+  defaultRateLimit,
+  getNodeApplyResult,
+} from '../services/mailNode/nodeApply.js';
 
-// The mail node (mailcow) settings, its domains with their onboarding, the EOP settings and the
-// quotas of the mailboxes MailExpert made there. Mounted at /api/mail-node. Everyone signed in may
-// list the domains a mailbox can be created on (the add-mailbox form offers them); everything else
-// is for administrators.
+// The mail node (mailcow) settings, its domains with their onboarding, the EOP settings, applying
+// them to the node (services/mailNode/nodeApply.js) and the quotas and send limits of the mailboxes
+// MailExpert made there. Mounted at /api/mail-node. Everyone signed in may list the domains a
+// mailbox can be created on (the add-mailbox form offers them); everything else is for
+// administrators.
 const router = Router();
 router.param('id', uuidParam('id'));
 
@@ -89,6 +105,10 @@ const ERRORS = {
   tenant_id_invalid: [400, 'Tenant ID must be a GUID'],
   app_id_invalid: [400, 'Application ID must be a GUID'],
   thumbprint_invalid: [400, 'Certificate thumbprint must be 40 hexadecimal characters'],
+  tls_policy_invalid: [400, 'TLS policy must be secure, dane, dane-only, verify, fingerprint, encrypt or default'],
+  tls_parameters_invalid: [400, 'TLS policy parameters must be name=value pairs up to 255 characters that fit the policy: match= takes hostname, nexthop, dot-nexthop or host names for secure and verify, fingerprints for fingerprint (required), and nothing for the other policies'],
+  panel_ips_invalid: [400, `Panel addresses must be up to ${MAX_PANEL_IPS} IP addresses or networks such as 203.0.113.10 or 203.0.113.0/28`],
+  rate_limit_invalid: [400, `Send limit must be a whole number of messages from 1 to ${MAX_SEND_LIMIT_PER_HOUR} per second, minute, hour or day`],
 };
 
 export function refuse(res, code) {
@@ -130,6 +150,7 @@ router.get('/config', requireAdmin, async (req, res) => {
     quotaMb: cfg?.quotaMb ?? DEFAULT_QUOTA_MB,
     diskPingUrl: cfg?.diskPingUrl ?? '',
     deleteAfterDays: cfg?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS,
+    panelIps: cfg?.panelIps ?? [],
   });
 });
 
@@ -150,23 +171,32 @@ router.put('/config', requireAdmin, async (req, res) => {
     req.body?.deleteAfterDays ?? current?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS, 1, MAX_DELETE_AFTER_DAYS,
   );
   if (!deleteAfterDays) return refuse(res, 'delete_after_days_invalid');
+  // The panel's own addresses for the node's fail2ban whitelist; left out, the stored ones stay.
+  const ips = req.body?.panelIps === undefined ? { networks: current?.panelIps ?? [] } : parseNetworkList(req.body.panelIps);
+  if (ips.error) return refuse(res, ips.error);
+  const panelIps = ips.networks;
   let apiKey = sent;
   if (!sent || sent === REDACTED_SECRET) {
     // The stored key goes only to the host it was entered for: a new host needs the key again.
     if (!current?.apiKey || current.mailHost !== mailHost) return refuse(res, 'api_key_required');
     apiKey = current.apiKey;
   }
-  const cfg = { mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays };
+  const cfg = { mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays, panelIps };
   try {
     await listDomains(cfg);
   } catch (err) {
     return mailNodeFailure(res, err);
   }
   await saveMailNodeConfig(cfg);
-  configAudit(req, 'node', Object.keys(cfg).filter((field) => current?.[field] !== cfg[field]));
+  const changed = Object.keys(cfg).filter((field) => JSON.stringify(current?.[field]) !== JSON.stringify(cfg[field]));
+  configAudit(req, 'node', changed);
   // Read the disk (and ping) right away instead of at the next scheduled run.
   checkMailNodeDisk().catch((err) => console.error('Mail node disk check failed:', err.message));
-  res.json({ ok: true });
+  // Another node, key or panel address: the node gets the panel's settings right after the answer,
+  // so the save never waits for a node that does not answer; the result shows on the next load.
+  const applying = changed.some((field) => ['mailHost', 'apiKey', 'panelIps'].includes(field));
+  res.json({ ok: true, ...(applying ? { applying } : {}) });
+  if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'node_settings' }));
 });
 
 // The node's domains with the panel's onboarding state of each ('unknown' for a domain the panel
@@ -199,8 +229,13 @@ router.get('/domains', async (req, res) => {
   });
 });
 
-// Creates the domain on the node; its onboarding starts at node_created. DNS, the EOP connectors
-// and DKIM stay manual (runbook) and are confirmed step by step.
+// A domain's node settings applied by themselves after it was added, adopted or started over. The
+// answer carries the result; a failure stays in it and never fails the action.
+const applyDomainQuietly = (req, domain, trigger) => applyQuietly(() => applyDomain({ domain, userId: req.session.userId, trigger }));
+
+// Creates the domain on the node, with a DKIM key only when mailcow signs (the EOP settings' DKIM
+// mode), and applies its node settings (relayhost, DKIM); its onboarding starts at node_created.
+// DNS and the EOP connectors stay manual (runbook) and are confirmed step by step.
 router.post('/domains', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.body?.domain);
   if (!domain) return refuse(res, 'domain_invalid');
@@ -208,8 +243,9 @@ router.post('/domains', requireAdmin, async (req, res) => {
   if (!mailboxes) return refuse(res, 'mailboxes_invalid');
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
+  const { dkimMode } = await getEopSettings();
   try {
-    await addDomain(cfg, { domain, mailboxes });
+    await addDomain(cfg, { domain, mailboxes, dkimKeySize: dkimMode === 'mailcow' ? DKIM_KEY_SIZE : 0 });
   } catch (err) {
     return mailNodeFailure(res, err);
   }
@@ -220,7 +256,8 @@ router.post('/domains', requireAdmin, async (req, res) => {
     actorUserId: req.session.userId, action: 'mail_node.domain_added',
     details: { domain, mailboxes, ...(before?.from ? { from: before.from, steps: before.steps ?? {} } : {}) },
   });
-  res.json({ ok: true, domain, state: 'node_created' });
+  const apply = await applyDomainQuietly(req, domain, 'domain_added');
+  res.json({ ok: true, domain, state: 'node_created', ...(apply ? { apply } : {}) });
 });
 
 // Takes in a domain made on the node by hand that the panel has no row for: it starts at
@@ -242,7 +279,8 @@ router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
     actorUserId: req.session.userId, action: 'mail_node.domain_adopted',
     details: { domain, state: 'node_created', origin: 'adopted' },
   });
-  res.json({ ok: true, domain, state: 'node_created' });
+  const apply = await applyDomainQuietly(req, domain, 'domain_adopted');
+  res.json({ ok: true, domain, state: 'node_created', ...(apply ? { apply } : {}) });
 });
 
 // The node's record of one domain for a route that acts on a known row: answers the refusal and
@@ -309,13 +347,60 @@ router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
 
 // "Restart onboarding": the domain goes back to node_created with no confirmed steps and nothing the
 // node or the tenant held, keeping the owner's DKIM mode and send limit. Its mailboxes stay as they
-// are. Needs no answer from the node: it only resets the panel's record. The journal keeps the
-// steps that were confirmed (who and when). A domain with nothing to clear is refused.
+// are. Needs no answer from the node to reset the panel's record; then its node settings are
+// applied again, as for a new domain. The journal keeps the steps that were confirmed (who and
+// when). A domain with nothing to clear is refused.
 router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
   const result = await restartOnboarding({ domain, userId: req.session.userId });
-  return stateChanged(req, res, domain, result, 'restarted');
+  if (result.error) return refuse(res, result.error);
+  recordAudit({
+    actorUserId: req.session.userId, action: 'mail_node.domain_state_changed',
+    details: { domain, from: result.from, to: result.to, how: 'restarted', ...(result.steps ? { steps: result.steps } : {}) },
+  });
+  const apply = await applyDomainQuietly(req, domain, 'onboarding_restarted');
+  return res.json({ ok: true, domain, state: result.to, ...(apply ? { apply } : {}) });
+});
+
+// "Apply settings" for one domain: its relayhost, DKIM key and the send limits of its mailboxes.
+// { confirmDkimDelete: true } lets it delete mailcow's DKIM key of a domain the tenant signs for.
+router.post('/domains/:domain/apply', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  if (!(await nodeDomainFor(res, domain))) return undefined;
+  try {
+    return res.json(await applyDomain({
+      domain, userId: req.session.userId, trigger: 'manual', confirmDkimDelete: req.body?.confirmDkimDelete === true,
+    }));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+});
+
+// The node's last "apply" (each domain's comes with GET /domains).
+router.get('/apply', requireAdmin, async (req, res) => {
+  res.json({ node: await getNodeApplyResult() });
+});
+
+// "Apply settings" for the node and every domain the panel knows. The spam filing rule is only
+// checked: it has its own action below.
+router.post('/apply', requireAdmin, async (req, res) => {
+  try {
+    return res.json(await applyNode({ userId: req.session.userId, trigger: 'manual' }));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+});
+
+// The spam filing rule (R-11). Writing it restarts Dovecot on the node, which drops every IMAP
+// session, so the screen warns first; an unchanged rule is not written again.
+router.post('/apply/prefilter', requireAdmin, async (req, res) => {
+  try {
+    return res.json(await applyPrefilter({ userId: req.session.userId }));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
 });
 
 // The administrator accepts the creation time the node reports now for a domain whose time differs
@@ -348,23 +433,51 @@ router.get('/eop', requireAdmin, async (req, res) => {
   res.json(eopAnswer(await getEopSettings()));
 });
 
-// Only checked and kept for now: later stages apply them to the node and the tenant.
+// The fields the node gets: a change applies the node settings at once.
+const NODE_APPLIED_FIELDS = Object.freeze(['eopHost', 'tlsPolicy', 'tlsPolicyParameters', 'dkimMode', 'sendLimitPerHour']);
+
+// Checked and kept; the next hop, its TLS, the DKIM mode and the send limit are applied to the node
+// (a run that never deletes a DKIM key nor writes the spam filing rule). TLS policy parameters must
+// fit the policy (eopSettingsConflict). The tenant fields are only kept until the tenant driver comes.
 router.put('/eop', requireAdmin, async (req, res) => {
   const { settings, error } = parseEopSettings(req.body);
   if (error) return refuse(res, error);
   const current = await getEopSettings();
+  const merged = { ...current, ...settings };
+  const conflict = eopSettingsConflict(merged);
+  if (conflict) return refuse(res, conflict);
   await saveEopSettings(settings);
-  configAudit(req, 'eop', EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]));
-  res.json(eopAnswer({ ...current, ...settings }));
+  const changed = EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]);
+  configAudit(req, 'eop', changed);
+  // Applied right after the answer, as for the node settings.
+  const applying = changed.some((field) => NODE_APPLIED_FIELDS.includes(field)) && !!(await getMailNodeConfig());
+  res.json({ ...eopAnswer(merged), ...(applying ? { applying } : {}) });
+  if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'eop_settings' }));
 });
 
-// The node mailboxes MailExpert knows, with quota and usage as the node reports them.
+// The send limit a mailbox gets when nobody set its own, for each domain of the given addresses.
+async function defaultLimits(emails) {
+  const domains = [...new Set(emails.map((email) => email.toLowerCase().split('@')[1]))];
+  const [eop, { rows }] = await Promise.all([
+    getEopSettings(),
+    query('SELECT domain, mailbox_send_limit FROM mail_node_domains WHERE domain = ANY($1::text[])', [domains]),
+  ]);
+  const own = new Map(rows.map((row) => [row.domain, row.mailbox_send_limit]));
+  return (email) => defaultRateLimit(eop, own.get(email.toLowerCase().split('@')[1]) ?? null);
+}
+
+const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
+
+// The node mailboxes MailExpert knows, with quota and usage as the node reports them, and the send
+// limit: the node's (rateLimit, null when the mailbox has none of its own), an administrator's
+// (rateLimitOverride) and the default the mailbox has without one (rateLimitDefault).
 router.get('/mailboxes', requireAdmin, async (req, res) => {
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
   const { rows } = await query(
-    'SELECT id, email_address FROM email_accounts WHERE mail_node = true ORDER BY email_address'
+    'SELECT id, email_address, node_rl_value, node_rl_frame FROM email_accounts WHERE mail_node = true ORDER BY email_address'
   );
+  const defaultFor = await defaultLimits(rows.map((row) => row.email_address));
   let onNode;
   try {
     onNode = new Map((await listMailboxes(cfg)).map((m) => [m.email, m]));
@@ -387,6 +500,9 @@ router.get('/mailboxes', requireAdmin, async (req, res) => {
         active: m?.active ?? false,
         quotaMb: m?.quotaMb ?? null,
         usedBytes: m?.usedBytes ?? null,
+        rateLimit: m?.rateLimit ?? null,
+        rateLimitOverride: overrideOf(row),
+        rateLimitDefault: defaultFor(row.email_address),
       };
     }),
   });
@@ -415,6 +531,41 @@ router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {
     details: { quotaMb, from: before?.quotaMb ?? null },
   });
   res.json({ ok: true, quotaMb });
+});
+
+// An administrator's send limit for one mailbox, { value, frame } (messages per s, m, h or d), or
+// { value: null } to go back to the default. The node takes it first; the panel keeps it after, so
+// every later apply keeps it too.
+router.put('/mailboxes/:id/rate-limit', requireAdmin, async (req, res) => {
+  const clear = req.body?.value === null || req.body?.value === '';
+  const value = clear ? null : parseWholeNumber(req.body?.value, 1, MAX_SEND_LIMIT_PER_HOUR);
+  const frame = clear ? null : req.body?.frame;
+  if (!clear && (!value || !RATE_LIMIT_FRAMES.includes(frame))) return refuse(res, 'rate_limit_invalid');
+  const { rows } = await query(
+    'SELECT email_address, imap_host, node_rl_value, node_rl_frame FROM email_accounts WHERE id = $1 AND mail_node = true', [req.params.id]
+  );
+  if (!rows.length) return refuse(res, 'mailbox_not_found');
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return refuse(res, 'mail_node_not_configured');
+  if (onOtherMailHost(rows[0], cfg)) return refuse(res, 'mail_node_host_mismatch');
+  const email = rows[0].email_address.toLowerCase();
+  const limit = clear ? (await defaultLimits([email]))(email) : { value, frame };
+  try {
+    const result = await setMailboxRateLimit(cfg, [email], limit);
+    if (result.failed.length) throw new MailNodeError('mail_node_refused', `The mail node refused: ${result.reason ?? 'refused'}`);
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  // Every row of the address: two rows for one mailcow mailbox share its limit.
+  await query(
+    'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
+    [email, value, frame],
+  );
+  recordAudit({
+    actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.rate_limit_changed',
+    details: { ...limit, override: !clear, from: overrideOf(rows[0]) },
+  });
+  res.json({ ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit });
 });
 
 export default router;

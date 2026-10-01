@@ -1,4 +1,4 @@
-import { domainStateKey } from './mailNode.js';
+import { applyItemKey, domainStateKey, rateFrameKey } from './mailNode.js';
 import { formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
@@ -13,6 +13,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.disabled': 'admin.audit.actionMailboxDisabled',
   'mailbox.password_restored': 'admin.audit.actionMailboxPasswordRestored',
   'mailbox.quota_changed': 'admin.audit.actionMailboxQuotaChanged',
+  'mailbox.rate_limit_changed': 'admin.audit.actionMailboxRateLimitChanged',
   'mailbox.deletion_requested': 'admin.audit.actionMailboxDeletionRequested',
   'mailbox.deletion_cancelled': 'admin.audit.actionMailboxDeletionCancelled',
   'message.sent': 'admin.audit.actionMessageSent',
@@ -29,6 +30,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.domain_adopted': 'admin.audit.actionMailNodeDomainAdopted',
   'mail_node.domain_state_changed': 'admin.audit.actionMailNodeDomainStateChanged',
   'mail_node.domain_identity_acknowledged': 'admin.audit.actionMailNodeDomainIdentityAcknowledged',
+  'mail_node.applied': 'admin.audit.actionMailNodeApplied',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -56,6 +58,9 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   quotaMb: 'admin.audit.fieldQuota',
   diskPingUrl: 'admin.audit.fieldPingUrl',
   deleteAfterDays: 'admin.audit.fieldDeleteAfterDays',
+  panelIps: 'admin.audit.fieldPanelIps',
+  tlsPolicy: 'admin.audit.fieldTlsPolicy',
+  tlsPolicyParameters: 'admin.audit.fieldTlsParameters',
   eopHost: 'admin.audit.fieldEopHost',
   certificateHost: 'admin.audit.fieldCertificateHost',
   dkimMode: 'admin.audit.fieldDkimMode',
@@ -65,6 +70,31 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   appId: 'admin.audit.fieldAppId',
   certThumbprint: 'admin.audit.fieldThumbprint',
 });
+
+// What a mail_node.applied entry applied to: the node, the spam filing rule, or a domain (named).
+const APPLY_SCOPE_KEYS = Object.freeze({
+  node: 'admin.audit.detailApplyScopeNode',
+  prefilter: 'admin.audit.detailApplyScopePrefilter',
+});
+
+// A mail_node.applied entry: the items it changed and those that failed, by name, with the domain
+// for a domain's run. Item names this screen does not know show as written.
+function appliedDetail(details) {
+  const names = (list) => (Array.isArray(list) ? list.map((entry) => applyItemKey(entry?.item)) : []);
+  const changed = names(details.changed);
+  const failed = names(details.failed);
+  let key = 'admin.audit.detailAppliedChanged';
+  if (failed.length) key = changed.length ? 'admin.audit.detailAppliedBoth' : 'admin.audit.detailAppliedFailed';
+  const scope = details.scope === 'domain' && details.domain ? { values: { scope: details.domain } } : null;
+  return {
+    key,
+    values: scope?.values ?? {},
+    valueKeys: {
+      ...(scope ? {} : { scope: APPLY_SCOPE_KEYS[details.scope] ?? APPLY_SCOPE_KEYS.node }),
+      changed, failed,
+    },
+  };
+}
 
 export function auditActionLabelKey(action) {
   return AUDIT_ACTION_LABEL_KEYS[action] ?? null;
@@ -134,6 +164,14 @@ export function auditDetail(entry) {
         key: 'admin.audit.detailDeletionCancelled',
         values: { date: formatDay(details.deleteAfter), reason: details.reason ?? '' },
       };
+    case 'mailbox.rate_limit_changed':
+      return {
+        key: details.override ? 'admin.audit.detailRateLimitSet' : 'admin.audit.detailRateLimitDefault',
+        values: { value: details.value ?? '' },
+        valueKeys: { frame: rateFrameKey(details.frame) },
+      };
+    case 'mail_node.applied':
+      return appliedDetail(details);
     case 'mailbox.quota_changed':
       return details.from == null
         ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }

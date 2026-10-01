@@ -2,7 +2,7 @@ import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
 import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
-  deletionReasonError, normalizeEopSettings, parseWholeNumber,
+  deletionReasonError, eopSettingsConflict, normalizeEopSettings, parseNetworkList, parseWholeNumber, rateLimitError,
 } from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
@@ -747,6 +747,20 @@ const readyDomain = (node) => demoDomain(node, {
   state: 'ready', origin: 'existing_mailboxes', addedAt: '2026-09-18T09:00:00.000Z', stateChangedAt: '2026-09-18T09:00:00.000Z',
 });
 
+// The node as the demo's "apply" finds it (backend services/mailNode/nodeApply.js): the TLS entry it
+// last wrote for the next hop, whether the spam filing rule is written, the domains whose tenant signs
+// (their mailcow key waits for the administrator) and the domains mailcow still has a key for.
+const demoNode = {
+  tls: 'secure',
+  prefilterWritten: false,
+  tenantSigns: new Set(['pilot.demo.mailexpert.local']),
+  dkimKeys: new Set(),
+};
+const demoDkim = (domain) => ({
+  selector: 'dkim', name: `dkim._domainkey.${domain}`, length: '2048',
+  txt: `v=DKIM1;k=rsa;t=s;s=email;p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA${domain.replace(/[^a-z]/g, '').slice(0, 24)}demoKeyIDAQAB`,
+});
+
 let mailNodeDomains = [
   readyDomain({ domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 0 }),
   ...fleetDomains(FLEET_ACCOUNTS).map(readyDomain),
@@ -762,10 +776,13 @@ let mailNodeDomains = [
     recreated: true, nodeCreated: '2026-09-02 09:15:00',
   }),
 ].sort((a, b) => a.domain.localeCompare(b.domain));
+for (const d of mailNodeDomains) if (d.state !== 'unknown') demoNode.dkimKeys.add(d.domain);
 
 // The EOP settings screen: the defaults with the next hop and certificate filled in, no tenant yet.
 let demoEopSettings = {
   eopHost: 'demo-mailexpert-local.mail.protection.outlook.com',
+  tlsPolicy: 'secure',
+  tlsPolicyParameters: null,
   certificateHost: 'mail.demo.mailexpert.local',
   dkimMode: 'mailcow',
   sendLimitPerHour: 50,
@@ -778,6 +795,82 @@ let demoEopSettings = {
 function eopSettingsAnswer() {
   const s = demoEopSettings;
   return clone({ ...s, tenantConfigured: !!(s.tenantId && s.appId && s.certThumbprint), tenantDriverActive: false });
+}
+
+let demoPanelIps = ['203.0.113.10'];
+
+// One domain's run: its relayhost, its DKIM key as its mode wants it and its mailboxes' limits.
+function demoDomainApply(domain, { confirmDkimDelete = false } = {}) {
+  const items = [];
+  const name = domain.domain;
+  items.push(demoEopSettings.eopHost
+    ? { item: 'domain_relayhost', target: name, status: 'ok', to: 1 }
+    : { item: 'domain_relayhost', target: name, status: 'skipped', code: 'eop_host_missing' });
+  let dkim = null;
+  const hasKey = demoNode.dkimKeys.has(name);
+  if (demoNode.tenantSigns.has(name) || demoEopSettings.dkimMode === 'eop') {
+    if (!hasKey) items.push({ item: 'dkim', target: name, status: 'ok' });
+    else if (!confirmDkimDelete) {
+      items.push({ item: 'dkim', target: name, status: 'skipped', code: 'dkim_delete_unconfirmed' });
+      dkim = demoDkim(name);
+    } else {
+      demoNode.dkimKeys.delete(name);
+      items.push({ item: 'dkim', target: name, status: 'changed', from: 'dkim', to: null });
+    }
+  } else {
+    items.push(hasKey ? { item: 'dkim', target: name, status: 'ok' } : { item: 'dkim', target: name, status: 'changed', from: null, to: 'dkim' });
+    demoNode.dkimKeys.add(name);
+    dkim = demoDkim(name);
+  }
+  // Every mailbox of the domain gets the limit the panel wants for it.
+  const own = mailNodeMailboxes.filter(m => m.email.split('@')[1] === name);
+  let changed = 0;
+  mailNodeMailboxes = mailNodeMailboxes.map((m) => {
+    if (m.email.split('@')[1] !== name) return m;
+    const wanted = m.rateLimitOverride ?? m.rateLimitDefault;
+    if (m.rateLimit?.value === wanted.value && m.rateLimit?.frame === wanted.frame) return m;
+    changed += 1;
+    return { ...m, rateLimit: { ...wanted } };
+  });
+  items.push({
+    item: 'mailbox_limits', target: name, status: changed ? 'changed' : 'ok',
+    counts: { mailboxes: own.length, matching: own.length - changed, changed, failed: 0, missing: 0 },
+  });
+  const apply = { at: new Date().toISOString(), items, dkim };
+  mailNodeDomains = mailNodeDomains.map(d => (d.domain === name ? { ...d, apply } : d));
+  return { at: apply.at, domain: name, items, dkim };
+}
+
+function demoNodeItems() {
+  const s = demoEopSettings;
+  const items = [];
+  if (!s.eopHost) {
+    items.push({ item: 'tls_policy', target: null, status: 'skipped', code: 'eop_host_missing' });
+    items.push({ item: 'relayhost', target: null, status: 'skipped', code: 'eop_host_missing' });
+  } else {
+    const wanted = [s.tlsPolicy, s.tlsPolicyParameters].filter(Boolean).join(' ');
+    items.push(demoNode.tls === wanted
+      ? { item: 'tls_policy', target: s.eopHost, status: 'ok', to: wanted }
+      : { item: 'tls_policy', target: s.eopHost, status: 'changed', from: demoNode.tls, to: wanted });
+    demoNode.tls = wanted;
+    items.push({ item: 'relayhost', target: s.eopHost, status: 'ok', to: 1 });
+  }
+  items.push(demoPanelIps.length
+    ? { item: 'fail2ban', target: demoPanelIps.join(', '), status: 'ok' }
+    : { item: 'fail2ban', target: null, status: 'skipped', code: 'panel_ips_missing' });
+  items.push(demoNode.prefilterWritten
+    ? { item: 'prefilter', target: null, status: 'ok' }
+    : { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' });
+  return items;
+}
+
+// "Apply settings" for the node and every domain the panel knows.
+let demoNodeApply = null;
+function demoApplyNode() {
+  const node = demoNodeItems();
+  const domains = mailNodeDomains.filter(d => d.state !== 'unknown' && d.onNode).map(d => demoDomainApply(d));
+  demoNodeApply = { at: new Date().toISOString(), items: node };
+  return { at: demoNodeApply.at, node, domains };
 }
 
 function mailNodeDomainByName(raw) {
@@ -841,10 +934,18 @@ function changeMailNodeDomain(action, raw, step, body) {
   if (step !== domain.nextStep) throw demoError('Only the next onboarding step can be confirmed', 'step_out_of_order');
   return updateMailNodeDomain(domain.domain, { state: step, stateChangedAt: now, steps: { ...domain.steps, [step]: demoStep(now) } });
 }
+const DEMO_DEFAULT_LIMIT = { value: 50, frame: 'h' };
 let mailNodeMailboxes = FLEET_ACCOUNTS.filter(account => account.mail_node).map((account, index) => ({
   accountId: account.id, email: account.email_address, onNode: true, active: true, quotaMb: 5120,
   usedBytes: ((index * 37) % 90 + 3) * 10 * 1048576,
+  rateLimit: index === 1 ? null : (index === 0 ? { value: 200, frame: 'd' } : { ...DEMO_DEFAULT_LIMIT }),
+  rateLimitOverride: index === 0 ? { value: 200, frame: 'd' } : null,
+  rateLimitDefault: { ...DEMO_DEFAULT_LIMIT },
 }));
+// The node and its domains as the last apply left them, before anyone pressed "Apply" in the demo.
+demoNodeApply = { at: '2026-09-30T18:00:00.000Z', items: demoNodeItems() };
+for (const d of mailNodeDomains) if (d.state !== 'unknown') demoDomainApply(d);
+mailNodeMailboxes = mailNodeMailboxes.map((m, index) => (index === 1 ? { ...m, rateLimit: null } : m));
 
 // Addresses Google granted before (the grant journal) that are no mailbox now: the Gmail field
 // offers them as "Connected before".
@@ -909,7 +1010,11 @@ function createDomainMailbox(body) {
     mail_node: true, thread_mode: 'rfc',
   };
   ACCOUNT_FIXTURES.push(account);
-  mailNodeMailboxes = [...mailNodeMailboxes, { accountId: account.id, email, onNode: true, active: true, quotaMb: 5120, usedBytes: 0 }];
+  mailNodeMailboxes = [...mailNodeMailboxes, {
+    accountId: account.id, email, onNode: true, active: true, quotaMb: 5120, usedBytes: 0,
+    rateLimit: { value: demoEopSettings.sendLimitPerHour, frame: 'h' }, rateLimitOverride: null,
+    rateLimitDefault: { value: demoEopSettings.sendLimitPerHour, frame: 'h' },
+  }];
   mailNodeDomains = mailNodeDomains.map(d => (d.domain === domain.domain ? { ...d, mailboxes: d.mailboxes + 1 } : d));
   welcomeLetter(account);
   return account;
@@ -1677,7 +1782,7 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && pathname === '/mail-node/config') {
     return {
       configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '',
-      deleteAfterDays: demoDeleteAfterDays,
+      deleteAfterDays: demoDeleteAfterDays, panelIps: [...demoPanelIps],
     };
   }
   if (verb === 'PUT' && pathname === '/mail-node/config') {
@@ -1686,6 +1791,18 @@ export async function demoRequest(method, path, body = {}) {
       const days = parseWholeNumber(body.deleteAfterDays, 1, MAX_DELETE_AFTER_DAYS);
       if (days == null) throw demoError('Days before a deletion must be a whole number from 1 to 90', 'delete_after_days_invalid');
       demoDeleteAfterDays = days;
+    }
+    // The panel's addresses for the node's fail2ban, checked as the server does; a change applies.
+    if (body?.panelIps !== undefined) {
+      const { networks, error } = parseNetworkList(body.panelIps);
+      if (error) throw demoError('Panel addresses must be IP addresses or networks', error);
+      const changed = networks.join() !== demoPanelIps.join();
+      demoPanelIps = networks;
+      // As on the server, the apply runs after the answer; the demo has it done at once.
+      if (changed) {
+        demoApplyNode();
+        return { ok: true, applying: true };
+      }
     }
     return { ok: true };
   }
@@ -1706,6 +1823,10 @@ export async function demoRequest(method, path, body = {}) {
         { domain, active: true, maxMailboxes: Number(body?.mailboxes) || 500, mailboxes: 0 },
         { state: 'node_created', origin: 'created', addedAt: now, addedBy: DEMO_ADMIN_EMAIL, stateChangedAt: now },
       )].sort((a, b) => a.domain.localeCompare(b.domain));
+      // A new domain gets a key only when mailcow signs, then its node settings.
+      if (demoEopSettings.dkimMode === 'mailcow') demoNode.dkimKeys.add(domain);
+      const apply = demoDomainApply(mailNodeDomains.find(d => d.domain === domain));
+      return { ok: true, domain, state: 'node_created', apply };
     }
     return { ok: true, domain, state: 'node_created' };
   }
@@ -1713,15 +1834,47 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'POST' && domainAction) {
     const action = domainAction[2].startsWith('steps/') ? 'step' : domainAction[2];
     const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]), body);
+    // As on the server, a domain adopted or started over gets its node settings applied.
+    if (action === 'adopt' || action === 'restart') {
+      return { ok: true, domain: changed.domain, state: changed.state, apply: demoDomainApply(changed) };
+    }
     return { ok: true, domain: changed.domain, state: changed.state };
+  }
+  const domainApply = pathname.match(/^\/mail-node\/domains\/([^/]+)\/apply$/);
+  if (verb === 'POST' && domainApply) {
+    const domain = mailNodeDomainByName(domainApply[1]);
+    if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+    return demoDomainApply(domain, { confirmDkimDelete: body?.confirmDkimDelete === true });
+  }
+  if (verb === 'GET' && pathname === '/mail-node/apply') return clone({ node: demoNodeApply });
+  if (verb === 'POST' && pathname === '/mail-node/apply') return clone(demoApplyNode());
+  if (verb === 'POST' && pathname === '/mail-node/apply/prefilter') {
+    // Writing the rule restarts Dovecot on a real node; the demo only records it.
+    const item = demoNode.prefilterWritten
+      ? { item: 'prefilter', target: null, status: 'ok' }
+      : { item: 'prefilter', target: null, status: 'changed' };
+    demoNode.prefilterWritten = true;
+    const at = new Date().toISOString();
+    demoNodeApply = { at: demoNodeApply?.at ?? at, items: [...(demoNodeApply?.items ?? []).filter(i => i.item !== 'prefilter'), { ...item, at }] };
+    return clone({ ...item, at });
   }
   if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();
   if (verb === 'PUT' && pathname === '/mail-node/eop') {
     // The server's checks and normalization (utils/mailNode.js mirrors eopSettings.js).
     const { settings, error } = normalizeEopSettings(body);
     if (error) throw demoError('Invalid EOP setting', error);
-    demoEopSettings = { ...demoEopSettings, ...settings };
-    return eopSettingsAnswer();
+    const merged = { ...demoEopSettings, ...settings };
+    const conflict = eopSettingsConflict(merged);
+    if (conflict) throw demoError('Invalid EOP setting', conflict);
+    const applied = ['eopHost', 'tlsPolicy', 'tlsPolicyParameters', 'dkimMode', 'sendLimitPerHour']
+      .some(field => field in settings && settings[field] !== demoEopSettings[field]);
+    demoEopSettings = merged;
+    if (settings.sendLimitPerHour) {
+      mailNodeMailboxes = mailNodeMailboxes.map(m => ({ ...m, rateLimitDefault: { value: settings.sendLimitPerHour, frame: 'h' } }));
+    }
+    if (!applied) return eopSettingsAnswer();
+    demoApplyNode();
+    return { ...eopSettingsAnswer(), applying: true };
   }
   if (verb === 'GET' && pathname === '/mail-node/mailboxes') {
     return clone({ disk: { usedPercent: 41, used: '16G', total: '40G', warn: false }, mailboxes: mailNodeMailboxes });
@@ -1731,6 +1884,20 @@ export async function demoRequest(method, path, body = {}) {
     const id = decodeURIComponent(quotaMatch[1]);
     mailNodeMailboxes = mailNodeMailboxes.map(m => (m.accountId === id ? { ...m, quotaMb: Number(body?.quotaMb) } : m));
     return { ok: true, quotaMb: Number(body?.quotaMb) };
+  }
+  const limitMatch = pathname.match(/^\/mail-node\/mailboxes\/([^/]+)\/rate-limit$/);
+  if (verb === 'PUT' && limitMatch) {
+    // An administrator's send limit, or the default again (value null), checked as the server does.
+    const id = decodeURIComponent(limitMatch[1]);
+    const mailbox = mailNodeMailboxes.find(m => m.accountId === id);
+    if (!mailbox) throw demoError('Mail node mailbox not found', 'mailbox_not_found');
+    const clear = body?.value === null || body?.value === '';
+    if (!clear && rateLimitError({ value: body?.value, frame: body?.frame })) throw demoError('Invalid send limit', 'rate_limit_invalid');
+    const limit = clear ? mailbox.rateLimitDefault : { value: Number(body.value), frame: body.frame };
+    mailNodeMailboxes = mailNodeMailboxes.map(m => (m.accountId === id
+      ? { ...m, rateLimit: { ...limit }, rateLimitOverride: clear ? null : { ...limit } }
+      : m));
+    return { ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit };
   }
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
   if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };

@@ -127,6 +127,8 @@ const SAME_VALUE_ALLOWED = {
   'admin.integrations.google.title':        'any', // Google / Gmail — brand names
   'admin.integrations.googleApps.clientIdPh': 'any', // 1234567890-abc123.apps.googleusercontent.com
   'admin.eop.guidPh':                        'any', // 00000000-0000-0000-0000-000000000000
+  'admin.eop.tlsParametersPh':               'any', // match=nexthop:dot-nexthop (Postfix syntax)
+  'admin.mailNode.panelIpsPh':               'any', // 203.0.113.10
   'admin.security.totpVerifyPh':            'any', // 000000
   'admin.sso.adminGroupClaimPh':            'any', // groups
   'admin.sso.adminGroupValuePh':            'any', // mailexpert-admins
