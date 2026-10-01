@@ -43,6 +43,8 @@ const TLS_POLICY_KEYS = {
 };
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 
+// What the TERRL limit is made of: a save that changes one of them recounts the budget.
+const BUDGET_FIELDS = ['terrl', 'licenses', 'tenantCreatedOn'];
 const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'licenses', 'tenantCreatedOn', 'tenantId', 'appId', 'certThumbprint'];
 
 // The stored settings as the form edits them: every field a string.
@@ -89,7 +91,9 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       setBudget(null);
     }
   }, []);
-  useEffect(() => { loadBudget(); }, [loadBudget, revision]);
+  // Once when the section opens (the server shares one read of the node log a minute), and again
+  // only when a save changed what the limit is made of; never on every domain change (revision).
+  useEffect(() => { loadBudget(); }, [loadBudget]);
 
   const loadApplied = useCallback(async () => {
     try {
@@ -144,7 +148,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       });
       setStored(saved);
       setForm(toForm(saved));
-      loadBudget();
+      if (BUDGET_FIELDS.some((field) => saved[field] !== stored?.[field])) loadBudget();
       // A change the node gets is applied after the answer: its result shows on the next load.
       setNotice(applying ? 'admin.eop.savedApplying' : 'admin.eop.saved');
     } catch (err) {

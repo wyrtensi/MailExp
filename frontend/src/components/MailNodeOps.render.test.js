@@ -221,6 +221,46 @@ describe('MailNodeOpsSection queue', () => {
     assert.deepEqual(calls.filter((c) => c.method === 'POST').map((c) => [c.path, c.body]), [['/api/mail-node/queue/53A99193F13/delete', { confirm: true }]]);
   });
 
+  test('closes the details that failed to load, and reads the queue again when the message is gone', async () => {
+    answers['GET /api/mail-node/queue/53A99193F13'] = { status: 404, body: { error: 'gone', code: 'queue_item_not_found' } };
+    const root = await mount(React.createElement(MailNodeOpsSection));
+    const before = calls.filter((c) => c.path === '/api/mail-node/queue').length;
+    answers['GET /api/mail-node/queue'] = { ...QUEUE, items: [HELD], counts: { ...QUEUE.counts, deferred: 0 }, total: 1 };
+    await click(root.querySelector('[data-queue-item="53A99193F13"] button[aria-expanded]'));
+    assert.equal(root.querySelector('[data-queue-details]'), null);
+    assert.equal(calls.filter((c) => c.path === '/api/mail-node/queue').length, before + 1);
+    assert.equal(root.querySelector('[data-queue-item="53A99193F13"]'), null);
+    assert.match(root.querySelector('[role="alert"]').textContent, /admin\.nodeOps\.errorQueueItemNotFound/);
+  });
+
+  test('shows the oldest 200 messages and says how many there are', async () => {
+    const many = Array.from({ length: 250 }, (_, i) => ({ ...DEFERRED, queueId: `AB${String(i).padStart(8, '0')}` }));
+    answers['GET /api/mail-node/queue'] = { ...QUEUE, items: many, total: 250 };
+    const root = await mount(React.createElement(MailNodeOpsSection));
+    assert.equal(root.querySelectorAll('[data-queue-item]').length, 200);
+    assert.ok(root.querySelector('[data-queue-shown]'));
+  });
+
+  test('the delete confirmation is a labelled alert dialog that takes the focus', async () => {
+    const root = await mount(React.createElement(MailNodeOpsSection));
+    await click(root.querySelector('[data-queue-item="53A99193F13"] [data-queue-action="delete"]'));
+    const dialog = root.querySelector('[role="alertdialog"]');
+    const label = dialog.getAttribute('aria-labelledby');
+    assert.match(dom.window.document.getElementById(label).textContent, /admin\.nodeOps\.deleteConfirm/);
+    assert.equal(dom.window.document.activeElement.textContent, 'common.cancel');
+  });
+
+  test('shows the missing EOP host as a note, not an error', async () => {
+    answers['GET /api/mail-node/alerts'] = {
+      state: { at, trigger: 'schedule', errors: [], alerts: [{ key: 'eop_host_missing', severity: 'info', since: at, seenAt: at, details: {} }] },
+      settings: SETTINGS, defaults: SETTINGS,
+    };
+    const root = await mount(React.createElement(MailNodeOpsSection));
+    const note = root.querySelector('[data-alert="eop_host_missing"]');
+    assert.equal(note.getAttribute('data-severity'), 'info');
+    assert.match(note.textContent, /admin\.nodeOps\.alertDetailEopHostMissing/);
+  });
+
   test('shows why the queue could not be read', async () => {
     answers['GET /api/mail-node/queue'] = { status: 502, body: { error: 'The mail node is unreachable', code: 'mail_node_unreachable' } };
     const root = await mount(React.createElement(MailNodeOpsSection));
@@ -250,6 +290,17 @@ describe('EopSection TERRL budget', () => {
     assert.match(budget.textContent, /admin\.eop\.budgetRamp/);
     assert.match(budget.textContent, /admin\.eop\.budgetLogPartial/);
     assert.ok(budget.querySelector('[role="alert"]'));
+  });
+
+  test('reads the budget once, and again only after a save that changes the limit', async () => {
+    answers['GET /api/mail-node/eop'] = EOP;
+    answers['GET /api/mail-node/apply'] = { node: null };
+    answers['GET /api/mail-node/eop/budget'] = BUDGET;
+    // The server answers the stored, normalized settings: nothing of the limit changed.
+    answers['PUT /api/mail-node/eop'] = () => EOP;
+    const root = await mount(React.createElement(EopSection, { revision: 0 }));
+    await click(buttons(root, 'common.save')[0]);
+    assert.equal(calls.filter((c) => c.path === '/api/mail-node/eop/budget').length, 1);
   });
 
   test('sends the licenses and the creation date with the settings', async () => {

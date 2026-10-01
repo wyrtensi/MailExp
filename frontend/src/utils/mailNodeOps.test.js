@@ -31,6 +31,12 @@ describe('TERRL budget mirror', () => {
     assert.deepEqual(normalizeEopSettings({ tenantCreatedOn: '2026-02-30' }), { error: 'tenant_created_invalid' });
     assert.equal(parseDay('2999-01-01'), null);
   });
+
+  it('takes the administrator\'s own today', () => {
+    const now = new Date(2026, 9, 2, 0, 30).getTime(); // 00:30 local on 2 October
+    assert.equal(parseDay('2026-10-02', now), '2026-10-02');
+    assert.equal(parseDay('2026-10-03', now), null);
+  });
 });
 
 describe('queue', () => {
@@ -59,9 +65,11 @@ describe('alerts', () => {
   it('describes each alert', () => {
     assert.equal(alertTitleKey('eop_bypass'), 'admin.nodeOps.alertEopBypass');
     assert.equal(alertTitleKey('new_one'), 'admin.nodeOps.alertUnknown');
-    assert.deepEqual(alertDetail({ key: 'eop_bypass', details: { count: 2, relays: ['a', 'b'], eopHostSet: false, lastAt: 'x' } }), {
-      key: 'admin.nodeOps.alertDetailBypassNoHost', values: { count: 2, relays: 'a, b' }, at: 'x',
+    assert.deepEqual(alertDetail({ key: 'eop_bypass', details: { count: 2, relays: ['a', 'b'], lastAt: 'x' } }), {
+      key: 'admin.nodeOps.alertDetailBypass', values: { count: 2, relays: 'a, b' }, at: 'x',
     });
+    assert.equal(alertTitleKey('eop_host_missing'), 'admin.nodeOps.alertEopHostMissing');
+    assert.deepEqual(alertDetail({ key: 'eop_host_missing', severity: 'info', details: {} }), { key: 'admin.nodeOps.alertDetailEopHostMissing', values: {} });
     assert.deepEqual(alertDetail({ key: 'containers', details: { down: [{ name: 'dovecot-mailcow', state: 'restarting' }] } }).values, { names: 'dovecot-mailcow (restarting)' });
     assert.equal(alertDetail({ key: 'certificate', details: { code: 'cert_expired', expiresAt: 'y' } }).key, 'admin.nodeOps.alertDetailCertExpired');
     assert.deepEqual(alertDetail({ key: 'queue_deferred', details: { deferred: 21, oldestMinutes: null, deferredCount: 20, deferredMinutes: 60 } }).values, {

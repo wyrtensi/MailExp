@@ -486,6 +486,7 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
 test('the node operations answer: queue actions, alerts, budget', async () => {
   const queue = await demoRequest('GET', '/mail-node/queue');
   const held = queue.items.find(item => item.queue === 'hold');
+  await reject('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/deliver`, {}, /released first/);
   const released = await answer('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/unhold`);
   assert.equal(released.action, 'unhold');
   await reject('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/delete`, {}, /confirmed/);

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
@@ -35,7 +35,10 @@ const cellStyle = { padding: '8px 10px', borderBottom: '1px solid var(--border-s
 const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' };
 const monoStyle = { fontFamily: 'JetBrains Mono, monospace', fontSize: 11 };
 const noteStyle = { fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
-const SEVERITY_COLORS = { error: 'var(--red)', warning: 'var(--amber)' };
+const SEVERITY_COLORS = { error: 'var(--red)', warning: 'var(--amber)', info: 'var(--text-secondary)' };
+// The queue may hold thousands of messages (postqueue -j gives up to 10000): the screen shows the
+// oldest ones and the counts.
+const MAX_QUEUE_ROWS = 200;
 
 const when = (at) => (at ? new Date(at).toLocaleString() : '');
 
@@ -124,8 +127,20 @@ export default function MailNodeOpsSection() {
     await loadQueue();
   }, 'admin.nodeOps.flushed');
 
+  // A message that left the queue meanwhile (delivered, expired, deleted elsewhere): the list is
+  // read again, so the screen stops offering it.
+  const reloadWhenGone = async (err) => {
+    if (err?.code === 'queue_item_not_found') await loadQueue();
+  };
+
   const act = (queueId, action) => run(async () => {
-    await api.mailNode.queueAction(queueId, action, { confirm: action === 'delete' });
+    try {
+      await api.mailNode.queueAction(queueId, action, { confirm: action === 'delete' });
+    } catch (err) {
+      setConfirmDelete(null);
+      await reloadWhenGone(err);
+      throw err;
+    }
     setConfirmDelete(null);
     if (open?.queueId === queueId) setOpen(null);
     await loadQueue();
@@ -136,10 +151,25 @@ export default function MailNodeOpsSection() {
       setOpen(null);
       return;
     }
+    const before = open;
     setOpen({ queueId, message: body ? open?.message : null, body });
-    const message = await api.mailNode.getQueuedMessage(queueId, { body });
-    setOpen({ queueId, message, body });
+    try {
+      const message = await api.mailNode.getQueuedMessage(queueId, { body });
+      setOpen({ queueId, message, body });
+    } catch (err) {
+      // No "Loading…" left behind: the headers already shown stay, a first read closes.
+      setOpen(body && before?.queueId === queueId ? before : null);
+      await reloadWhenGone(err);
+      throw err;
+    }
   });
+
+  // The delete confirmation takes the focus, on "Cancel", so a keyboard user lands in it and a
+  // stray Enter does not delete.
+  const cancelDeleteRef = useRef(null);
+  useEffect(() => {
+    if (confirmDelete) cancelDeleteRef.current?.focus();
+  }, [confirmDelete]);
 
   const age = (seconds) => {
     if (seconds == null) return '—';
@@ -153,7 +183,8 @@ export default function MailNodeOpsSection() {
   };
 
   const state = alerts?.state ?? null;
-  const items = queue?.items ?? [];
+  const allItems = queue?.items ?? [];
+  const items = allItems.slice(0, MAX_QUEUE_ROWS);
 
   return (
     <div data-section="node-ops" style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -251,6 +282,9 @@ export default function MailNodeOpsSection() {
           </div>
         )}
         {queue && items.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginTop: 6 }}>{t('admin.nodeOps.queueEmpty')}</div>}
+        {allItems.length > items.length && (
+          <div data-queue-shown style={noteStyle}>{t('admin.nodeOps.queueShown', { shown: items.length, total: allItems.length })}</div>
+        )}
         {items.length > 0 && (
           <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
             <thead>
@@ -300,11 +334,11 @@ export default function MailNodeOpsSection() {
                         ))}
                       </span>
                       {confirmDelete === item.queueId && (
-                        <div role="alertdialog" data-delete-confirm style={{ marginTop: 8, fontSize: 12 }}>
-                          <div style={{ fontWeight: 600 }}>{t('admin.nodeOps.deleteConfirm', { id: item.queueId })}</div>
+                        <div role="alertdialog" aria-labelledby={`queue-delete-${item.queueId}`} data-delete-confirm style={{ marginTop: 8, fontSize: 12 }}>
+                          <div id={`queue-delete-${item.queueId}`} style={{ fontWeight: 600 }}>{t('admin.nodeOps.deleteConfirm', { id: item.queueId })}</div>
                           <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                             <button type="button" onClick={() => act(item.queueId, 'delete')} disabled={busy} style={dangerButtonStyle}>{t('admin.nodeOps.deleteConfirmButton')}</button>
-                            <button type="button" onClick={() => setConfirmDelete(null)} disabled={busy} style={buttonStyle}>{t('common.cancel')}</button>
+                            <button type="button" ref={cancelDeleteRef} onClick={() => setConfirmDelete(null)} disabled={busy} style={buttonStyle}>{t('common.cancel')}</button>
                           </div>
                         </div>
                       )}
@@ -323,6 +357,12 @@ export default function MailNodeOpsSection() {
                                 arrival: open.message.envelope?.arrival ?? '—',
                               })}
                             </div>
+                            {open.message.envelope?.doneRecipients?.length > 0 && (
+                              <div data-done-recipients style={noteStyle}>
+                                {t('admin.nodeOps.doneRecipients', { list: open.message.envelope.doneRecipients.join(', ') })}
+                              </div>
+                            )}
+                            {open.message.dumpTruncated && <div style={noteStyle}>{t('admin.nodeOps.dumpTruncated')}</div>}
                             <ul style={{ listStyle: 'none', margin: '6px 0 0', padding: 0 }}>
                               {open.message.headers.map((h, index) => (
                                 // Headers repeat (Received): the position tells them apart.

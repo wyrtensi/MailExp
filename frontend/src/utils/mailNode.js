@@ -135,6 +135,7 @@ const ERROR_KEYS = {
   queue_action_invalid: 'admin.nodeOps.errorQueueAction',
   queue_delete_unconfirmed: 'admin.nodeOps.errorDeleteUnconfirmed',
   queue_item_not_found: 'admin.nodeOps.errorQueueItemNotFound',
+  queue_item_held: 'admin.nodeOps.errorQueueItemHeld',
   deferred_count_invalid: 'admin.nodeOps.errorDeferredCount',
   deferred_minutes_invalid: 'admin.nodeOps.errorDeferredMinutes',
   alert_check_failed: 'admin.nodeOps.errorAlertCheck',
@@ -366,12 +367,15 @@ const parseIpv4 = (value) => {
 };
 // A calendar day as YYYY-MM-DD, not after today (UTC): the tenant's creation date (backend
 // eopSettings.js parseDay).
+// "Today" is the administrator's own (local) day, which the server takes too.
 export function parseDay(value, now = Date.now()) {
   const text = String(value ?? '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
   const at = Date.parse(`${text}T00:00:00Z`);
   if (!Number.isFinite(at) || new Date(at).toISOString().slice(0, 10) !== text) return null;
-  return at <= now ? text : null;
+  const local = new Date(now);
+  const today = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
+  return text <= today ? text : null;
 }
 const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
@@ -795,6 +799,8 @@ const QUEUE_ACTION_KEYS = {
   unhold: 'admin.nodeOps.actionUnhold',
   deliver: 'admin.nodeOps.actionDeliver',
   delete: 'admin.nodeOps.actionDelete',
+  // Not a button: reading a queued message's body, as the journal names it.
+  view_body: 'admin.nodeOps.actionViewBody',
 };
 export function queueActionKey(action) {
   return QUEUE_ACTION_KEYS[action] ?? action;
@@ -831,6 +837,7 @@ const ALERT_TITLE_KEYS = {
   certificate: 'admin.nodeOps.alertCertificate',
   containers: 'admin.nodeOps.alertContainers',
   terrl_budget: 'admin.nodeOps.alertTerrlBudget',
+  eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
 
@@ -861,10 +868,12 @@ export function alertDetail(alert) {
       return { key: 'admin.nodeOps.alertDetailRefusals', values: { count: d.count ?? 0 }, at: d.lastAt ?? null };
     case 'eop_bypass':
       return {
-        key: d.eopHostSet === false ? 'admin.nodeOps.alertDetailBypassNoHost' : 'admin.nodeOps.alertDetailBypass',
+        key: 'admin.nodeOps.alertDetailBypass',
         values: { count: d.count ?? 0, relays: (d.relays ?? []).join(', ') || '—' },
         at: d.lastAt ?? null,
       };
+    case 'eop_host_missing':
+      return { key: 'admin.nodeOps.alertDetailEopHostMissing', values: {} };
     case 'queue_deferred':
       return {
         key: 'admin.nodeOps.alertDetailQueue',

@@ -1139,7 +1139,7 @@ function demoQueuedMessage(item, withBody) {
   const body = `Hello,\n\n${item.subject} is attached.\n\nMailExpert demo`;
   return {
     queueId: item.queueId, queue: item.queue,
-    envelope: { sender: item.sender, recipients: item.recipients.map(r => r.address), arrival: new Date(item.arrivedAt).toUTCString() },
+    envelope: { sender: item.sender, recipients: item.recipients.map(r => r.address), doneRecipients: [], arrival: new Date(item.arrivedAt).toUTCString() },
     headers: [
       { name: 'Received', value: `from panel (panel [203.0.113.10]) by mail.demo.mailexpert.local (Postfix) with ESMTPSA id ${item.queueId}` },
       { name: 'From', value: item.sender },
@@ -1147,7 +1147,7 @@ function demoQueuedMessage(item, withBody) {
       { name: 'Subject', value: item.subject },
       { name: 'Message-ID', value: `<${item.queueId.toLowerCase()}@demo.mailexpert.local>` },
     ],
-    bodyBytes: body.length, body: withBody ? body : null, bodyTruncated: false,
+    bodyBytes: body.length, body: withBody ? body : null, bodyTruncated: false, dumpTruncated: false,
   };
 }
 
@@ -2186,6 +2186,7 @@ export async function demoRequest(method, path, body = {}) {
     const item = demoQueue.find(entry => entry.queueId === queueId);
     if (!item) throw demoError('The mail queue has no message with this ID', 'queue_item_not_found');
     if (!action) return clone(demoQueuedMessage(item, url.searchParams.get('body') === '1'));
+    if (action === 'deliver' && item.queue === 'hold') throw demoError('A held message is released first, then delivered', 'queue_item_held');
     if (!queueItemActions(item).includes(action)) return { ok: true, action, queueId };
     // The demo's EOP accepts what is tried again: the message leaves the queue.
     if (action === 'delete' || action === 'deliver') demoQueue = demoQueue.filter(entry => entry.queueId !== queueId);

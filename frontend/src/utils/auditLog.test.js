@@ -344,6 +344,7 @@ describe('auditDetail of the node operations', () => {
     });
     assert.equal(auditDetail({ action: 'mail_node.queue_action', details: { action: 'hold', queueId: 'AB12CD34EF', sender: '', recipients: [] } }).values.sender, '<>');
     assert.deepEqual(auditDetail({ action: 'mail_node.queue_action', details: { action: 'flush' } }), { key: 'admin.audit.detailQueueFlush', values: {} });
+    assert.equal(auditDetail({ action: 'mail_node.queue_action', details: { action: 'view_body', queueId: 'AB12CD34EF', sender: 'a@b.c', recipients: ['d@e.f'] } }).valueKeys.action, 'admin.nodeOps.actionViewBody');
   });
 
   it('names the alert raised or cleared', () => {
