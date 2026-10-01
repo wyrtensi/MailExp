@@ -31,9 +31,26 @@ describe('eopCategory', () => {
     expect(eopCategory(parseRawHeaders(raw)['x-forefront-antispam-report'])).toBe('HPHISH');
   });
 
-  it('reads a list of categories and upper-cases them', () => {
+  it('reads a comma list of categories and upper-cases them', () => {
     expect(eopCategory('SFV:SPM;cat:bulk,spoof;')).toBe('SPOOF');
     expect(eopCategory('CAT: hspm ;')).toBe('HSPM');
+  });
+
+  it('ranks the Defender categories: malware over impersonation over spoofing', () => {
+    expect(eopCategory('CAT:SPOOF,UIMP;')).toBe('UIMP');
+    expect(eopCategory('CAT:DIMP,SAP;')).toBe('SAP');
+    expect(eopCategory('CAT:INTOS;')).toBe('INTOS');
+    expect(eopCategory('CAT:FTBP;')).toBe('FTBP');
+  });
+
+  it('does not split a value on the space unfolding leaves behind', () => {
+    // A fold right after "CAT:" leaves a space before the value: still one category.
+    const folded = parseRawHeaders('X-Forefront-Antispam-Report: SFV:SPM;CAT:\r\n PHSH;DIR:INB;\r\n')['x-forefront-antispam-report'];
+    expect(eopCategory(folded)).toBe('PHSH');
+    // A fold inside the value breaks it: "PH SH" is not a category, and not PH plus SH either.
+    const broken = parseRawHeaders('X-Forefront-Antispam-Report: SFV:SPM;CAT:PH\r\n SH;\r\n')['x-forefront-antispam-report'];
+    expect(eopCategory(broken)).toBeNull();
+    expect(eopCategory('CAT:BULK SPOOF;')).toBeNull();
   });
 
   it('answers null without a category or with garbage in it', () => {

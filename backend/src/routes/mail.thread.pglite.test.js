@@ -45,7 +45,7 @@ beforeAll(async () => {
       is_read boolean NOT NULL DEFAULT false, is_starred boolean NOT NULL DEFAULT false,
       has_attachments boolean NOT NULL DEFAULT false, account_id uuid NOT NULL, category text,
       list_unsubscribe text, list_unsubscribe_post text, unsubscribed_at timestamptz,
-      delivery_addresses jsonb, is_deleted boolean NOT NULL DEFAULT false
+      delivery_addresses jsonb, eop_category text, is_deleted boolean NOT NULL DEFAULT false
     );
   `);
   await db.query("INSERT INTO email_accounts (id, name) VALUES ($1, 'sales'), ($2, 'ops')", [SALES, OPS]);

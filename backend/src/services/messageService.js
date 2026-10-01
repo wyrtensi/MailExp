@@ -107,7 +107,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
                m.to_addresses, m.cc_addresses, m.reply_to, m.in_reply_to,
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
-               m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses,
+               m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses, m.eop_category,
                a.name  AS account_name,
                a.email_address AS account_email,
                a.color AS account_color,
@@ -166,7 +166,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
              to_addresses, cc_addresses, reply_to, in_reply_to,
              date, snippet, is_starred, is_read, has_attachments, account_id,
              account_name, account_email, account_color,
-             category, list_unsubscribe, list_unsubscribe_post, delivery_addresses,
+             category, list_unsubscribe, list_unsubscribe_post, delivery_addresses, eop_category,
              message_count, unread_count,
              thread_has_contact_photo AS has_contact_photo
       FROM ranked
@@ -203,7 +203,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
            m.to_addresses, m.cc_addresses, m.reply_to, m.in_reply_to,
            m.date, m.snippet, m.is_read, m.is_starred,
            m.has_attachments, m.account_id, m.category,
-           m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses,
+           m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses, m.eop_category,
            a.name as account_name, a.email_address as account_email, a.color as account_color,
            EXISTS (SELECT 1 FROM contacts co
                     WHERE co.primary_email = lower(m.from_email)
