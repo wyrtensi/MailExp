@@ -50,6 +50,12 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
     api.mailNode.listDomains()
       .then((data) => {
         if (!live) return;
+        // An administrator gets the domains even when the node cannot list them, with the node's
+        // error beside them: no mailbox can be created then, so the form says why.
+        if (data?.node) {
+          setLoadError({ key: mailNodeErrorKey(data.node.code), detail: '' });
+          return;
+        }
         const list = selectableDomains(data?.domains);
         setDomains(list);
         setDomain((current) => current || list[0] || '');

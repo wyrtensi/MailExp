@@ -329,6 +329,16 @@ describe('DomainMailboxAddForm', () => {
     assert.deepEqual(options, ['ready.example']);
   });
 
+  test('says the node is unreachable, not that there is no domain, when an administrator gets the node error', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: DOMAINS.filter((d) => d.state !== 'unknown').map((d) => ({ ...d, onNode: null, active: null })),
+      node: { error: 'The mail node is unreachable (ETIMEDOUT)', code: 'mail_node_unreachable' },
+    };
+    const host = await mount(React.createElement(DomainMailboxAddForm, { accounts: [], onCreated: () => {} }));
+    assert.ok(host.textContent.includes('admin.mailNode.errorUnreachable'));
+    assert.equal(host.textContent.includes('admin.accounts.add.domainNoDomains'), false);
+  });
+
   test('says there is no ready domain when none is', async () => {
     answers['GET /api/mail-node/domains'] = { domains: DOMAINS.filter((d) => d.state !== 'ready') };
     const host = await mount(React.createElement(DomainMailboxAddForm, { accounts: [], onCreated: () => {} }));

@@ -68,6 +68,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       setDomainsNodeError(data?.node ?? null);
       setDomainsError(null);
     } catch (err) {
+      setDomainsNodeError(null);
       setDomainsError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
     }
   }, []);
