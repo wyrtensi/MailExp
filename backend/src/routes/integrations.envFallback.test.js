@@ -104,6 +104,21 @@ describe('GOOGLE_REDIRECT_URI as the fallback callback URL', () => {
     });
   });
 
+  it('leaves the mail node rows out of the settings screen, encrypted key and EOP settings alike', async () => {
+    const { default: router } = await loadModule(ENV_URI);
+    db.rows = [
+      { provider: 'microsoft', config: { clientId: 'ms-client', clientSecret: 'enc:ms' }, updated_at: 't' },
+      { provider: 'mail_node', config: { mailHost: 'mail.example.com', apiKey: 'enc:node-key' }, updated_at: 't' },
+      { provider: 'mail_node_eop', config: { eopHost: 'contoso-com.mail.protection.outlook.com' }, updated_at: 't' },
+    ];
+    await withApp(router, async (base) => {
+      const body = await (await fetch(`${base}/api/integrations`)).json();
+      expect(Object.keys(body).sort()).toEqual(['google', 'microsoft']);
+      expect(body.microsoft.clientSecret).toBe('••••••••');
+      expect(JSON.stringify(body)).not.toContain('node-key');
+    });
+  });
+
   it('still clears the variable when the process started without one', async () => {
     const { loadIntegrationConfigs } = await loadModule(undefined);
     process.env.GOOGLE_REDIRECT_URI = STORED_URI; // left by an earlier save in this process

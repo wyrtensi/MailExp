@@ -22,6 +22,7 @@ import { providerThreadIndexState } from '../services/threading/providerThreadIn
 import {
   MailNodeError, disableMailbox, getMailbox, getMailNodeConfig, listDomains, parseHostName, parseLocalPart, provisionMailbox,
 } from '../services/mailNode/mailcow.js';
+import { canCreateMailboxes, getDomainRow, isRecreated } from '../services/mailNode/domains.js';
 import { mailNodeFailure, refuse as refuseMailNode } from './mailNode.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
@@ -179,13 +180,18 @@ async function createDomainMailboxNow(req, res) {
 
   const taken = await query('SELECT 1 FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
   if (taken.rows.length) return res.status(409).json({ error: 'This mailbox is already in MailExpert', code: 'mailbox_exists' });
+  // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does.
+  const panelDomain = await getDomainRow(domain);
+  if (!canCreateMailboxes(panelDomain?.state)) return refuseMailNode(res, 'domain_not_ready');
 
   let created;
   try {
-    const domains = await listDomains(cfg);
-    if (!domains.some((d) => d.domain === domain && d.active)) {
+    const onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
+    if (!onNode?.active) {
       return res.status(400).json({ error: 'The mail node has no such active domain', code: 'domain_unknown' });
     }
+    // Made again on the node by hand: not the domain that was onboarded.
+    if (isRecreated(panelDomain, onNode)) return refuseMailNode(res, 'domain_not_ready');
     created = await provisionMailbox(cfg, { localPart, domain, name });
   } catch (err) {
     return mailNodeFailure(res, err);
@@ -511,7 +517,7 @@ router.delete('/:id', async (req, res) => {
       actorUserId: req.session.userId,
       accountEmail: check.rows[0].email_address,
       action: 'mailbox.deleted',
-      details: {},
+      details: { mailNode: !!check.rows[0].mail_node },
     });
     imapManager.disconnectAccount(id).catch(err =>
       console.error(`Disconnect error after delete for ${id}:`, err.message)

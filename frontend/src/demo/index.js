@@ -1,5 +1,6 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
+import { DOMAIN_STATES, MAILBOX_READY_STATES, canMarkReady, normalizeEopSettings } from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
   {
@@ -240,6 +241,16 @@ const DEMO_USER = {
 // Audit entries for the admin journal screen, newest first. Times are fixed so the demo reads
 // the same on every load.
 const AUDIT_FIXTURES = [
+  {
+    id: '9', occurredAt: '2026-09-18T11:20:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    accountId: null, accountEmail: null, action: 'mail_node.domain_state_changed',
+    details: { domain: 'pilot.demo.mailexpert.local', from: 'node_configured', to: 'dns_ok', how: 'step_confirmed' },
+  },
+  {
+    id: '8', occurredAt: '2026-09-18T09:00:00.000Z', actorUserId: null, actorEmail: 'MailExpert',
+    accountId: null, accountEmail: null, action: 'mail_node.domain_adopted',
+    details: { domain: 'demo.mailexpert.local', state: 'ready', origin: 'existing_mailboxes' },
+  },
   {
     id: '7', occurredAt: '2026-09-17T10:05:00.000Z', actorUserId: null, actorEmail: 'Cloudflare Access',
     accountId: null, accountEmail: null, action: 'access.sync_aborted',
@@ -691,11 +702,90 @@ function contactFromPayload(payload, current = {}) {
   };
 }
 
-// The mail node as an admin sees it in the demo: its domains, the mailboxes made there, the disk.
+// The mail node as an admin sees it in the demo: its domains with their onboarding, the mailboxes
+// made there, the disk. The domains show every kind of row: ready ones (the main domain was taken
+// in at the upgrade because it had mailboxes), one halfway through its onboarding and one made on
+// the node by hand that the panel does not know yet.
+const DEMO_ADMIN_EMAIL = 'demo@mailexpert.local';
+const demoStep = (at) => ({ at, userId: 'demo-user', email: DEMO_ADMIN_EMAIL });
+
+function nextDemoStep(state) {
+  const next = DOMAIN_STATES[DOMAIN_STATES.indexOf(state) + 1];
+  return state !== 'unknown' && next && next !== 'authoritative' ? next : null;
+}
+
+function demoDomain(node, panel) {
+  const row = {
+    onNode: true, state: 'unknown', origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {},
+    ...node, ...panel,
+  };
+  return { ...row, nextStep: nextDemoStep(row.state) };
+}
+
+const readyDomain = (node) => demoDomain(node, {
+  state: 'ready', origin: 'existing_mailboxes', addedAt: '2026-09-18T09:00:00.000Z', stateChangedAt: '2026-09-18T09:00:00.000Z',
+});
+
 let mailNodeDomains = [
-  { domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 0 },
-  ...fleetDomains(FLEET_ACCOUNTS),
-];
+  readyDomain({ domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 0 }),
+  ...fleetDomains(FLEET_ACCOUNTS).map(readyDomain),
+  demoDomain({ domain: 'pilot.demo.mailexpert.local', active: true, maxMailboxes: 50, mailboxes: 0 }, {
+    state: 'dns_ok', origin: 'created', addedAt: '2026-09-18T10:00:00.000Z', addedBy: DEMO_ADMIN_EMAIL,
+    stateChangedAt: '2026-09-18T11:20:00.000Z',
+    steps: { node_configured: demoStep('2026-09-18T10:30:00.000Z'), dns_ok: demoStep('2026-09-18T11:20:00.000Z') },
+  }),
+  demoDomain({ domain: 'legacy.demo.mailexpert.local', active: true, maxMailboxes: 20, mailboxes: 0 }),
+].sort((a, b) => a.domain.localeCompare(b.domain));
+
+// The EOP settings screen: the defaults with the next hop and certificate filled in, no tenant yet.
+let demoEopSettings = {
+  eopHost: 'demo-mailexpert-local.mail.protection.outlook.com',
+  certificateHost: 'mail.demo.mailexpert.local',
+  dkimMode: 'mailcow',
+  sendLimitPerHour: 50,
+  terrl: null,
+  tenantId: null,
+  appId: null,
+  certThumbprint: null,
+};
+
+function eopSettingsAnswer() {
+  const s = demoEopSettings;
+  return clone({ ...s, tenantConfigured: !!(s.tenantId && s.appId && s.certThumbprint), tenantDriverActive: false });
+}
+
+function mailNodeDomainByName(raw) {
+  const name = decodeURIComponent(raw).toLowerCase();
+  const domain = mailNodeDomains.find(d => d.domain === name);
+  if (!domain) throw demoError('The mail node has no such domain', 'domain_not_on_node');
+  return domain;
+}
+
+function updateMailNodeDomain(name, change) {
+  mailNodeDomains = mailNodeDomains.map(d => (d.domain === name ? demoDomain(d, change) : d));
+  return mailNodeDomains.find(d => d.domain === name);
+}
+
+// Adopt, "Done" and "mark ready" with the same refusals as the server (routes/mailNode.js).
+function changeMailNodeDomain(action, raw, step) {
+  const domain = mailNodeDomainByName(raw);
+  const now = new Date().toISOString();
+  if (action === 'adopt') {
+    if (domain.state !== 'unknown') throw demoError('The panel knows this domain already', 'domain_known');
+    return updateMailNodeDomain(domain.domain, {
+      state: 'node_created', origin: 'adopted', addedAt: now, addedBy: DEMO_ADMIN_EMAIL, stateChangedAt: now, steps: {},
+    });
+  }
+  if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+  if (action === 'ready') {
+    if (!canMarkReady(domain)) throw demoError('The domain is ready already', 'domain_already_ready');
+    return updateMailNodeDomain(domain.domain, {
+      state: 'ready', stateChangedAt: now, steps: { ...domain.steps, ready: { ...demoStep(now), markedReady: true } },
+    });
+  }
+  if (step !== domain.nextStep) throw demoError('Only the next onboarding step can be confirmed', 'step_out_of_order');
+  return updateMailNodeDomain(domain.domain, { state: step, stateChangedAt: now, steps: { ...domain.steps, [step]: demoStep(now) } });
+}
 let mailNodeMailboxes = FLEET_ACCOUNTS.filter(account => account.mail_node).map((account, index) => ({
   accountId: account.id, email: account.email_address, onNode: true, active: true, quotaMb: 5120,
   usedBytes: ((index * 37) % 90 + 3) * 10 * 1048576,
@@ -744,10 +834,13 @@ function createDomainMailbox(body) {
   if (!/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(localPart) || localPart.includes('..')) {
     throw demoError('Invalid local part', 'local_part_invalid');
   }
-  const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain) && d.active);
-  if (!domain) throw demoError('Unknown domain', 'domain_unknown');
-  const email = `${localPart}@${domain.domain}`;
+  // The server's order: an address already added, then a domain whose onboarding is not done,
+  // then one the node lacks or has inactive.
+  const email = `${localPart}@${normalizeEmail(body.domain)}`;
   if (mailboxWithEmail(email)) throw demoError('This mailbox is already in MailExpert', 'mailbox_exists');
+  const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain));
+  if (!MAILBOX_READY_STATES.includes(domain?.state)) throw demoError('The domain is not ready for mailboxes', 'domain_not_ready');
+  if (!domain.active) throw demoError('Unknown domain', 'domain_unknown');
   const senderName = String(body.senderName ?? '').trim() || null;
   const name = String(body.name ?? '').trim() || senderName || email;
   const account = {
@@ -1479,13 +1572,39 @@ export async function demoRequest(method, path, body = {}) {
     return { configured: true, mailHost: 'mail.demo.mailexpert.local', apiKey: '•'.repeat(8), quotaMb: 5120, diskPingUrl: '' };
   }
   if (verb === 'PUT' && pathname === '/mail-node/config') return { ok: true };
-  if (verb === 'GET' && pathname === '/mail-node/domains') return clone({ domains: mailNodeDomains });
+  if (verb === 'GET' && pathname === '/mail-node/domains') {
+    // As on the server, an ordinary user sees only the domains a mailbox can be created on.
+    if (demoRole() !== 'user') return clone({ domains: mailNodeDomains });
+    return clone({
+      domains: mailNodeDomains
+        .filter(d => d.onNode && d.active && MAILBOX_READY_STATES.includes(d.state))
+        .map(({ domain, active, state }) => ({ domain, active, state })),
+    });
+  }
   if (verb === 'POST' && pathname === '/mail-node/domains') {
     const domain = String(body?.domain || '').trim().toLowerCase();
     if (domain && !mailNodeDomains.some(d => d.domain === domain)) {
-      mailNodeDomains = [...mailNodeDomains, { domain, active: true, maxMailboxes: Number(body?.mailboxes) || 500, mailboxes: 0 }];
+      const now = new Date().toISOString();
+      mailNodeDomains = [...mailNodeDomains, demoDomain(
+        { domain, active: true, maxMailboxes: Number(body?.mailboxes) || 500, mailboxes: 0 },
+        { state: 'node_created', origin: 'created', addedAt: now, addedBy: DEMO_ADMIN_EMAIL, stateChangedAt: now },
+      )].sort((a, b) => a.domain.localeCompare(b.domain));
     }
-    return { ok: true, domain };
+    return { ok: true, domain, state: 'node_created' };
+  }
+  const domainAction = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(adopt|ready|steps\/([^/]+))$/);
+  if (verb === 'POST' && domainAction) {
+    const action = domainAction[2].startsWith('steps/') ? 'step' : domainAction[2];
+    const changed = changeMailNodeDomain(action, domainAction[1], domainAction[3] && decodeURIComponent(domainAction[3]));
+    return { ok: true, domain: changed.domain, state: changed.state };
+  }
+  if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();
+  if (verb === 'PUT' && pathname === '/mail-node/eop') {
+    // The server's checks and normalization (utils/mailNode.js mirrors eopSettings.js).
+    const { settings, error } = normalizeEopSettings(body);
+    if (error) throw demoError('Invalid EOP setting', error);
+    demoEopSettings = { ...demoEopSettings, ...settings };
+    return eopSettingsAnswer();
   }
   if (verb === 'GET' && pathname === '/mail-node/mailboxes') {
     return clone({ disk: { usedPercent: 41, used: '16G', total: '40G', warn: false }, mailboxes: mailNodeMailboxes });

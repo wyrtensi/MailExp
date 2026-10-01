@@ -19,6 +19,7 @@ import authRoutes, { destroyUserSessions } from './routes/auth.js';
 import accountRoutes from './routes/accounts.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
+import { adoptDomainsWithMailboxes } from './services/mailNode/domains.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
 import adminRoutes from './routes/admin.js';
@@ -244,6 +245,11 @@ setupWebSocket(wss, sessionMiddleware);
 
 // Run pending schema migrations then start
 await runMigrations();
+
+// Mail node domains that already hold panel mailboxes keep taking new ones: they are recorded as
+// ready before the server takes requests (services/mailNode/domains.js).
+const adoptedDomains = await adoptDomainsWithMailboxes();
+if (adoptedDomains.length) console.log(`Mail node: took in ${adoptedDomains.length} domain(s) with mailboxes as ready`);
 
 // Resume the queued server MOVEs of DB-first moves (services/moveQueue.js) before any mailbox
 // syncs: the guards that keep sync from re-adding a moved letter at its source live in memory and

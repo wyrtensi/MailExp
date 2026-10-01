@@ -4,9 +4,13 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
 import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
-import { getMailNodeConfig } from '../services/mailNode/mailcow.js';
+import { MAIL_NODE_PROVIDER, getMailNodeConfig } from '../services/mailNode/mailcow.js';
+import { EOP_PROVIDER } from '../services/mailNode/eopSettings.js';
 
 const router = Router();
+
+// Rows of integration_config that belong to the mail node, not to this screen.
+const MAIL_NODE_PROVIDERS = new Set([MAIL_NODE_PROVIDER, EOP_PROVIDER]);
 
 // Placeholder sent instead of a stored client secret; posting it back keeps the stored value.
 const REDACTED_SECRET = '••••••••';
@@ -47,9 +51,11 @@ router.get('/', requireAdmin, async (req, res) => {
     'SELECT provider, config, updated_at FROM integration_config'
   );
 
-  // Redact secrets from response
+  // Redact secrets from response. The mail node rows have their own admin endpoints
+  // (/api/mail-node) and this screen never reads them, so they are left out entirely.
   const configs = {};
   for (const row of result.rows) {
+    if (MAIL_NODE_PROVIDERS.has(row.provider)) continue;
     const cfg = { ...row.config };
     if (cfg.clientSecret) cfg.clientSecret = REDACTED_SECRET;
     configs[row.provider] = { ...cfg, updated_at: row.updated_at };

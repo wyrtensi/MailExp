@@ -37,6 +37,7 @@ import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
+import EopSection from './EopSection.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
@@ -2365,6 +2366,9 @@ function IntegrationsTab() {
   const [deviceFlow, setDeviceFlow] = useState(null); // { userCode, verificationUri, interval }
   const [deviceStatus, setDeviceStatus] = useState(null); // 'pending'|'success'|'declined'|'expired'|'error'
   const devicePollRef = useRef(null);
+  // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
+  const [mailNodeRevision, setMailNodeRevision] = useState(0);
+  const mailNodeDomainsChanged = useCallback(() => setMailNodeRevision((n) => n + 1), []);
 
   // Todoist state
   const [tdConnected, setTdConnected] = useState(false);
@@ -2882,7 +2886,8 @@ function IntegrationsTab() {
           </div>
 
           {isAdmin && <GoogleAppsSection />}
-          {isAdmin && <MailNodeSection />}
+          {isAdmin && <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
+          {isAdmin && <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
         </div>
       )}
         </div>

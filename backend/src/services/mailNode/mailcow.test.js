@@ -107,12 +107,17 @@ describe('stored settings', () => {
 describe('API requests', () => {
   it('calls https://<host>/api/v1 with the key header, allowing a private address', async () => {
     safeFetch.mockResolvedValueOnce(answer([{ domain_name: 'Example.com', active: '1', max_num_mboxes_for_domain: 500, mboxes_in_domain: 3 }]));
-    expect(await listDomains(CFG)).toEqual([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 3 }]);
+    expect(await listDomains(CFG)).toEqual([{ domain: 'example.com', active: true, maxMailboxes: 500, mailboxes: 3, created: null }]);
     const [call] = calls();
     expect(call.url).toBe('https://mail.example.com/api/v1/get/domain/all');
     expect(call.method).toBe('GET');
     expect(call.headers['X-API-Key']).toBe('api-key-1');
     expect(call.guard).toEqual({ allowPrivate: true, requireHttps: true });
+  });
+
+  it('keeps when mailcow made each domain', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ domain_name: 'example.com', active: 1, created: '2026-09-30 12:00:00' }]));
+    expect((await listDomains(CFG))[0].created).toBe('2026-09-30 12:00:00');
   });
 
   it('reads an empty object as no domains', async () => {

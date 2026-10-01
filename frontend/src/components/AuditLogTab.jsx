@@ -95,7 +95,11 @@ export default function AuditLogTab() {
   const detailText = (entry) => {
     const detail = auditDetail(entry);
     if (!detail) return '';
-    return detail.key ? t(detail.key, detail.values) : detail.text;
+    if (!detail.key) return detail.text;
+    const translated = Object.fromEntries(Object.entries(detail.valueKeys ?? {}).map(([name, key]) => (
+      [name, Array.isArray(key) ? key.map((k) => t(k)).join(', ') : t(key)]
+    )));
+    return t(detail.key, { ...detail.values, ...translated });
   };
 
   const actionText = (action) => {

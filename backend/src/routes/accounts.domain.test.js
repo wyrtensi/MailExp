@@ -33,13 +33,19 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
     getMailbox: vi.fn(async () => null),
   };
 });
+// The panel's onboarding state of each domain: only ready (and authoritative) ones take mailboxes.
+const domainStates = vi.hoisted(() => new Map());
+vi.mock('../services/mailNode/domains.js', async (importActual) => ({
+  ...(await importActual()),
+  getDomainRow: vi.fn(async (domain) => (domainStates.has(domain) ? { state: domainStates.get(domain), nodeCreated: '2026-09-01 10:00:00' } : null)),
+}));
 
 import express from 'express';
 import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { recordAudit } from '../services/auditLog.js';
-import { MailNodeError, disableMailbox, getMailbox, provisionMailbox } from '../services/mailNode/mailcow.js';
+import { MailNodeError, disableMailbox, getMailbox, listDomains, provisionMailbox } from '../services/mailNode/mailcow.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
@@ -61,6 +67,8 @@ describe('domain mailboxes in /api/accounts', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     node.cfg = CFG;
+    domainStates.clear();
+    domainStates.set('example.com', 'ready').set('off.example', 'ready').set('dbeb.example', 'authoritative').set('pending.example', 'connector_ready');
     inserted = null;
     aliasInserted = null;
     query.mockReset().mockImplementation(async (sql, params) => {
@@ -139,9 +147,35 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(provisionMailbox).not.toHaveBeenCalled();
   });
 
-  it('refuses a bad local part, an unknown or inactive domain, and an address already added', async () => {
+  it('refuses a domain that has not finished its onboarding, or one the panel does not know, before touching mailcow', async () => {
+    for (const domain of ['pending.example', 'other.example']) {
+      const res = await post({ kind: 'domain', localPart: 'info', domain });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('domain_not_ready');
+    }
+    expect(listDomains).not.toHaveBeenCalled();
+    expect(provisionMailbox).not.toHaveBeenCalled();
+  });
+
+  it('refuses a ready domain that was deleted on the node and made again by hand', async () => {
+    listDomains.mockResolvedValueOnce([{ domain: 'example.com', active: true, created: '2026-09-30 08:00:00' }]);
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('domain_not_ready');
+    expect(provisionMailbox).not.toHaveBeenCalled();
+  });
+
+  it('creates a mailbox on an authoritative domain too', async () => {
+    listDomains.mockResolvedValueOnce([{ domain: 'dbeb.example', active: true }]);
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'dbeb.example' });
+    expect(res.status).toBe(200);
+    expect(provisionMailbox).toHaveBeenCalledWith(CFG, { localPart: 'info', domain: 'dbeb.example', name: 'info@dbeb.example' });
+  });
+
+  it('refuses a bad local part, a ready domain the node lacks or has inactive, and an address already added', async () => {
     let res = await post({ kind: 'domain', localPart: 'a b', domain: 'example.com' });
     expect((await res.json()).code).toBe('local_part_invalid');
+    domainStates.set('other.example', 'ready');
     res = await post({ kind: 'domain', localPart: 'info', domain: 'other.example' });
     expect((await res.json()).code).toBe('domain_unknown');
     res = await post({ kind: 'domain', localPart: 'info', domain: 'off.example' });
@@ -188,6 +222,9 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       expect(disableMailbox).toHaveBeenCalledWith(CFG, 'info@example.com');
       expect(order).toEqual(['disable', 'delete']);
+      expect(recordAudit).toHaveBeenCalledWith({
+        actorUserId: 'user-1', accountEmail: 'info@example.com', action: 'mailbox.deleted', details: { mailNode: true },
+      });
     });
 
     it('keeps the row when the node cannot disable the mailbox', async () => {

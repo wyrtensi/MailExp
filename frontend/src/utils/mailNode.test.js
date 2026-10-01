@@ -1,6 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canMarkReady,
+  domainStateKey,
+  eopSettingsError,
+  normalizeEopSettings,
+  onboardingSteps,
   domainMailboxFormError,
   domainMailboxTaken,
   senderNameError,
@@ -28,11 +33,108 @@ describe('domainMailboxFormError', () => {
 });
 
 describe('selectableDomains', () => {
-  it('offers active domains, sorted', () => {
+  it('offers active domains whose onboarding is done, sorted', () => {
     assert.deepEqual(selectableDomains([
-      { domain: 'b.example', active: true }, { domain: 'off.example', active: false }, { domain: 'a.example', active: true },
+      { domain: 'b.example', active: true, state: 'ready' },
+      { domain: 'off.example', active: false, state: 'ready' },
+      { domain: 'a.example', active: true, state: 'authoritative' },
+      { domain: 'pending.example', active: true, state: 'connector_ready' },
+      { domain: 'manual.example', active: true, state: 'unknown' },
+      { domain: 'old.example', active: true },
     ]), ['a.example', 'b.example']);
     assert.deepEqual(selectableDomains(null), []);
+  });
+});
+
+describe('domain onboarding', () => {
+  it('names every state, unknown for anything else', () => {
+    assert.equal(domainStateKey('ready'), 'admin.mailNode.stateReady');
+    assert.equal(domainStateKey('connector_ready'), 'admin.mailNode.stateConnectorReady');
+    assert.equal(domainStateKey('unknown'), 'admin.mailNode.stateUnknown');
+    assert.equal(domainStateKey(undefined), 'admin.mailNode.stateUnknown');
+  });
+
+  it('lists the manual steps with who confirmed them and which one is next', () => {
+    const steps = onboardingSteps({
+      state: 'dns_ok', nextStep: 'tenant_verified',
+      steps: {
+        node_configured: { at: '2026-10-01T10:00:00Z', email: 'admin@example.com' },
+        dns_ok: { at: '2026-10-01T11:00:00Z', email: 'ops@example.com' },
+      },
+    });
+    assert.deepEqual(steps.map((s) => [s.state, s.status, s.by]), [
+      ['node_configured', 'confirmed', 'admin@example.com'],
+      ['dns_ok', 'confirmed', 'ops@example.com'],
+      ['tenant_verified', 'next', null],
+      ['internal_relay', 'pending', null],
+      ['connector_ready', 'pending', null],
+      ['ready', 'pending', null],
+    ]);
+    assert.equal(steps[0].labelKey, 'admin.mailNode.stepNodeConfigured');
+  });
+
+  it('shows the steps a domain marked ready passed over as skipped', () => {
+    const steps = onboardingSteps({
+      state: 'ready', nextStep: null,
+      steps: { node_configured: { email: 'a@example.com' }, ready: { email: 'b@example.com', markedReady: true } },
+    });
+    assert.deepEqual(steps.map((s) => s.status), ['confirmed', 'skipped', 'skipped', 'skipped', 'skipped', 'confirmed']);
+    assert.equal(steps[5].markedReady, true);
+    assert.equal(steps[5].by, 'b@example.com');
+  });
+
+  it('lets an administrator mark ready only a known domain before ready', () => {
+    assert.equal(canMarkReady({ state: 'node_created' }), true);
+    assert.equal(canMarkReady({ state: 'connector_ready' }), true);
+    assert.equal(canMarkReady({ state: 'ready' }), false);
+    assert.equal(canMarkReady({ state: 'authoritative' }), false);
+    assert.equal(canMarkReady({ state: 'unknown' }), false);
+  });
+});
+
+describe('normalizeEopSettings', () => {
+  it('normalizes the fields sent the way the server does', () => {
+    assert.deepEqual(normalizeEopSettings({
+      eopHost: ' Contoso-com.mail.protection.outlook.com ', dkimMode: 'eop', sendLimitPerHour: '25', terrl: 48248,
+      tenantId: ' AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE ', appId: '', certThumbprint: 'ab:cd ef01 2345 6789 abcd ef01 2345 6789 abcd ef01',
+    }), {
+      settings: {
+        eopHost: 'contoso-com.mail.protection.outlook.com', dkimMode: 'eop', sendLimitPerHour: 25, terrl: 48248,
+        tenantId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', appId: null, certThumbprint: 'ABCDEF0123456789ABCDEF0123456789ABCDEF01',
+      },
+    });
+  });
+
+  it('answers the server refusal codes', () => {
+    assert.deepEqual(normalizeEopSettings({ dkimMode: '' }), { error: 'dkim_mode_invalid' });
+    assert.deepEqual(normalizeEopSettings({ sendLimitPerHour: null }), { error: 'send_limit_invalid' });
+    assert.deepEqual(normalizeEopSettings({ certThumbprint: 'xyz' }), { error: 'thumbprint_invalid' });
+    assert.deepEqual(normalizeEopSettings({}), { settings: {} });
+  });
+});
+
+describe('eopSettingsError', () => {
+  const valid = {
+    eopHost: 'contoso-com.mail.protection.outlook.com', certificateHost: 'mail.example.com', dkimMode: 'mailcow',
+    sendLimitPerHour: '50', terrl: '48248', tenantId: '11111111-2222-4333-8444-555555555555',
+    appId: 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE', certThumbprint: 'ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:ab:cd:ef:01',
+  };
+
+  it('accepts filled and empty optional fields', () => {
+    assert.equal(eopSettingsError(valid), null);
+    assert.equal(eopSettingsError({ dkimMode: 'eop', sendLimitPerHour: '1' }), null);
+  });
+
+  it('names the first bad field', () => {
+    assert.equal(eopSettingsError({ ...valid, eopHost: '10.0.0.1' }), 'admin.eop.errorEopHost');
+    assert.equal(eopSettingsError({ ...valid, certificateHost: 'mail' }), 'admin.eop.errorCertificateHost');
+    assert.equal(eopSettingsError({ ...valid, dkimMode: 'both' }), 'admin.eop.errorDkimMode');
+    assert.equal(eopSettingsError({ ...valid, sendLimitPerHour: '' }), 'admin.eop.errorSendLimit');
+    assert.equal(eopSettingsError({ ...valid, sendLimitPerHour: '10001' }), 'admin.eop.errorSendLimit');
+    assert.equal(eopSettingsError({ ...valid, terrl: '0' }), 'admin.eop.errorTerrl');
+    assert.equal(eopSettingsError({ ...valid, tenantId: 'contoso' }), 'admin.eop.errorTenantId');
+    assert.equal(eopSettingsError({ ...valid, appId: '123' }), 'admin.eop.errorAppId');
+    assert.equal(eopSettingsError({ ...valid, certThumbprint: 'xyz' }), 'admin.eop.errorThumbprint');
   });
 });
 
@@ -57,6 +159,9 @@ describe('errors', () => {
   it('maps server codes to keys, unknown ones to the generic text', () => {
     assert.equal(mailNodeErrorKey('mail_node_auth'), 'admin.mailNode.errorAuth');
     assert.equal(mailNodeErrorKey('mailbox_exists'), 'admin.accounts.add.domainErrorExists');
+    assert.equal(mailNodeErrorKey('domain_not_ready'), 'admin.accounts.add.domainErrorNotReady');
+    assert.equal(mailNodeErrorKey('step_out_of_order'), 'admin.mailNode.errorStepOutOfOrder');
+    assert.equal(mailNodeErrorKey('thumbprint_invalid'), 'admin.eop.errorThumbprint');
     assert.equal(mailNodeErrorKey('something_new'), 'admin.mailNode.errorFailed');
   });
 
