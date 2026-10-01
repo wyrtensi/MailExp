@@ -4,6 +4,8 @@ import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
   deletionReasonError, eopSettingsConflict, normalizeEopSettings, normalizeExpectedValues, parseNetworkList, parseWholeNumber,
   rateLimitError,
+  DEFAULT_DEFERRED_COUNT, DEFAULT_DEFERRED_MINUTES, MAX_DEFERRED_COUNT, MAX_DEFERRED_MINUTES, QUEUE_NAMES, queueItemActions,
+  terrlBudget,
 } from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
@@ -813,6 +815,8 @@ let demoEopSettings = {
   dkimMode: 'mailcow',
   sendLimitPerHour: 50,
   terrl: null,
+  licenses: 120,
+  tenantCreatedOn: null,
   tenantId: null,
   appId: null,
   certThumbprint: null,
@@ -1092,6 +1096,97 @@ mailNodeDomains = mailNodeDomains.map(d => (d.domain === 'pilot.demo.mailexpert.
   ? { ...d, expected: { ...d.expected, dkimSelector1Cname: demoZoneOf(d.domain).cnames[0], dkimSelector2Cname: demoZoneOf(d.domain).cnames[1] } }
   : d));
 demoCheckAll('schedule');
+
+// --- The node's operations: mail queue, alerts, TERRL budget (backend routes/mailNode.js) ----------
+// Arrival times are relative to the demo's start, so the ages read the same on every visit.
+const DEMO_STARTED = Date.now();
+const DEMO_EOP_REPLY = 'host demo-mailexpert-local.mail.protection.outlook.com[52.101.40.10] said: 451 4.7.500 Server busy. Please try again later from [203.0.113.10]. (S77) (in reply to RCPT TO command)';
+let demoQueue = [
+  {
+    queueId: 'D3A1F2B4C5', queue: 'deferred', arrivedAt: new Date(DEMO_STARTED - 25 * 60000).toISOString(), size: 48213, forcedExpire: false,
+    sender: 'sales@demo.mailexpert.local', recipients: [{ address: 'partner@contoso.example', reason: DEMO_EOP_REPLY }],
+    subject: 'Quarterly price list',
+  },
+  {
+    queueId: '7B2C9E1A04', queue: 'hold', arrivedAt: new Date(DEMO_STARTED - 3 * 3600000).toISOString(), size: 3120, forcedExpire: false,
+    sender: 'support@demo.mailexpert.local', recipients: [{ address: 'customer@fabrikam.example', reason: null }],
+    subject: 'Your ticket 4821',
+  },
+];
+let demoAlertSettings = { pingUrl: null, deferredCount: DEFAULT_DEFERRED_COUNT, deferredMinutes: DEFAULT_DEFERRED_MINUTES };
+// The node's certificate as the demo's alert check finds it: 12 days left.
+const DEMO_CERT_EXPIRES = new Date(DEMO_STARTED + 12 * 86400000).toISOString();
+let demoAlertState = null;
+
+function demoQueueSummary() {
+  const now = Date.now();
+  const counts = Object.fromEntries(QUEUE_NAMES.map(name => [name, 0]));
+  let oldestDeferredSeconds = null;
+  const items = demoQueue.map((entry) => {
+    // The subject is the demo's own, for its message details; the server's list has none.
+    const item = { ...entry };
+    delete item.subject;
+    const ageSeconds = Math.floor((now - Date.parse(item.arrivedAt)) / 1000);
+    counts[item.queue] += 1;
+    if (item.queue === 'deferred' && (oldestDeferredSeconds == null || ageSeconds > oldestDeferredSeconds)) oldestDeferredSeconds = ageSeconds;
+    return { ...item, ageSeconds };
+  }).sort((a, b) => b.ageSeconds - a.ageSeconds);
+  return { items, counts, total: items.length, oldestDeferredSeconds };
+}
+
+// One queued message as the server reads it with postcat: envelope, headers, the body on request.
+function demoQueuedMessage(item, withBody) {
+  const body = `Hello,\n\n${item.subject} is attached.\n\nMailExpert demo`;
+  return {
+    queueId: item.queueId, queue: item.queue,
+    envelope: { sender: item.sender, recipients: item.recipients.map(r => r.address), arrival: new Date(item.arrivedAt).toUTCString() },
+    headers: [
+      { name: 'Received', value: `from panel (panel [203.0.113.10]) by mail.demo.mailexpert.local (Postfix) with ESMTPSA id ${item.queueId}` },
+      { name: 'From', value: item.sender },
+      { name: 'To', value: item.recipients.map(r => r.address).join(', ') },
+      { name: 'Subject', value: item.subject },
+      { name: 'Message-ID', value: `<${item.queueId.toLowerCase()}@demo.mailexpert.local>` },
+    ],
+    bodyBytes: body.length, body: withBody ? body : null, bodyTruncated: false,
+  };
+}
+
+function demoTerrlBudget() {
+  const now = Date.now();
+  return {
+    ...terrlBudget({ settings: demoEopSettings, used: 1834, now }),
+    windowStart: new Date(now - 86400000).toISOString(),
+    log: { read: true, covered: true, oldestAt: new Date(now - 3 * 86400000).toISOString() },
+  };
+}
+
+// The alert check of the demo: the deferred queue against the thresholds, the certificate, the budget.
+function demoCheckAlerts(trigger) {
+  const now = Date.now();
+  const at = new Date(now).toISOString();
+  const before = new Map((demoAlertState?.alerts ?? []).map(a => [a.key, a]));
+  const fresh = [];
+  const queue = demoQueueSummary();
+  const deferred = queue.counts.deferred;
+  if (deferred > demoAlertSettings.deferredCount || (queue.oldestDeferredSeconds ?? 0) > demoAlertSettings.deferredMinutes * 60) {
+    fresh.push({
+      key: 'queue_deferred', severity: 'warning',
+      details: { deferred, oldestMinutes: Math.floor((queue.oldestDeferredSeconds ?? 0) / 60), ...demoAlertSettings },
+    });
+  }
+  fresh.push({ key: 'certificate', severity: 'warning', details: { code: 'cert_expiring', daysLeft: 12, expiresAt: DEMO_CERT_EXPIRES, checkedAt: at } });
+  const budget = demoTerrlBudget();
+  if (budget.warn) {
+    fresh.push({ key: 'terrl_budget', severity: budget.exceeded ? 'error' : 'warning', details: { used: budget.used, limit: budget.limit, percent: budget.percent } });
+  }
+  demoAlertState = {
+    at, trigger, errors: [],
+    alerts: fresh.map(a => ({ ...a, since: before.get(a.key)?.since ?? at, seenAt: at })),
+    queue: { counts: queue.counts, total: queue.total, oldestDeferredSeconds: queue.oldestDeferredSeconds },
+  };
+  return demoAlertState;
+}
+demoCheckAlerts('schedule');
 
 // Addresses Google granted before (the grant journal) that are no mailbox now: the Gmail field
 // offers them as "Connected before".
@@ -2078,6 +2173,45 @@ export async function demoRequest(method, path, body = {}) {
       : m));
     return { ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit };
   }
+  // The node's operations, with the server's refusals (routes/mailNode.js).
+  if (verb === 'GET' && pathname === '/mail-node/queue') return clone(demoQueueSummary());
+  if (verb === 'POST' && pathname === '/mail-node/queue/flush') return { ok: true, action: 'flush' };
+  const queueMatch = pathname.match(/^\/mail-node\/queue\/([^/]+)(?:\/([^/]+))?$/);
+  if (queueMatch && (verb === 'GET' ? !queueMatch[2] : verb === 'POST' && queueMatch[2])) {
+    const queueId = decodeURIComponent(queueMatch[1]).toUpperCase();
+    if (!/^[0-9A-F]{6,20}$/.test(queueId)) throw demoError('Queue ID must be a Postfix queue ID', 'queue_id_invalid');
+    const action = queueMatch[2] && decodeURIComponent(queueMatch[2]);
+    if (action && !['hold', 'unhold', 'deliver', 'delete'].includes(action)) throw demoError('No such queue action', 'queue_action_invalid');
+    if (action === 'delete' && body?.confirm !== true) throw demoError('Deleting a queued message must be confirmed', 'queue_delete_unconfirmed');
+    const item = demoQueue.find(entry => entry.queueId === queueId);
+    if (!item) throw demoError('The mail queue has no message with this ID', 'queue_item_not_found');
+    if (!action) return clone(demoQueuedMessage(item, url.searchParams.get('body') === '1'));
+    if (!queueItemActions(item).includes(action)) return { ok: true, action, queueId };
+    // The demo's EOP accepts what is tried again: the message leaves the queue.
+    if (action === 'delete' || action === 'deliver') demoQueue = demoQueue.filter(entry => entry.queueId !== queueId);
+    else demoQueue = demoQueue.map(entry => (entry.queueId === queueId ? { ...entry, queue: action === 'hold' ? 'hold' : 'deferred' } : entry));
+    return { ok: true, action, queueId };
+  }
+  if (verb === 'GET' && pathname === '/mail-node/alerts') {
+    return clone({ state: demoAlertState, settings: demoAlertSettings, defaults: { pingUrl: null, deferredCount: DEFAULT_DEFERRED_COUNT, deferredMinutes: DEFAULT_DEFERRED_MINUTES } });
+  }
+  if (verb === 'POST' && pathname === '/mail-node/alerts/check') return clone({ state: demoCheckAlerts('manual') });
+  if (verb === 'PUT' && pathname === '/mail-node/alerts/settings') {
+    const next = {
+      pingUrl: body?.pingUrl !== undefined ? (String(body.pingUrl ?? '').trim() || null) : demoAlertSettings.pingUrl,
+      deferredCount: body?.deferredCount ?? demoAlertSettings.deferredCount,
+      deferredMinutes: body?.deferredMinutes ?? demoAlertSettings.deferredMinutes,
+    };
+    // The server's checks (backend nodeAlerts.js parseAlertSettings).
+    if (next.pingUrl && !/^https:\/\/\S+$/.test(next.pingUrl)) throw demoError('Ping URL must be an https address', 'ping_url_invalid');
+    const deferredCount = parseWholeNumber(next.deferredCount, 1, MAX_DEFERRED_COUNT);
+    if (deferredCount == null) throw demoError('Invalid deferred message threshold', 'deferred_count_invalid');
+    const deferredMinutes = parseWholeNumber(next.deferredMinutes, 1, MAX_DEFERRED_MINUTES);
+    if (deferredMinutes == null) throw demoError('Invalid deferred age threshold', 'deferred_minutes_invalid');
+    demoAlertSettings = { pingUrl: next.pingUrl, deferredCount, deferredMinutes };
+    return clone({ settings: demoAlertSettings });
+  }
+  if (verb === 'GET' && pathname === '/mail-node/eop/budget') return clone(demoTerrlBudget());
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
   if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
   if ((verb === 'POST' && pathname === '/oauth/microsoft/device')
