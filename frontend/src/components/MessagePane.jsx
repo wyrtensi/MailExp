@@ -24,14 +24,15 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { folderMatchesQuery } from '../utils/folderDisplay.js';
 import FolderPathLabel from './FolderPathLabel.jsx';
 import { classifyAttachmentRisk } from '../utils/attachmentRisk.js';
+import {
+  safeQuoteSource, safeViewMarkup, safeViewPlainText, safeViewState, spamFolderPaths as spamFolderPathsFor,
+} from '../utils/safeView.js';
+import ConfirmOverlay from './ConfirmOverlay.jsx';
+import SafeViewNotice from './SafeViewNotice.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailexpert:message-opening';
 // riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
 const DOWNLOAD_ALL = 'all';
-
-// Module-level regex so the spam-name heuristic isn't recompiled on every
-// render — same heuristic as ContextMenu.jsx, both files read this constant.
-const SPAM_NAME_RE = /(spam|junk|bulk|indesiderata|spamverdacht|courrier\s*ind|posta\s*indesiderata)/i;
 
 // Lazy-load the div-renderer utilities so PostCSS is excluded from the flag-off
 // bundle. Rollup treats the import() calls inside this block as dead code when
@@ -251,13 +252,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // Mirrors the heuristic in ContextMenu.jsx so the toolbar matches the menu.
   const account = accounts.find(a => a.id === message?.account_id);
   const accountFolders = useStore(s => selectAccountFolders(s, message?.account_id));
-  const spamFolderPaths = (() => {
-    const mapped = account?.folder_mappings?.spam;
-    if (mapped) return new Set([mapped]);
-    return new Set(accountFolders.filter(f =>
-      f.special_use === '\\Junk' || SPAM_NAME_RE.test(f.name || '')
-    ).map(f => f.path));
-  })();
+  const spamFolderPaths = spamFolderPathsFor(account, accountFolders);
   const inSpamFolder = message ? spamFolderPaths.has(message.folder) : false;
   const hasSpamFolder = spamFolderPaths.size > 0;
 
@@ -307,6 +302,31 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const [retryKey, setRetryKey] = useState(0);
   const [loadingBody, setLoadingBody] = useState(false);
   const [downloadingPart, setDownloadingPart] = useState(null);
+  // Safe view (R-41, utils/safeView.js): a letter in Spam, or one EOP marked as phishing, malware
+  // or a spoofed sender in any folder, opens as text with its attachments locked. "Show in full"
+  // holds the letter's id for this view only: opening another letter forgets it.
+  const [fullViewId, setFullViewId] = useState(null);
+  useEffect(() => { setFullViewId(null); }, [selectedMessageId]);
+  // The list row carries the EOP category, so the decision does not wait for the body.
+  const eopCategory = message?.eop_category || body?.eopCategory || null;
+  const safeState = message ? safeViewState({ inSpamFolder, eopCategory }) : null;
+  const safeView = Boolean(safeState?.locked) && fullViewId !== message?.id;
+  // Words that introduce a link's target in the safe text, the print and the quote.
+  const safeLabels = useMemo(() => ({ link: t('message.safeView.linkTo'), form: t('message.safeView.formTo') }), [t]);
+  // Converted only while the safe view is on, so a normal letter costs nothing.
+  const safeMarkup = useMemo(() => (safeView && body ? safeViewMarkup(body, safeLabels) : ''), [safeView, body, safeLabels]);
+  // "Show in full" moves focus to the letter it reveals (bodyFocusRef: the body's container).
+  const bodyFocusRef = useRef(null);
+  const focusBodyRef = useRef(false);
+  const showInFull = useCallback(() => {
+    focusBodyRef.current = true;
+    setFullViewId(message?.id ?? null);
+  }, [message?.id]);
+  useEffect(() => {
+    if (!focusBodyRef.current || safeView || !bodyFocusRef.current) return;
+    focusBodyRef.current = false;
+    bodyFocusRef.current.focus({ preventScroll: true });
+  }, [safeView, fullViewId]);
   const [showReplyMenu, setShowReplyMenu] = useState(false);
   const [savingAllow, setSavingAllow] = useState(false);
   const [paneScrolled, setPaneScrolled] = useState(false);
@@ -381,9 +401,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // useMemo so prepared is available in the same render as body.html — no extra frame,
   // no flash of empty content between skeleton-gone and email-shown.
   const prepared = useMemo(() => {
-    if (!USE_DIV_RENDER || !body?.html) return null;
+    if (!USE_DIV_RENDER || !body?.html || safeView) return null;
     return prepareEmailHtml(body.html, windowMode ? `w${message?.id ?? 'preview'}` : String(message?.id ?? 'preview'));
-  }, [body?.html, message?.id, windowMode]);
+  }, [body?.html, message?.id, windowMode, safeView]);
   const outerRef = useRef(null);
   const scaleRef = useRef(null);
   const innerRef = useRef(null);
@@ -588,7 +608,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // percentage-height elements expand → body grows → observer fires → repeat.
   useEffect(() => {
     const iframe = iframeRef.current;
-    if (!iframe || !body?.html) return;
+    // safeView is a dependency because "Show in full" mounts the frame for the same body.
+    if (!iframe || !body?.html || safeView) return;
 
     let rafId;
     let pollId = null;
@@ -866,7 +887,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       iframe.removeEventListener('load', onLoaded);
       emailScaleRef.current = 1;
     };
-  }, [body?.html, selectedMessageId, hasNativeContextTarget, openPaneContextMenu]);
+  }, [body?.html, selectedMessageId, hasNativeContextTarget, openPaneContextMenu, safeView]);
 
   // Inject scoped email styles before paint so there is no flash of unstyled content.
   // useLayoutEffect runs synchronously after DOM mutations and before the browser paints,
@@ -1168,7 +1189,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     });
     // The quote header speaks the language of the name the reply goes out under.
     const quoteLang = senderLanguage(identityName(myAccount, replyAliasId));
-    const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, { text: body?.text, html: body?.html });
+    // A letter in safe view is quoted as its safe text, never its HTML (utils/safeView.js).
+    const quoteSource = safeView ? safeQuoteSource(body, safeLabels) : { text: body?.text, html: body?.html };
+    const { quotedText, quotedHtml: quotedBodyHtml } = buildQuote(quoteMeta, quoteLang, quoteSource);
 
     const myAddresses = new Set([
       myEmail.toLowerCase(),
@@ -1221,7 +1244,8 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const quoteExtra = { to: parseAddressField(message.to_addresses), cc: parseAddressField(message.cc_addresses) };
     const quoteMeta = quoteMetaFor(message, 'forward');
     const quoteLang = senderLanguage(identityName(accounts.find(a => a.id === message.account_id)));
-    const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { text: body?.text, html: body?.html, ...quoteExtra });
+    const quoteSource = safeView ? safeQuoteSource(body, safeLabels) : { text: body?.text, html: body?.html };
+    const { quotedText: fwdText, quotedHtml: fwdHtml } = buildQuote(quoteMeta, quoteLang, { ...quoteSource, ...quoteExtra });
     openCompose({
       subject: message.subject?.startsWith('Fwd:') ? message.subject : `Fwd: ${message.subject}`,
       body: '',
@@ -1256,7 +1280,21 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   // an astral character (an emoji) never splits a surrogate pair into the filename.
   const emlFilename = (subject) => `${[...(subject || 'message')].slice(0, 80).join('')}.eml`;
 
-  const handleDownloadEml = async () => {
+  // A letter in safe view asks first: the .eml holds it whole, and whatever opens the file shows
+  // its images, links and attachments.
+  const [emlConfirm, setEmlConfirm] = useState(null);
+  const handleDownloadEml = () => {
+    if (!message) return;
+    if (!safeView) { downloadEml(); return; }
+    setEmlConfirm({
+      title: t('message.downloadEml'),
+      message: t('message.safeView.emlConfirm'),
+      confirmLabel: t('message.safeView.emlConfirmButton'),
+      onConfirm: downloadEml,
+    });
+  };
+
+  const downloadEml = async () => {
     if (!message) return;
     try {
       const blob = await api.downloadRawEml(message.id);
@@ -1291,7 +1329,10 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
     const toStr = parseList(message.to_addresses).map(fmtAddr).join(', ');
     const ccStr = parseList(message.cc_addresses).map(fmtAddr).join(', ');
 
-    const bodyContent = body?.html
+    // A letter in safe view prints as the text on screen: printing must not load what it holds back.
+    const bodyContent = safeView
+      ? `<pre style="white-space:pre-wrap;font-family:sans-serif;font-size:14px">${esc(safeViewPlainText(body, safeLabels))}</pre>`
+      : body?.html
       ? DOMPurify.sanitize(body.html, { ADD_ATTR: ['target'] })
       : body?.text
         ? `<pre style="white-space:pre-wrap;font-family:sans-serif;font-size:14px">${esc(body.text)}</pre>`
@@ -2739,8 +2780,52 @@ ${bodyContent}
           onToggleThread={setShowThread}
         />
 
+        {/* Locked: the bar until "Show in full". Not locked (a spoofed sender outside Spam): a
+            warning only, the letter shows as usual. */}
+        {safeState && (safeView || !safeState.locked) && (
+          <SafeViewNotice
+            reason={safeState.reason}
+            eopCategory={eopCategory}
+            onShowFull={safeView ? showInFull : null}
+            label={`${t('message.safeView.label')}: ${resolvedSubject || message.subject || t('message.noSubject')}`}
+          />
+        )}
+
+        {/* Attachments in safe view: named, never fetched. "Show in full" brings the buttons back. */}
+        {safeView && attachments.length > 0 && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', fontWeight: 500, marginBottom: 8 }}>
+              {t('message.attachment', { count: attachments.length })}
+            </div>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {attachments.map((att, i) => (
+                <li
+                  key={i}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '8px 12px', borderRadius: 8, maxWidth: 240,
+                    background: 'var(--bg-secondary)', border: '1px dashed var(--border)',
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <span aria-hidden="true" style={{ display: 'flex', flexShrink: 0 }}>{fileIcon(att.type)}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {att.filename}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{formatBytes(att.size)}</div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>
+              {t('message.safeView.attachmentsLocked')}
+            </div>
+          </div>
+        )}
+
         {/* Attachments */}
-        {attachments.length > 0 && (
+        {!safeView && attachments.length > 0 && (
           <div style={{ marginBottom: 20 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
               <div style={{ fontSize: 12, color: 'var(--text-tertiary)', fontWeight: 500 }}>
@@ -2844,6 +2929,7 @@ ${bodyContent}
                   canRegen={!!action}
                   onRegen={() => action && runAiAction(action, { force: true })}
                   onDismiss={() => dismissAiResult(key)}
+                  plain={safeView}
                 />
               );
             })}
@@ -2918,9 +3004,29 @@ ${bodyContent}
         )}
       </div>
 
+      {/* Safe view — the letter as text in the plain-text card: no images, styles or links (the
+          addresses are text), and none of the banners below (unsubscribe, AI classify, images). */}
+      {!loadingBody && !bodyError && safeView && (body?.html || body?.text) && (
+        <div style={{ padding: isMobile ? '0 0px 16px' : '0 28px 24px' }}>
+          <div className="msg-card" data-safe-view-body="" style={{
+            margin: 0, padding: '14px 16px 12px',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            fontSize: 14, color: '#1a1a1a', lineHeight: 1.7,
+            fontFamily: 'var(--font-sans, sans-serif)', background: 'white',
+            borderRadius: isMobile ? 0 : 10,
+            border: isMobile ? 'none' : '1px solid var(--border-subtle)',
+            overflow: 'hidden',
+          }}
+            // Written in one piece and opted back into translation, like the plain-text body.
+            translate="yes"
+            dangerouslySetInnerHTML={{ __html: safeMarkup }}
+          />
+        </div>
+      )}
+
       {/* HTML email — iframe sized to full content height; outer container scrolls */}
-      {!loadingBody && !bodyError && body?.html && (
-        <div style={{ padding: isMobile ? '0 0 16px' : '0 28px 24px' }}>
+      {!loadingBody && !bodyError && !safeView && body?.html && (
+        <div ref={bodyFocusRef} tabIndex={-1} data-letter-body="" style={{ padding: isMobile ? '0 0 16px' : '0 28px 24px' }}>
           {/* Unsubscribe banner — shown for newsletter messages that have a List-Unsubscribe header */}
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
             <div className="msg-notice" style={{
@@ -3110,8 +3216,8 @@ ${bodyContent}
       )}
 
       {/* Plain-text email — no internal scroll, outer container handles it */}
-      {!loadingBody && !bodyError && body?.text && !body?.html && (
-        <div style={{
+      {!loadingBody && !bodyError && !safeView && body?.text && !body?.html && (
+        <div ref={bodyFocusRef} tabIndex={-1} data-letter-body="" style={{
           padding: isMobile ? '0 0px 16px' : '0 28px 24px',
         }}>
           {message.list_unsubscribe && !message.unsubscribed_at && unsubscribeStatus !== 'done' && (
@@ -3174,9 +3280,11 @@ ${bodyContent}
         </div>
       )}
       {showThread && conversation?.items?.length > 1 && (
-        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} />
+        <ConversationThread conversation={conversation} currentId={message.id} onOpen={openHistoryMessage} spamFolderPaths={spamFolderPaths} />
       )}
       </div>{/* end single scroll container */}
+
+      <ConfirmOverlay dialog={emlConfirm} onClose={() => setEmlConfirm(null)} />
 
       {/* Mobile move-to-folder bottom sheet */}
       {showMovePicker && isMobile && (
@@ -3481,14 +3589,16 @@ function PaneBtn({ children, onClick, title, danger, label, kind, style: extraSt
 
 // A pinned AI result box shown above the message (#204). Collapsible to keep
 // multiple results from crowding the view; offers regenerate and dismiss.
-function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
+// plain: the letter is in safe view (utils/safeView.js). The output can repeat the letter's links,
+// so it shows as its source text: every address readable, none clickable.
+function AiResultBox({ result, canRegen, onRegen, onDismiss, plain = false }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const loading = result.status === 'loading';
   const error = result.status === 'error';
   // Render the (markdown) AI output to sanitized HTML. Memoized on the text so toggling
   // expand/collapse doesn't re-parse; re-runs as text streams in during generation (#215).
-  const html = useMemo(() => renderMarkdown(result.text || ''), [result.text]);
+  const html = useMemo(() => (plain ? '' : renderMarkdown(result.text || '')), [result.text, plain]);
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef(null);
   useEffect(() => () => clearTimeout(copyTimerRef.current), []);
@@ -3504,7 +3614,7 @@ function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
       copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
     };
     try {
-      if (navigator.clipboard?.write && window.ClipboardItem) {
+      if (!plain && navigator.clipboard?.write && window.ClipboardItem) {
         await navigator.clipboard.write([new window.ClipboardItem({
           'text/html': new Blob([html], { type: 'text/html' }),
           'text/plain': new Blob([source], { type: 'text/plain' }),
@@ -3582,6 +3692,13 @@ function AiResultBox({ result, canRegen, onRegen, onDismiss }) {
         <span style={{ color: 'var(--text-tertiary)', fontStyle: 'italic' }}>{t('compose.toolbar.aiGenerating')}</span>
       ) : error ? (
         <span style={{ color: 'var(--red)' }}>{t('compose.toolbar.aiError', { message: result.text })}</span>
+      ) : plain ? (
+        <div
+          data-ai-plain=""
+          style={{ maxHeight: expanded ? 'none' : 220, overflowY: expanded ? 'visible' : 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+        >
+          {result.text}
+        </div>
       ) : (
         <div
           className="ai-markdown"

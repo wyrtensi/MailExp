@@ -18,6 +18,7 @@ import { decrypt } from './encryption.js';
 import { sendPushToActiveUsers } from './pushNotifications.js';
 import { defaultAddressBookId } from './addressBooks.js';
 import { redactEmail } from '../utils/redact.js';
+import { eopCategory } from '../utils/antispamReport.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -1277,7 +1278,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      bcc_addresses, provider_thread_id, provider_message_id, threading_reason
+      bcc_addresses, provider_thread_id, provider_message_id, threading_reason, eop_category
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1288,7 +1289,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      bcc_addresses, provider_thread_id, provider_message_id, threading_reason
+      bcc_addresses, provider_thread_id, provider_message_id, threading_reason, eop_category
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
@@ -4734,8 +4735,9 @@ export class ImapManager {
                 body_html, body_text, attachments,
                 thread_references, thread_id, is_bulk, category,
                 list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                sender_name, sender_email, provider_thread_id, provider_message_id, threading_reason
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+                sender_name, sender_email, provider_thread_id, provider_message_id, threading_reason,
+                eop_category
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$34)
               ON CONFLICT (account_id, uid, folder) DO UPDATE
               SET subject = CASE
                     WHEN EXCLUDED.subject IS NOT NULL
@@ -4815,7 +4817,8 @@ export class ImapManager {
                   sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
                   sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email),
                   provider_thread_id = COALESCE(EXCLUDED.provider_thread_id, messages.provider_thread_id),
-                  provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id)
+                  provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id),
+                  eop_category = COALESCE(EXCLUDED.eop_category, messages.eop_category)
               RETURNING id, (xmax = 0) as is_new
             `, [
               account.id, parsed.uid, folder,
@@ -4834,6 +4837,7 @@ export class ImapManager {
               sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
               providerIds.providerThreadId, providerIds.providerMessageId, threadingReason,
               GMAIL_KEY_PREFIX,
+              eopCategory(parsed.parsedHeaders?.['x-forefront-antispam-report']),
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
@@ -5527,8 +5531,9 @@ export class ImapManager {
                     body_html, body_text, attachments,
                     thread_references, thread_id, is_bulk, category,
                     list_unsubscribe, list_unsubscribe_post, delivery_addresses,
-                    sender_name, sender_email, provider_thread_id, provider_message_id, threading_reason
-                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32)
+                    sender_name, sender_email, provider_thread_id, provider_message_id, threading_reason,
+                    eop_category
+                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$34)
                   ON CONFLICT (account_id, uid, folder) DO UPDATE
                   SET subject = CASE
                         WHEN EXCLUDED.subject IS NOT NULL
@@ -5606,7 +5611,8 @@ export class ImapManager {
                       sender_name = COALESCE(EXCLUDED.sender_name, messages.sender_name),
                       sender_email = COALESCE(EXCLUDED.sender_email, messages.sender_email),
                       provider_thread_id = COALESCE(EXCLUDED.provider_thread_id, messages.provider_thread_id),
-                      provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id)
+                      provider_message_id = COALESCE(EXCLUDED.provider_message_id, messages.provider_message_id),
+                      eop_category = COALESCE(EXCLUDED.eop_category, messages.eop_category)
                 `, [
                   account.id, parsed.uid, folder,
                   bfMsgId, sanitizeStr(parsed.subject),
@@ -5624,6 +5630,7 @@ export class ImapManager {
                   sanitizeStr(parsed.senderName), sanitizeStr(parsed.senderEmail),
                   bfProviderIds.providerThreadId, bfProviderIds.providerMessageId, bfThreadingReason,
                   GMAIL_KEY_PREFIX,
+                  eopCategory(parsed.parsedHeaders?.['x-forefront-antispam-report']),
                 ]);
                 backfilledRows++;
                 // A mailbox keyed by Gmail thread numbers has no provisional roots to move.

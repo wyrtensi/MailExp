@@ -246,6 +246,42 @@
       "doubleExt": "Hidden extension: .{{ext}} — the real type is the last one",
       "confirm": "click again to download anyway"
     },
+    "safeView": {
+      "label": "Safe view",
+      "title": {
+        "spam": "This letter is in Spam",
+        "phishing": "This letter looks like phishing",
+        "malware": "This letter may carry malware",
+        "spoof": "The sender of this letter may be forged"
+      },
+      "explain": "Shown as text only: no images, no clickable links, and attachments cannot be opened. Check the sender before you trust it.",
+      "explainWarn": "The mail filter could not confirm that this letter comes from the address it shows. Check the sender before you reply, click a link or open an attachment.",
+      "category": "Mail filter verdict: {{category}}",
+      "categories": {
+        "spam": "spam",
+        "highSpam": "high confidence spam",
+        "bulk": "bulk mail",
+        "outboundSpam": "outbound spam",
+        "phishing": "phishing",
+        "highPhishing": "high confidence phishing",
+        "intraOrgPhishing": "phishing from inside the organization",
+        "domainImpersonation": "domain impersonation",
+        "userImpersonation": "user impersonation",
+        "mailboxImpersonation": "impersonation found by mailbox intelligence",
+        "brandImpersonation": "brand impersonation",
+        "spoof": "spoofed sender",
+        "malware": "malware",
+        "antiMalware": "caught by the anti-malware policy",
+        "safeAttachments": "caught by Safe Attachments",
+        "fileType": "blocked attachment type"
+      },
+      "showFull": "Show in full",
+      "attachmentsLocked": "Show the letter in full to open its attachments.",
+      "linkTo": "link to",
+      "formTo": "form sends to",
+      "emlConfirm": "This letter is in safe view. The .eml file holds it whole: images, links and attachments open in whatever program reads it. Download anyway?",
+      "emlConfirmButton": "Download .eml"
+    },
     "downloadAll": "Download all",
     "reply": "Reply",
     "replyAll": "Reply All",

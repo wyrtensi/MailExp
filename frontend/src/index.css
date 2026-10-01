@@ -251,6 +251,44 @@ body, #root {
   animation: skeleton-shimmer 1.4s ease-in-out infinite;
 }
 
+/* A link in a letter shown in safe view (utils/safeView.js): its words, then where it really goes,
+   labelled, with the host in bold. Nothing is a link. The target is isolated left-to-right so text
+   around it cannot reorder it, and monospace shows look-alike letters (rn for m, 0 for o) as they
+   are. The letter card is white in every theme, so the colours are fixed like the card's own text. */
+.safe-view-words {
+  text-decoration: underline dashed;
+  text-underline-offset: 3px;
+}
+.safe-view-target {
+  unicode-bidi: isolate;
+  direction: ltr;
+  display: inline;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  color: #374151;
+  font-size: 0.9em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.safe-view-target-label {
+  color: #6b7280;
+  font-style: italic;
+}
+.safe-view-host {
+  unicode-bidi: isolate;
+  direction: ltr;
+  color: #111827;
+  font-weight: 700;
+}
+.safe-view-address {
+  unicode-bidi: isolate;
+  direction: ltr;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+
 /* Prevent iOS Safari from zooming in when focusing inputs smaller than 16px */
 @supports (-webkit-touch-callout: none) {
   input, textarea, select { font-size: 16px !important; }

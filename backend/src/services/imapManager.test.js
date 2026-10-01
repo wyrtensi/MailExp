@@ -1397,6 +1397,48 @@ describe('syncMessages — empty local cache vs nonempty server (wiring)', () =>
   });
 });
 
+describe('syncMessages — EOP category (R-41)', () => {
+  // The reading pane shows a phishing letter in safe mode wherever it lies, from the CAT field of
+  // X-Forefront-Antispam-Report. The sync already fetches every header, so it stores the category.
+  async function syncOne(parsedHeaders) {
+    const account = {
+      id: 'acct-eop', user_id: 'user-1', email_address: 'me@example.com',
+      gtd_enabled: false, categorization_enabled: false, imap_host: 'imap.example.com',
+    };
+    const client = {
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      mailbox: { exists: 1, uidValidity: 100, highestModseq: 500n },
+      fetch: vi.fn(async function* () { yield { uid: 501 }; }),
+    };
+    query.mockImplementation((sql) => {
+      if (sql.includes('SELECT uid_validity, highest_modseq FROM folders')) return Promise.resolve({ rows: [{ uid_validity: 100, highest_modseq: '500' }] });
+      if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)')) return Promise.resolve({ rows: [{ n: 0 }] });
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return Promise.resolve({ rows: [{ max_uid: 0 }] });
+      if (sql.includes('INSERT INTO messages')) return Promise.resolve({ rows: [{ id: 'x', is_new: true }] });
+      return Promise.resolve({ rows: [] });
+    });
+    parseMessage.mockResolvedValue({
+      uid: 501, messageId: '<eop@x>', subject: 'Verify your account', fromName: 'Bank', fromEmail: 'bank@example.net',
+      to: [], cc: [], replyTo: [], inReplyTo: null, references: null, date: new Date('2026-10-01T10:00:00Z'),
+      snippet: 'hi', isRead: true, isStarred: false, hasAttachments: false, flags: ['\\Seen'], isBulk: false, parsedHeaders,
+    });
+    await ImapManager.prototype.syncMessages.call(noMoves(), account, client, 'INBOX', 50, false, true);
+    const [sql, params] = query.mock.calls.find(([s]) => s.includes('INSERT INTO messages'));
+    // The category is the last parameter, bound to the eop_category column.
+    expect(sql).toMatch(/threading_reason,\s*eop_category\s*\) VALUES \([^)]*\$32,\$34\)/);
+    expect(sql).toContain('eop_category = COALESCE(EXCLUDED.eop_category, messages.eop_category)');
+    return params[33];
+  }
+
+  it('stores the CAT of the report', async () => {
+    expect(await syncOne({ 'x-forefront-antispam-report': 'CIP:203.0.113.5;SFV:SPM;CAT:PHSH;DIR:INB;' })).toBe('PHSH');
+  });
+
+  it('stores nothing for a letter without the report', async () => {
+    expect(await syncOne({})).toBeNull();
+  });
+});
+
 describe('syncMessages — unread_count recompute ordering (folder badge fix)', () => {
   it('recomputes folders.unread_count from rows AFTER inserting new messages', async () => {
     // The provisional unread_count written before the fetch left on-demand folders (e.g. Junk)

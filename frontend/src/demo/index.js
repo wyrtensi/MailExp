@@ -92,6 +92,10 @@ function message({
   toAddresses,
   ccAddresses = [],
   bodyText = snippet,
+  // A letter whose HTML differs from its text (links, styling); by default the text in a <p>.
+  bodyHtml,
+  // The CAT field of the letter's X-Forefront-Antispam-Report header (backend utils/antispamReport.js).
+  eopCategory = null,
   // Generated letters carry their own headers and threading (demo/fleet.js); the hand-made
   // ones below leave these out and read through THREADING_OVERRIDES instead.
   messageId,
@@ -125,8 +129,9 @@ function message({
     is_starred: starred,
     has_attachments: attachments,
     category,
-    body_html: `<p>${bodyText}</p>`,
+    body_html: bodyHtml ?? `<p>${bodyText}</p>`,
     body_text: bodyText,
+    eop_category: eopCategory,
   };
   if (reason !== undefined) {
     Object.assign(row, {
@@ -184,10 +189,30 @@ const MESSAGE_FIXTURES = [
     fromName: 'Elena Rossi', fromEmail: 'elena@demo.mailexpert.local', date: '2026-09-13T11:40:00.000Z',
     snippet: 'Notes and follow-ups from the pipeline review.', bodyText: 'Here are the notes and follow-ups from our Q3 pipeline review.', read: true,
   }),
+  // Spam opens in safe view (R-41): as text, the link's target written out, the attachment locked.
   message({
     id: 'demo-008', accountId: 'demo-ops', folder: 'Spam', subject: 'You have won a cloud server',
     fromName: 'Cloud Prize Desk', fromEmail: 'winner@suspicious.example', date: '2026-09-12T05:15:00.000Z',
-    snippet: 'Claim your prize immediately.', bodyText: 'Claim your prize immediately by following this suspicious link.', category: 'promotion',
+    snippet: 'Claim your prize immediately.', bodyText: '', category: 'promotion', attachments: true,
+    bodyHtml: '<div style="font-family:Arial,sans-serif;text-align:center;padding:24px;background:#fff7d6;border:2px dashed #f59e0b">'
+      + '<h1 style="color:#b45309;margin:0 0 12px">Congratulations!</h1>'
+      + '<p>You have won a <b>cloud server</b>. Claim your prize immediately:</p>'
+      + '<p><a href="https://prize.suspicious.example/claim?id=8841" style="display:inline-block;padding:10px 20px;background:#16a34a;color:#fff;border-radius:6px;text-decoration:none">Claim my prize</a></p>'
+      + '</div>',
+  }),
+  // EOP marked it as phishing (CAT:PHSH) yet it sits in the Inbox: safe view all the same.
+  message({
+    id: 'demo-010', accountId: 'demo-ops', subject: 'Action required: your mailbox will be closed',
+    fromName: 'IT Service Desk', fromEmail: 'it-support@helpdesk-mailexpert.example', date: '2026-09-16T06:05:00.000Z',
+    snippet: 'Your mailbox storage is full. Verify your account within 24 hours.', bodyText: '', eopCategory: 'PHSH',
+    bodyHtml: '<div style="font-family:Segoe UI,Arial,sans-serif;max-width:520px">'
+      + '<div style="background:#0f62fe;color:#fff;padding:12px 16px;font-weight:600">MailExpert IT Service Desk</div>'
+      + '<div style="padding:16px;border:1px solid #d0d7e2">'
+      + '<p>Your mailbox storage is full and incoming mail is being held.</p>'
+      + '<p>To keep your mailbox, verify your account within 24 hours:</p>'
+      + '<p><a href="https://login.helpdesk-mailexpert.example/verify?u=ops" style="display:inline-block;padding:10px 18px;background:#0f62fe;color:#fff;text-decoration:none">https://mail.demo.mailexpert.local/verify</a></p>'
+      + '<p style="color:#6b7280;font-size:12px">IT Service Desk</p>'
+      + '</div></div>',
   }),
   message({
     id: 'demo-009', accountId: 'demo-sales', folder: 'Trash', subject: 'Old conference invitation',
@@ -1515,6 +1540,7 @@ export async function demoRequest(method, path, body = {}) {
       // No Sender header distinct from From in the demo letters, as for most real mail.
       senderEmail: null,
       senderName: null,
+      eopCategory: item.eop_category ?? null,
     }) : {};
   }
 

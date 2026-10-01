@@ -170,7 +170,7 @@ router.get('/messages/:id', async (req, res) => {
              m.reply_to, m.in_reply_to,
              m.date, m.snippet, m.is_read, m.is_starred,
              m.has_attachments, m.account_id, m.category,
-             m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+             m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses, m.eop_category,
              a.name AS account_name, a.email_address AS account_email,
              a.color AS account_color
       FROM messages m
@@ -206,7 +206,7 @@ router.get('/resolve-message', async (req, res) => {
              m.reply_to, m.in_reply_to,
              m.date, m.snippet, m.is_read, m.is_starred,
              m.has_attachments, m.account_id, m.category,
-             m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+             m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses, m.eop_category,
              a.name AS account_name, a.email_address AS account_email,
              a.color AS account_color`;
   try {
@@ -288,7 +288,7 @@ router.get('/thread/:threadId', async (req, res) => {
                m.reply_to, m.in_reply_to,
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
-               m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses,
+               m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses, m.eop_category,
                a.name AS account_name, a.email_address AS account_email, a.color AS account_color
         FROM messages m
         JOIN email_accounts a ON m.account_id = a.id
@@ -573,7 +573,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(html);
       hasBlockedRemoteImages = true;
     }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name });
+    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -615,7 +615,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(safeHtml);
       hasBlockedRemoteImages = true;
     }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name });
+    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error('Body fetch error:', msg);
