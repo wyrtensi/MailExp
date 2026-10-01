@@ -88,6 +88,20 @@ describe('mail node onboarding in demo mode', () => {
     assert.equal(host.querySelectorAll('[data-recreated-badge]').length, 1);
   });
 
+  test('the demo has DNS results: the node, a ready domain with errors and the pilot passing', async () => {
+    const host = await mount(React.createElement(MailNodeSection));
+    assert.ok(host.querySelector('[data-node-dns] [data-dns-result]'), 'the node has a last check');
+    const badges = [...host.querySelectorAll('[data-dns-badge]')].map((el) => el.getAttribute('data-dns-badge'));
+    assert.deepEqual(badges, ['branch.demo.mailexpert.local']);
+    assert.equal(host.querySelector('[data-dns-summary]').getAttribute('data-dns-summary'), '1');
+    const { domains } = await demoRequest('GET', '/mail-node/domains');
+    assert.equal(domains.find((d) => d.domain === 'pilot.demo.mailexpert.local').dns.overall, 'ok');
+    // Entering the MX the branch domain must publish alone does not hide the second one.
+    const branch = await demoRequest('PUT', '/mail-node/domains/branch.demo.mailexpert.local/dns-expected', { expectedMx: 'branch-demo-mailexpert-local.mail.protection.outlook.com' });
+    assert.equal(branch.dns.checks.find((c) => c.check === 'mx').code, 'mx_extra');
+    await assert.rejects(demoRequest('PUT', '/mail-node/domains/branch.demo.mailexpert.local/dns-expected', { expectedMx: 'not a host' }), { code: 'expected_mx_invalid' });
+  });
+
   test('the EOP section shows the demo settings and its checklist, and Done moves a domain on', async () => {
     const host = await mount(React.createElement(EopSection));
     const values = [...host.querySelectorAll('input')].map((input) => input.value);

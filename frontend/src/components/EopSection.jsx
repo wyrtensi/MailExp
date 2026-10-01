@@ -42,7 +42,7 @@ const TLS_POLICY_KEYS = {
 };
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 
-const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
+const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'nodeIp', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
 
 // The stored settings as the form edits them: every field a string.
 function toForm(settings) {
@@ -209,6 +209,11 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             <span style={labelStyle}>{t('admin.eop.certificateHostLabel')}</span>
             {textField('certificateHost', { placeholder: t('admin.mailNode.hostPh') })}
             <span style={hintStyle}>{t('admin.eop.certificateHostNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.eop.nodeIpLabel')}</span>
+            {textField('nodeIp', { placeholder: t('admin.eop.nodeIpPh') })}
+            <span style={hintStyle}>{t('admin.eop.nodeIpNote')}</span>
           </label>
           <label>
             <span style={labelStyle}>{t('admin.eop.dkimModeLabel')}</span>

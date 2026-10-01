@@ -69,6 +69,7 @@ const CONCRETE_PATH = {
   '/mail-node/mailboxes': '/mail-node/mailboxes',
   '/mail-node/eop': '/mail-node/eop',
   '/mail-node/apply': '/mail-node/apply',
+  '/mail-node/dns-check': '/mail-node/dns-check',
   '/accounts/:param/folders': '/accounts/demo-sales/folders',
   '/accounts/:param/aliases': '/accounts/demo-sales/aliases',
   '/accounts/:param/node-aliases': '/accounts/demo-fx-02/node-aliases',
@@ -469,6 +470,12 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   assert.equal(domainApply.domain, 'coverage.demo.mailexpert.local');
   const prefilter = await answer('/mail-node/apply/prefilter', 'POST', '/mail-node/apply/prefilter');
   assert.equal(prefilter.item, 'prefilter');
+  const dnsAll = await answer('/mail-node/dns-check', 'POST', '/mail-node/dns-check');
+  assert.ok(dnsAll.node?.checks?.length && Array.isArray(dnsAll.domains));
+  const dnsDomain = await answer('/mail-node/domains/:param/dns-check', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/dns-check');
+  assert.equal(dnsDomain.domain, 'coverage.demo.mailexpert.local');
+  const expected = await answer('/mail-node/domains/:param/dns-expected', 'PUT', '/mail-node/domains/coverage.demo.mailexpert.local/dns-expected', { expectedMx: 'coverage-demo.mail.protection.outlook.com' });
+  assert.deepEqual(expected.fields, ['mx']);
   await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });
 });
 

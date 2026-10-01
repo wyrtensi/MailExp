@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
+import MailNodeDnsResult from './MailNodeDnsResult.jsx';
 import {
   DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
@@ -10,7 +11,9 @@ import {
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
   RATE_LIMIT_FRAMES,
+  dnsSummary,
   domainStateKey,
+  hasDnsErrors,
   mailNodeConfigError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
@@ -38,6 +41,11 @@ const primaryButtonStyle = { ...buttonStyle, background: 'var(--accent)', border
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 const cellStyle = { padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)', fontSize: 13, textAlign: 'left' };
 const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' };
+const badgeStyle = (color, background) => ({
+  fontSize: 11, fontWeight: 500, color: 'var(--text-primary)', padding: '1px 7px', borderRadius: 20,
+  border: `1px solid ${color}`, background,
+});
+const dnsBadgeStyle = badgeStyle('var(--red)', 'rgba(239,68,68,0.12)');
 
 const EMPTY_FORM = {
   mailHost: '', apiKey: '', quotaMb: String(DEFAULT_QUOTA_MB), diskPingUrl: '', deleteAfterDays: String(DEFAULT_DELETE_AFTER_DAYS),
@@ -52,8 +60,12 @@ const RATE_STATE_KEYS = {
 
 // Settings -> Integrations -> "Mail node" (admins only): the mailcow server MailExpert creates
 // domain mailboxes on, the panel's own addresses for the node's fail2ban whitelist, its domains with
-// their onboarding, the mail disk and the quota and send limit of every mailbox made there. The EOP section next to it changes domains too: `revision` goes up after any
-// such change, and this section tells it about its own through `onDomainsChanged`.
+// their onboarding, the mail disk, the node's DNS and certificate check (R-15) with "Check now" for
+// the node and every domain, and the quota and send limit of every mailbox made there. A domain
+// that takes mailboxes while its last DNS check found errors carries a badge in the list, and the
+// title a summary of them; the checks only warn and never change a domain's state. The EOP section
+// next to it changes domains too: `revision` goes up after any such change, and this section tells
+// it about its own through `onDomainsChanged`.
 export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
   const [stored, setStored] = useState(null);
@@ -62,6 +74,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   // The node's error when it could not list its domains: the panel's own record is shown anyway.
   const [domainsNodeError, setDomainsNodeError] = useState(null);
   const [overview, setOverview] = useState(null);
+  // The node's last DNS check: { at, overall, checks }, or null before the first one.
+  const [nodeDns, setNodeDns] = useState(null);
   const [newDomain, setNewDomain] = useState({ domain: '', mailboxes: String(DEFAULT_DOMAIN_MAILBOXES) });
   const [quotaEdits, setQuotaEdits] = useState({});
   // A send limit being edited per mailbox: { value, frame }.
@@ -76,7 +90,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   // Each list shows on its own: a failing mailbox listing does not hide the domains, and a node
   // that cannot list its domains leaves the panel's record of them on screen with a warning.
   const loadNode = useCallback(async () => {
-    const [d, o] = await Promise.allSettled([api.mailNode.listDomains(), api.mailNode.listMailboxes()]);
+    const [d, o, n] = await Promise.allSettled([api.mailNode.listDomains(), api.mailNode.listMailboxes(), api.mailNode.getDnsCheck()]);
     if (d.status === 'fulfilled') {
       setDomains(d.value?.domains ?? []);
       setDomainsNodeError(d.value?.node ?? null);
@@ -84,7 +98,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
       setDomainsNodeError(null);
     }
     if (o.status === 'fulfilled') setOverview(o.value);
-    const failed = [d, o].find((r) => r.status === 'rejected');
+    if (n.status === 'fulfilled') setNodeDns(n.value?.node ?? null);
+    const failed = [d, o, n].find((r) => r.status === 'rejected');
     if (failed) fail(failed.reason);
   }, []);
 
@@ -166,12 +181,29 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     return `${p.value} ${t(p.unitKey)}`;
   };
 
+  // "Check now": the node and every domain the panel knows; the lists reload with the results.
+  const checkDns = () => run(async () => {
+    const result = await api.mailNode.checkDns();
+    setNodeDns(result?.node ?? null);
+    await refreshDomains();
+  }, 'admin.mailNode.dnsCheckDone');
+
   const disk = overview?.disk;
   const quotaGb = quotaMbInGb(form.quotaMb);
+  const dnsProblems = dnsSummary(domains, nodeDns);
 
   return (
     <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
-      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{t('admin.mailNode.title')}</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{t('admin.mailNode.title')}</span>
+        {stored?.configured && (dnsProblems.domains.length > 0 || dnsProblems.node) && (
+          <span role="status" data-dns-summary={dnsProblems.domains.length} style={dnsBadgeStyle}>
+            {dnsProblems.node
+              ? t('admin.mailNode.dnsSummaryNode', { number: dnsProblems.domains.length })
+              : t('admin.mailNode.dnsSummary', { number: dnsProblems.domains.length })}
+          </span>
+        )}
+      </div>
       <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, marginBottom: 16 }}>
         {t('admin.mailNode.description')}
       </div>
@@ -241,6 +273,17 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
         </>
       )}
 
+      {stored?.configured && (
+        <div data-node-dns>
+          <div style={subTitleStyle}>{t('admin.mailNode.nodeDnsTitle')}</div>
+          <span style={{ ...hintStyle, marginTop: 0, marginBottom: 8 }}>{t('admin.mailNode.nodeDnsNote')}</span>
+          {nodeDns ? <MailNodeDnsResult result={nodeDns} /> : <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{t('admin.mailNode.dnsNever')}</div>}
+          <div style={{ marginTop: 10 }}>
+            <button type="button" onClick={checkDns} disabled={busy} style={buttonStyle}>{t('admin.mailNode.dnsCheckAll')}</button>
+          </div>
+        </div>
+      )}
+
       {stored?.configured && domains && (
         <>
           <div style={subTitleStyle}>{t('admin.mailNode.domainsTitle')}</div>
@@ -277,11 +320,13 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                             {t(domainStateKey(d.state))}
                           </span>
                           {d.recreated && (
-                            <span data-recreated-badge style={{
-                              fontSize: 11, fontWeight: 500, color: 'var(--text-primary)', padding: '1px 7px', borderRadius: 20,
-                              border: '1px solid var(--amber)', background: 'rgba(251,191,36,0.14)',
-                            }}>
+                            <span data-recreated-badge style={badgeStyle('var(--amber)', 'rgba(251,191,36,0.14)')}>
                               {t('admin.mailNode.recreatedBadge')}
+                            </span>
+                          )}
+                          {hasDnsErrors(d) && (
+                            <span data-dns-badge={d.domain} style={dnsBadgeStyle}>
+                              {t('admin.mailNode.dnsBadge')}
                             </span>
                           )}
                           <button

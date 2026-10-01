@@ -2,7 +2,8 @@ import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoRole } from '../utils/demoRole.js';
 import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
-  deletionReasonError, eopSettingsConflict, normalizeEopSettings, parseNetworkList, parseWholeNumber, rateLimitError,
+  deletionReasonError, eopSettingsConflict, normalizeEopSettings, normalizeExpectedValues, parseNetworkList, parseWholeNumber,
+  rateLimitError,
 } from '../utils/mailNode.js';
 
 const ACCOUNT_FIXTURES = [
@@ -790,6 +791,7 @@ let demoEopSettings = {
   tenantId: null,
   appId: null,
   certThumbprint: null,
+  nodeIp: '203.0.113.10',
 };
 
 function eopSettingsAnswer() {
@@ -873,6 +875,114 @@ function demoApplyNode() {
   return { at: demoNodeApply.at, node, domains };
 }
 
+// The demo's DNS (backend services/mailNode/dnsCheck.js, R-14 and R-15): what each demo domain
+// publishes, and a check that compares the MX, the tenant TXT and the EOP selector CNAMEs with the
+// values entered as the server does; SPF, DKIM, DMARC and MTA-STS are published right everywhere.
+// The branch domain publishes a second MX, so a ready domain shows DNS errors.
+const DEMO_SPF = 'v=spf1 include:spf.protection.outlook.com -all';
+const demoSlug = (domain) => domain.replace(/\./g, '-');
+function demoZoneOf(domain) {
+  const mx = [`${demoSlug(domain)}.mail.protection.outlook.com`];
+  if (domain === 'branch.demo.mailexpert.local') mx.push('mail.branch.demo.mailexpert.local');
+  return {
+    mx,
+    msTxt: [`MS=ms${String(domain.length * 7919).padStart(8, '0')}`],
+    cnames: [1, 2].map((n) => `selector${n}-${demoSlug(domain)}._domainkey.demomailexpert.n-v1.dkim.mail.microsoft`),
+  };
+}
+const noExpected = () => ({ mx: [], tenantTxt: null, dkimSelector1Cname: null, dkimSelector2Cname: null });
+// What an administrator entered for the demo domains: the MX and the TXT the tenant gives them.
+function demoExpectedOf(domain) {
+  const zone = demoZoneOf(domain);
+  return { ...noExpected(), mx: [zone.mx[0]], tenantTxt: zone.msTxt[0] };
+}
+const demoCheck = (check, status, fields = {}) => ({ check, status, code: null, found: [], expected: null, records: [], ...fields });
+const worstOf = (checks) => ['error', 'warning'].find((status) => checks.some((c) => c.status === status)) ?? 'ok';
+
+function demoDomainChecks(domain) {
+  const name = domain.domain;
+  const zone = demoZoneOf(name);
+  const expected = domain.expected ?? noExpected();
+  const checks = [];
+  if (!expected.mx.length) checks.push(demoCheck('mx', 'warning', { code: 'mx_expected_missing', name, found: zone.mx }));
+  else {
+    const fields = { name, found: zone.mx, expected: expected.mx, records: expected.mx.map((mx) => ({ type: 'MX', name, value: `0 ${mx}` })) };
+    if (expected.mx.some((mx) => !zone.mx.includes(mx))) checks.push(demoCheck('mx', 'error', { ...fields, code: 'mx_mismatch' }));
+    else if (zone.mx.some((mx) => !expected.mx.includes(mx))) checks.push(demoCheck('mx', 'error', { ...fields, code: 'mx_extra' }));
+    else checks.push(demoCheck('mx', 'ok', fields));
+  }
+  checks.push(demoCheck('spf', 'ok', { name, found: [DEMO_SPF], expected: [DEMO_SPF], records: [{ type: 'TXT', name, value: DEMO_SPF }] }));
+  const tenantSigns = demoNode.tenantSigns.has(name) || demoEopSettings.dkimMode === 'eop';
+  if (!tenantSigns) {
+    const dkim = demoDkim(name);
+    checks.push(demoCheck('dkim_txt', 'ok', { name: dkim.name, found: [dkim.txt], expected: [dkim.txt], records: [{ type: 'TXT', name: dkim.name, value: dkim.txt }] }));
+  }
+  const cnames = [expected.dkimSelector1Cname, expected.dkimSelector2Cname];
+  if (tenantSigns || cnames.some(Boolean)) {
+    const names = [1, 2].map((n) => `selector${n}._domainkey.${name}`);
+    if (cnames.some((c) => !c)) checks.push(demoCheck('dkim_cname', 'warning', { code: 'dkim_cname_expected_missing', name: names.join(', '), found: zone.cnames }));
+    else {
+      const fields = { name: names.join(', '), found: zone.cnames, expected: cnames, records: names.map((n, i) => ({ type: 'CNAME', name: n, value: cnames[i] })) };
+      checks.push(cnames.every((c, i) => c === zone.cnames[i])
+        ? demoCheck('dkim_cname', 'ok', fields)
+        : demoCheck('dkim_cname', 'error', { ...fields, code: 'dkim_cname_mismatch' }));
+    }
+  }
+  checks.push(demoCheck('dmarc', 'ok', { name: `_dmarc.${name}`, found: ['v=DMARC1; p=none'], records: [{ type: 'TXT', name: `_dmarc.${name}`, value: 'v=DMARC1; p=none' }] }));
+  if (!expected.tenantTxt) checks.push(demoCheck('tenant_txt', 'warning', { code: 'tenant_txt_expected_missing', name, found: zone.msTxt }));
+  else {
+    const fields = { name, found: zone.msTxt, expected: [expected.tenantTxt], records: [{ type: 'TXT', name, value: expected.tenantTxt }] };
+    checks.push(zone.msTxt.includes(expected.tenantTxt)
+      ? demoCheck('tenant_txt', 'ok', fields)
+      : demoCheck('tenant_txt', 'error', { ...fields, code: 'tenant_txt_missing' }));
+  }
+  checks.push(demoCheck('mta_sts', 'ok', { name: `_mta-sts.${name}` }));
+  return checks;
+}
+
+// One domain's check, kept with the domain as the server keeps it.
+function demoCheckDomain(domain, trigger, at = new Date().toISOString()) {
+  const checks = demoDomainChecks(domain);
+  const dns = { at, overall: worstOf(checks), trigger, checks };
+  mailNodeDomains = mailNodeDomains.map(d => (d.domain === domain.domain ? { ...d, dns } : d));
+  return { domain: domain.domain, ...dns };
+}
+
+// The node: its name, address and the certificate on 587, all in place; the certificate ends in two
+// months.
+function demoNodeChecks() {
+  const host = 'mail.demo.mailexpert.local';
+  const ip = demoEopSettings.nodeIp;
+  const checks = ip
+    ? [
+      demoCheck('node_a', 'ok', { name: host, found: [ip], expected: [ip], records: [{ type: 'A', name: host, value: ip }] }),
+      demoCheck('node_ptr', 'ok', {
+        name: `${ip.split('.').reverse().join('.')}.in-addr.arpa`, found: [host], expected: [host],
+        records: [{ type: 'PTR', name: `${ip.split('.').reverse().join('.')}.in-addr.arpa`, value: host }],
+      }),
+    ]
+    : [
+      demoCheck('node_a', 'warning', { code: 'node_ip_missing', name: host, found: ['203.0.113.10'] }),
+      demoCheck('node_ptr', 'warning', { code: 'node_ip_missing' }),
+    ];
+  const cert = { subject: `CN=${host}`, issuer: 'C=US, O=Let\'s Encrypt, CN=R11', subjectAltName: `DNS:${host}` };
+  return [
+    ...checks,
+    demoCheck('node_aaaa', 'ok', { name: host }),
+    demoCheck('cert_expiry', 'ok', { ...cert, daysLeft: 61 }),
+    demoCheck('cert_name', 'ok', { ...cert, expected: [host], found: [cert.subjectAltName] }),
+    demoCheck('cert_chain', 'ok', cert),
+  ];
+}
+let demoNodeDns = null;
+function demoCheckAll(trigger) {
+  const at = new Date().toISOString();
+  const checks = demoNodeChecks();
+  demoNodeDns = { at, overall: worstOf(checks), trigger, checks };
+  const domains = mailNodeDomains.filter(d => d.state !== 'unknown').map(d => demoCheckDomain(d, trigger, at));
+  return { at, node: demoNodeDns, domains };
+}
+
 function mailNodeDomainByName(raw) {
   const name = decodeURIComponent(raw).toLowerCase();
   const domain = mailNodeDomains.find(d => d.domain === name);
@@ -916,6 +1026,7 @@ function changeMailNodeDomain(action, raw, step, body) {
     if (domain.state !== 'unknown') throw demoError('The panel knows this domain already', 'domain_known');
     return updateMailNodeDomain(domain.domain, {
       state: 'node_created', origin: 'adopted', addedAt: now, addedBy: DEMO_ADMIN_EMAIL, stateChangedAt: now, steps: {},
+      dns: null, expected: noExpected(),
     });
   }
   if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
@@ -923,7 +1034,8 @@ function changeMailNodeDomain(action, raw, step, body) {
     if (!canRestartOnboarding(domain)) throw demoError('The domain is at the first step with nothing to clear', 'domain_nothing_to_restart');
     // Mailboxes on the domain stay; the node identity is bound again, so the warning goes too.
     withoutRecreatedWarning(domain.domain);
-    return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {} });
+    // As on the server, the DNS result and the values entered by hand go with the restart.
+    return updateMailNodeDomain(domain.domain, { state: 'node_created', stateChangedAt: now, steps: {}, dns: null, expected: noExpected() });
   }
   if (action === 'ready') {
     if (!canMarkReady(domain)) throw demoError('The domain is ready already', 'domain_already_ready');
@@ -946,6 +1058,15 @@ let mailNodeMailboxes = FLEET_ACCOUNTS.filter(account => account.mail_node).map(
 demoNodeApply = { at: '2026-09-30T18:00:00.000Z', items: demoNodeItems() };
 for (const d of mailNodeDomains) if (d.state !== 'unknown') demoDomainApply(d);
 mailNodeMailboxes = mailNodeMailboxes.map((m, index) => (index === 1 ? { ...m, rateLimit: null } : m));
+// The DNS as the last scheduled check found it: the values to publish entered for every known
+// domain (the pilot's EOP selector CNAMEs too), the branch domain with a second MX.
+mailNodeDomains = mailNodeDomains.map(d => ({
+  ...d, dns: null, expected: d.state === 'unknown' ? null : demoExpectedOf(d.domain),
+}));
+mailNodeDomains = mailNodeDomains.map(d => (d.domain === 'pilot.demo.mailexpert.local'
+  ? { ...d, expected: { ...d.expected, dkimSelector1Cname: demoZoneOf(d.domain).cnames[0], dkimSelector2Cname: demoZoneOf(d.domain).cnames[1] } }
+  : d));
+demoCheckAll('schedule');
 
 // Addresses Google granted before (the grant journal) that are no mailbox now: the Gmail field
 // offers them as "Connected before".
@@ -1821,7 +1942,7 @@ export async function demoRequest(method, path, body = {}) {
       const now = new Date().toISOString();
       mailNodeDomains = [...mailNodeDomains, demoDomain(
         { domain, active: true, maxMailboxes: Number(body?.mailboxes) || 500, mailboxes: 0 },
-        { state: 'node_created', origin: 'created', addedAt: now, addedBy: DEMO_ADMIN_EMAIL, stateChangedAt: now },
+        { state: 'node_created', origin: 'created', addedAt: now, addedBy: DEMO_ADMIN_EMAIL, stateChangedAt: now, dns: null, expected: noExpected() },
       )].sort((a, b) => a.domain.localeCompare(b.domain));
       // A new domain gets a key only when mailcow signs, then its node settings.
       if (demoEopSettings.dkimMode === 'mailcow') demoNode.dkimKeys.add(domain);
@@ -1845,6 +1966,28 @@ export async function demoRequest(method, path, body = {}) {
     const domain = mailNodeDomainByName(domainApply[1]);
     if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
     return demoDomainApply(domain, { confirmDkimDelete: body?.confirmDkimDelete === true });
+  }
+  // The DNS checks: the node's last result, "Check now" for everything and for one domain, and the
+  // values a domain must publish, checked as the server checks them (utils/mailNode.js mirrors it).
+  if (verb === 'GET' && pathname === '/mail-node/dns-check') return clone({ node: demoNodeDns });
+  if (verb === 'POST' && pathname === '/mail-node/dns-check') return clone(demoCheckAll('manual'));
+  const domainDns = pathname.match(/^\/mail-node\/domains\/([^/]+)\/(dns-check|dns-expected)$/);
+  if (domainDns && ((verb === 'POST' && domainDns[2] === 'dns-check') || (verb === 'PUT' && domainDns[2] === 'dns-expected'))) {
+    const domain = mailNodeDomainByName(domainDns[1]);
+    if (domain.state === 'unknown') throw demoError('The panel does not know this domain', 'domain_not_found');
+    if (domainDns[2] === 'dns-check') return clone(demoCheckDomain(domain, 'manual'));
+    const { values, error } = normalizeExpectedValues(body);
+    if (error) throw demoError('Invalid value to publish', error);
+    const before = domain.expected ?? noExpected();
+    const after = {
+      mx: values.mx ?? before.mx,
+      ...Object.fromEntries(['tenantTxt', 'dkimSelector1Cname', 'dkimSelector2Cname']
+        .map((field) => [field, values[field] !== undefined ? values[field] : before[field]])),
+    };
+    const fields = Object.keys(after).filter((key) => JSON.stringify(after[key]) !== JSON.stringify(before[key]));
+    mailNodeDomains = mailNodeDomains.map(d => (d.domain === domain.domain ? { ...d, expected: after } : d));
+    const dns = demoCheckDomain({ ...domain, expected: after }, 'expected_changed');
+    return clone({ ok: true, domain: domain.domain, fields, dns });
   }
   if (verb === 'GET' && pathname === '/mail-node/apply') return clone({ node: demoNodeApply });
   if (verb === 'POST' && pathname === '/mail-node/apply') return clone(demoApplyNode());

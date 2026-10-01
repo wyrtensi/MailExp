@@ -396,6 +396,12 @@ export const api = {
     applyNode: () => request('POST', '/mail-node/apply'),
     applyDomain: (domain, { confirmDkimDelete = false } = {}) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/apply`, { confirmDkimDelete }),
     applyPrefilter: () => request('POST', '/mail-node/apply/prefilter'),
+    // The DNS checks: the node's last result, "Check now" for the node with every domain and for
+    // one domain, and the values a domain must publish that the panel cannot read yet.
+    getDnsCheck: () => request('GET', '/mail-node/dns-check'),
+    checkDns: () => request('POST', '/mail-node/dns-check'),
+    checkDomainDns: (domain) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/dns-check`),
+    setDnsExpected: (domain, values) => request('PUT', `/mail-node/domains/${encodeURIComponent(domain)}/dns-expected`, values),
   },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),

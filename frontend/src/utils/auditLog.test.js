@@ -11,7 +11,7 @@ describe('AUDIT_ACTIONS', () => {
       'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
-      'mail_node.domain_identity_acknowledged', 'mail_node.applied',
+      'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
     ]);
     assert.equal(auditActionLabelKey('mail_node.applied'), 'admin.audit.actionMailNodeApplied');
     assert.equal(auditActionLabelKey('mailbox.rate_limit_changed'), 'admin.audit.actionMailboxRateLimitChanged');
@@ -143,6 +143,46 @@ describe('auditDetail', () => {
       auditDetail({ action: 'mail_node.config_changed', details: { settings: 'node', fields: ['panelIps'] } }).valueKeys,
       { fields: ['admin.audit.fieldPanelIps'] },
     );
+  });
+
+  it('describes the values a domain must publish by the names of the fields', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'domain_dns', domain: 'a.example', fields: ['mx', 'tenantTxt'] } }),
+      {
+        key: 'admin.audit.detailDomainDnsExpectedChanged', values: { domain: 'a.example' },
+        valueKeys: { fields: ['admin.audit.fieldExpectedMx', 'admin.audit.fieldTenantTxt'] },
+      },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['nodeIp'] } }).valueKeys,
+      { fields: ['admin.audit.fieldNodeIp'] },
+    );
+  });
+
+  it('describes a DNS check: everything at once, or one scope with its status before', () => {
+    assert.deepEqual(
+      auditDetail({
+        action: 'mail_node.dns_checked',
+        details: { scope: 'all', trigger: 'manual', overall: 'ok', from: null, counts: { ok: 2, warning: 1, error: 1 }, errorDomains: ['b.example'] },
+      }),
+      { key: 'admin.audit.detailDnsCheckedAll', values: { ok: 2, warning: 1, error: 1, domains: 'b.example' }, valueKeys: { overall: 'admin.mailNode.dnsStatusOk' } },
+    );
+    assert.deepEqual(
+      auditDetail({
+        action: 'mail_node.dns_checked',
+        details: { scope: 'domain', domain: 'a.example', trigger: 'schedule', overall: 'error', from: 'ok', errors: ['mx'], warnings: [] },
+      }),
+      {
+        key: 'admin.audit.detailDnsCheckedDomain', values: { domain: 'a.example', warnings: '—' },
+        valueKeys: { overall: 'admin.mailNode.dnsStatusError', from: 'admin.mailNode.dnsStatusOk', errors: ['admin.mailNode.dnsCheckMx'] },
+      },
+    );
+    const node = auditDetail({ action: 'mail_node.dns_checked', details: { scope: 'node', overall: 'warning', from: null, errors: [], warnings: ['node_aaaa'] } });
+    assert.equal(node.key, 'admin.audit.detailDnsCheckedNode');
+    assert.deepEqual(node.valueKeys, {
+      overall: 'admin.mailNode.dnsStatusWarning', from: 'admin.audit.detailDnsCheckedFirst', warnings: ['admin.mailNode.dnsCheckNodeAaaa'],
+    });
+    assert.equal(auditActionLabelKey('mail_node.dns_checked'), 'admin.audit.actionMailNodeDnsChecked');
   });
 
   it('describes what an apply of the node settings changed and what failed', () => {

@@ -113,6 +113,10 @@ const ERROR_KEYS = {
   tls_parameters_invalid: 'admin.eop.errorTlsParameters',
   panel_ips_invalid: 'admin.mailNode.errorPanelIps',
   rate_limit_invalid: 'admin.mailNode.errorRateLimit',
+  node_ip_invalid: 'admin.eop.errorNodeIp',
+  expected_mx_invalid: 'admin.mailNode.errorExpectedMx',
+  tenant_txt_invalid: 'admin.mailNode.errorTenantTxt',
+  dkim_cname_invalid: 'admin.mailNode.errorDkimCname',
   // Codes of the items an "apply" reports (backend services/mailNode/nodeApply.js).
   eop_host_missing: 'admin.mailNode.applyCodeEopHostMissing',
   panel_ips_missing: 'admin.mailNode.applyCodePanelIpsMissing',
@@ -342,6 +346,11 @@ export function parseTlsParameters(value) {
   if (!text || text.length > MAX_TLS_PARAMETERS) return null;
   return text.split(' ').every((token) => /^[a-z][a-z0-9_]*=[!-~]+$/i.test(token)) ? text : null;
 }
+// The node's public IPv4 address (backend eopSettings.js parseIpv4), for the DNS check only.
+const parseIpv4 = (value) => {
+  const ip = String(value).trim();
+  return IPV4_PATTERN.test(ip) ? ip : null;
+};
 const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
   return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
@@ -358,6 +367,7 @@ const EOP_PARSERS = {
   tenantId: [parseGuid, 'tenant_id_invalid', true],
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
+  nodeIp: [parseIpv4, 'node_ip_invalid', true],
 };
 
 export function normalizeEopSettings(body) {
@@ -543,4 +553,180 @@ export function quotaMbInGb(quotaMb) {
   const n = Number(quotaMb);
   if (!Number.isFinite(n) || n < 1024) return null;
   return (n / 1024).toFixed(1);
+}
+
+// --- DNS checks (backend services/mailNode/dnsCheck.js, R-14 and R-15) -------------------------
+
+// Spelled out literally so the i18n coverage test finds them.
+const DNS_CHECK_KEYS = {
+  mx: 'admin.mailNode.dnsCheckMx',
+  spf: 'admin.mailNode.dnsCheckSpf',
+  dkim_txt: 'admin.mailNode.dnsCheckDkimTxt',
+  dkim_cname: 'admin.mailNode.dnsCheckDkimCname',
+  dmarc: 'admin.mailNode.dnsCheckDmarc',
+  tenant_txt: 'admin.mailNode.dnsCheckTenantTxt',
+  mta_sts: 'admin.mailNode.dnsCheckMtaSts',
+  node_a: 'admin.mailNode.dnsCheckNodeA',
+  node_ptr: 'admin.mailNode.dnsCheckNodePtr',
+  node_aaaa: 'admin.mailNode.dnsCheckNodeAaaa',
+  cert_expiry: 'admin.mailNode.dnsCheckCertExpiry',
+  cert_name: 'admin.mailNode.dnsCheckCertName',
+  cert_chain: 'admin.mailNode.dnsCheckCertChain',
+  cert_connect: 'admin.mailNode.dnsCheckCertConnect',
+  resolver: 'admin.mailNode.dnsCheckResolver',
+};
+const DNS_STATUS_KEYS = {
+  ok: 'admin.mailNode.dnsStatusOk',
+  warning: 'admin.mailNode.dnsStatusWarning',
+  error: 'admin.mailNode.dnsStatusError',
+};
+export const DNS_STATUS_COLORS = { ok: 'var(--text-secondary)', warning: 'var(--amber)', error: 'var(--red)' };
+// Why a check is not ok: each explanation says what is wrong and what to do.
+const DNS_CODE_KEYS = {
+  mx_expected_missing: 'admin.mailNode.dnsCodeMxExpectedMissing',
+  mx_missing: 'admin.mailNode.dnsCodeMxMissing',
+  mx_mismatch: 'admin.mailNode.dnsCodeMxMismatch',
+  mx_extra: 'admin.mailNode.dnsCodeMxExtra',
+  spf_missing: 'admin.mailNode.dnsCodeSpfMissing',
+  spf_multiple: 'admin.mailNode.dnsCodeSpfMultiple',
+  spf_no_include: 'admin.mailNode.dnsCodeSpfNoInclude',
+  spf_node_ip: 'admin.mailNode.dnsCodeSpfNodeIp',
+  dkim_key_unknown: 'admin.mailNode.dnsCodeDkimKeyUnknown',
+  dkim_missing: 'admin.mailNode.dnsCodeDkimMissing',
+  dkim_mismatch: 'admin.mailNode.dnsCodeDkimMismatch',
+  dkim_cname_expected_missing: 'admin.mailNode.dnsCodeDkimCnameExpectedMissing',
+  dkim_cname_missing: 'admin.mailNode.dnsCodeDkimCnameMissing',
+  dkim_cname_mismatch: 'admin.mailNode.dnsCodeDkimCnameMismatch',
+  dmarc_missing: 'admin.mailNode.dnsCodeDmarcMissing',
+  dmarc_invalid: 'admin.mailNode.dnsCodeDmarcInvalid',
+  dmarc_multiple: 'admin.mailNode.dnsCodeDmarcMultiple',
+  tenant_txt_expected_missing: 'admin.mailNode.dnsCodeTenantTxtExpectedMissing',
+  tenant_txt_missing: 'admin.mailNode.dnsCodeTenantTxtMissing',
+  mta_sts_published: 'admin.mailNode.dnsCodeMtaStsPublished',
+  dns_lookup_failed: 'admin.mailNode.dnsCodeLookupFailed',
+  dns_resolver_invalid: 'admin.mailNode.dnsCodeResolverInvalid',
+  node_ip_missing: 'admin.mailNode.dnsCodeNodeIpMissing',
+  a_missing: 'admin.mailNode.dnsCodeAMissing',
+  a_mismatch: 'admin.mailNode.dnsCodeAMismatch',
+  ptr_missing: 'admin.mailNode.dnsCodePtrMissing',
+  ptr_mismatch: 'admin.mailNode.dnsCodePtrMismatch',
+  aaaa_present: 'admin.mailNode.dnsCodeAaaaPresent',
+  cert_expired: 'admin.mailNode.dnsCodeCertExpired',
+  cert_expiring: 'admin.mailNode.dnsCodeCertExpiring',
+  cert_name_mismatch: 'admin.mailNode.dnsCodeCertNameMismatch',
+  cert_chain_incomplete: 'admin.mailNode.dnsCodeCertChainIncomplete',
+  cert_untrusted: 'admin.mailNode.dnsCodeCertUntrusted',
+  cert_unreachable: 'admin.mailNode.dnsCodeCertUnreachable',
+  starttls_unavailable: 'admin.mailNode.dnsCodeStarttlsUnavailable',
+  starttls_refused: 'admin.mailNode.dnsCodeStarttlsRefused',
+  cert_handshake_failed: 'admin.mailNode.dnsCodeCertHandshakeFailed',
+};
+// What the line of the domain's "DNS is right" step says about the latest check.
+const DNS_VERDICT_KEYS = {
+  none: 'admin.mailNode.dnsVerdictNone',
+  ok: 'admin.mailNode.dnsVerdictOk',
+  warning: 'admin.mailNode.dnsVerdictWarning',
+  error: 'admin.mailNode.dnsVerdictError',
+};
+
+export function dnsCheckKey(check) {
+  return DNS_CHECK_KEYS[check] ?? check;
+}
+
+export function dnsStatusKey(status) {
+  return DNS_STATUS_KEYS[status] ?? DNS_STATUS_KEYS.error;
+}
+
+export function dnsCodeKey(code) {
+  return DNS_CODE_KEYS[code] ?? 'admin.mailNode.dnsCodeUnknown';
+}
+
+// The values an explanation names: what DNS has, what it must have, the resolver's or server's
+// words, the days left, the names missing from the certificate, the DNS name asked.
+export function dnsCodeValues(check) {
+  const list = (value) => (Array.isArray(value) && value.length ? value.join(', ') : '—');
+  return {
+    found: list(check?.found), expected: list(check?.expected), detail: check?.detail ?? '',
+    days: check?.daysLeft ?? '', missing: list(check?.missing), name: check?.name ?? '',
+  };
+}
+
+// The latest check of a domain next to its "DNS is right" step: only information, the step stays
+// a person's confirmation.
+export function dnsVerdictKey(domain) {
+  return DNS_VERDICT_KEYS[domain?.dns?.overall] ?? DNS_VERDICT_KEYS.none;
+}
+
+// A domain that takes mailboxes while its last check found errors: the domain list warns about it.
+// The check never changes the state.
+export function hasDnsErrors(domain) {
+  return MAILBOX_READY_STATES.includes(domain?.state) && domain?.dns?.overall === 'error';
+}
+
+// What the mail node section's summary badge counts: the ready domains with DNS errors, and
+// whether the node's own check found errors.
+export function dnsSummary(domains, nodeResult) {
+  return {
+    domains: (domains ?? []).filter(hasDnsErrors).map((d) => d.domain),
+    node: nodeResult?.overall === 'error',
+  };
+}
+
+// The values a domain must publish as the form edits them: every field a string.
+export function expectedForm(expected) {
+  return {
+    expectedMx: (expected?.mx ?? []).join(', '),
+    tenantTxt: expected?.tenantTxt ?? '',
+    dkimSelector1Cname: expected?.dkimSelector1Cname ?? '',
+    dkimSelector2Cname: expected?.dkimSelector2Cname ?? '',
+  };
+}
+
+// The most MX hosts a domain is expected to publish (backend domains.js MAX_EXPECTED_MX).
+export const MAX_EXPECTED_MX = 10;
+// A host name as the server takes it: lowercase, without the root dot; null for anything else.
+const expectedHost = (value) => {
+  const text = String(value ?? '').trim().toLowerCase().replace(/\.$/, '');
+  return HOST_PATTERN.test(text) ? text : null;
+};
+
+// The values as the server takes them (backend domains.js parseExpectedValues): { values } with the
+// fields sent (an empty one is null, or [] for the MX), or { error } with the refusal code. The demo
+// answers with it too.
+export function normalizeExpectedValues(body) {
+  const values = {};
+  if (body?.expectedMx !== undefined) {
+    const parts = Array.isArray(body.expectedMx) ? body.expectedMx : String(body.expectedMx ?? '').split(/[\s,;]+/);
+    const mx = [];
+    for (const part of parts) {
+      if (!String(part ?? '').trim()) continue;
+      const host = expectedHost(part);
+      if (!host) return { error: 'expected_mx_invalid' };
+      if (!mx.includes(host)) mx.push(host);
+    }
+    if (mx.length > MAX_EXPECTED_MX) return { error: 'expected_mx_invalid' };
+    values.mx = mx;
+  }
+  if (body?.tenantTxt !== undefined) {
+    const text = String(body.tenantTxt ?? '').trim() || null;
+    if (text && (text.length > 255 || !/^[ -~]+$/.test(text) || text.includes('"'))) return { error: 'tenant_txt_invalid' };
+    values.tenantTxt = text;
+  }
+  for (const field of ['dkimSelector1Cname', 'dkimSelector2Cname']) {
+    if (body?.[field] === undefined) continue;
+    if (!String(body[field] ?? '').trim()) {
+      values[field] = null;
+      continue;
+    }
+    const host = expectedHost(body[field]);
+    if (!host) return { error: 'dkim_cname_invalid' };
+    values[field] = host;
+  }
+  return { values };
+}
+
+// The error key for the expected values form, or null.
+export function expectedValuesError(form) {
+  const { error } = normalizeExpectedValues(form);
+  return error ? mailNodeErrorKey(error) : null;
 }

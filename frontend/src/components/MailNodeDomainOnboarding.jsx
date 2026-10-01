@@ -2,11 +2,16 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeApplyResult from './MailNodeApplyResult.jsx';
+import MailNodeDnsResult from './MailNodeDnsResult.jsx';
 import {
+  DNS_STATUS_COLORS,
   canMarkReady,
   canRestartOnboarding,
   dkimDeleteWaiting,
+  dnsVerdictKey,
   domainStateKey,
+  expectedForm,
+  expectedValuesError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
   onboardingSteps,
@@ -42,6 +47,18 @@ const ORIGIN_KEYS = {
 
 const when = (at) => (at ? new Date(at).toLocaleString() : '');
 const subTitleStyle = { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', margin: '14px 0 4px' };
+const fieldStyle = {
+  width: '100%', padding: '6px 9px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 7,
+  color: 'var(--text-primary)', fontSize: 12, outline: 'none', boxSizing: 'border-box', fontFamily: 'JetBrains Mono, monospace',
+};
+const labelStyle = { display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 3 };
+// The fields of the values a domain must publish, with their labels and placeholders.
+const EXPECTED_FIELDS = [
+  ['expectedMx', 'admin.mailNode.dnsExpectedMxLabel', 'admin.mailNode.dnsExpectedMxPh'],
+  ['tenantTxt', 'admin.mailNode.dnsExpectedTenantTxtLabel', 'admin.mailNode.dnsExpectedTenantTxtPh'],
+  ['dkimSelector1Cname', 'admin.mailNode.dnsExpectedSelector1Label', 'admin.mailNode.dnsExpectedSelectorPh'],
+  ['dkimSelector2Cname', 'admin.mailNode.dnsExpectedSelector2Label', 'admin.mailNode.dnsExpectedSelectorPh'],
+];
 const recordStyle = {
   display: 'block', marginTop: 4, padding: '6px 8px', borderRadius: 6, background: 'var(--bg-tertiary)',
   fontFamily: 'JetBrains Mono, monospace', fontSize: 11, wordBreak: 'break-all', userSelect: 'all', color: 'var(--text-primary)',
@@ -75,17 +92,22 @@ function DkimRecord({ dkim }) {
 // and the checklist of steps up to "ready". An administrator adopts an unknown domain, confirms the
 // next step with "Done", marks the domain ready for a pilot or a stand without a tenant, or starts
 // its onboarding over; when the node reports another creation time for the domain, a warning offers
-// to accept it. Below, the domain's node settings: the last apply (relayhost, DKIM, the send limits
-// of its mailboxes) with the DKIM record to publish, "Apply settings", and, when the tenant signs
-// and mailcow still has a key, deleting that key after a confirmation. The server journals each.
-// `onChanged` runs after any of them so the lists reload. Nothing here ever hides the domain or
-// changes its state on its own.
+// to accept it. Below, the domain's DNS: the last check (R-14) item by item with the records to
+// publish, "Check now", and the values the domain must publish that the panel cannot read yet (its
+// MX, the tenant's verification TXT, the EOP DKIM selector CNAMEs); the "DNS is right" step shows
+// the latest result next to its "Done", which stays a person's confirmation. Then the domain's node
+// settings: the last apply (relayhost, DKIM, the send limits of its mailboxes) with the DKIM record
+// to publish, "Apply settings", and, when the tenant signs and mailcow still has a key, deleting
+// that key after a confirmation. The server journals each. `onChanged` runs after any of them so
+// the lists reload. Nothing here ever hides the domain or changes its state on its own.
 export default function MailNodeDomainOnboarding({ domain, onChanged }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   // null, 'ready', 'restart' or 'dkim': the action waiting for its second confirmation.
   const [confirming, setConfirming] = useState(null);
+  // The values the domain must publish while an administrator edits them; null when not editing.
+  const [expected, setExpected] = useState(null);
 
   const run = async (action) => {
     setBusy(true);
@@ -153,6 +175,11 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
                 ? t(step.markedReady ? 'admin.mailNode.stepMarkedReadyBy' : 'admin.mailNode.stepConfirmedBy', { by: step.by, at: when(step.at) })
                 : t(STATUS_KEYS[step.status])}
             </span>
+            {step.status === 'next' && step.state === 'dns_ok' && (
+              <span data-dns-verdict={domain.dns?.overall ?? 'none'} style={{ fontSize: 11, marginLeft: 8, color: DNS_STATUS_COLORS[domain.dns?.overall] ?? 'var(--text-tertiary)' }}>
+                {t(dnsVerdictKey(domain), { at: when(domain.dns?.at) })}
+              </span>
+            )}
             {step.status === 'next' && actionable && (
               <button type="button" onClick={() => run(() => api.mailNode.confirmDomainStep(domain.domain, step.state))} disabled={busy} style={{ ...buttonStyle, marginLeft: 8 }}>
                 {t('admin.mailNode.stepDone')}
@@ -204,6 +231,58 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
           </div>
         </div>
       )}
+      <div data-domain-dns={domain.domain}>
+        <div style={subTitleStyle}>{t('admin.mailNode.dnsTitle')}</div>
+        {domain.dns
+          ? <MailNodeDnsResult result={domain.dns} />
+          : <div style={noteStyle}>{t('admin.mailNode.dnsNever')}</div>}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+          <button type="button" onClick={() => run(() => api.mailNode.checkDomainDns(domain.domain))} disabled={busy} style={buttonStyle}>
+            {t('admin.mailNode.dnsCheckNow')}
+          </button>
+          {expected === null && (
+            <button type="button" onClick={() => setExpected(expectedForm(domain.expected))} disabled={busy} style={buttonStyle}>
+              {t('admin.mailNode.dnsExpectedEdit')}
+            </button>
+          )}
+        </div>
+        {expected !== null && (
+          <div data-dns-expected-form style={confirmBoxStyle}>
+            <div style={{ ...noteStyle, marginBottom: 8 }}>{t('admin.mailNode.dnsExpectedNote')}</div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              {EXPECTED_FIELDS.map(([field, labelKey, placeholderKey]) => (
+                <label key={field}>
+                  <span style={labelStyle}>{t(labelKey)}</span>
+                  <input
+                    value={expected[field]}
+                    onChange={(e) => setExpected({ ...expected, [field]: e.target.value })}
+                    spellCheck={false}
+                    placeholder={t(placeholderKey)}
+                    style={fieldStyle}
+                  />
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+              <button
+                type="button"
+                onClick={() => run(async () => {
+                  await api.mailNode.setDnsExpected(domain.domain, expected);
+                  setExpected(null);
+                })}
+                disabled={busy || !!expectedValuesError(expected)}
+                style={primaryButtonStyle}
+              >
+                {t('common.save')}
+              </button>
+              <button type="button" onClick={() => setExpected(null)} disabled={busy} style={buttonStyle}>
+                {t('common.cancel')}
+              </button>
+              {expectedValuesError(expected) && <span style={noteStyle}>{t(expectedValuesError(expected))}</span>}
+            </div>
+          </div>
+        )}
+      </div>
       <div data-domain-apply={domain.domain}>
         <div style={subTitleStyle}>{t('admin.mailNode.domainApplyTitle')}</div>
         {domain.apply
