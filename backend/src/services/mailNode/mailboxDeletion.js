@@ -102,6 +102,12 @@ async function recordFailure(row, reason) {
 }
 
 async function deleteDue(row, cfg, disconnect) {
+  // The batch was read before this row's turn: a cancel in between (allowed until the row is marked
+  // in progress) must win, so the row is read again now that a cancel is refused.
+  const { rows: [still] } = await query(
+    'SELECT 1 FROM email_accounts WHERE id = $1 AND delete_after IS NOT NULL AND delete_after <= NOW()', [row.id],
+  );
+  if (!still) return null;
   // A row on another host than the node the settings name: the same address there is another
   // mailbox. It stays pending with the reason shown until the settings or the row are put right.
   if (String(row.imap_host ?? '').trim().toLowerCase() !== cfg.mailHost) {
@@ -161,8 +167,10 @@ export async function runDueDeletions({ disconnect = async () => {} } = {}) {
     for (const row of rows) {
       inProgress.add(row.id);
       try {
-        if (await deleteDue(row, cfg, disconnect)) deleted += 1;
-        else failed += 1;
+        const done = await deleteDue(row, cfg, disconnect);
+        // null: cancelled since the batch was read; neither deleted nor failed.
+        if (done) deleted += 1;
+        else if (done === false) failed += 1;
       } catch (err) {
         failed += 1;
         const reason = err instanceof MailNodeError ? `${err.code}: ${err.message}` : (err?.message || 'error');

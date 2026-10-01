@@ -216,6 +216,26 @@ describe('the deletion job', () => {
     expect((await row(id)).deletion_last_error).toBe('tenant down');
   });
 
+  it('lets a cancel win for a row of the same batch that the job has not reached yet', async () => {
+    const first = await addMailbox('first@example.com');
+    const second = await addMailbox('second@example.com');
+    for (const [id, ago] of [[first, '2 minutes'], [second, '1 minute']]) {
+      await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+      await makeDue(id, ago);
+    }
+    let cancelled;
+    deleteMailbox.mockImplementationOnce(async () => {
+      cancelled = await cancelDeletion({ accountId: second });
+      return { warnings: [] };
+    });
+    expect(await runDueDeletions()).toEqual({ deleted: 1, failed: 0 });
+    expect(cancelled).toMatchObject({ reason: 'r' });
+    expect(deleteMailbox).toHaveBeenCalledTimes(1);
+    expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'first@example.com');
+    expect(await row(first)).toBeUndefined();
+    expect(await row(second)).toMatchObject({ delete_after: null, deletion_reason: null });
+  });
+
   it('refuses a cancel while the job is deleting the mailbox, and a cancel before keeps it', async () => {
     const id = await addMailbox('info@example.com');
     await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
