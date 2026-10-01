@@ -44,16 +44,42 @@ export class DnsCheckError extends Error {
   }
 }
 
+const validPort = (port) => /^[1-9]\d{0,4}$/.test(port) &&Number(port) >= 1 && Number(port) <= 65535;
+
+// The DNS_CHECK_RESOLVER setting checked: an IPv4 address with an optional port ("172.19.0.7",
+// "172.19.0.7:5353"), a bare IPv6 address ("2001:db8::53"), or one in brackets with an optional
+// port ("[2001:db8::53]", "[2001:db8::53]:53"). '' for an empty setting, null for anything else:
+// the port must be 1 to 65535 before c-ares sees it (port 0 makes it abort the process).
+export function parseResolverSetting(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']');
+    if (end < 0 || isIP(text.slice(1, end)) !== 6) return null;
+    const rest = text.slice(end + 1);
+    if (rest === '') return text;
+    return rest.startsWith(':') && validPort(rest.slice(1)) ? text : null;
+  }
+  if (isIP(text)) return text;
+  const at = text.lastIndexOf(':');
+  if (at < 0 || isIP(text.slice(0, at)) !== 4 || !validPort(text.slice(at + 1))) return null;
+  return text;
+}
+
 // A resolver of its own for one run, so no answer outlives the run. server: the DNS_CHECK_RESOLVER
-// setting, an IP address with an optional port ("172.19.0.7", "172.19.0.7:5353", "[2001:db8::53]:53");
-// empty asks the servers the system uses.
+// setting (parseResolverSetting); empty asks the servers the system uses. A setting that is no
+// address throws dns_resolver_invalid, never anything else.
 export function createResolver(server = process.env.DNS_CHECK_RESOLVER, { timeoutMs = LOOKUP_TIMEOUT_MS, tries = LOOKUP_TRIES } = {}) {
+  const setting = parseResolverSetting(server);
+  const invalid = () => new DnsCheckError('dns_resolver_invalid', 'DNS_CHECK_RESOLVER must be an IP address with an optional port from 1 to 65535');
+  if (setting === null) throw invalid();
   const resolver = new Resolver({ timeout: timeoutMs, tries });
-  const text = String(server ?? '').trim();
-  if (text) {
-    const address = text.startsWith('[') ? text.slice(1, text.indexOf(']')) : text.replace(/:\d+$/, '');
-    if (!isIP(address)) throw new DnsCheckError('dns_resolver_invalid', 'DNS_CHECK_RESOLVER must be an IP address with an optional port');
-    resolver.setServers([text]);
+  if (setting) {
+    try {
+      resolver.setServers([setting]);
+    } catch {
+      throw invalid();
+    }
   }
   return resolver;
 }
@@ -92,6 +118,13 @@ async function lookup(run) {
   }
 }
 
+// Whether the resolver answers at all, asked for the A of a name: null when it answers (an empty
+// answer too), else its error code. A run starts with it, so an outage ends the run at once.
+export async function probeResolver(resolver, name) {
+  const { failed } = await lookup(() => resolver.resolve4(name));
+  return failed ?? null;
+}
+
 const item = (check, status, fields = {}) => ({ check, status, code: null, found: [], expected: null, records: [], ...fields });
 const failedItem = (check, name, failed) => item(check, 'error', { code: 'dns_lookup_failed', detail: failed, name });
 
@@ -118,20 +151,57 @@ async function mxCheck(resolver, domain, expectedMx) {
 }
 
 const SPF_VERSION = /^v=spf1(\s|$)/i;
+const MICROSOFT_SPF_DOMAIN = 'spf.protection.outlook.com';
 
-// SPF: one v=spf1 record (two make receivers ignore both) with Microsoft's include. Mail leaves
-// through EOP only: the node's own address in it lets mail that skipped EOP pass SPF.
+const ipv4Number = (ip) => ip.split('.').reduce((n, part) => n * 256 + Number(part), 0);
+
+// Whether an SPF ip4: value (an address or a network) holds the address.
+export function ipv4InNetwork(network, ip) {
+  const [address, bits = '32'] = network.split('/');
+  if (isIP(address) !== 4 || isIP(ip) !== 4 || !/^\d{1,2}$/.test(bits) || Number(bits) > 32) return false;
+  const size = 2 ** (32 - Number(bits));
+  return Math.floor(ipv4Number(address) / size) === Math.floor(ipv4Number(ip) / size);
+}
+
+// The terms of one SPF record that decide, read as a receiver does: from left to right up to the
+// "all" mechanism (nothing after it counts), with redirect= used only when there is no "all".
+// Include and ip4 count only when they pass mail (the qualifier + or none). Nested includes are not
+// followed: Microsoft's include must stand in the domain's own record or be its redirect.
+export function readSpf(record, nodeIp = null) {
+  let include = false;
+  let nodeListed = false;
+  let all = null;
+  let redirect = null;
+  for (const term of record.trim().split(/\s+/).slice(1)) {
+    const [, qualifier, body] = /^([+?~-]?)(.*)$/.exec(term);
+    const value = body.toLowerCase();
+    const passes = qualifier === '' || qualifier === '+';
+    if (value === 'all') {
+      all = qualifier || '+';
+      break;
+    }
+    if (value.startsWith('redirect=')) redirect = value.slice('redirect='.length).replace(/\.$/, '');
+    else if (passes && value === `include:${MICROSOFT_SPF_DOMAIN}`) include = true;
+    else if (passes && nodeIp && value.startsWith('ip4:') && ipv4InNetwork(value.slice(4), nodeIp)) nodeListed = true;
+  }
+  if (!all && redirect === MICROSOFT_SPF_DOMAIN) include = true;
+  return { include, nodeListed, all };
+}
+
+// SPF: one v=spf1 record (two make receivers ignore both) with Microsoft's include. "+all" lets
+// anyone pass SPF as the domain: an error. "?all" makes SPF say nothing: a warning. Mail leaves
+// through EOP only: the node's own address in a passing ip4: lets mail that skipped EOP pass SPF.
 function spfCheck(domain, txt, nodeIp) {
   if (txt.failed) return failedItem('spf', domain, txt.failed);
   const found = txt.records.filter((r) => SPF_VERSION.test(r));
   const fields = { name: domain, found, expected: [SPF_RECORD], records: [{ type: 'TXT', name: domain, value: SPF_RECORD }] };
   if (!found.length) return item('spf', 'error', { ...fields, code: 'spf_missing' });
   if (found.length > 1) return item('spf', 'error', { ...fields, code: 'spf_multiple' });
-  const terms = found[0].toLowerCase().split(/\s+/).map((term) => term.replace(/^[+?~-]/, ''));
-  if (!terms.includes(MICROSOFT_SPF_INCLUDE)) return item('spf', 'error', { ...fields, code: 'spf_no_include' });
-  if (nodeIp && (terms.includes(`ip4:${nodeIp}`) || terms.includes(`ip4:${nodeIp}/32`))) {
-    return item('spf', 'warning', { ...fields, code: 'spf_node_ip' });
-  }
+  const spf = readSpf(found[0], nodeIp);
+  if (!spf.include) return item('spf', 'error', { ...fields, code: 'spf_no_include' });
+  if (spf.all === '+') return item('spf', 'error', { ...fields, code: 'spf_pass_all' });
+  if (spf.all === '?') return item('spf', 'warning', { ...fields, code: 'spf_neutral_all' });
+  if (spf.nodeListed) return item('spf', 'warning', { ...fields, code: 'spf_node_ip' });
   return item('spf', 'ok', fields);
 }
 
@@ -177,20 +247,29 @@ async function dkimCnameCheck(resolver, domain, cnames) {
   return item('dkim_cname', 'ok', fields);
 }
 
-const DMARC_VERSION = /^v\s*=\s*DMARC1\s*(;|$)/i;
+// RFC 7489 6.4: the tag name is case-insensitive, its value DMARC1 is not.
+const DMARC_VERSION = /^[vV]\s*=\s*DMARC1\s*(;|$)/;
 
-// DMARC: one record under _dmarc that starts with v=DMARC1 (anything else there is ignored by
-// receivers, as two records are).
+// DMARC: one record that starts with v=DMARC1 (anything else there is ignored by receivers, as two
+// records are). A subdomain without a record of its own is covered by its parent's (RFC 7489 6.6.3
+// asks the organizational domain): the parents are asked up to the last two labels, without a
+// public suffix list, and the first that publishes anything under _dmarc decides.
 async function dmarcCheck(resolver, domain) {
-  const name = `_dmarc.${domain}`;
-  const txt = await txtOf(resolver, name);
-  if (txt.failed) return failedItem('dmarc', name, txt.failed);
-  const valid = txt.records.filter((r) => DMARC_VERSION.test(r));
-  const fields = { name, found: txt.records, records: [{ type: 'TXT', name, value: DMARC_RECORD }] };
-  if (!txt.records.length) return item('dmarc', 'error', { ...fields, code: 'dmarc_missing' });
-  if (!valid.length) return item('dmarc', 'error', { ...fields, code: 'dmarc_invalid' });
-  if (valid.length > 1) return item('dmarc', 'error', { ...fields, code: 'dmarc_multiple' });
-  return item('dmarc', 'ok', fields);
+  const own = `_dmarc.${domain}`;
+  const records = [{ type: 'TXT', name: own, value: DMARC_RECORD }];
+  const labels = domain.split('.');
+  for (let i = 0; labels.length - i >= 2; i += 1) {
+    const name = `_dmarc.${labels.slice(i).join('.')}`;
+    const txt = await txtOf(resolver, name);
+    if (txt.failed) return failedItem('dmarc', name, txt.failed);
+    if (!txt.records.length) continue;
+    const valid = txt.records.filter((r) => DMARC_VERSION.test(r));
+    const fields = { name, found: txt.records, records, ...(i > 0 ? { inheritedFrom: labels.slice(i).join('.') } : {}) };
+    if (!valid.length) return item('dmarc', 'error', { ...fields, code: 'dmarc_invalid' });
+    if (valid.length > 1) return item('dmarc', 'error', { ...fields, code: 'dmarc_multiple' });
+    return item('dmarc', 'ok', fields);
+  }
+  return item('dmarc', 'error', { name: own, found: [], records, code: 'dmarc_missing' });
 }
 
 // The tenant's verification TXT (Graph verificationDnsRecords "text"; entered by hand until the
@@ -244,9 +323,11 @@ export async function checkDomainDns({
   return { checks, overall: overallStatus(checks) };
 }
 
-// The node's name: A <MAIL_HOST> is the node's address and nothing else, PTR of the address is
-// <MAIL_HOST>, and no AAAA (the node runs with IPv6 off, decision D-13, so a sender trying it fails
-// before it falls back). Without the node's address only what DNS has is shown.
+// The node's name: A <MAIL_HOST> is the node's address and nothing else (an error otherwise), PTR
+// of the address is <MAIL_HOST> and no AAAA (warnings: outbound mail leaves through EOP, so no
+// receiver judges the node by its PTR; the node runs with IPv6 off, decision D-13, so a sender
+// trying the AAAA fails before it falls back). Without the node's address only what DNS has is
+// shown.
 export async function checkNodeDns({ mailHost, nodeIp = null, resolver }) {
   const host = hostName(mailHost);
   const a = await lookup(() => resolver.resolve4(host));
@@ -267,8 +348,8 @@ export async function checkNodeDns({ mailHost, nodeIp = null, resolver }) {
     else {
       const found = ptr.records.map(hostName);
       const fields = { name: ptrName, found, expected: [host], records: [{ type: 'PTR', name: ptrName, value: host }] };
-      if (!found.length) checks.push(item('node_ptr', 'error', { ...fields, code: 'ptr_missing' }));
-      else if (!found.includes(host)) checks.push(item('node_ptr', 'error', { ...fields, code: 'ptr_mismatch' }));
+      if (!found.length) checks.push(item('node_ptr', 'warning', { ...fields, code: 'ptr_missing' }));
+      else if (!found.includes(host)) checks.push(item('node_ptr', 'warning', { ...fields, code: 'ptr_mismatch' }));
       else checks.push(item('node_ptr', 'ok', fields));
     }
   }
@@ -279,19 +360,22 @@ export async function checkNodeDns({ mailHost, nodeIp = null, resolver }) {
   return { checks, overall: overallStatus(checks) };
 }
 
-// Why a chain did not verify. The server sent the leaf without its intermediate: OpenSSL finds no
-// issuer for the leaf at all, and EOP refuses the relay with 550 5.7.64 TenantAttribution (checked
-// with a three-tier test chain: leaf alone -> UNABLE_TO_VERIFY_LEAF_SIGNATURE, a full chain to an
-// unknown root -> UNABLE_TO_GET_ISSUER_CERT_LOCALLY).
-const CHAIN_INCOMPLETE = new Set(['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT']);
-// Dates are judged on their own (cert_expiry); a chain that fails only on them is complete.
+// Why a chain did not verify: no chain from the leaf to a trusted root, and EOP refuses the relay
+// with 550 5.7.64 TenantAttribution. Checked with a three-tier test chain: the leaf alone ->
+// UNABLE_TO_VERIFY_LEAF_SIGNATURE, a full chain to an unknown root ->
+// UNABLE_TO_GET_ISSUER_CERT_LOCALLY.
+const CHAIN_INCOMPLETE = new Set(['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY']);
+// OpenSSL reports the last error it met, and the dates come after the chain: an expired leaf sent
+// without its intermediate reports CERT_HAS_EXPIRED only (seen with the test chain). After a date
+// error the chain is judged by itself (chainReachesRoot).
 const DATE_ERRORS = new Set(['CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID']);
 const DAY_MS = 86400000;
 
 // The certificate the node presents on 587, judged: its end date, the names it must carry
 // (<MAIL_HOST> and the certificate name the EOP connector checks), and whether the chain it sends
 // reaches a trusted root. cert: { authorized, authorizationError, validTo, subject, issuer,
-// subjectAltName, matches(name) }.
+// subjectAltName, matches(name), chainReachesRoot }; chainReachesRoot: the chain the server sent,
+// completed from the trusted roots, ends at a self-signed root.
 export function judgeCertificate(cert, { names, now = Date.now() }) {
   const info = { subject: cert.subject ?? null, issuer: cert.issuer ?? null, subjectAltName: cert.subjectAltName ?? null };
   const ends = Date.parse(cert.validTo);
@@ -310,20 +394,31 @@ export function judgeCertificate(cert, { names, now = Date.now() }) {
 
   const reason = cert.authorized ? null : String(cert.authorizationError ?? 'UNKNOWN');
   let chainItem;
-  if (!reason || DATE_ERRORS.has(reason)) chainItem = item('cert_chain', 'ok', info);
+  if (!reason || (DATE_ERRORS.has(reason) && cert.chainReachesRoot)) chainItem = item('cert_chain', 'ok', info);
+  else if (DATE_ERRORS.has(reason)) chainItem = item('cert_chain', 'error', { ...info, code: 'cert_chain_incomplete', detail: 'UNABLE_TO_GET_ISSUER_CERT' });
   else if (CHAIN_INCOMPLETE.has(reason)) chainItem = item('cert_chain', 'error', { ...info, code: 'cert_chain_incomplete', detail: reason });
   else chainItem = item('cert_chain', 'error', { ...info, code: 'cert_untrusted', detail: reason });
   return [expiryItem, nameItem, chainItem];
 }
 
+// The most an SMTP reply may hold before the server counts as broken.
+const MAX_REPLY_BYTES = 64 * 1024;
+
 // Reads SMTP replies line by line: next() resolves with the next complete reply (the last line of a
-// multi-line one decides), { code, lines }.
-function replyReader(socket) {
+// multi-line one decides), { code, lines }. A server that sends more than MAX_REPLY_BYTES without
+// finishing a reply is cut off (onOverflow).
+function replyReader(socket, onOverflow) {
   let buffer = '';
   let lines = [];
   const waiting = [];
   const ready = [];
+  let held = 0;
   socket.on('data', (data) => {
+    held += data.length;
+    if (held > MAX_REPLY_BYTES) {
+      onOverflow();
+      return;
+    }
     buffer += data.toString('latin1');
     let at;
     while ((at = buffer.indexOf('\n')) >= 0) {
@@ -333,6 +428,7 @@ function replyReader(socket) {
       if (/^\d{3}(?: |$)/.test(line)) {
         const reply = { code: Number(line.slice(0, 3)), lines };
         lines = [];
+        held = buffer.length;
         const take = waiting.shift();
         if (take) take(reply);
         else ready.push(reply);
@@ -340,6 +436,18 @@ function replyReader(socket) {
     }
   });
   return { next: () => (ready.length ? Promise.resolve(ready.shift()) : new Promise((resolve) => waiting.push(resolve))) };
+}
+
+// Whether the chain Node builds from what the server sent (and the trusted roots it adds) ends at a
+// self-signed certificate: a leaf whose issuer was neither sent nor trusted stops short of one.
+function reachesRoot(peer) {
+  const seen = new Set();
+  let cert = peer;
+  while (cert?.fingerprint256 && !seen.has(cert.fingerprint256)) {
+    seen.add(cert.fingerprint256);
+    cert = cert.issuerCertificate;
+  }
+  return !!cert?.fingerprint256 && seen.has(cert.fingerprint256) && seen.size > 0;
 }
 
 class SmtpStepError extends Error {
@@ -354,8 +462,9 @@ class SmtpStepError extends Error {
 // panel uses, the certificate judged without trusting it first (rejectUnauthorized: false), so an
 // incomplete chain is reported instead of only failing. Connects through the system resolver, as
 // the panel does for IMAP and SMTP. Returns the judged items, or one cert_connect item when the
-// port could not be reached or offers no STARTTLS.
-export async function checkSubmissionCertificate({ host, names, port = SUBMISSION_PORT, timeoutMs = CERT_TIMEOUT_MS, now }) {
+// port could not be reached or offers no STARTTLS. ca: the roots to trust instead of the system's
+// (tests).
+export async function checkSubmissionCertificate({ host, names, port = SUBMISSION_PORT, timeoutMs = CERT_TIMEOUT_MS, now, ca }) {
   let socket;
   let secure;
   let timer;
@@ -368,9 +477,11 @@ export async function checkSubmissionCertificate({ host, names, port = SUBMISSIO
         socket.once('error', (err) => reject(new SmtpStepError('cert_unreachable', err.code || 'error')));
       });
       socket.on('error', () => {});
-      const replies = replyReader(socket);
+      let overflow;
+      const overflowed = new Promise((_, reject) => { overflow = () => reject(new SmtpStepError('cert_unreachable', 'reply too long')); });
+      const replies = replyReader(socket, () => overflow());
       const closed = new Promise((_, reject) => socket.once('close', () => reject(new SmtpStepError('cert_unreachable', 'ECONNRESET'))));
-      const next = () => Promise.race([replies.next(), closed]);
+      const next = () => Promise.race([replies.next(), closed, overflowed]);
       const greeting = await next();
       if (greeting.code !== 220) throw new SmtpStepError('cert_unreachable', greeting.lines.at(-1));
       socket.write('EHLO mailexpert.invalid\r\n');
@@ -385,6 +496,7 @@ export async function checkSubmissionCertificate({ host, names, port = SUBMISSIO
       // The names are judged apart (cert_name): authorizationError then speaks of the chain alone.
       secure = tls.connect({
         socket, servername: isIP(host) ? undefined : host, rejectUnauthorized: false, checkServerIdentity: () => undefined,
+        ...(ca ? { ca } : {}),
       });
       await new Promise((resolve, reject) => {
         secure.once('secureConnect', resolve);
@@ -395,7 +507,9 @@ export async function checkSubmissionCertificate({ host, names, port = SUBMISSIO
       const cert = {
         authorized: secure.authorized, authorizationError: secure.authorizationError ?? null, validTo: x509.validTo,
         subject: x509.subject, issuer: x509.issuer, subjectAltName: x509.subjectAltName ?? null,
-        matches: (name) => x509.checkHost(name) !== undefined,
+        // An address is matched against the certificate's IP entries, never as a host name.
+        matches: (name) => (isIP(name) ? x509.checkIP(name) !== undefined : x509.checkHost(name) !== undefined),
+        chainReachesRoot: reachesRoot(secure.getPeerCertificate(true)),
       };
       secure.end('QUIT\r\n');
       return judgeCertificate(cert, { names, now });

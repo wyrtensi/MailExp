@@ -46,7 +46,7 @@ import {
   setExpectedValues,
   MAX_EXPECTED_MX,
 } from '../services/mailNode/domains.js';
-import { checkAllNow, checkDomainNow, getNodeDnsCheck } from '../services/mailNode/dnsCheckJob.js';
+import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
 import {
   EOP_FIELDS,
   MAX_SEND_LIMIT_PER_HOUR,
@@ -149,8 +149,11 @@ function configAudit(req, settings, fields) {
   recordAudit({ actorUserId: req.session.userId, action: 'mail_node.config_changed', details: { settings, fields } });
 }
 
+// nodeIp: the node's public address, kept with the EOP settings (one stored value, shown with both
+// forms) so that moving the node changes its name and its address in one place.
 router.get('/config', requireAdmin, async (req, res) => {
   const cfg = await getMailNodeConfig();
+  const { nodeIp } = await getEopSettings();
   res.json({
     configured: !!cfg,
     mailHost: cfg?.mailHost ?? '',
@@ -159,6 +162,7 @@ router.get('/config', requireAdmin, async (req, res) => {
     diskPingUrl: cfg?.diskPingUrl ?? '',
     deleteAfterDays: cfg?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS,
     panelIps: cfg?.panelIps ?? [],
+    nodeIp: nodeIp ?? '',
   });
 });
 
@@ -183,6 +187,9 @@ router.put('/config', requireAdmin, async (req, res) => {
   const ips = req.body?.panelIps === undefined ? { networks: current?.panelIps ?? [] } : parseNetworkList(req.body.panelIps);
   if (ips.error) return refuse(res, ips.error);
   const panelIps = ips.networks;
+  // The node's address, left out to keep the stored one; checked as the EOP settings check it.
+  const address = req.body?.nodeIp === undefined ? { settings: {} } : parseEopSettings({ nodeIp: req.body.nodeIp });
+  if (address.error) return refuse(res, address.error);
   let apiKey = sent;
   if (!sent || sent === REDACTED_SECRET) {
     // The stored key goes only to the host it was entered for: a new host needs the key again.
@@ -197,6 +204,13 @@ router.put('/config', requireAdmin, async (req, res) => {
   }
   await saveMailNodeConfig(cfg);
   const changed = Object.keys(cfg).filter((field) => JSON.stringify(current?.[field]) !== JSON.stringify(cfg[field]));
+  if ('nodeIp' in address.settings) {
+    const { nodeIp: storedIp } = await getEopSettings();
+    if (address.settings.nodeIp !== storedIp) {
+      await saveEopSettings(address.settings);
+      changed.push('nodeIp');
+    }
+  }
   configAudit(req, 'node', changed);
   // Read the disk (and ping) right away instead of at the next scheduled run.
   checkMailNodeDisk().catch((err) => console.error('Mail node disk check failed:', err.message));
@@ -412,18 +426,18 @@ router.post('/apply/prefilter', requireAdmin, async (req, res) => {
 });
 
 // The DNS checks (R-14, R-15; services/mailNode/dnsCheckJob.js): the node's last result (each
-// domain's comes with GET /domains), "Check now" for the node and every domain the panel knows,
-// and for one domain. A result only warns: it never changes a domain's onboarding state.
+// domain's comes with GET /domains), "Check now" for the node and every domain the panel knows (it
+// runs in the background: the answer comes at once, with started: false when a run was already
+// going, and the results show on the next load), and for one domain (at once, never waiting for a
+// run of everything). A result only warns: it never changes a domain's onboarding state.
 router.get('/dns-check', requireAdmin, async (req, res) => {
   res.json({ node: await getNodeDnsCheck() });
 });
 
 router.post('/dns-check', requireAdmin, async (req, res) => {
-  try {
-    return res.json(await checkAllNow({ userId: req.session.userId, trigger: 'manual' }));
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
+  if (!(await getMailNodeConfig())) return refuse(res, 'mail_node_not_configured');
+  const { started } = startCheckAll({ userId: req.session.userId, trigger: 'manual' });
+  return res.status(202).json({ ok: true, started, running: true });
 });
 
 router.post('/domains/:domain/dns-check', requireAdmin, async (req, res) => {

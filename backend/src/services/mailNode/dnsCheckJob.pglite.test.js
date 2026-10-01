@@ -8,8 +8,11 @@ import { createRealSchemaDb } from '../testing/realSchema.js';
 import { createFakeMailcow } from '../testing/fakeMailcow.js';
 
 const dbState = { db: null };
-const fake = vi.hoisted(() => ({ current: null, zone: null, cert: null }));
-vi.mock('../db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
+const fake = vi.hoisted(() => ({ current: null, zone: null, cert: null, failing: {} }));
+vi.mock('../db.js', () => ({
+  query: (sql, params) => dbState.db.query(sql, params),
+  withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
+}));
 vi.mock('../encryption.js', () => ({
   encrypt: (v) => `enc:${v}`,
   decrypt: (v) => (typeof v === 'string' && v.startsWith('enc:') ? v.slice(4) : v),
@@ -23,6 +26,7 @@ vi.mock('./dnsCheck.js', async (importOriginal) => {
     createResolver: (...args) => {
       real.createResolver(...args);
       const answer = (type) => async (name) => {
+        if (fake.failing[name]) throw Object.assign(new Error(fake.failing[name]), { code: fake.failing[name] });
         const records = fake.zone[type]?.[name];
         if (!records) throw Object.assign(new Error('not found'), { code: 'ENOTFOUND' });
         return records;
@@ -36,7 +40,7 @@ vi.mock('./dnsCheck.js', async (importOriginal) => {
   };
 });
 
-const { checkAllNow, checkDomainNow, getNodeDnsCheck } = await import('./dnsCheckJob.js');
+const { checkAllNow, checkDomainNow, getNodeDnsCheck, startCheckAll } = await import('./dnsCheckJob.js');
 const { saveMailNodeConfig } = await import('./mailcow.js');
 const { saveEopSettings } = await import('./eopSettings.js');
 const { listDomainRows, parseExpectedValues, restartOnboarding, setExpectedValues } = await import('./domains.js');
@@ -83,6 +87,7 @@ beforeEach(async () => {
   fake.current = mc;
   fake.zone = zoneFor('PUBA');
   fake.cert = certOk;
+  fake.failing = {};
   await saveMailNodeConfig({ mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 });
   await saveEopSettings({ nodeIp: NODE_IP, certificateHost: 'relay.example.com' });
   await db.query("INSERT INTO mail_node_domains (domain, state, expected_mx) VALUES ('a.example', 'ready', $1), ('b.example', 'dns_ok', '[]')", [JSON.stringify([MX])]);
@@ -147,7 +152,77 @@ describe('checkDomainNow', () => {
   it('reports a resolver setting that is not an address instead of asking anyone', async () => {
     process.env.DNS_CHECK_RESOLVER = 'dns.example.com';
     const result = await checkDomainNow({ domain: 'a.example', userId: ADMIN });
-    expect(result).toMatchObject({ overall: 'error', checks: [{ check: 'resolver', status: 'error', code: 'dns_resolver_invalid' }] });
+    expect(result).toMatchObject({ overall: null, checks: [], lookupFailed: { code: 'dns_resolver_invalid', trigger: 'manual' } });
+  });
+});
+
+describe('a check that could not ask DNS', () => {
+  it('keeps the result before, says when and why, and journals only an administrator\'s check', async () => {
+    const first = await checkDomainNow({ domain: 'a.example', userId: ADMIN });
+    const { dns_checked_at: checkedAt } = await raw('a.example');
+    fake.failing['_dmarc.a.example'] = 'ETIMEOUT';
+    const failed = await checkDomainNow({ domain: 'a.example', userId: ADMIN });
+    expect(failed).toMatchObject({ overall: 'ok', checks: first.checks, lookupFailed: { code: 'dns_lookup_failed', detail: 'ETIMEOUT' } });
+    expect(failed.lookupFailed.checks).toEqual([{ check: 'dmarc', name: '_dmarc.a.example', detail: 'ETIMEOUT' }]);
+    const row = await raw('a.example');
+    expect(row.dns_checked_at).toEqual(checkedAt);
+    const [listed] = (await listDomainRows()).filter((d) => d.domain === 'a.example');
+    expect(listed.dns).toMatchObject({ overall: 'ok', lookupFailed: { code: 'dns_lookup_failed' } });
+    const entries = await audit();
+    expect(entries.at(-1).details).toEqual({
+      scope: 'domain', domain: 'a.example', trigger: 'manual', lookupFailed: true, code: 'dns_lookup_failed', detail: 'ETIMEOUT',
+    });
+    // The schedule journals no failure, and the next result counts against the last real one.
+    await checkAllNow({ trigger: 'schedule' });
+    expect(await audit()).toHaveLength(entries.length);
+    delete fake.failing['_dmarc.a.example'];
+    await checkAllNow({ trigger: 'schedule' });
+    expect(await audit()).toHaveLength(entries.length);
+    expect((await raw('a.example')).dns_check.lookupFailed).toBeUndefined();
+  });
+
+  it('ends a run at once when the resolver does not answer, keeping every result', async () => {
+    await checkAllNow({ trigger: 'schedule' });
+    const before = await raw('b.example');
+    const node = await getNodeDnsCheck();
+    fake.failing['mail.example.com'] = 'ECONNREFUSED';
+    fake.cert = () => { throw new Error('the certificate must not be read during an outage'); };
+    const result = await checkAllNow({ userId: ADMIN });
+    expect(result.node).toMatchObject({ overall: node.overall, checks: node.checks, lookupFailed: { code: 'dns_lookup_failed', detail: 'ECONNREFUSED' } });
+    expect(result.domains.map((d) => [d.domain, d.overall, d.lookupFailed?.code])).toEqual([
+      ['a.example', 'ok', 'dns_lookup_failed'], ['b.example', 'warning', 'dns_lookup_failed'],
+    ]);
+    expect((await raw('b.example')).dns_checked_at).toEqual(before.dns_checked_at);
+    const [entry] = (await audit()).slice(-1);
+    expect(entry.details).toMatchObject({
+      scope: 'all', lookupFailed: true, code: 'dns_lookup_failed', counts: { ok: 0, warning: 0, error: 0, lookupFailed: 2 },
+    });
+  });
+
+  it('keeps one domain\'s failure to itself', async () => {
+    fake.zone.MX['a.example'] = [null];
+    const result = await checkAllNow({ trigger: 'schedule' });
+    const byDomain = Object.fromEntries(result.domains.map((d) => [d.domain, d]));
+    expect(byDomain['a.example']).toMatchObject({ overall: null, lookupFailed: { code: 'check_failed' } });
+    expect(byDomain['b.example']).toMatchObject({ overall: 'warning' });
+  });
+});
+
+describe('a run of everything', () => {
+  it('is one at a time: a second request joins the running one', async () => {
+    const first = startCheckAll({ userId: ADMIN });
+    const second = startCheckAll({ userId: ADMIN });
+    expect([first.started, second.started]).toEqual([true, false]);
+    expect(second.promise).toBe(first.promise);
+    await first.promise;
+    expect(startCheckAll({ trigger: 'schedule' }).started).toBe(true);
+  });
+
+  it('checks no domain past its deadline', async () => {
+    const result = await checkAllNow({ trigger: 'schedule', deadlineMs: -1 });
+    expect(result.domains).toEqual([]);
+    expect(result.skipped).toEqual(['a.example', 'b.example']);
+    expect((await raw('a.example')).dns_check).toBeNull();
   });
 });
 
@@ -168,7 +243,7 @@ describe('checkAllNow', () => {
     const entries = await audit();
     expect(entries).toHaveLength(1);
     expect(entries[0].details).toEqual({
-      scope: 'all', trigger: 'manual', overall: 'ok', from: null, counts: { ok: 1, warning: 1, error: 0 }, errorDomains: [],
+      scope: 'all', trigger: 'manual', overall: 'ok', from: null, counts: { ok: 1, warning: 1, error: 0, lookupFailed: 0 }, errorDomains: [],
     });
   });
 
@@ -198,9 +273,23 @@ describe('the values entered by hand', () => {
       .toEqual({ values: { tenantTxt: 'MS=ms123', dkimSelector1Cname: null, dkimSelector2Cname: 'x.example' } });
     expect(parseExpectedValues({ tenantTxt: 'a"b' })).toEqual({ error: 'tenant_txt_invalid' });
     expect(parseExpectedValues({ dkimSelector1Cname: 'no host' })).toEqual({ error: 'dkim_cname_invalid' });
+    // Real EOP selector targets hold "_" in their labels.
+    expect(parseExpectedValues({
+      dkimSelector1Cname: 'Selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft.',
+      dkimSelector2Cname: 'selector2-contoso-com._domainkey.contoso.onmicrosoft.com',
+    })).toEqual({
+      values: {
+        dkimSelector1Cname: 'selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft',
+        dkimSelector2Cname: 'selector2-contoso-com._domainkey.contoso.onmicrosoft.com',
+      },
+    });
+    expect(parseExpectedValues({ dkimSelector1Cname: 'selector1-stage-test._domainkey.tenant.onmicrosoft.test' }))
+      .toEqual({ values: { dkimSelector1Cname: 'selector1-stage-test._domainkey.tenant.onmicrosoft.test' } });
+    expect(parseExpectedValues({ dkimSelector1Cname: 'selector1._domainkey.contoso.dkim_mail' })).toEqual({ error: 'dkim_cname_invalid' });
+    expect(parseExpectedValues({ expectedMx: 'mx_1.example.com' })).toEqual({ error: 'expected_mx_invalid' });
   });
 
-  it('are kept with the domain, report what changed, and go with "Restart onboarding"', async () => {
+  it('are kept with the domain, report what changed, and stay through "Restart onboarding"', async () => {
     expect(await setExpectedValues({ domain: 'a.example', values: { mx: [MX], tenantTxt: 'MS=ms11111111' } })).toEqual({ fields: [] });
     expect(await setExpectedValues({ domain: 'a.example', values: { dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' } }))
       .toEqual({ fields: ['dkimSelector1Cname', 'dkimSelector2Cname'] });
@@ -211,7 +300,7 @@ describe('the values entered by hand', () => {
     await checkDomainNow({ domain: 'a.example', userId: ADMIN });
     await restartOnboarding({ domain: 'a.example', userId: ADMIN });
     const [after] = (await listDomainRows()).filter((d) => d.domain === 'a.example');
-    expect(after.expected).toEqual({ mx: [], tenantTxt: null, dkimSelector1Cname: null, dkimSelector2Cname: null });
+    expect(after.expected).toEqual({ mx: [MX], tenantTxt: 'MS=ms11111111', dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' });
     expect(after.dns).toBeNull();
   });
 });

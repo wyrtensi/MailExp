@@ -128,10 +128,11 @@ describe('the onboarding state machine', () => {
     expect(row).toMatchObject({ state: 'node_created', steps: {}, maxMailboxes: 20, addedBy: 'other', nodeCreated: null });
     const { rows: [raw] } = await db.query(`SELECT relayhost_id, dns_check, dns_checked_at, tenant, accepted_domain_type,
       expected_mx, dkim_mode, mailbox_send_limit FROM mail_node_domains WHERE domain = 'again.example'`);
-    // The owner's choices for the domain stay; what described it on the node and in the tenant goes.
+    // The owner's choices and typed values for the domain stay; what described it on the node and in
+    // the tenant goes.
     expect(raw).toEqual({
       relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: null,
-      expected_mx: [], dkim_mode: 'eop', mailbox_send_limit: 20,
+      expected_mx: ['mx.example'], dkim_mode: 'eop', mailbox_send_limit: 20,
     });
   });
 
@@ -280,13 +281,25 @@ describe('restartOnboarding', () => {
       expected_mx, dkim_mode, mailbox_send_limit, state_changed_by FROM mail_node_domains WHERE domain = 'again.example'`);
     expect(raw).toEqual({
       relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: null,
-      expected_mx: [], dkim_mode: 'eop', mailbox_send_limit: 20, state_changed_by: OTHER,
+      expected_mx: ['mx.example'], dkim_mode: 'eop', mailbox_send_limit: 20, state_changed_by: OTHER,
     });
     expect(await restartOnboarding({ domain: 'missing.example', userId: ADMIN })).toEqual({ error: 'domain_not_found' });
     // Now at the first step with nothing to clear: refused, nothing changes.
     expect(await restartOnboarding({ domain: 'again.example', userId: ADMIN })).toEqual({ error: 'domain_nothing_to_restart' });
     const { rows: [after] } = await db.query("SELECT state_changed_by FROM mail_node_domains WHERE domain = 'again.example'");
     expect(after.state_changed_by).toBe(OTHER);
+  });
+
+  it('keeps the values to publish typed by hand, and they alone are no reason to restart', async () => {
+    await recordCreatedDomain({ domain: 'typed.example', userId: ADMIN, maxMailboxes: 30 });
+    const manual = { verificationTxt: 'MS=ms1', dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example', source: 'manual' };
+    await db.query("UPDATE mail_node_domains SET expected_mx = '[\"mx.example\"]', tenant = $1 WHERE domain = 'typed.example'", [manual]);
+    expect(await restartOnboarding({ domain: 'typed.example', userId: ADMIN })).toEqual({ error: 'domain_nothing_to_restart' });
+    await markReady({ domain: 'typed.example', userId: ADMIN });
+    await restartOnboarding({ domain: 'typed.example', userId: ADMIN });
+    await recordCreatedDomain({ domain: 'typed.example', userId: ADMIN, maxMailboxes: 30 });
+    const { rows: [raw] } = await db.query("SELECT expected_mx, tenant FROM mail_node_domains WHERE domain = 'typed.example'");
+    expect(raw).toEqual({ expected_mx: ['mx.example'], tenant: manual });
   });
 
   it('says which state and steps a known domain had when it is added to the node again', async () => {

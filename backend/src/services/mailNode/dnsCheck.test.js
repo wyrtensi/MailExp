@@ -2,7 +2,12 @@
 // a resolver in memory: each check reads what DNS publishes and compares it with what the domain
 // must publish, and says ok, warning or error with the record to publish.
 import net from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import tls from 'node:tls';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   CERT_WARN_DAYS,
   checkDomainDns,
@@ -10,8 +15,11 @@ import {
   checkSubmissionCertificate,
   createResolver,
   dkimPublicKey,
+  ipv4InNetwork,
   judgeCertificate,
   overallStatus,
+  parseResolverSetting,
+  readSpf,
   reverseName,
 } from './dnsCheck.js';
 
@@ -142,6 +150,39 @@ describe('checkDomainDns', () => {
       expect(net32).toMatchObject({ status: 'warning', code: 'spf_node_ip' });
     });
 
+    it('counts only what passes mail before "all"', async () => {
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 -all include:spf.protection.outlook.com')))).spf)
+        .toMatchObject({ status: 'error', code: 'spf_no_include' });
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 ~include:spf.protection.outlook.com -all')))).spf)
+        .toMatchObject({ status: 'error', code: 'spf_no_include' });
+      expect(byCheck(await checkDomainDns(domainInput(withSpf(`v=spf1 include:spf.protection.outlook.com -ip4:${NODE_IP} -all`)))).spf.status)
+        .toBe('ok');
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 include:spf.protection.outlook.com -all ip4:203.0.113.0/24')))).spf.status)
+        .toBe('ok');
+    });
+
+    it('is an error for +all and warns for ?all', async () => {
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 include:spf.protection.outlook.com +all')))).spf)
+        .toMatchObject({ status: 'error', code: 'spf_pass_all' });
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 include:spf.protection.outlook.com all')))).spf)
+        .toMatchObject({ status: 'error', code: 'spf_pass_all' });
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 include:spf.protection.outlook.com ?all')))).spf)
+        .toMatchObject({ status: 'warning', code: 'spf_neutral_all' });
+    });
+
+    it('finds the node in a network that holds it', async () => {
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 ip4:203.0.113.0/24 include:spf.protection.outlook.com -all')))).spf)
+        .toMatchObject({ status: 'warning', code: 'spf_node_ip' });
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 ip4:203.0.114.0/24 include:spf.protection.outlook.com -all')))).spf.status)
+        .toBe('ok');
+    });
+
+    it('takes a redirect to Microsoft as the include, but not when "all" stands before it', async () => {
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 redirect=spf.protection.outlook.com')))).spf.status).toBe('ok');
+      expect(byCheck(await checkDomainDns(domainInput(withSpf('v=spf1 -all redirect=spf.protection.outlook.com')))).spf)
+        .toMatchObject({ status: 'error', code: 'spf_no_include' });
+    });
+
     it('reads a record split in strings and ignores the case of the version', async () => {
       const zone = okZone();
       zone.TXT[DOMAIN] = [['V=SPF1 include:spf.protection', '.outlook.com -all']];
@@ -247,6 +288,27 @@ describe('checkDomainDns', () => {
       zone.TXT[`_dmarc.${DOMAIN}`] = [['v=DMARC1; p=none'], ['v=DMARC1; p=reject']];
       expect(byCheck(await checkDomainDns(domainInput(fakeResolver(zone)))).dmarc).toMatchObject({ status: 'error', code: 'dmarc_multiple' });
     });
+
+    it('takes the version value exactly, the tag name in any case', async () => {
+      const zone = okZone();
+      zone.TXT[`_dmarc.${DOMAIN}`] = [['v=dmarc1; p=none']];
+      expect(byCheck(await checkDomainDns(domainInput(fakeResolver(zone)))).dmarc).toMatchObject({ status: 'error', code: 'dmarc_invalid' });
+      zone.TXT[`_dmarc.${DOMAIN}`] = [['V = DMARC1;p=none']];
+      expect(byCheck(await checkDomainDns(domainInput(fakeResolver(zone)))).dmarc.status).toBe('ok');
+    });
+
+    it('lets a subdomain without a record of its own fall back to its parent', async () => {
+      const zone = okZone();
+      const sub = `eu.${DOMAIN}`;
+      zone.MX[sub] = zone.MX[DOMAIN];
+      zone.TXT[sub] = zone.TXT[DOMAIN];
+      const { dmarc } = byCheck(await checkDomainDns(domainInput(fakeResolver(zone), { domain: sub, dkimKey: null })));
+      expect(dmarc).toMatchObject({ status: 'ok', name: `_dmarc.${DOMAIN}`, inheritedFrom: DOMAIN });
+      expect(dmarc.records).toEqual([{ type: 'TXT', name: `_dmarc.${sub}`, value: 'v=DMARC1; p=none' }]);
+      delete zone.TXT[`_dmarc.${DOMAIN}`];
+      expect(byCheck(await checkDomainDns(domainInput(fakeResolver(zone), { domain: sub, dkimKey: null }))).dmarc)
+        .toMatchObject({ status: 'error', code: 'dmarc_missing', name: `_dmarc.${sub}` });
+    });
   });
 
   describe('tenant verification', () => {
@@ -294,13 +356,13 @@ describe('checkNodeDns', () => {
     expect(byCheck(result).node_a.records).toEqual([{ type: 'A', name: MAIL_HOST, value: NODE_IP }]);
   });
 
-  it('is an error when the name points elsewhere or the address has no PTR', async () => {
+  it('is an error when the name points elsewhere, and warns when the address has no PTR or another one', async () => {
     const zone = okZone();
     zone.A[MAIL_HOST] = ['198.51.100.7'];
     delete zone.PTR[NODE_IP];
-    expect(statuses(await node(zone))).toMatchObject({ node_a: 'error:a_mismatch', node_ptr: 'error:ptr_missing' });
+    expect(statuses(await node(zone))).toMatchObject({ node_a: 'error:a_mismatch', node_ptr: 'warning:ptr_missing' });
     zone.PTR[NODE_IP] = ['host.provider.test'];
-    expect(byCheck(await node(zone)).node_ptr).toMatchObject({ status: 'error', code: 'ptr_mismatch', found: ['host.provider.test'] });
+    expect(byCheck(await node(zone)).node_ptr).toMatchObject({ status: 'warning', code: 'ptr_mismatch', found: ['host.provider.test'] });
     delete zone.A[MAIL_HOST];
     expect(byCheck(await node(zone)).node_a).toMatchObject({ status: 'error', code: 'a_missing' });
   });
@@ -322,7 +384,7 @@ describe('judgeCertificate', () => {
   const NOW = Date.parse('2026-10-01T00:00:00Z');
   const cert = (extra = {}) => ({
     authorized: true, authorizationError: null, validTo: 'Dec 30 00:00:00 2026 GMT', subject: 'CN=mail.test.local',
-    issuer: 'CN=Stage CA', subjectAltName: 'DNS:mail.test.local', matches: () => true, ...extra,
+    issuer: 'CN=Stage CA', subjectAltName: 'DNS:mail.test.local', matches: () => true, chainReachesRoot: true, ...extra,
   });
   const judge = (c, names = [MAIL_HOST]) => Object.fromEntries(judgeCertificate(c, { names, now: NOW }).map((i) => [i.check, i]));
 
@@ -333,13 +395,15 @@ describe('judgeCertificate', () => {
     expect(items.cert_chain).toMatchObject({ status: 'ok' });
   });
 
-  it('is an error when the server sent the leaf without its intermediate (EOP answers 5.7.64)', () => {
-    expect(judge(cert({ authorized: false, authorizationError: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' })).cert_chain)
-      .toMatchObject({ status: 'error', code: 'cert_chain_incomplete' });
+  it('is an error when no chain leads to a trusted root (EOP answers 5.7.64)', () => {
+    for (const reason of ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY']) {
+      expect(judge(cert({ authorized: false, authorizationError: reason, chainReachesRoot: false })).cert_chain)
+        .toMatchObject({ status: 'error', code: 'cert_chain_incomplete', detail: reason });
+    }
   });
 
-  it('is an error when the chain ends at an untrusted root', () => {
-    for (const reason of ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'SELF_SIGNED_CERT_IN_CHAIN', 'DEPTH_ZERO_SELF_SIGNED_CERT']) {
+  it('is an error when the chain ends at a self-signed certificate nobody trusts', () => {
+    for (const reason of ['SELF_SIGNED_CERT_IN_CHAIN', 'DEPTH_ZERO_SELF_SIGNED_CERT']) {
       expect(judge(cert({ authorized: false, authorizationError: reason })).cert_chain)
         .toMatchObject({ status: 'error', code: 'cert_untrusted', detail: reason });
     }
@@ -352,6 +416,14 @@ describe('judgeCertificate', () => {
     expect(expired.cert_expiry).toMatchObject({ status: 'error', code: 'cert_expired' });
     // The chain itself is judged apart from its dates.
     expect(expired.cert_chain).toMatchObject({ status: 'ok' });
+  });
+
+  it('still finds the missing intermediate of an expired leaf, which OpenSSL reports only as expired', () => {
+    const items = judge(cert({
+      authorized: false, authorizationError: 'CERT_HAS_EXPIRED', validTo: 'Sep 30 00:00:00 2026 GMT', chainReachesRoot: false,
+    }));
+    expect(items.cert_expiry).toMatchObject({ status: 'error', code: 'cert_expired' });
+    expect(items.cert_chain).toMatchObject({ status: 'error', code: 'cert_chain_incomplete' });
   });
 
   it('is an error when a name is not on the certificate', () => {
@@ -427,7 +499,99 @@ describe('helpers', () => {
   it('asks only the configured server, and refuses one that is not an address', () => {
     expect(createResolver('172.19.0.7').getServers()).toEqual(['172.19.0.7']);
     expect(createResolver('172.19.0.7:5353').getServers()).toEqual(['172.19.0.7:5353']);
-    expect(() => createResolver('dns.example.com')).toThrow(expect.objectContaining({ code: 'dns_resolver_invalid' }));
+    expect(createResolver('2001:db8::53').getServers()).toEqual(['2001:db8::53']);
+    expect(createResolver('[2001:db8::53]:5353').getServers()).toEqual(['[2001:db8::53]:5353']);
     expect(createResolver('').getServers().length).toBeGreaterThan(0);
+    // Port 0 would make c-ares abort the process: refused before it gets there, like every other mistake.
+    for (const bad of ['dns.example.com', '172.19.0.7:0', '172.19.0.7:65536', '172.19.0.7:', '[2001:db8::53', '[2001:db8::53]:0',
+      '[172.19.0.7]:53', '2001:db8::53:99999', '172.19.0.7:53:53', '[2001:db8::53]x']) {
+      expect(() => createResolver(bad), bad).toThrow(expect.objectContaining({ code: 'dns_resolver_invalid' }));
+    }
+  });
+
+  it('reads the resolver setting', () => {
+    expect(parseResolverSetting(' 172.19.0.7:53 ')).toBe('172.19.0.7:53');
+    expect(parseResolverSetting('[2001:db8::53]')).toBe('[2001:db8::53]');
+    expect(parseResolverSetting(undefined)).toBe('');
+    expect(parseResolverSetting('172.19.0.7:65535')).toBe('172.19.0.7:65535');
+    expect(parseResolverSetting('172.19.0.7:00053')).toBeNull();
+  });
+
+  it('reads SPF as a receiver does', () => {
+    expect(readSpf('v=spf1 include:spf.protection.outlook.com -all', NODE_IP)).toEqual({ include: true, nodeListed: false, all: '-' });
+    expect(readSpf('v=spf1 +include:SPF.protection.outlook.com ip4:203.0.113.10/32 ~all', NODE_IP)).toEqual({ include: true, nodeListed: true, all: '~' });
+    expect(readSpf('v=spf1 redirect=spf.protection.outlook.com.', NODE_IP)).toEqual({ include: true, nodeListed: false, all: null });
+    expect(ipv4InNetwork('203.0.112.0/23', NODE_IP)).toBe(true);
+    expect(ipv4InNetwork('203.0.113.11', NODE_IP)).toBe(false);
+    expect(ipv4InNetwork('0.0.0.0/0', NODE_IP)).toBe(true);
+    expect(ipv4InNetwork('203.0.113.0/33', NODE_IP)).toBe(false);
+  });
+});
+
+// The whole path against a real STARTTLS server with certificates made for the test by openssl
+// (as the fake-EOP tests do): a root, an intermediate and a wildcard leaf.
+describe('checkSubmissionCertificate with a real certificate', () => {
+  let dir;
+  let pem;
+  const servers = [];
+  const openssl = (...args) => execFileSync('openssl', args, { cwd: dir, stdio: 'pipe' });
+
+  beforeAll(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'dns-check-cert-'));
+    openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'root.key', '-out', 'root.pem', '-days', '30', '-subj', '/CN=Test Root',
+      '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign');
+    openssl('req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'int.key', '-out', 'int.csr', '-subj', '/CN=Test Intermediate');
+    writeFileSync(path.join(dir, 'int.ext'), 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n');
+    openssl('x509', '-req', '-in', 'int.csr', '-CA', 'root.pem', '-CAkey', 'root.key', '-CAcreateserial', '-out', 'int.pem', '-days', '30', '-extfile', 'int.ext');
+    openssl('req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'leaf.key', '-out', 'leaf.csr', '-subj', '/CN=*.test.local');
+    writeFileSync(path.join(dir, 'leaf.ext'), 'subjectAltName=DNS:*.test.local\nextendedKeyUsage=serverAuth\n');
+    openssl('x509', '-req', '-in', 'leaf.csr', '-CA', 'int.pem', '-CAkey', 'int.key', '-CAcreateserial', '-out', 'leaf.pem', '-days', '30', '-extfile', 'leaf.ext');
+    pem = Object.fromEntries(['root', 'int', 'leaf'].map((n) => [n, readFileSync(path.join(dir, `${n}.pem`), 'utf8')]));
+    pem.key = readFileSync(path.join(dir, 'leaf.key'), 'utf8');
+  });
+  afterAll(() => {
+    for (const s of servers) s.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // An SMTP server with STARTTLS that presents the given certificate chain.
+  async function starttls(cert) {
+    const secureContext = tls.createSecureContext({ key: pem.key, cert });
+    const server = net.createServer((socket) => {
+      socket.on('error', () => {});
+      socket.write('220 mail.test.local ESMTP\r\n');
+      const onData = (data) => {
+        const line = data.toString();
+        if (/^EHLO/i.test(line)) socket.write('250-mail.test.local\r\n250-STARTTLS\r\n250 8BITMIME\r\n');
+        else if (/^STARTTLS/i.test(line)) {
+          socket.off('data', onData);
+          socket.write('220 2.0.0 Ready to start TLS\r\n', () => {
+            const secure = new tls.TLSSocket(socket, { isServer: true, secureContext });
+            secure.on('error', () => {});
+            secure.on('data', () => secure.end('221 bye\r\n'));
+          });
+        }
+      };
+      socket.on('data', onData);
+    });
+    servers.push(server);
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return server.address().port;
+  }
+  const run = (port, names = [MAIL_HOST]) => checkSubmissionCertificate({ host: '127.0.0.1', names, port, timeoutMs: 5000, ca: [pem.root] })
+    .then((items) => Object.fromEntries(items.map((i) => [i.check, i])));
+
+  it('passes a full chain whose wildcard covers the node name', async () => {
+    const items = await run(await starttls(pem.leaf + pem.int));
+    expect(items.cert_expiry).toMatchObject({ status: 'ok' });
+    expect(items.cert_expiry.daysLeft).toBeGreaterThanOrEqual(28);
+    expect(items.cert_name).toMatchObject({ status: 'ok', found: ['DNS:*.test.local'] });
+    expect(items.cert_chain).toMatchObject({ status: 'ok', issuer: 'CN=Test Intermediate' });
+  });
+
+  it('finds the missing intermediate and the names the wildcard does not cover', async () => {
+    const items = await run(await starttls(pem.leaf), [MAIL_HOST, 'relay.example.com', '203.0.113.10']);
+    expect(items.cert_chain).toMatchObject({ status: 'error', code: 'cert_chain_incomplete', detail: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' });
+    expect(items.cert_name).toMatchObject({ status: 'error', missing: ['relay.example.com', '203.0.113.10'] });
   });
 });

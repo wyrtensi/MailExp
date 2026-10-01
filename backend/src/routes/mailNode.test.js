@@ -49,7 +49,7 @@ const dns = vi.hoisted(() => ({
   domain: (domain, trigger) => ({ domain, at: '2026-10-01T10:00:00.000Z', trigger, overall: 'ok', checks: [] }),
 }));
 vi.mock('../services/mailNode/dnsCheckJob.js', () => ({
-  checkAllNow: vi.fn(async () => ({ at: '2026-10-01T10:00:00.000Z', node: { overall: 'ok', checks: [] }, domains: [] })),
+  startCheckAll: vi.fn(() => ({ started: true, promise: Promise.resolve(null) })),
   checkDomainNow: vi.fn(async ({ domain, trigger }) => dns.domain(domain, trigger)),
   getNodeDnsCheck: vi.fn(async () => ({ at: '2026-10-01T09:00:00.000Z', overall: 'warning', checks: [] })),
 }));
@@ -87,7 +87,7 @@ import {
   acknowledgeNodeIdentity, adoptDomain, confirmStep, markReady, recordCreatedDomain, restartOnboarding,
 } from '../services/mailNode/domains.js';
 import { EOP_DEFAULTS, saveEopSettings } from '../services/mailNode/eopSettings.js';
-import { checkAllNow, checkDomainNow } from '../services/mailNode/dnsCheckJob.js';
+import { checkDomainNow, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
 import { setExpectedValues } from '../services/mailNode/domains.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
@@ -126,6 +126,7 @@ describe('/api/mail-node', () => {
     const body = await (await call('GET', '/config')).json();
     expect(body).toEqual({
       configured: true, mailHost: 'mail.example.com', apiKey: '••••••••', quotaMb: 5120, diskPingUrl: '', deleteAfterDays: 5, panelIps: [],
+      nodeIp: '',
     });
     session.isAdmin = false;
     expect((await call('GET', '/config')).status).toBe(403);
@@ -804,11 +805,14 @@ describe('/api/mail-node', () => {
       expect(applyNode).not.toHaveBeenCalled();
     });
 
-    it('shows the node result and checks the node and every domain, for administrators only', async () => {
+    it('shows the node result and starts a check of the node and every domain in the background, for administrators only', async () => {
       expect(await (await call('GET', '/dns-check')).json()).toEqual({ node: { at: '2026-10-01T09:00:00.000Z', overall: 'warning', checks: [] } });
       const res = await call('POST', '/dns-check');
-      expect(res.status).toBe(200);
-      expect(checkAllNow).toHaveBeenCalledWith({ userId: 'user-1', trigger: 'manual' });
+      expect(res.status).toBe(202);
+      expect(await res.json()).toEqual({ ok: true, started: true, running: true });
+      expect(startCheckAll).toHaveBeenCalledWith({ userId: 'user-1', trigger: 'manual' });
+      startCheckAll.mockReturnValueOnce({ started: false, promise: Promise.resolve(null) });
+      expect(await (await call('POST', '/dns-check')).json()).toEqual({ ok: true, started: false, running: true });
       session.isAdmin = false;
       expect((await call('GET', '/dns-check')).status).toBe(403);
       expect((await call('POST', '/dns-check')).status).toBe(403);
@@ -817,10 +821,12 @@ describe('/api/mail-node', () => {
     });
 
     it('answers the refusals of a check with their codes', async () => {
-      checkAllNow.mockRejectedValueOnce(new MailNodeError('mail_node_not_configured', 'The mail node is not set up', 409));
+      node.cfg = null;
       let res = await call('POST', '/dns-check');
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe('mail_node_not_configured');
+      expect(startCheckAll).not.toHaveBeenCalled();
+      node.cfg = CFG;
       checkDomainNow.mockRejectedValueOnce(new MailNodeError('domain_not_found', 'The panel does not know this domain', 404));
       res = await call('POST', '/domains/gone.example/dns-check');
       expect(res.status).toBe(404);
@@ -859,6 +865,37 @@ describe('/api/mail-node', () => {
       const res = await call('PUT', '/domains/example.com/dns-expected', { expectedMx: [] });
       expect(await res.json()).toEqual({ ok: true, domain: 'example.com', fields: [] });
       expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('takes the selector CNAMEs EOP really gives, with "_" in their labels', async () => {
+      const res = await call('PUT', '/domains/example.com/dns-expected', {
+        dkimSelector1Cname: 'selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft',
+        dkimSelector2Cname: 'Selector2-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft.',
+      });
+      expect(res.status).toBe(200);
+      expect(setExpectedValues).toHaveBeenCalledWith({
+        domain: 'example.com',
+        values: {
+          dkimSelector1Cname: 'selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft',
+          dkimSelector2Cname: 'selector2-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft',
+        },
+      });
+    });
+
+    it('keeps the node address with the node settings too, in the one place the EOP settings keep it', async () => {
+      panel.eop = { ...EOP_DEFAULTS, nodeIp: '203.0.113.10' };
+      expect((await (await call('GET', '/config')).json()).nodeIp).toBe('203.0.113.10');
+      let res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', nodeIp: '198.51.100.20' });
+      expect(res.status).toBe(200);
+      expect(saveEopSettings).toHaveBeenCalledWith({ nodeIp: '198.51.100.20' });
+      expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { settings: 'node', fields: ['nodeIp'] } }));
+      vi.clearAllMocks();
+      res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', nodeIp: '203.0.113.10' });
+      expect(res.status).toBe(200);
+      expect(saveEopSettings).not.toHaveBeenCalled();
+      res = await call('PUT', '/config', { mailHost: 'mail.example.com', apiKey: '••••••••', nodeIp: 'mail.example.com' });
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe('node_ip_invalid');
     });
 
     it('refuses bad values before saving anything', async () => {
