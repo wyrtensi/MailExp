@@ -210,6 +210,15 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             {textField('certificateHost', { placeholder: t('admin.mailNode.hostPh') })}
             <span style={hintStyle}>{t('admin.eop.certificateHostNote')}</span>
           </label>
+          {/* The node's address is kept here but edited next to the node's name in "Mail node", so moving
+              the node changes both in one place. */}
+          <div data-eop-node-ip>
+            <span style={labelStyle}>{t('admin.mailNode.nodeIpLabel')}</span>
+            <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: 'JetBrains Mono, monospace' }}>
+              {stored.nodeIp || t('admin.eop.nodeIpNotSet')}
+            </span>
+            <span style={hintStyle}>{t('admin.eop.nodeIpReadOnlyNote')}</span>
+          </div>
           <label>
             <span style={labelStyle}>{t('admin.eop.dkimModeLabel')}</span>
             <select value={form.dkimMode} onChange={set('dkimMode')} style={{ ...fieldStyle, maxWidth: 320 }}>

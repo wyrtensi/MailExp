@@ -40,9 +40,13 @@ import {
   markReady,
   mergeDomains,
   nodeRefusal,
+  parseExpectedValues,
   recordCreatedDomain,
   restartOnboarding,
+  setExpectedValues,
+  MAX_EXPECTED_MX,
 } from '../services/mailNode/domains.js';
+import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
 import {
   EOP_FIELDS,
   MAX_SEND_LIMIT_PER_HOUR,
@@ -109,6 +113,10 @@ const ERRORS = {
   tls_parameters_invalid: [400, 'TLS policy parameters must be name=value pairs up to 255 characters that fit the policy: match= takes hostname, nexthop, dot-nexthop or host names for secure and verify, fingerprints for fingerprint (required), and nothing for the other policies'],
   panel_ips_invalid: [400, `Panel addresses must be up to ${MAX_PANEL_IPS} IP addresses or networks such as 203.0.113.10 or 203.0.113.0/28`],
   rate_limit_invalid: [400, `Send limit must be a whole number of messages from 1 to ${MAX_SEND_LIMIT_PER_HOUR} per second, minute, hour or day`],
+  node_ip_invalid: [400, 'Node address must be an IPv4 address such as 203.0.113.10'],
+  expected_mx_invalid: [400, `Expected MX must be up to ${MAX_EXPECTED_MX} host names such as contoso-com.mail.protection.outlook.com`],
+  tenant_txt_invalid: [400, 'Verification TXT must be printable text up to 255 characters without quotes, such as MS=ms12345678'],
+  dkim_cname_invalid: [400, 'DKIM selector CNAME must be a host name'],
 };
 
 export function refuse(res, code) {
@@ -141,8 +149,11 @@ function configAudit(req, settings, fields) {
   recordAudit({ actorUserId: req.session.userId, action: 'mail_node.config_changed', details: { settings, fields } });
 }
 
+// nodeIp: the node's public address, kept with the EOP settings (one stored value, shown with both
+// forms) so that moving the node changes its name and its address in one place.
 router.get('/config', requireAdmin, async (req, res) => {
   const cfg = await getMailNodeConfig();
+  const { nodeIp } = await getEopSettings();
   res.json({
     configured: !!cfg,
     mailHost: cfg?.mailHost ?? '',
@@ -151,6 +162,7 @@ router.get('/config', requireAdmin, async (req, res) => {
     diskPingUrl: cfg?.diskPingUrl ?? '',
     deleteAfterDays: cfg?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS,
     panelIps: cfg?.panelIps ?? [],
+    nodeIp: nodeIp ?? '',
   });
 });
 
@@ -175,6 +187,9 @@ router.put('/config', requireAdmin, async (req, res) => {
   const ips = req.body?.panelIps === undefined ? { networks: current?.panelIps ?? [] } : parseNetworkList(req.body.panelIps);
   if (ips.error) return refuse(res, ips.error);
   const panelIps = ips.networks;
+  // The node's address, left out to keep the stored one; checked as the EOP settings check it.
+  const address = req.body?.nodeIp === undefined ? { settings: {} } : parseEopSettings({ nodeIp: req.body.nodeIp });
+  if (address.error) return refuse(res, address.error);
   let apiKey = sent;
   if (!sent || sent === REDACTED_SECRET) {
     // The stored key goes only to the host it was entered for: a new host needs the key again.
@@ -189,6 +204,13 @@ router.put('/config', requireAdmin, async (req, res) => {
   }
   await saveMailNodeConfig(cfg);
   const changed = Object.keys(cfg).filter((field) => JSON.stringify(current?.[field]) !== JSON.stringify(cfg[field]));
+  if ('nodeIp' in address.settings) {
+    const { nodeIp: storedIp } = await getEopSettings();
+    if (address.settings.nodeIp !== storedIp) {
+      await saveEopSettings(address.settings);
+      changed.push('nodeIp');
+    }
+  }
   configAudit(req, 'node', changed);
   // Read the disk (and ping) right away instead of at the next scheduled run.
   checkMailNodeDisk().catch((err) => console.error('Mail node disk check failed:', err.message));
@@ -401,6 +423,56 @@ router.post('/apply/prefilter', requireAdmin, async (req, res) => {
   } catch (err) {
     return mailNodeFailure(res, err);
   }
+});
+
+// The DNS checks (R-14, R-15; services/mailNode/dnsCheckJob.js): the node's last result (each
+// domain's comes with GET /domains), "Check now" for the node and every domain the panel knows (it
+// runs in the background: the answer comes at once, with started: false when a run was already
+// going, and the results show on the next load), and for one domain (at once, never waiting for a
+// run of everything). A result only warns: it never changes a domain's onboarding state.
+router.get('/dns-check', requireAdmin, async (req, res) => {
+  res.json({ node: await getNodeDnsCheck() });
+});
+
+router.post('/dns-check', requireAdmin, async (req, res) => {
+  if (!(await getMailNodeConfig())) return refuse(res, 'mail_node_not_configured');
+  const { started } = startCheckAll({ userId: req.session.userId, trigger: 'manual' });
+  return res.status(202).json({ ok: true, started, running: true });
+});
+
+router.post('/domains/:domain/dns-check', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  try {
+    return res.json(await checkDomainNow({ domain, userId: req.session.userId, trigger: 'manual' }));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+});
+
+// The values a domain must publish that the panel cannot read until the tenant driver exists: its
+// MX, the tenant's verification TXT and the EOP DKIM selector CNAMEs. Journaled by the names of the
+// fields that changed; the domain's DNS is checked again right away (a failure stays in the
+// result, the save holds).
+router.put('/domains/:domain/dns-expected', requireAdmin, async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  const { values, error } = parseExpectedValues(req.body);
+  if (error) return refuse(res, error);
+  const result = await setExpectedValues({ domain, values });
+  if (result.error) return refuse(res, result.error);
+  if (result.fields.length) {
+    recordAudit({
+      actorUserId: req.session.userId, action: 'mail_node.config_changed',
+      details: { settings: 'domain_dns', domain, fields: result.fields },
+    });
+  }
+  const dns = await checkDomainNow({ domain, userId: req.session.userId, trigger: 'expected_changed' })
+    .catch((err) => {
+      console.error('Mail node DNS check after saving the expected values failed:', err?.code || 'error');
+      return null;
+    });
+  return res.json({ ok: true, domain, fields: result.fields, ...(dns ? { dns } : {}) });
 });
 
 // The administrator accepts the creation time the node reports now for a domain whose time differs

@@ -3,10 +3,12 @@ import { isIP } from 'node:net';
 import { query } from '../db.js';
 import { encrypt, decrypt } from '../encryption.js';
 import { safeFetch } from '../safeFetch.js';
+import { joinTxtChunks } from './txtRecord.js';
 
 // The mail node: a mailcow server that MailExpert creates and deletes mailboxes on.
-// MailExpert stores only its host name (<MAIL_HOST>), never an IP: IMAP and SMTP of every mailbox
-// and the API at https://<MAIL_HOST>/api/v1 all go by that name, so moving the node is a DNS change.
+// MailExpert connects to it only by its host name (<MAIL_HOST>), never an IP: IMAP and SMTP of every
+// mailbox and the API at https://<MAIL_HOST>/api/v1 all go by that name, so moving the node is a DNS
+// change. The node's address in the EOP settings (nodeIp) only serves the DNS check.
 
 export const MAIL_NODE_PROVIDER = 'mail_node';
 // Quota of a new mailbox in MiB (mailcow's unit). A quota only caps a mailbox, it reserves no disk.
@@ -309,13 +311,8 @@ export async function enableRelayhost(cfg, id) {
 export const DKIM_SELECTOR = 'dkim';
 export const DKIM_KEY_SIZE = 2048;
 
-// The TXT value of a DKIM record as one string: mailcow (SPLIT_DKIM_255) and DNS answers may give it
-// as quoted pieces of up to 255 characters separated by spaces ("v=DKIM1;..." "...").
-export function joinTxtChunks(value) {
-  const text = String(value ?? '').trim();
-  if (!text.startsWith('"')) return text;
-  return [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1].replace(/\\(.)/g, '$1')).join('');
-}
+// The TXT value of a DKIM record as one string (SPLIT_DKIM_255 pieces joined).
+export { joinTxtChunks };
 
 // The domain's DKIM key as DNS must publish it: { selector, name, txt, length }, or null when
 // mailcow has no key for it. The private key is never read.

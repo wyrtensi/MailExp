@@ -102,6 +102,12 @@ esac
 if [ "$variant" = mta-sts ]; then echo "txt-record=_mta-sts.$Z,\"v=STSv1; id=20261001000000\""; fi
 
 # The node's own name: A, PTR and (in one variant) an AAAA that IPv6-less mailcow must not have.
-echo "host-record=mail.test.local,$NODE_IP"
-if [ "$variant" != no-ptr ]; then echo "ptr-record=$NODE_PTR,mail.test.local"; fi
+# host-record publishes the PTR of its address too, so the variant without a PTR publishes the A
+# with address= (no PTR) instead.
+if [ "$variant" = no-ptr ]; then
+  echo "address=/mail.test.local/$NODE_IP"
+else
+  echo "host-record=mail.test.local,$NODE_IP"
+  echo "ptr-record=$NODE_PTR,mail.test.local"
+fi
 if [ "$variant" = aaaa ]; then echo "host-record=mail.test.local,2001:db8::10"; fi

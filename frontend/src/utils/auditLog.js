@@ -1,4 +1,4 @@
-import { applyItemKey, domainStateKey, rateFrameKey } from './mailNode.js';
+import { applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, rateFrameKey } from './mailNode.js';
 import { formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
@@ -31,6 +31,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.domain_state_changed': 'admin.audit.actionMailNodeDomainStateChanged',
   'mail_node.domain_identity_acknowledged': 'admin.audit.actionMailNodeDomainIdentityAcknowledged',
   'mail_node.applied': 'admin.audit.actionMailNodeApplied',
+  'mail_node.dns_checked': 'admin.audit.actionMailNodeDnsChecked',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -69,7 +70,59 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   tenantId: 'admin.audit.fieldTenantId',
   appId: 'admin.audit.fieldAppId',
   certThumbprint: 'admin.audit.fieldThumbprint',
+  nodeIp: 'admin.audit.fieldNodeIp',
+  // The values a domain must publish (settings 'domain_dns').
+  mx: 'admin.audit.fieldExpectedMx',
+  tenantTxt: 'admin.audit.fieldTenantTxt',
+  dkimSelector1Cname: 'admin.audit.fieldDkimSelector1Cname',
+  dkimSelector2Cname: 'admin.audit.fieldDkimSelector2Cname',
 });
+
+// The settings a mail_node.config_changed entry is about.
+const SETTINGS_DETAIL_KEYS = Object.freeze({
+  node: 'admin.audit.detailMailNodeSettingsChanged',
+  eop: 'admin.audit.detailEopSettingsChanged',
+  domain_dns: 'admin.audit.detailDomainDnsExpectedChanged',
+});
+
+// A mail_node.dns_checked entry: an administrator's check of everything (the node's status and how
+// many domains ended in each), or one scope (the node or a domain) with its status and the one
+// before, and the checks that found errors or warnings.
+function dnsCheckedDetail(details) {
+  const overall = dnsStatusKey(details.overall);
+  const names = (list) => (Array.isArray(list) ? list.map((check) => dnsCheckKey(check)) : []);
+  // A check that could not ask DNS: no result, only why.
+  if (details.lookupFailed) {
+    if (details.scope === 'all') return { key: 'admin.audit.detailDnsCheckedAllFailed', values: { code: details.code ?? '' } };
+    return details.scope === 'domain'
+      ? { key: 'admin.audit.detailDnsCheckLookupFailed', values: { scope: details.domain ?? '', code: details.code ?? '' } }
+      : { key: 'admin.audit.detailDnsCheckLookupFailed', values: { code: details.code ?? '' }, valueKeys: { scope: 'admin.audit.detailDnsScopeNode' } };
+  }
+  if (details.scope === 'all') {
+    const counts = details.counts ?? {};
+    return {
+      key: 'admin.audit.detailDnsCheckedAll',
+      values: {
+        ok: counts.ok ?? 0, warning: counts.warning ?? 0, error: counts.error ?? 0, lookupFailed: counts.lookupFailed ?? 0,
+        domains: Array.isArray(details.errorDomains) && details.errorDomains.length ? details.errorDomains.join(', ') : '—',
+      },
+      valueKeys: { overall },
+    };
+  }
+  // A list with no check in it reads as a dash.
+  const listed = { errors: names(details.errors), warnings: names(details.warnings) };
+  const empty = Object.fromEntries(Object.entries(listed).filter(([, list]) => !list.length).map(([name]) => [name, '—']));
+  const nonEmpty = Object.fromEntries(Object.entries(listed).filter(([, list]) => list.length));
+  return {
+    key: details.scope === 'domain' ? 'admin.audit.detailDnsCheckedDomain' : 'admin.audit.detailDnsCheckedNode',
+    values: { domain: details.domain ?? '', ...empty },
+    valueKeys: {
+      overall,
+      from: details.from ? dnsStatusKey(details.from) : 'admin.audit.detailDnsCheckedFirst',
+      ...nonEmpty,
+    },
+  };
+}
 
 // What a mail_node.applied entry applied to: the node, the spam filing rule, or a domain (named).
 const APPLY_SCOPE_KEYS = Object.freeze({
@@ -172,6 +225,8 @@ export function auditDetail(entry) {
       };
     case 'mail_node.applied':
       return appliedDetail(details);
+    case 'mail_node.dns_checked':
+      return dnsCheckedDetail(details);
     case 'mailbox.quota_changed':
       return details.from == null
         ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }
@@ -226,8 +281,8 @@ export function auditDetail(entry) {
     case 'mail_node.config_changed':
       return Array.isArray(details.fields) && details.fields.length
         ? {
-          key: details.settings === 'eop' ? 'admin.audit.detailEopSettingsChanged' : 'admin.audit.detailMailNodeSettingsChanged',
-          values: {},
+          key: SETTINGS_DETAIL_KEYS[details.settings] ?? SETTINGS_DETAIL_KEYS.node,
+          values: details.settings === 'domain_dns' ? { domain: details.domain ?? '' } : {},
           valueKeys: { fields: details.fields.map((field) => SETTINGS_FIELD_KEYS[field] ?? field) },
         }
         : null;

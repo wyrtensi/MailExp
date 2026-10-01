@@ -174,8 +174,8 @@ accepted domains (`recipient-denied` отвечает всем получате�
 
 ## DNS-фикстуры (stage-dns)
 
-Зона `stage.test`, какой её должен публиковать тенант за EOP, для будущей проверки DNS панели (R-14,
-R-15). Опционально: контейнер `stage-dns` (dnsmasq, образ `stage-dns:dnsmasq` собирается из `alpine:3.22`) стоит в сети панели `stage_mailexpert`
+Зона `stage.test`, какой её должен публиковать тенант за EOP, для проверки DNS панели (R-14, R-15;
+[runbook, «Проверка DNS»](mail-node.md)). Опционально: контейнер `stage-dns` (dnsmasq, образ `stage-dns:dnsmasq` собирается из `alpine:3.22`) стоит в сети панели `stage_mailexpert`
 и в сети mailcow, и **ничем не пользуется, пока клиент не укажет его адрес**. Ни панель, ни mailcow на
 него не переключаются, реальные адреса (Gmail) резолвятся как раньше.
 
@@ -193,11 +193,19 @@ scripts/deploy/test/stage.sh dns down
 mailcow), `_dmarc`, а также A `mail.test.local` и PTR к нему (`203.0.113.10`). Неполные варианты:
 `no-spf`, `spf-ip4`, `spf-double`, `no-dkim`, `dkim-mismatch`, `dkim-cname` (CNAME `selector1/2`),
 `no-dmarc`, `dmarc-bad`, `wrong-mx`, `extra-mx`, `mx-new-form` (`*.mx.microsoft`), `no-ms-txt`,
-`ms-txt-wrong`, `mta-sts`, `no-ptr`, `aaaa`. Имя вне зоны получает `REFUSED` (наружу `stage-dns` ничего
+`ms-txt-wrong`, `mta-sts`, `no-ptr` (A узла через `address=`: `host-record` dnsmasq сам добавляет
+PTR), `aaaa`. Имя вне зоны получает `REFUSED` (наружу `stage-dns` ничего
 не пересылает), несуществующее имя в `stage.test` — `NXDOMAIN`. Новая зона пишется во временный файл и
 подменяет рабочую только когда сформирована целиком: неверное имя варианта или пустой ключ не портят
-действующую зону. Адрес резолвера — вывод `dns status`; панель, когда у проверки появится настройка резолвера (предлагается
-`DNS_CHECK_RESOLVER`), получит его как единственный сервер. Зона — `scripts/deploy/test/stand-dns/zone.sh`,
+действующую зону. Адрес резолвера — вывод `dns status`; панель получает его как единственный сервер через
+`DNS_CHECK_RESOLVER`. Опубликованные образы панели стенда проверку пока не несут (она появится после
+слияния): код ветки запускается одноразовым контейнером в сети `stage_mailexpert` с
+`DNS_CHECK_RESOLVER=<адрес stage-dns>`, а для сертификата на 587 — с `--add-host
+mail.test.local:host-gateway` и CA стенда (`-v /opt/testca/ca.pem:/ca/ca.pem:ro -e
+NODE_EXTRA_CA_CERTS=/ca/ca.pem`). Резолвер самого контейнера на `stage-dns` не переключать: в зоне
+`mail.test.local` указывает на `203.0.113.10` (TEST-NET), и подключение к 587 ушло бы в никуда. Ключ DKIM
+зоны — `/opt/stage-dns/dkim.pub`, а не ключ mailcow: в режиме «mailcow» вариант `ok` проходит проверку
+только против него. Зона — `scripts/deploy/test/stand-dns/zone.sh`,
 тесты — `scripts/deploy/test/stage-dns.bats`. Unbound mailcow на `stage-dns` не настроен (для него понадобился
 бы `stub-zone` и `local-zone: "test." transparent`); проверка DNS этого не требует.
 

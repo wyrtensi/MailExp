@@ -84,6 +84,9 @@ count() {
   lacks 'ms12345678'
   run zone no-ptr QUJD
   lacks '^ptr-record='
+  # host-record would publish the PTR by itself.
+  lacks '^host-record=mail\.test\.local,203'
+  has '^address=/mail\.test\.local/203\.0\.113\.10$'
   run zone aaaa QUJD
   has '^host-record=mail\.test\.local,2001:db8::10$'
   run zone mta-sts QUJD

@@ -39,6 +39,16 @@ import {
   rateFrameKey,
   rateLimitError,
   rateLimitState,
+  dnsCheckKey,
+  dnsCodeKey,
+  dnsCodeValues,
+  dnsStatusKey,
+  dnsSummary,
+  dnsVerdictKey,
+  expectedForm,
+  expectedValuesError,
+  hasDnsErrors,
+  normalizeExpectedValues,
 } from './mailNode.js';
 
 describe('domainMailboxFormError', () => {
@@ -132,6 +142,13 @@ describe('normalizeEopSettings', () => {
     assert.deepEqual(normalizeEopSettings({ sendLimitPerHour: null }), { error: 'send_limit_invalid' });
     assert.deepEqual(normalizeEopSettings({ certThumbprint: 'xyz' }), { error: 'thumbprint_invalid' });
     assert.deepEqual(normalizeEopSettings({}), { settings: {} });
+  });
+
+  it('keeps the node address as an IPv4 address only, and lets it be cleared', () => {
+    assert.deepEqual(normalizeEopSettings({ nodeIp: ' 203.0.113.10 ' }), { settings: { nodeIp: '203.0.113.10' } });
+    assert.deepEqual(normalizeEopSettings({ nodeIp: '' }), { settings: { nodeIp: null } });
+    assert.deepEqual(normalizeEopSettings({ nodeIp: '2001:db8::10' }), { error: 'node_ip_invalid' });
+    assert.deepEqual(normalizeEopSettings({ nodeIp: 'mail.example.com' }), { error: 'node_ip_invalid' });
   });
 });
 
@@ -464,5 +481,78 @@ describe('send limits', () => {
     assert.equal(rateLimitState({ rateLimit: { value: 9, frame: 'm' }, rateLimitOverride: { value: 9, frame: 'm' }, rateLimitDefault: def }), 'own');
     assert.equal(rateLimitState({ rateLimit: null, rateLimitOverride: null, rateLimitDefault: def }), 'differs');
     assert.equal(rateLimitState({ rateLimit: def, rateLimitOverride: { value: 9, frame: 'm' }, rateLimitDefault: def }), 'differs');
+  });
+});
+
+describe('the DNS checks', () => {
+  const dns = (overall) => ({ at: '2026-10-01T10:00:00.000Z', overall, checks: [] });
+
+  it('warns about a domain only once it takes mailboxes, and never from its state alone', () => {
+    assert.equal(hasDnsErrors({ state: 'ready', dns: dns('error') }), true);
+    assert.equal(hasDnsErrors({ state: 'authoritative', dns: dns('error') }), true);
+    assert.equal(hasDnsErrors({ state: 'ready', dns: dns('warning') }), false);
+    assert.equal(hasDnsErrors({ state: 'dns_ok', dns: dns('error') }), false);
+    assert.equal(hasDnsErrors({ state: 'ready', dns: null }), false);
+  });
+
+  it('sums up the ready domains with errors and the node', () => {
+    const domains = [
+      { domain: 'a.example', state: 'ready', dns: dns('error') },
+      { domain: 'b.example', state: 'node_created', dns: dns('error') },
+      { domain: 'c.example', state: 'ready', dns: dns('ok') },
+    ];
+    assert.deepEqual(dnsSummary(domains, dns('error')), { domains: ['a.example'], node: true });
+    assert.deepEqual(dnsSummary(null, null), { domains: [], node: false });
+  });
+
+  it('names the latest result next to the step that confirms the DNS', () => {
+    assert.equal(dnsVerdictKey({ dns: dns('ok') }), 'admin.mailNode.dnsVerdictOk');
+    assert.equal(dnsVerdictKey({ dns: dns('error') }), 'admin.mailNode.dnsVerdictError');
+    assert.equal(dnsVerdictKey({ dns: null }), 'admin.mailNode.dnsVerdictNone');
+  });
+
+  it('translates checks, statuses and codes, with a fallback for what it does not know', () => {
+    assert.equal(dnsCheckKey('mx'), 'admin.mailNode.dnsCheckMx');
+    assert.equal(dnsCheckKey('future_check'), 'future_check');
+    assert.equal(dnsStatusKey('warning'), 'admin.mailNode.dnsStatusWarning');
+    assert.equal(dnsStatusKey('strange'), 'admin.mailNode.dnsStatusError');
+    assert.equal(dnsCodeKey('cert_chain_incomplete'), 'admin.mailNode.dnsCodeCertChainIncomplete');
+    assert.equal(dnsCodeKey('future_code'), 'admin.mailNode.dnsCodeUnknown');
+    assert.deepEqual(dnsCodeValues({ found: ['a', 'b'], expected: [], detail: 'ETIMEOUT', daysLeft: 9, name: 'x.example' }), {
+      found: 'a, b', expected: '—', detail: 'ETIMEOUT', days: 9, missing: '—', name: 'x.example',
+    });
+  });
+
+  it('edits the values to publish as strings and checks them the way the server does', () => {
+    assert.deepEqual(expectedForm({ mx: ['a.example', 'b.example'], tenantTxt: 'MS=ms1', dkimSelector1Cname: null, dkimSelector2Cname: null }), {
+      expectedMx: 'a.example, b.example', tenantTxt: 'MS=ms1', dkimSelector1Cname: '', dkimSelector2Cname: '',
+    });
+    assert.deepEqual(expectedForm(null), { expectedMx: '', tenantTxt: '', dkimSelector1Cname: '', dkimSelector2Cname: '' });
+    assert.deepEqual(normalizeExpectedValues({ expectedMx: 'A.Example.com., b.mx.microsoft b.mx.microsoft', tenantTxt: ' ', dkimSelector1Cname: 'S1.Example.com.' }), {
+      values: { mx: ['a.example.com', 'b.mx.microsoft'], tenantTxt: null, dkimSelector1Cname: 's1.example.com' },
+    });
+    assert.deepEqual(normalizeExpectedValues({ expectedMx: 'not a host' }), { error: 'expected_mx_invalid' });
+    assert.deepEqual(normalizeExpectedValues({ expectedMx: Array.from({ length: 11 }, (_, i) => `mx${i}.example.com`) }), { error: 'expected_mx_invalid' });
+    assert.deepEqual(normalizeExpectedValues({ tenantTxt: 'MS="x"' }), { error: 'tenant_txt_invalid' });
+    assert.deepEqual(normalizeExpectedValues({ dkimSelector2Cname: '10.0.0.1' }), { error: 'dkim_cname_invalid' });
+    assert.equal(expectedValuesError({ expectedMx: 'not a host' }), 'admin.mailNode.errorExpectedMx');
+    assert.equal(expectedValuesError(expectedForm(null)), null);
+  });
+
+  it('takes the selector CNAME targets EOP really gives, with "_" in their labels', () => {
+    assert.deepEqual(normalizeExpectedValues({ dkimSelector1Cname: 'Selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft.' }), {
+      values: { dkimSelector1Cname: 'selector1-contoso-com._domainkey.contoso.n-v1.dkim.mail.microsoft' },
+    });
+    assert.deepEqual(normalizeExpectedValues({ dkimSelector2Cname: 'selector2._domainkey.contoso.dkim_mail' }), { error: 'dkim_cname_invalid' });
+    assert.deepEqual(normalizeExpectedValues({ expectedMx: 'mx_1.example.com' }), { error: 'expected_mx_invalid' });
+  });
+
+  it('says when the last check could not ask DNS, and checks the node address with the node settings', () => {
+    assert.equal(dnsVerdictKey({ dns: { overall: 'ok', lookupFailed: { code: 'dns_lookup_failed' } } }), 'admin.mailNode.dnsVerdictLookupFailed');
+    assert.equal(hasDnsErrors({ state: 'ready', dns: { overall: null, checks: [], lookupFailed: { code: 'dns_lookup_failed' } } }), false);
+    const form = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: '5120', diskPingUrl: '' };
+    assert.equal(mailNodeConfigError({ ...form, nodeIp: '' }), null);
+    assert.equal(mailNodeConfigError({ ...form, nodeIp: '203.0.113.10' }), null);
+    assert.equal(mailNodeConfigError({ ...form, nodeIp: '2001:db8::10' }), 'admin.eop.errorNodeIp');
   });
 });

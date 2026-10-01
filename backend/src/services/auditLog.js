@@ -1,8 +1,9 @@
 import { query } from './db.js';
 
 // Everything a user can do that the journal records, plus the Cloudflare Access sync stopping
-// itself, MailExpert restoring a rejected mail node password and taking in the mail node domains
-// that already had mailboxes. Mail sync and inbox rules never write here.
+// itself, MailExpert restoring a rejected mail node password, taking in the mail node domains
+// that already had mailboxes and a scheduled DNS check whose result changed. Mail sync and inbox
+// rules never write here.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
@@ -10,7 +11,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'message.sent', 'message.deleted', 'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
   'access.sync_aborted',
   'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
-  'mail_node.domain_identity_acknowledged', 'mail_node.applied',
+  'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 
