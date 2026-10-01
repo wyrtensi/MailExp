@@ -23,8 +23,6 @@ const linkButtonStyle = {
   background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer', fontFamily: 'inherit',
   fontSize: 13, textAlign: 'left',
 };
-const cellStyle = { padding: '7px 8px', borderBottom: '1px solid var(--border-subtle)', fontSize: 12, textAlign: 'left', verticalAlign: 'top' };
-const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' };
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '14px 0 6px' };
 const symbolStyle = (score) => ({
   fontFamily: 'JetBrains Mono, monospace', fontSize: 11, padding: '1px 7px', borderRadius: 20, color: 'var(--text-primary)',
@@ -243,7 +241,6 @@ export default function MailNodeQuarantine({ admin = false }) {
 
   if (hidden) return null;
   const items = data ? filterQuarantine(data.items, filter) : [];
-  const openEntry = data?.items.find((i) => i.id === open) ?? null;
 
   return (
     <div data-mail-node-quarantine style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -283,56 +280,48 @@ export default function MailNodeQuarantine({ admin = false }) {
           </div>
           {data.total === 0 && <span style={hintStyle}>{t('admin.quarantine.emptyNote')}</span>}
           {items.length > 0 && (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
-                <thead>
-                  <tr>
-                    <th style={headCellStyle}>{t('admin.quarantine.columnTime')}</th>
-                    <th style={headCellStyle}>{t('admin.quarantine.columnLetter')}</th>
-                    <th style={headCellStyle}>{t('admin.quarantine.columnScore')}</th>
-                    <th style={headCellStyle}>{t('admin.quarantine.columnSymbols')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((item) => {
-                    const actionKey = rspamdActionKey(item.action);
-                    return (
-                      <tr key={item.id} data-quarantine-row={item.id}>
-                        <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>{item.created ? formatDateTime(item.created) : '—'}</td>
-                        <td style={{ ...cellStyle, wordBreak: 'break-word' }}>
-                          <button type="button" onClick={() => setOpen(open === item.id ? null : item.id)} aria-expanded={open === item.id} style={linkButtonStyle}>
-                            {item.subject || t('message.noSubject')}
-                          </button>
-                          <div style={{ color: 'var(--text-tertiary)', marginTop: 2 }}>
-                            {t('admin.quarantine.fromTo', { sender: item.sender, rcpt: item.rcpt })}
-                          </div>
-                        </td>
-                        <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>
-                          <div>{formatScore(item.score)}</div>
-                          <div style={{ color: item.action === 'reject' ? 'var(--red)' : 'var(--text-tertiary)' }}>{actionKey ? t(actionKey) : item.action}</div>
-                          {item.virus && <div style={{ color: 'var(--red)' }}>{t('admin.quarantine.virus')}</div>}
-                        </td>
-                        <td style={cellStyle}>
-                          {item.topSymbols ? <Symbols symbols={item.topSymbols} label={t('admin.quarantine.columnSymbols')} /> : '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+            <ul style={{ listStyle: 'none', margin: '6px 0 0', padding: 0 }}>
+              {items.map((item) => {
+                const actionKey = rspamdActionKey(item.action);
+                return (
+                  <li key={item.id} data-quarantine-row={item.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--border-subtle)', fontSize: 12 }}>
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        onClick={() => setOpen(open === item.id ? null : item.id)}
+                        aria-expanded={open === item.id}
+                        style={{ ...linkButtonStyle, flex: '1 1 200px', minWidth: 0, overflowWrap: 'anywhere' }}
+                      >
+                        {item.subject || t('message.noSubject')}
+                      </button>
+                      <span style={{ whiteSpace: 'nowrap', color: item.action === 'reject' ? 'var(--red)' : 'var(--text-secondary)' }}>
+                        {formatScore(item.score)} · {actionKey ? t(actionKey) : item.action}
+                        {item.virus && ` · ${t('admin.quarantine.virus')}`}
+                      </span>
+                    </div>
+                    <div style={{ color: 'var(--text-tertiary)', marginTop: 2, overflowWrap: 'anywhere' }}>
+                      {item.created ? `${formatDateTime(item.created)} · ` : ''}{t('admin.quarantine.fromTo', { sender: item.sender, rcpt: item.rcpt })}
+                    </div>
+                    {item.topSymbols && (
+                      <div style={{ marginTop: 4 }}>
+                        <Symbols symbols={item.topSymbols} label={t('admin.quarantine.columnSymbols')} />
+                      </div>
+                    )}
+                    {open === item.id && (
+                      <QuarantineEntry
+                        entry={item}
+                        admin={admin && data.admin}
+                        onReleased={onReleased}
+                        onDeleted={onDeleted}
+                        onClose={() => setOpen(null)}
+                      />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           )}
           {data.total > 0 && items.length === 0 && <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-tertiary)' }}>{t('admin.quarantine.noMatch')}</div>}
-          {openEntry && (
-            <QuarantineEntry
-              key={openEntry.id}
-              entry={openEntry}
-              admin={admin && data.admin}
-              onReleased={onReleased}
-              onDeleted={onDeleted}
-              onClose={() => setOpen(null)}
-            />
-          )}
         </>
       )}
     </div>
