@@ -162,8 +162,9 @@ function refusal(body) {
 }
 
 // judge: false leaves the answer of a POST to the caller (delete/mailbox mixes warnings with its
-// success).
-async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+// success). textLimit: the answer as text of at most that many bytes ({ text, truncated }), for
+// the few calls that print instead of answering JSON (get/postcat).
+async function request(cfg, method, path, body, { judge = true, timeoutMs = REQUEST_TIMEOUT_MS, textLimit = 0 } = {}) {
   let res;
   try {
     // allowPrivate: on a one-server install <MAIL_HOST> resolves to this host's own address.
@@ -185,6 +186,7 @@ async function request(cfg, method, path, body, { judge = true, timeoutMs = REQU
     throw new MailNodeError('mail_node_auth', 'The mail node refused the API key');
   }
   if (!res.ok) throw new MailNodeError('mail_node_failed', `The mail node answered HTTP ${res.status}`);
+  if (textLimit) return textCapped(res, textLimit);
   let data;
   try {
     data = await res.json();
@@ -560,7 +562,159 @@ export async function getDiskStatus(cfg) {
   return { usedPercent, used: String(data.used ?? ''), total: String(data.total ?? '') };
 }
 
-// ── Quarantine and rspamd history (R-20) ───────────────────────────────────────────────────────
+// --- Node operations: the mail queue (R-16), the Postfix log and the containers (R-18) -----------
+// mailcow runs each queue call as a command in postfix-mailcow through its dockerapi: get/mailq/all
+// is `postqueue -j` (at most 10000 entries), get/postcat/<id> is `postcat -q <id>` printed as text,
+// edit/mailq hold/unhold/deliver are `postsuper -h/-H` and `postqueue -i` per id, flush is
+// `postqueue -f`, delete/mailq is `postsuper -d` per id. Its super_delete (`postsuper -d ALL`) is
+// never called from the panel. All of them need an administrator's API key.
+
+const QUEUE_LIST_TIMEOUT_MS = 30000;
+const LOG_TIMEOUT_MS = 30000;
+// The queues postqueue -j names.
+export const QUEUE_NAMES = Object.freeze(['active', 'deferred', 'hold', 'incoming', 'maildrop']);
+// What the panel lets an administrator do with one queued message besides deleting it.
+export const QUEUE_ACTIONS = Object.freeze(['hold', 'unhold', 'deliver']);
+
+// A queue id as mailcow's dockerapi takes it (hex only; it drops anything else silently): upper
+// case, or null.
+export function parseQueueId(value) {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return /^[0-9A-Fa-f]{6,20}$/.test(id) ? id.toUpperCase() : null;
+}
+
+// mailcow rewrites each recipient of postqueue -j into "address (delay reason)" when Postfix gave a
+// reason, and keeps the bare address otherwise.
+function queueRecipient(value) {
+  if (value && typeof value === 'object') {
+    return { address: String(value.address ?? '').toLowerCase(), reason: value.delay_reason ? String(value.delay_reason) : null };
+  }
+  const text = String(value ?? '').trim();
+  const match = /^(\S+) \(([\s\S]*)\)$/.exec(text);
+  return match ? { address: match[1].toLowerCase(), reason: match[2] } : { address: text.toLowerCase(), reason: null };
+}
+
+// The node's mail queue: [{ queueId, queue, arrivedAt (ISO), size (bytes), forcedExpire, sender
+// ('' for the null sender of a bounce), recipients: [{ address, reason }] }].
+export async function listQueue(cfg) {
+  const data = await request(cfg, 'GET', 'get/mailq/all', undefined, { timeoutMs: QUEUE_LIST_TIMEOUT_MS });
+  return (Array.isArray(data) ? data : asList(data))
+    .filter((item) => item && typeof item === 'object' && parseQueueId(String(item.queue_id ?? '')))
+    .map((item) => {
+      const arrival = Number(item.arrival_time);
+      return {
+        queueId: parseQueueId(String(item.queue_id)),
+        queue: String(item.queue_name ?? ''),
+        arrivedAt: Number.isFinite(arrival) && arrival > 0 ? new Date(arrival * 1000).toISOString() : null,
+        size: Number(item.message_size ?? 0) || 0,
+        forcedExpire: item.forced_expire === true,
+        sender: String(item.sender ?? '').toLowerCase(),
+        recipients: (Array.isArray(item.recipients) ? item.recipients : []).map(queueRecipient).filter((r) => r.address),
+      };
+    });
+}
+
+// A queued message can be up to Postfix's message_size_limit; the panel reads at most this much of
+// its postcat dump (the envelope and the headers come first).
+export const MAX_POSTCAT_BYTES = 2 * 1024 * 1024;
+
+// An answer as text, stopping after maxBytes: { text, truncated }.
+async function textCapped(res, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  let truncated = false;
+  if (res.body?.getReader) {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const room = maxBytes - size;
+      if (value.byteLength > room) {
+        chunks.push(Buffer.from(value.subarray(0, room)));
+        truncated = true;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+      chunks.push(Buffer.from(value));
+      size += value.byteLength;
+    }
+  } else {
+    const whole = Buffer.from(await res.text());
+    truncated = whole.length > maxBytes;
+    chunks.push(truncated ? whole.subarray(0, maxBytes) : whole);
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), truncated };
+}
+
+// The queued message as `postcat -q` prints it (envelope records, the message, extracted headers),
+// or what postcat said instead when the message is gone: { text, truncated } (cut at
+// MAX_POSTCAT_BYTES).
+export async function getQueuedMessageText(cfg, queueId) {
+  return request(cfg, 'GET', `get/postcat/${encodeURIComponent(queueId)}`, undefined, {
+    textLimit: MAX_POSTCAT_BYTES, timeoutMs: QUEUE_LIST_TIMEOUT_MS,
+  });
+}
+
+// hold, unhold or deliver for the given queue ids. deliver answers success whatever postqueue did.
+export async function queueAction(cfg, queueIds, action) {
+  if (!QUEUE_ACTIONS.includes(action)) throw new MailNodeError('queue_action_invalid', 'No such queue action', 400);
+  await request(cfg, 'POST', 'edit/mailq', { items: queueIds, attr: { action } });
+}
+
+// Tries every deferred message again now.
+export async function flushQueue(cfg) {
+  await request(cfg, 'POST', 'edit/mailq', { items: [], attr: { action: 'flush' } });
+}
+
+export async function deleteQueued(cfg, queueIds) {
+  await request(cfg, 'POST', 'delete/mailq', queueIds);
+}
+
+// The last `lines` lines of the Postfix log, newest first, as mailcow keeps them:
+// [{ time: "<unix seconds>", program, priority, message }]. Parsed by services/mailNode/postfixLog.js.
+// mailcow answers {} when Redis has no lines; Postfix logs all the time, so that, an empty list or
+// anything else that is no list of lines is a failure (mail_node_failed), never "nothing happened".
+export async function getPostfixLog(cfg, lines) {
+  const data = await request(cfg, 'GET', `get/logs/postfix/${lines}`, undefined, { timeoutMs: LOG_TIMEOUT_MS });
+  if (!Array.isArray(data) || !data.length) {
+    throw new MailNodeError('mail_node_failed', 'The mail node returned no Postfix log');
+  }
+  return data;
+}
+
+// The node's alias domains (get/alias-domain/all), lower case: mail to them is the node's own.
+export async function listAliasDomains(cfg) {
+  return asList(await request(cfg, 'GET', 'get/alias-domain/all'))
+    .map((d) => String(d.alias_domain ?? '').trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// The node's containers: [{ name, state ('running', 'exited', 'restarting', ...), health, startedAt,
+// image }]. mailcow answers an object keyed by container name. health: Docker's health status
+// ('healthy', 'unhealthy', 'starting') when the answer carries it, else null; mailcow 2026-09 sends
+// only the state (json_api.php status/containers), so an unhealthy but running container shows only
+// with a mailcow that adds it.
+export async function getContainers(cfg) {
+  const data = await request(cfg, 'GET', 'get/status/containers');
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new MailNodeError('mail_node_failed', 'The mail node did not report its containers');
+  }
+  return Object.entries(data)
+    .filter(([, c]) => c && typeof c === 'object')
+    .map(([key, c]) => ({
+      name: String(c.container ?? key),
+      state: String(c.state ?? '').toLowerCase(),
+      health: (() => {
+        const health = c.health ?? c.health_status ?? c.State?.Health?.Status;
+        return health ? String(health).toLowerCase() : null;
+      })(),
+      startedAt: c.started_at ? String(c.started_at) : null,
+      image: c.image ? String(c.image) : null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// ── Quarantine and rspamd history (R-20)───────────────────────────────────────────────────────
 // mailcow keeps a copy of every letter rspamd rejected or marked as spam ("reject", "add header",
 // "rewrite subject"; data/conf/rspamd/local.d/metadata_exporter.conf) in its quarantine table, one
 // row per final mailbox. The panel lists, shows, releases and deletes those rows; what it reads of

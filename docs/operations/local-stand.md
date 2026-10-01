@@ -167,6 +167,18 @@ accepted domains (`recipient-denied` отвечает всем получате�
   отбрасывает письмо с уже виденным `Message-ID`, поэтому перед каждым таким `inject` нужен новый
   `eop send`.
 
+**Очередь и оповещения панели на стенде (этап 4a).** `eop mode tempfail` и `eop send` дают письмо в
+отложенной очереди (причина — ответ `451 4.7.500`), `blocked-connector` и `tenant-limit` — строки
+`dsn=5.7.711` и `dsn=5.7.233` в логе Postfix, которые поднимают оповещения. Отправитель `eop send` по
+умолчанию (`someone@stage.test`) — не ящик стенда: отбивка на него отбрасывается как двойная и в очереди не
+остаётся. Обход EOP проверяется без правки `extra.cf`: временный транспорт mailcow
+(`add/transport {destination: "bypass-test.example", nexthop: "[<адрес fake-EOP>]:25"}`) отправляет письмо
+на этот домен в тот же fake-EOP, но по адресу, а не по имени `eop.test.local`, и строка `status=sent`
+получает `relay=<адрес>[<адрес>]:25`; транспорт удаляется сразу после отправки (`delete/transport`).
+Опубликованные образы стенда этих функций пока не несут: код ветки запускается одноразовым контейнером в
+сети `stage_mailexpert` с окружением `stage-backend` (как для проверки DNS выше), см. раздел 5.5
+[требований](../architecture/mail-node-research/eop-panel-requirements.md).
+
 Тесты fake-EOP: `node --test scripts/deploy/test/fake-eop/eop.test.mjs` (нужен `openssl`; разбор сертификата,
 режимы, полный диалог SMTP с STARTTLS и клиентским сертификатом, строгие строки и лимиты, возобновление
 сессии TLS, inject и коды возврата команды). Правка `extra.cf` — `fake-eop/extra-cf.sh`, тесты —
@@ -174,7 +186,7 @@ accepted domains (`recipient-denied` отвечает всем получате�
 
 ## Карантин и rspamd на стенде
 
-Проверено 2026-10-02 при работе над R-20 ([runbook, раздел 6б](mail-node.md)):
+Проверено 2026-10-02 при работе над R-20 ([runbook, раздел 6в](mail-node.md)):
 
 - rspamd стенда оценивает и письма из сети Docker mailcow (`mynetworks`): в истории у них
   `is_skipped: false` и обычные символы. Поэтому письмо для карантина можно отдать прямо на

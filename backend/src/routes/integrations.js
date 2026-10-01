@@ -5,12 +5,13 @@ import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
 import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
 import { MAIL_NODE_PROVIDER, getMailNodeConfig } from '../services/mailNode/mailcow.js';
-import { EOP_PROVIDER } from '../services/mailNode/eopSettings.js';
 
 const router = Router();
 
-// Rows of integration_config that belong to the mail node, not to this screen.
-const MAIL_NODE_PROVIDERS = new Set([MAIL_NODE_PROVIDER, EOP_PROVIDER]);
+// Rows of integration_config that belong to the mail node, not to this screen: 'mail_node' and every
+// 'mail_node_*' row (EOP settings, DNS check, apply result, alert settings and state, and what later
+// stages add).
+const isMailNodeRow = (provider) => provider === MAIL_NODE_PROVIDER || String(provider).startsWith(`${MAIL_NODE_PROVIDER}_`);
 
 // Placeholder sent instead of a stored client secret; posting it back keeps the stored value.
 const REDACTED_SECRET = '••••••••';
@@ -55,7 +56,7 @@ router.get('/', requireAdmin, async (req, res) => {
   // (/api/mail-node) and this screen never reads them, so they are left out entirely.
   const configs = {};
   for (const row of result.rows) {
-    if (MAIL_NODE_PROVIDERS.has(row.provider)) continue;
+    if (isMailNodeRow(row.provider)) continue;
     const cfg = { ...row.config };
     if (cfg.clientSecret) cfg.clientSecret = REDACTED_SECRET;
     configs[row.provider] = { ...cfg, updated_at: row.updated_at };

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeApplyResult from './MailNodeApplyResult.jsx';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
+import MailNodeTerrlBudget from './MailNodeTerrlBudget.jsx';
 import {
   DEFAULT_SEND_LIMIT_PER_HOUR,
   MAILBOX_READY_STATES,
@@ -42,7 +43,9 @@ const TLS_POLICY_KEYS = {
 };
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 
-const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'tenantId', 'appId', 'certThumbprint'];
+// What the TERRL limit is made of: a save that changes one of them recounts the budget.
+const BUDGET_FIELDS = ['terrl', 'licenses', 'tenantCreatedOn'];
+const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'licenses', 'tenantCreatedOn', 'tenantId', 'appId', 'certThumbprint'];
 
 // The stored settings as the form edits them: every field a string.
 function toForm(settings) {
@@ -63,7 +66,8 @@ function toForm(settings) {
 // the panel works with the tenant itself (the server's tenantDriverActive, false until the tenant
 // driver exists), the domains' onboarding is done by hand, so this section also lists the domains
 // that are not ready with their checklist and the "Done" of each step. Filling in the tenant ids
-// alone does not change that.
+// alone does not change that. Next to the TERRL it shows the tenant's external recipient budget of
+// the last 24 hours (R-21), from the licenses and the tenant's creation date when no TERRL is set.
 export default function EopSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
   const [stored, setStored] = useState(null);
@@ -77,6 +81,19 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   // The node's last apply ({ at, items }) and whether the spam rule waits for its confirmation.
   const [applied, setApplied] = useState(null);
   const [confirmPrefilter, setConfirmPrefilter] = useState(false);
+  // The TERRL budget now (R-21); null while it loads or when it could not be read.
+  const [budget, setBudget] = useState(null);
+
+  const loadBudget = useCallback(async () => {
+    try {
+      setBudget(await api.mailNode.getTerrlBudget());
+    } catch {
+      setBudget(null);
+    }
+  }, []);
+  // Once when the section opens (the server shares one read of the node log a minute), and again
+  // only when a save changed what the limit is made of; never on every domain change (revision).
+  useEffect(() => { loadBudget(); }, [loadBudget]);
 
   const loadApplied = useCallback(async () => {
     try {
@@ -131,6 +148,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       });
       setStored(saved);
       setForm(toForm(saved));
+      if (BUDGET_FIELDS.some((field) => saved[field] !== stored?.[field])) loadBudget();
       // A change the node gets is applied after the answer: its result shows on the next load.
       setNotice(applying ? 'admin.eop.savedApplying' : 'admin.eop.saved');
     } catch (err) {
@@ -237,6 +255,21 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             <input inputMode="numeric" value={form.terrl} onChange={set('terrl')} style={{ ...fieldStyle, maxWidth: 160 }} />
             <span style={hintStyle}>{t('admin.eop.terrlNote')}</span>
           </label>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <label style={{ minWidth: 160 }}>
+              <span style={labelStyle}>{t('admin.eop.licensesLabel')}</span>
+              <input inputMode="numeric" value={form.licenses} onChange={set('licenses')} style={{ ...fieldStyle, maxWidth: 160 }} />
+            </label>
+            <label style={{ minWidth: 160 }}>
+              <span style={labelStyle}>{t('admin.eop.tenantCreatedLabel')}</span>
+              <input type="date" value={form.tenantCreatedOn} onChange={set('tenantCreatedOn')} style={{ ...fieldStyle, maxWidth: 180 }} />
+            </label>
+          </div>
+          <span style={{ ...hintStyle, marginTop: -6 }}>{t('admin.eop.budgetSettingsNote')}</span>
+          <div data-eop-budget>
+            <span style={labelStyle}>{t('admin.eop.budgetTitle')}</span>
+            {budget ? <MailNodeTerrlBudget budget={budget} /> : <span style={{ ...hintStyle, marginTop: 0 }}>{t('admin.eop.budgetUnavailable')}</span>}
+          </div>
 
           <div style={{ ...subTitleStyle, margin: '8px 0 0' }}>{t('admin.eop.tenantTitle')}</div>
           <span style={{ ...hintStyle, marginTop: 0 }}>{t('admin.eop.tenantNote')}</span>

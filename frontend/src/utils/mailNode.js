@@ -20,6 +20,7 @@ export const DKIM_MODES = ['mailcow', 'eop'];
 export const DEFAULT_SEND_LIMIT_PER_HOUR = 50;
 export const MAX_SEND_LIMIT_PER_HOUR = 10000;
 export const MAX_TERRL = 10000000;
+export const MAX_LICENSES = 1000000;
 // The TLS Policy Map entry for the next hop (backend eopSettings.js TLS_POLICIES); 'default' is no
 // entry, mailcow's own DANE / MTA-STS then.
 export const TLS_POLICIES = ['secure', 'dane', 'dane-only', 'verify', 'fingerprint', 'encrypt', 'default'];
@@ -126,6 +127,18 @@ const ERROR_KEYS = {
   prefilter_markers_broken: 'admin.mailNode.applyCodePrefilterMarkersBroken',
   prefilter_not_written: 'admin.mailNode.applyCodePrefilterNotWritten',
   relayhost_in_use: 'admin.mailNode.applyCodeRelayhostInUse',
+  // The node operations (backend routes/mailNode.js): EOP settings of the TERRL budget, the mail
+  // queue and the alerts.
+  licenses_invalid: 'admin.eop.errorLicenses',
+  tenant_created_invalid: 'admin.eop.errorTenantCreated',
+  queue_id_invalid: 'admin.nodeOps.errorQueueId',
+  queue_action_invalid: 'admin.nodeOps.errorQueueAction',
+  queue_delete_unconfirmed: 'admin.nodeOps.errorDeleteUnconfirmed',
+  queue_item_not_found: 'admin.nodeOps.errorQueueItemNotFound',
+  queue_item_held: 'admin.nodeOps.errorQueueItemHeld',
+  deferred_count_invalid: 'admin.nodeOps.errorDeferredCount',
+  deferred_minutes_invalid: 'admin.nodeOps.errorDeferredMinutes',
+  alert_check_failed: 'admin.nodeOps.errorAlertCheck',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -352,6 +365,18 @@ const parseIpv4 = (value) => {
   const ip = String(value).trim();
   return IPV4_PATTERN.test(ip) ? ip : null;
 };
+// A calendar day as YYYY-MM-DD, not after today (UTC): the tenant's creation date (backend
+// eopSettings.js parseDay).
+// "Today" is the administrator's own (local) day, which the server takes too.
+export function parseDay(value, now = Date.now()) {
+  const text = String(value ?? '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const at = Date.parse(`${text}T00:00:00Z`);
+  if (!Number.isFinite(at) || new Date(at).toISOString().slice(0, 10) !== text) return null;
+  const local = new Date(now);
+  const today = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
+  return text <= today ? text : null;
+}
 const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
   return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
@@ -365,6 +390,8 @@ const EOP_PARSERS = {
   dkimMode: [(v) => (DKIM_MODES.includes(v) ? v : null), 'dkim_mode_invalid', false],
   sendLimitPerHour: [(v) => parseWholeNumber(v, 1, MAX_SEND_LIMIT_PER_HOUR), 'send_limit_invalid', false],
   terrl: [(v) => parseWholeNumber(v, 1, MAX_TERRL), 'terrl_invalid', true],
+  licenses: [(v) => parseWholeNumber(v, 1, MAX_LICENSES), 'licenses_invalid', true],
+  tenantCreatedOn: [(v) => parseDay(v), 'tenant_created_invalid', true],
   tenantId: [parseGuid, 'tenant_id_invalid', true],
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
@@ -742,4 +769,171 @@ export function normalizeExpectedValues(body) {
 export function expectedValuesError(form) {
   const { error } = normalizeExpectedValues(form);
   return error ? mailNodeErrorKey(error) : null;
+}
+
+// --- Node operations: mail queue (R-16), alerts (R-18, R-19), TERRL budget (R-21) --------------
+// Mirrors backend services/mailNode/{mailQueue,nodeAlerts,terrl}.js for the screens and the demo.
+
+// Spelled out literally so the i18n coverage test finds them.
+const QUEUE_NAME_KEYS = {
+  active: 'admin.nodeOps.queueActive',
+  deferred: 'admin.nodeOps.queueDeferred',
+  hold: 'admin.nodeOps.queueHold',
+  incoming: 'admin.nodeOps.queueIncoming',
+  maildrop: 'admin.nodeOps.queueMaildrop',
+};
+export const QUEUE_NAMES = Object.keys(QUEUE_NAME_KEYS);
+
+export function queueNameKey(queue) {
+  return QUEUE_NAME_KEYS[queue] ?? 'admin.nodeOps.queueOther';
+}
+
+// What one queued message offers: a held one can be released or deleted; any other can be held,
+// tried again now or deleted.
+export function queueItemActions(item) {
+  return item?.queue === 'hold' ? ['unhold', 'delete'] : ['hold', 'deliver', 'delete'];
+}
+
+const QUEUE_ACTION_KEYS = {
+  hold: 'admin.nodeOps.actionHold',
+  unhold: 'admin.nodeOps.actionUnhold',
+  deliver: 'admin.nodeOps.actionDeliver',
+  delete: 'admin.nodeOps.actionDelete',
+  // Not a button: reading a queued message's body, as the journal names it.
+  view_body: 'admin.nodeOps.actionViewBody',
+};
+export function queueActionKey(action) {
+  return QUEUE_ACTION_KEYS[action] ?? action;
+}
+
+// An age in seconds as { value, unitKey }: minutes under an hour, hours under two days, then days.
+export function ageParts(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  if (s < 3600) return { value: Math.floor(s / 60), unitKey: 'admin.nodeOps.ageMinutes' };
+  if (s < 2 * 86400) return { value: Math.floor(s / 3600), unitKey: 'admin.nodeOps.ageHours' };
+  return { value: Math.floor(s / 86400), unitKey: 'admin.nodeOps.ageDays' };
+}
+
+export const DEFAULT_DEFERRED_COUNT = 20;
+export const DEFAULT_DEFERRED_MINUTES = 60;
+export const MAX_DEFERRED_COUNT = 100000;
+export const MAX_DEFERRED_MINUTES = 7 * 24 * 60;
+
+// The error key for the alert settings form, or null.
+export function alertSettingsError({ pingUrl, deferredCount, deferredMinutes }) {
+  const ping = String(pingUrl ?? '').trim();
+  if (ping && !/^https:\/\/\S+$/.test(ping)) return 'admin.mailNode.errorPingUrl';
+  if (parseWholeNumber(deferredCount, 1, MAX_DEFERRED_COUNT) == null) return 'admin.nodeOps.errorDeferredCount';
+  if (parseWholeNumber(deferredMinutes, 1, MAX_DEFERRED_MINUTES) == null) return 'admin.nodeOps.errorDeferredMinutes';
+  return null;
+}
+
+const ALERT_TITLE_KEYS = {
+  connector_blocked: 'admin.nodeOps.alertConnectorBlocked',
+  tenant_attribution: 'admin.nodeOps.alertTenantAttribution',
+  terrl_exceeded: 'admin.nodeOps.alertTerrlExceeded',
+  eop_bypass: 'admin.nodeOps.alertEopBypass',
+  queue_deferred: 'admin.nodeOps.alertQueueDeferred',
+  certificate: 'admin.nodeOps.alertCertificate',
+  containers: 'admin.nodeOps.alertContainers',
+  terrl_budget: 'admin.nodeOps.alertTerrlBudget',
+  eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
+};
+export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
+
+export function alertTitleKey(key) {
+  return ALERT_TITLE_KEYS[key] ?? 'admin.nodeOps.alertUnknown';
+}
+
+// What a source that could not be read is called (backend nodeAlerts.js sources).
+const ALERT_SOURCE_KEYS = {
+  log: 'admin.nodeOps.sourceLog',
+  queue: 'admin.nodeOps.sourceQueue',
+  certificate: 'admin.nodeOps.sourceCertificate',
+  containers: 'admin.nodeOps.sourceContainers',
+  terrl: 'admin.nodeOps.sourceTerrl',
+};
+export function alertSourceKey(source) {
+  return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
+}
+
+// The line under an alert's title: { key, values } with times left as ISO strings in `at` values
+// the screen formats.
+export function alertDetail(alert) {
+  const d = alert?.details ?? {};
+  switch (alert?.key) {
+    case 'connector_blocked':
+    case 'tenant_attribution':
+    case 'terrl_exceeded':
+      return { key: 'admin.nodeOps.alertDetailRefusals', values: { count: d.count ?? 0 }, at: d.lastAt ?? null };
+    case 'eop_bypass':
+      return {
+        key: 'admin.nodeOps.alertDetailBypass',
+        values: { count: d.count ?? 0, relays: (d.relays ?? []).join(', ') || '—' },
+        at: d.lastAt ?? null,
+      };
+    case 'eop_host_missing':
+      return { key: 'admin.nodeOps.alertDetailEopHostMissing', values: {} };
+    case 'queue_deferred':
+      return {
+        key: 'admin.nodeOps.alertDetailQueue',
+        values: { deferred: d.deferred ?? 0, oldest: d.oldestMinutes ?? '—', count: d.deferredCount ?? '', minutes: d.deferredMinutes ?? '' },
+      };
+    case 'certificate':
+      return d.code === 'cert_expired'
+        ? { key: 'admin.nodeOps.alertDetailCertExpired', values: {}, at: d.expiresAt ?? null }
+        : { key: 'admin.nodeOps.alertDetailCertExpiring', values: { days: d.daysLeft ?? '—' }, at: d.expiresAt ?? null };
+    case 'containers':
+      return {
+        key: 'admin.nodeOps.alertDetailContainers',
+        values: { names: (d.down ?? []).map((c) => `${c.name} (${c.state || '?'})`).join(', ') },
+      };
+    case 'terrl_budget':
+      return { key: 'admin.nodeOps.alertDetailTerrl', values: { used: d.used ?? 0, limit: d.limit ?? '—', percent: d.percent ?? '—' } };
+    default:
+      return null;
+  }
+}
+
+// The TERRL budget (backend terrl.js): 500 x licenses^0.7 + 9500, rounded; a young tenant gets 10
+// percent of it under 31 days and 25 percent at 31 to 60 days.
+export const TERRL_WARN_PERCENT = 80;
+const DAY_MS = 86400000;
+
+export function terrlFromLicenses(licenses) {
+  return Number.isInteger(licenses) && licenses >= 1 ? Math.round(500 * licenses ** 0.7 + 9500) : null;
+}
+
+export function tenantAgeDays(createdOn, now = Date.now()) {
+  if (typeof createdOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(createdOn)) return null;
+  const created = Date.parse(`${createdOn}T00:00:00Z`);
+  return Number.isFinite(created) ? Math.max(0, Math.floor((now - created) / DAY_MS)) : null;
+}
+
+export function rampPercent(ageDays) {
+  if (ageDays == null) return 100;
+  if (ageDays < 31) return 10;
+  if (ageDays <= 60) return 25;
+  return 100;
+}
+
+// The budget from the EOP settings and the count: { fullLimit, limitFrom, ageDays, rampPercent,
+// limit, used, percent, warn, exceeded }.
+export function terrlBudget({ settings = {}, used = 0, now = Date.now() } = {}) {
+  const fromLicenses = terrlFromLicenses(settings.licenses ?? null);
+  const own = Number.isInteger(settings.terrl) && settings.terrl > 0;
+  const fullLimit = own ? settings.terrl : fromLicenses;
+  let limitFrom = null;
+  if (own) limitFrom = 'terrl';
+  else if (fromLicenses != null) limitFrom = 'licenses';
+  const ageDays = tenantAgeDays(settings.tenantCreatedOn ?? null, now);
+  const ramp = rampPercent(ageDays);
+  const limit = fullLimit == null ? null : Math.round((fullLimit * ramp) / 100);
+  if (limit == null) return { fullLimit, limitFrom, ageDays, rampPercent: ramp, limit, used, percent: null, warn: false, exceeded: false };
+  return {
+    fullLimit, limitFrom, ageDays, rampPercent: ramp, limit, used,
+    percent: Math.floor((used * 100) / limit),
+    warn: used * 100 >= limit * TERRL_WARN_PERCENT,
+    exceeded: used >= limit,
+  };
 }

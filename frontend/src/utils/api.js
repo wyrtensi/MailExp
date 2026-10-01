@@ -402,6 +402,16 @@ export const api = {
     checkDns: () => request('POST', '/mail-node/dns-check'),
     checkDomainDns: (domain) => request('POST', `/mail-node/domains/${encodeURIComponent(domain)}/dns-check`),
     setDnsExpected: (domain, values) => request('PUT', `/mail-node/domains/${encodeURIComponent(domain)}/dns-expected`, values),
+    // The node's operations: its mail queue (one message's body only on request; delete needs
+    // { confirm: true }), its alerts with their settings, and the tenant's TERRL budget.
+    getQueue: () => request('GET', '/mail-node/queue'),
+    getQueuedMessage: (queueId, { body = false } = {}) => request('GET', `/mail-node/queue/${encodeURIComponent(queueId)}${body ? '?body=1' : ''}`),
+    queueAction: (queueId, action, { confirm = false } = {}) => request('POST', `/mail-node/queue/${encodeURIComponent(queueId)}/${encodeURIComponent(action)}`, confirm ? { confirm: true } : undefined),
+    flushQueue: () => request('POST', '/mail-node/queue/flush'),
+    getAlerts: () => request('GET', '/mail-node/alerts'),
+    checkAlerts: () => request('POST', '/mail-node/alerts/check'),
+    saveAlertSettings: (data) => request('PUT', '/mail-node/alerts/settings', data),
+    getTerrlBudget: () => request('GET', '/mail-node/eop/budget'),
     // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
     // release and delete (administrators), and whether users see it too.
     listQuarantine: () => request('GET', '/mail-node/quarantine'),

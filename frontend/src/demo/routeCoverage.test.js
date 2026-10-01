@@ -70,6 +70,10 @@ const CONCRETE_PATH = {
   '/mail-node/eop': '/mail-node/eop',
   '/mail-node/apply': '/mail-node/apply',
   '/mail-node/dns-check': '/mail-node/dns-check',
+  '/mail-node/queue': '/mail-node/queue',
+  '/mail-node/queue/:param:param': '/mail-node/queue/D3A1F2B4C5',
+  '/mail-node/alerts': '/mail-node/alerts',
+  '/mail-node/eop/budget': '/mail-node/eop/budget',
   '/mail-node/quarantine': '/mail-node/quarantine',
   '/mail-node/quarantine/:param': '/mail-node/quarantine/41',
   '/mail-node/quarantine/settings': '/mail-node/quarantine/settings',
@@ -491,6 +495,24 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   const quarantineSettings = await answer('/mail-node/quarantine/settings', 'PUT', '/mail-node/quarantine/settings', { userView: false });
   assert.equal(quarantineSettings.userView, false);
   await answer('/oauth/google/start', 'POST', '/oauth/google/start', { email: `coverage-${Date.now()}@gmail.com` });
+});
+
+test('the node operations answer: queue actions, alerts, budget', async () => {
+  const queue = await demoRequest('GET', '/mail-node/queue');
+  const held = queue.items.find(item => item.queue === 'hold');
+  await reject('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/deliver`, {}, /released first/);
+  const released = await answer('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/unhold`);
+  assert.equal(released.action, 'unhold');
+  await reject('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/delete`, {}, /confirmed/);
+  await answer('/mail-node/queue/:param/:param', 'POST', `/mail-node/queue/${held.queueId}/delete`, { confirm: true });
+  assert.ok(!(await demoRequest('GET', '/mail-node/queue')).items.some(item => item.queueId === held.queueId));
+  const flushed = await answer('/mail-node/queue/flush', 'POST', '/mail-node/queue/flush');
+  assert.equal(flushed.action, 'flush');
+  const checked = await answer('/mail-node/alerts/check', 'POST', '/mail-node/alerts/check');
+  assert.ok(Array.isArray(checked.state.alerts));
+  const saved = await answer('/mail-node/alerts/settings', 'PUT', '/mail-node/alerts/settings', { pingUrl: 'https://hc.example.com/p/alerts', deferredCount: 5, deferredMinutes: 30 });
+  assert.equal(saved.settings.deferredMinutes, 30);
+  await reject('/mail-node/alerts/settings', 'PUT', '/mail-node/alerts/settings', { pingUrl: 'http://insecure.example' }, /https/);
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {

@@ -193,6 +193,8 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'message.threading.conversationCount_few', 'message.threading.conversationCount_many',
     'message.moveReverted.title_few', 'message.moveReverted.title_many',
     'message.moveReverted.body_few', 'message.moveReverted.body_many',
+    'admin.nodeOps.alertDetailRefusals_few', 'admin.nodeOps.alertDetailRefusals_many',
+    'admin.nodeOps.alertDetailBypass_few', 'admin.nodeOps.alertDetailBypass_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

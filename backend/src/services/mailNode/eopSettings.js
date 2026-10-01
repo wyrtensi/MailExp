@@ -6,7 +6,9 @@ import { parseHostName, parseWholeNumber } from './mailcow.js';
 // The mail path through Microsoft EOP, set next to the mail node settings (integration_config row
 // 'mail_node_eop'): the next hop of the node (<EOP_HOST>) with the TLS Postfix must use toward it,
 // the name on the node's client certificate (<MAIL_HOST>), who signs DKIM, the send limit of a
-// mailbox, the tenant's external recipient limit (TERRL, read by hand from the EAC report) and how
+// mailbox, the tenant's external recipient limit (TERRL, read by hand from the EAC report, or
+// computed from its licenses; with the tenant's creation date for the ramp of a young tenant, see
+// services/mailNode/terrl.js) and how
 // the panel will reach the tenant, and the node's public address the DNS check compares DNS with.
 // The next hop, its TLS, DKIM and the send limit are applied to the node through the mailcow API
 // (services/mailNode/nodeApply.js); the tenant fields and the node address are only kept.
@@ -24,6 +26,7 @@ export const DKIM_MODES = Object.freeze(['mailcow', 'eop']);
 export const DEFAULT_SEND_LIMIT_PER_HOUR = 50;
 export const MAX_SEND_LIMIT_PER_HOUR = 10000;
 export const MAX_TERRL = 10000000;
+export const MAX_LICENSES = 1000000;
 // The TLS Policy Map entry for <EOP_HOST> (Postfix smtp_tls_policy_maps levels), or 'default' for
 // none: mailcow's own default then (MTA-STS through postfix-tlspol, else DANE where the host
 // publishes TLSA, else opportunistic TLS: unverified, and cleartext when the host offers no TLS).
@@ -50,6 +53,10 @@ export const EOP_DEFAULTS = Object.freeze({
   dkimMode: 'mailcow',
   sendLimitPerHour: DEFAULT_SEND_LIMIT_PER_HOUR,
   terrl: null,
+  // The TERRL budget (services/mailNode/terrl.js): the licenses the formula takes when no TERRL is
+  // entered, and the tenant's creation date (YYYY-MM-DD) for the young tenant's ramp.
+  licenses: null,
+  tenantCreatedOn: null,
   tenantId: null,
   appId: null,
   certThumbprint: null,
@@ -82,6 +89,17 @@ function parseIpv4(value) {
   return isIP(ip) === 4 ? ip : null;
 }
 
+// A calendar day as YYYY-MM-DD (the tenant's creation date), not in the future; null for anything
+// else. The administrator picks it in their own time zone, which may already be a day ahead of UTC
+// (up to UTC+14), so "today" there passes: the day may start up to 24 hours after now.
+export function parseDay(value, now = Date.now()) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const at = Date.parse(`${text}T00:00:00Z`);
+  if (!Number.isFinite(at) || new Date(at).toISOString().slice(0, 10) !== text) return null;
+  return at <= now + 24 * 60 * 60 * 1000 ? text : null;
+}
+
 function parseGuid(value) {
   const id = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return isUuid(id) ? id : null;
@@ -96,6 +114,8 @@ const PARSERS = {
   dkimMode: [(v) => (DKIM_MODES.includes(v) ? v : null), 'dkim_mode_invalid', false],
   sendLimitPerHour: [(v) => parseWholeNumber(v, 1, MAX_SEND_LIMIT_PER_HOUR), 'send_limit_invalid', false],
   terrl: [(v) => parseWholeNumber(v, 1, MAX_TERRL), 'terrl_invalid', true],
+  licenses: [(v) => parseWholeNumber(v, 1, MAX_LICENSES), 'licenses_invalid', true],
+  tenantCreatedOn: [parseDay, 'tenant_created_invalid', true],
   tenantId: [parseGuid, 'tenant_id_invalid', true],
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],

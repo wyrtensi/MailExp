@@ -49,6 +49,7 @@ import {
 import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
 import {
   EOP_FIELDS,
+  MAX_LICENSES,
   MAX_SEND_LIMIT_PER_HOUR,
   MAX_TERRL,
   eopSettingsConflict,
@@ -67,10 +68,33 @@ import {
   defaultRateLimit,
   getNodeApplyResult,
 } from '../services/mailNode/nodeApply.js';
+import {
+  QUEUE_ACTIONS,
+  deleteQueued,
+  flushQueue,
+  getQueuedMessageText,
+  listQueue,
+  parseQueueId,
+  queueAction,
+} from '../services/mailNode/mailcow.js';
+import { parsePostcat, postcatGone, summarizeQueue } from '../services/mailNode/mailQueue.js';
+import { readPostfixLog } from '../services/mailNode/postfixLog.js';
+import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from '../services/mailNode/terrl.js';
+import {
+  ALERT_DEFAULTS,
+  MAX_DEFERRED_COUNT,
+  MAX_DEFERRED_MINUTES,
+  checkAlertsNow,
+  getAlertSettings,
+  getAlertState,
+  parseAlertSettings,
+  saveAlertSettings,
+} from '../services/mailNode/nodeAlerts.js';
 
 // The mail node (mailcow) settings, its domains with their onboarding, the EOP settings, applying
 // them to the node (services/mailNode/nodeApply.js) and the quotas and send limits of the mailboxes
-// MailExpert made there. Mounted at /api/mail-node. Everyone signed in may list the domains a
+// MailExpert made there, and the node's operations: its mail queue, its alerts and the tenant's
+// external recipient budget. Mounted at /api/mail-node. Everyone signed in may list the domains a
 // mailbox can be created on (the add-mailbox form offers them); everything else is for
 // administrators.
 const router = Router();
@@ -117,6 +141,16 @@ const ERRORS = {
   expected_mx_invalid: [400, `Expected MX must be up to ${MAX_EXPECTED_MX} host names such as contoso-com.mail.protection.outlook.com`],
   tenant_txt_invalid: [400, 'Verification TXT must be printable text up to 255 characters without quotes, such as MS=ms12345678'],
   dkim_cname_invalid: [400, 'DKIM selector CNAME must be a host name'],
+  licenses_invalid: [400, `Licenses must be a whole number from 1 to ${MAX_LICENSES}`],
+  tenant_created_invalid: [400, 'Tenant creation date must be a date such as 2026-09-14, not in the future'],
+  queue_id_invalid: [400, 'Queue ID must be a Postfix queue ID such as 53A99193F13'],
+  queue_action_invalid: [400, 'Queue action must be hold, unhold, deliver or delete'],
+  queue_delete_unconfirmed: [400, 'Deleting a queued message must be confirmed'],
+  queue_item_not_found: [404, 'The mail queue has no message with this ID'],
+  queue_item_held: [409, 'A held message is released first, then delivered'],
+  deferred_count_invalid: [400, `Deferred message threshold must be a whole number from 1 to ${MAX_DEFERRED_COUNT}`],
+  deferred_minutes_invalid: [400, `Deferred age threshold must be a whole number of minutes from 1 to ${MAX_DEFERRED_MINUTES}`],
+  alert_check_failed: [502, 'The alert check failed'],
 };
 
 export function refuse(res, code) {
@@ -638,6 +672,147 @@ router.put('/mailboxes/:id/rate-limit', requireAdmin, async (req, res) => {
     details: { ...limit, override: !clear, from: overrideOf(rows[0]) },
   });
   res.json({ ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit });
+});
+
+// --- Node operations: the mail queue (R-16), the alerts (R-18, R-19) and the TERRL budget (R-21) ---
+
+async function nodeConfigOr(res) {
+  const cfg = await getMailNodeConfig();
+  if (!cfg) refuse(res, 'mail_node_not_configured');
+  return cfg;
+}
+
+// The node's mail queue: every message with its queue, age, size, sender and recipients (with the
+// reason a deferred one waits), counts per queue and the oldest deferred message's age.
+router.get('/queue', requireAdmin, async (req, res) => {
+  const cfg = await nodeConfigOr(res);
+  if (!cfg) return undefined;
+  try {
+    return res.json(summarizeQueue(await listQueue(cfg)));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+});
+
+// One queued message: its envelope and headers; the body only with ?body=1 (cut at 64 KB), and
+// reading the body is journaled (the id and the envelope, never the body). Postcat's dump is read
+// up to 2 MB. Gone from the queue -> 404; any other answer that is no dump -> 502.
+router.get('/queue/:queueId', requireAdmin, async (req, res) => {
+  const queueId = parseQueueId(req.params.queueId);
+  if (!queueId) return refuse(res, 'queue_id_invalid');
+  const cfg = await nodeConfigOr(res);
+  if (!cfg) return undefined;
+  let dump;
+  try {
+    dump = await getQueuedMessageText(cfg, queueId);
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  const withBody = req.query.body === '1';
+  const message = parsePostcat(dump.text, { withBody, truncated: dump.truncated });
+  if (!message) {
+    if (postcatGone(dump.text)) return refuse(res, 'queue_item_not_found');
+    return mailNodeFailure(res, new MailNodeError('mail_node_failed', 'The mail node did not show the queued message'));
+  }
+  if (withBody) {
+    recordAudit({
+      actorUserId: req.session.userId, action: 'mail_node.queue_action',
+      details: {
+        action: 'view_body', queueId, queue: message.queue,
+        sender: message.envelope.sender ?? '', recipients: message.envelope.recipients,
+      },
+    });
+  }
+  return res.json(message);
+});
+
+// "Retry all now" (postqueue -f). Journaled.
+router.post('/queue/flush', requireAdmin, async (req, res) => {
+  const cfg = await nodeConfigOr(res);
+  if (!cfg) return undefined;
+  try {
+    await flushQueue(cfg);
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.queue_action', details: { action: 'flush' } });
+  return res.json({ ok: true, action: 'flush' });
+});
+
+// hold, unhold, deliver or delete one queued message. Delete needs { confirm: true } (the screen
+// asks first); the whole-queue delete of mailcow is never offered. The message must be in the queue
+// now; the journal keeps its envelope (sender, recipients, size), so a deleted message stays
+// traceable.
+router.post('/queue/:queueId/:action', requireAdmin, async (req, res) => {
+  const queueId = parseQueueId(req.params.queueId);
+  if (!queueId) return refuse(res, 'queue_id_invalid');
+  const { action } = req.params;
+  if (![...QUEUE_ACTIONS, 'delete'].includes(action)) return refuse(res, 'queue_action_invalid');
+  if (action === 'delete' && req.body?.confirm !== true) return refuse(res, 'queue_delete_unconfirmed');
+  const cfg = await nodeConfigOr(res);
+  if (!cfg) return undefined;
+  let item;
+  try {
+    item = (await listQueue(cfg)).find((entry) => entry.queueId === queueId);
+    if (!item) return refuse(res, 'queue_item_not_found');
+    // postqueue -i does not release a held message: it is released first, by "Release".
+    if (action === 'deliver' && item.queue === 'hold') return refuse(res, 'queue_item_held');
+    if (action === 'delete') await deleteQueued(cfg, [queueId]);
+    else await queueAction(cfg, [queueId], action);
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  recordAudit({
+    actorUserId: req.session.userId, action: 'mail_node.queue_action',
+    details: {
+      action, queueId, queue: item.queue, sender: item.sender, size: item.size,
+      recipients: item.recipients.map((r) => r.address),
+    },
+  });
+  return res.json({ ok: true, action, queueId });
+});
+
+// The alerts: the last run ({ at, alerts, errors, log, queue }, null before the first) and the
+// settings.
+router.get('/alerts', requireAdmin, async (req, res) => {
+  const [state, settings] = await Promise.all([getAlertState(), getAlertSettings()]);
+  res.json({ state, settings, defaults: ALERT_DEFAULTS });
+});
+
+// "Check now": a run at once (or the one going), answered with its state.
+router.post('/alerts/check', requireAdmin, async (req, res) => {
+  if (!(await nodeConfigOr(res))) return undefined;
+  const state = await checkAlertsNow({ userId: req.session.userId, trigger: 'manual' });
+  if (!state) return refuse(res, 'alert_check_failed');
+  return res.json({ state });
+});
+
+// The ping URL of the alerts' own check and the queue thresholds. Journaled by field names.
+router.put('/alerts/settings', requireAdmin, async (req, res) => {
+  const { settings, error } = parseAlertSettings(req.body);
+  if (error) return refuse(res, error);
+  const current = await getAlertSettings();
+  await saveAlertSettings(settings);
+  configAudit(req, 'alerts', Object.keys(settings).filter((field) => settings[field] !== current[field]));
+  return res.json({ settings: { ...current, ...settings } });
+});
+
+// The TERRL budget now: unique external recipients of the last 24 hours against the limit
+// (services/mailNode/terrl.js). The node's log is read for what the journal does not see, through
+// the shared read of the alert job (a minute's cache, one read at a time), so opening the EOP
+// screen does not ask the node for 10000 lines each time; when the node does not answer, the
+// journal alone counts (log.read: false).
+router.get('/eop/budget', requireAdmin, async (req, res) => {
+  const now = Date.now();
+  const [eop, cfg] = await Promise.all([getEopSettings(), getMailNodeConfig()]);
+  const log = cfg
+    ? await readPostfixLog(cfg, { since: now - TERRL_WINDOW_MS }).catch((err) => {
+      if (err instanceof MailNodeError) return null;
+      throw err;
+    })
+    : null;
+  const aliasDomains = cfg ? await aliasDomainsOf(cfg) : [];
+  res.json(await computeTerrlBudget({ eop, log, aliasDomains, now }));
 });
 
 export default router;

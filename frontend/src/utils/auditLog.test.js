@@ -12,6 +12,7 @@ describe('AUDIT_ACTIONS', () => {
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
+      'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',
       'mail_node.quarantine_released', 'mail_node.quarantine_deleted', 'mail_node.quarantine_learned_spam',
       'mail_node.quarantine_settings_applied',
     ]);
@@ -359,5 +360,39 @@ describe('auditDetail', () => {
     assert.equal(auditDetail({ action: 'mailbox.deleted', details: {} }), null);
     assert.equal(auditDetail({ action: 'mailbox.disabled' }), null);
     assert.equal(auditDetail(null), null);
+  });
+});
+
+describe('auditDetail of the node operations', () => {
+  it('names the queue action, the message and its envelope, or the whole queue', () => {
+    assert.deepEqual(auditDetail({
+      action: 'mail_node.queue_action',
+      details: { action: 'delete', queueId: '53A99193F13', queue: 'deferred', sender: 'someone@stage.test', size: 360, recipients: ['a@example.org', 'b@example.org'] },
+    }), {
+      key: 'admin.audit.detailQueueAction',
+      values: { id: '53A99193F13', sender: 'someone@stage.test', recipients: 'a@example.org, b@example.org' },
+      valueKeys: { action: 'admin.nodeOps.actionDelete' },
+    });
+    assert.equal(auditDetail({ action: 'mail_node.queue_action', details: { action: 'hold', queueId: 'AB12CD34EF', sender: '', recipients: [] } }).values.sender, '<>');
+    assert.deepEqual(auditDetail({ action: 'mail_node.queue_action', details: { action: 'flush' } }), { key: 'admin.audit.detailQueueFlush', values: {} });
+    assert.equal(auditDetail({ action: 'mail_node.queue_action', details: { action: 'view_body', queueId: 'AB12CD34EF', sender: 'a@b.c', recipients: ['d@e.f'] } }).valueKeys.action, 'admin.nodeOps.actionViewBody');
+  });
+
+  it('names the alert raised or cleared', () => {
+    assert.deepEqual(auditDetail({ action: 'mail_node.alert_raised', details: { alert: 'connector_blocked', severity: 'error', count: 2 } }), {
+      key: 'admin.audit.detailAlertRaised', values: {}, valueKeys: { alert: 'admin.nodeOps.alertConnectorBlocked' },
+    });
+    assert.equal(auditDetail({ action: 'mail_node.alert_cleared', details: { alert: 'eop_bypass' } }).key, 'admin.audit.detailAlertCleared');
+  });
+
+  it('names the alert settings and the TERRL fields that changed', () => {
+    assert.deepEqual(auditDetail({ action: 'mail_node.config_changed', details: { settings: 'alerts', fields: ['pingUrl', 'deferredCount'] } }), {
+      key: 'admin.audit.detailAlertSettingsChanged', values: {},
+      valueKeys: { fields: ['admin.audit.fieldAlertPingUrl', 'admin.audit.fieldDeferredCount'] },
+    });
+    assert.deepEqual(
+      auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['licenses', 'tenantCreatedOn'] } }).valueKeys.fields,
+      ['admin.audit.fieldLicenses', 'admin.audit.fieldTenantCreated'],
+    );
   });
 });

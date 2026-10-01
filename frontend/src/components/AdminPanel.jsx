@@ -38,6 +38,7 @@ import { isGoogleAuthMode } from '../utils/authMode.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
+import MailNodeOpsSection from './MailNodeOpsSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
@@ -2945,6 +2946,7 @@ function IntegrationsTab() {
           {isAdmin && <GoogleAppsSection />}
           {isAdmin && <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
           {isAdmin && <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
+          {isAdmin && <MailNodeOpsSection />}
           {isAdmin && <MailNodeQuarantine admin />}
         </div>
       )}

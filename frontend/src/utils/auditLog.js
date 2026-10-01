@@ -1,4 +1,4 @@
-import { applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, rateFrameKey } from './mailNode.js';
+import { alertTitleKey, applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, queueActionKey, rateFrameKey } from './mailNode.js';
 import { formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
@@ -32,6 +32,9 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.domain_identity_acknowledged': 'admin.audit.actionMailNodeDomainIdentityAcknowledged',
   'mail_node.applied': 'admin.audit.actionMailNodeApplied',
   'mail_node.dns_checked': 'admin.audit.actionMailNodeDnsChecked',
+  'mail_node.queue_action': 'admin.audit.actionMailNodeQueueAction',
+  'mail_node.alert_raised': 'admin.audit.actionMailNodeAlertRaised',
+  'mail_node.alert_cleared': 'admin.audit.actionMailNodeAlertCleared',
   'mail_node.quarantine_released': 'admin.audit.actionMailNodeQuarantineReleased',
   'mail_node.quarantine_deleted': 'admin.audit.actionMailNodeQuarantineDeleted',
   'mail_node.quarantine_learned_spam': 'admin.audit.actionMailNodeQuarantineLearnedSpam',
@@ -75,6 +78,12 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   appId: 'admin.audit.fieldAppId',
   certThumbprint: 'admin.audit.fieldThumbprint',
   nodeIp: 'admin.audit.fieldNodeIp',
+  licenses: 'admin.audit.fieldLicenses',
+  tenantCreatedOn: 'admin.audit.fieldTenantCreated',
+  // The alert settings (settings 'alerts').
+  pingUrl: 'admin.audit.fieldAlertPingUrl',
+  deferredCount: 'admin.audit.fieldDeferredCount',
+  deferredMinutes: 'admin.audit.fieldDeferredMinutes',
   // The values a domain must publish (settings 'domain_dns').
   mx: 'admin.audit.fieldExpectedMx',
   tenantTxt: 'admin.audit.fieldTenantTxt',
@@ -89,6 +98,7 @@ const SETTINGS_DETAIL_KEYS = Object.freeze({
   node: 'admin.audit.detailMailNodeSettingsChanged',
   eop: 'admin.audit.detailEopSettingsChanged',
   domain_dns: 'admin.audit.detailDomainDnsExpectedChanged',
+  alerts: 'admin.audit.detailAlertSettingsChanged',
   quarantine: 'admin.audit.detailQuarantineSettingsChanged',
 });
 
@@ -234,6 +244,26 @@ export function auditDetail(entry) {
       return appliedDetail(details);
     case 'mail_node.dns_checked':
       return dnsCheckedDetail(details);
+    case 'mail_node.queue_action':
+      // One queued message held, released, tried again or deleted (with its envelope), or the
+      // whole queue tried again.
+      return details.action === 'flush'
+        ? { key: 'admin.audit.detailQueueFlush', values: {} }
+        : {
+          key: 'admin.audit.detailQueueAction',
+          values: {
+            id: details.queueId ?? '', sender: details.sender || '<>',
+            recipients: Array.isArray(details.recipients) && details.recipients.length ? details.recipients.join(', ') : '—',
+          },
+          valueKeys: { action: queueActionKey(details.action) },
+        };
+    case 'mail_node.alert_raised':
+    case 'mail_node.alert_cleared':
+      return {
+        key: entry.action === 'mail_node.alert_raised' ? 'admin.audit.detailAlertRaised' : 'admin.audit.detailAlertCleared',
+        values: {},
+        valueKeys: { alert: alertTitleKey(details.alert) },
+      };
     case 'mailbox.quota_changed':
       return details.from == null
         ? { key: 'admin.audit.detailQuotaSet', values: { to: details.quotaMb ?? '' } }
