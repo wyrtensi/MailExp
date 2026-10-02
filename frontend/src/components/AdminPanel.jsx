@@ -55,6 +55,7 @@ import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABE
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
+import { buildAccountSearchIndex, searchAccounts } from '../utils/accountSearch.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
@@ -531,6 +532,21 @@ export function AccountsTab() {
     setEditTarget(target);
     setSubview('edit');
   }, [accountSettingsRequested, accounts, accountsReady, clearAccountSettingsRequest]);
+
+  // Search over the list below. Local state: it is this screen's own query, not the sidebar's
+  // mailbox filter. The searchable text of every account is built once per account list, so a
+  // keystroke is only a substring scan.
+  const [searchQuery, setSearchQuery] = useState('');
+  const mailNodeLabel = t('admin.accounts.mailNodeBadge');
+  const searchIndex = useMemo(
+    () => buildAccountSearchIndex(accounts, { mailNodeLabel }),
+    [accounts, mailNodeLabel],
+  );
+  const searching = searchQuery.trim() !== '';
+  const shownAccounts = useMemo(
+    () => (searching ? searchAccounts(searchIndex, searchQuery) : accounts),
+    [searching, searchIndex, searchQuery, accounts],
+  );
 
   // Alias form state
   const [aliasFormMode, setAliasFormMode] = useState(null); // null | 'add' | 'edit'
@@ -1156,7 +1172,39 @@ export function AccountsTab() {
         </div>
       )}
 
-      {accounts.map(account => (
+      {accounts.length > 1 && (
+        <div style={{ marginBottom: 14 }}>
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            onKeyDown={e => {
+              // Escape empties the box (and is not passed on while there is something to empty).
+              if (e.key === 'Escape' && searchQuery) { setSearchQuery(''); e.stopPropagation(); }
+            }}
+            placeholder={t('admin.accounts.search.placeholder')}
+            aria-label={t('admin.accounts.search.label')}
+            spellCheck={false}
+            autoComplete="off"
+            style={inputStyle}
+            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+            onBlur={e => e.target.style.borderColor = 'var(--border)'}
+          />
+          <div role="status" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 5, minHeight: 14 }}>
+            {searching && shownAccounts.length > 0
+              ? t('admin.accounts.search.count', { shown: shownAccounts.length, total: accounts.length })
+              : ''}
+          </div>
+        </div>
+      )}
+
+      {searching && accounts.length > 0 && shownAccounts.length === 0 && (
+        <div role="status" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-tertiary)', fontSize: 13 }}>
+          {t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
+        </div>
+      )}
+
+      {shownAccounts.map(account => (
         <div key={account.id} style={{
           border: '1px solid var(--border-subtle)', borderRadius: 10,
           background: 'var(--bg-tertiary)', marginBottom: 10, overflow: 'hidden',

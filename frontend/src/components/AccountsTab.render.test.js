@@ -1,6 +1,6 @@
 // Render tests for the accounts tab of the settings (AdminPanel.jsx's AccountsTab, exported for
 // exactly this): the sidebar's "Account settings" item must land on that account's own settings
-// view, not on the general accounts list.
+// view, not on the general accounts list; and the search field over that list.
 //
 // The harness mirrors ThemesTab.render.test.js: node --test cannot parse JSX, so the loader
 // hook transforms .jsx with sucrase, and react-i18next is stubbed.
@@ -151,5 +151,87 @@ describe('AccountsTab opened for one account (sidebar "Account settings")', () =
     await settle();
     assert.ok(showsEditFor('sales@example.invalid'));
     assert.equal(useStore.getState().accountSettingsRequested, null);
+  });
+});
+
+describe('AccountsTab search', () => {
+  let host, root;
+  before(() => {
+    host = dom.window.document.createElement('div');
+    dom.window.document.body.appendChild(host);
+    root = createRoot(host);
+  });
+  after(async () => {
+    await React.act(async () => root.unmount());
+    host.remove();
+  });
+  beforeEach(async () => {
+    await React.act(async () => root.render(null));
+    useStore.setState({
+      accounts: [
+        { ...ACCOUNTS[0], sender_name: 'Acme Sales Desk', aliases: [{ id: 'al1', name: 'Quotes', email: 'quotes@alias.invalid', reply_to: null }] },
+        ACCOUNTS[1],
+        { ...ACCOUNTS[2], oauth_provider: 'google' },
+      ],
+      accountsReady: true, user: { id: 'u1', isAdmin: true }, accountSettingsRequested: null,
+    });
+    await React.act(async () => { root.render(React.createElement(AccountsTab)); });
+    await settle();
+  });
+
+  const searchBox = () => host.querySelector('input[type="search"]');
+  const type = async (value) => {
+    const input = searchBox();
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+    await React.act(async () => {
+      setter.call(input, value);
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+  };
+  const shown = () => ['sales@', 'ops@', 'support@'].filter(prefix => host.textContent.includes(`${prefix}example.invalid`));
+
+  test('offers a labelled search field, with every account listed to begin with', () => {
+    assert.ok(searchBox(), 'the search field is there');
+    assert.equal(searchBox().getAttribute('aria-label'), 'admin.accounts.search.label');
+    assert.deepEqual(shown(), ['sales@', 'ops@', 'support@']);
+  });
+
+  test('narrows the list by address, case-insensitively', async () => {
+    await type('OPS@Example');
+    assert.deepEqual(shown(), ['ops@']);
+  });
+
+  test('finds an account by its sender name, its alias and its provider', async () => {
+    await type('sales desk');
+    assert.deepEqual(shown(), ['sales@']);
+    await type('quotes@alias');
+    assert.deepEqual(shown(), ['sales@']);
+    await type('gmail');
+    assert.deepEqual(shown(), ['support@']);
+  });
+
+  test('says so when nothing matches, and the list comes back when the box is emptied', async () => {
+    await type('zzz-nothing');
+    assert.deepEqual(shown(), []);
+    assert.ok(host.textContent.includes('admin.accounts.search.noMatch'), 'the empty state is shown');
+    assert.ok(host.querySelector('[role="status"]') != null, 'and announced');
+    await type('');
+    assert.deepEqual(shown(), ['sales@', 'ops@', 'support@']);
+  });
+
+  test('Escape in the field clears it', async () => {
+    await type('ops');
+    assert.deepEqual(shown(), ['ops@']);
+    await React.act(async () => {
+      searchBox().dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    assert.equal(searchBox().value, '');
+    assert.deepEqual(shown(), ['sales@', 'ops@', 'support@']);
+  });
+
+  test('is not offered for a single account', async () => {
+    await React.act(async () => { useStore.setState({ accounts: [ACCOUNTS[0]] }); });
+    await settle();
+    assert.equal(searchBox(), null);
   });
 });

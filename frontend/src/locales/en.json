@@ -1011,6 +1011,12 @@
       "title": "Email accounts",
       "addButton": "Add account",
       "empty": "No accounts added yet",
+      "search": {
+        "label": "Search mail accounts",
+        "placeholder": "Search by address, name, alias or provider…",
+        "noMatch": "No mail accounts match \"{{query}}\"",
+        "count": "{{shown}} of {{total}} accounts"
+      },
       "connected": "Connected",
       "folderMappings": "Folder mappings",
       "aliases": "Aliases",
