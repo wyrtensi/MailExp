@@ -16,6 +16,8 @@ import { buildEndSessionUrl } from './oidc.js';
 import { getGlobalCategorizationEnabled } from '../services/categorizer.js';
 import { sanitizeGtdPrefs } from '../utils/gtdPrefs.js';
 import { sanitizeRightSidebarPrefs } from '../utils/rightSidebarPrefs.js';
+import { MAX_PINNED_ACCOUNTS, sanitizePinnedAccounts } from '../utils/accountPrefs.js';
+import { isUuid } from '../utils/uuid.js';
 import { redisClient } from '../services/redis.js';
 import { generateTotpSecret, totpKeyUri, verifyTotp } from '../services/totp.js';
 import { consume as rlConsume, reset as rlReset } from '../services/rateLimiter.js';
@@ -762,6 +764,18 @@ export async function getPreferences(req, res) {
     getGlobalCategorizationEnabled(),
   ]);
   const prefs = userResult.rows[0]?.preferences || {};
+  // Pins of mailboxes that were deleted since are dropped here, so every device sees the list
+  // that is real; the next pin or unpin writes the cleaned list back.
+  if (Array.isArray(prefs.pinnedAccounts)) {
+    const pinned = sanitizePinnedAccounts(prefs.pinnedAccounts);
+    if (pinned.length) {
+      const alive = await query('SELECT id FROM email_accounts WHERE id = ANY($1::uuid[])', [pinned]);
+      const live = new Set(alive.rows.map(row => String(row.id).toLowerCase()));
+      prefs.pinnedAccounts = pinned.filter(id => live.has(id));
+    } else {
+      prefs.pinnedAccounts = [];
+    }
+  }
   const customCss = cssResult.rows[0]?.value;
   if (customCss) prefs.customCss = customCss;
   // Install-wide and read-only here: the client uses it only to refresh the list while the
@@ -784,7 +798,7 @@ export async function patchPreferences(req, res) {
           markReadBehavior, markReadDelay, aiActions,
           autoLockMinutes, showMobileAvatars, gravatarAvatars,
           folderOrder, senderFavicons, showMessagePreviews, defaultSender, hoverActionSet,
-          themeFollowsSystem } = req.body;
+          themeFollowsSystem, pinnedAccounts, sortAccountsByLatest } = req.body;
   // GTD content and generic right-sidebar layout preferences are independent flat
   // top-level keys with separate allow-lists. gtdEnabled is intentionally NOT a user
   // preference — it lives per-account in email_accounts.gtd_enabled.
@@ -847,6 +861,37 @@ export async function patchPreferences(req, res) {
     return res.status(400).json({ error: 'themeFollowsSystem must be a boolean' });
   }
   const themeFollowsSystemVal = hasThemeFollowsSystem ? themeFollowsSystem : null;
+  // Sidebar account list: whether mailboxes rise by their latest received mail. Same
+  // boolean-or-400 contract as senderFavicons and themeFollowsSystem.
+  const hasSortAccountsByLatest = Object.prototype.hasOwnProperty.call(req.body, 'sortAccountsByLatest');
+  if (hasSortAccountsByLatest && typeof sortAccountsByLatest !== 'boolean') {
+    return res.status(400).json({ error: 'sortAccountsByLatest must be a boolean' });
+  }
+  const sortAccountsByLatestVal = hasSortAccountsByLatest ? sortAccountsByLatest : null;
+  // Mailboxes the user pinned to the top of the sidebar, in pin order: ids only, deduplicated and
+  // capped (utils/accountPrefs.js). Ids of mailboxes that no longer exist are dropped on read.
+  // Three ways to write it, each answered with a 400 when malformed, like the switch above:
+  //   pinnedAccounts  the whole list (replaces what is stored);
+  //   pinAccount      one id appended to the stored list, atomically in SQL;
+  //   unpinAccount    one id removed from it, the same way.
+  // The client uses the last two, so a tab holding a stale list cannot overwrite a pin made on
+  // another device: it only says what it changed.
+  const has = (key) => Object.prototype.hasOwnProperty.call(req.body, key);
+  if (has('pinnedAccounts') && !Array.isArray(pinnedAccounts)) {
+    return res.status(400).json({ error: 'pinnedAccounts must be an array of account ids' });
+  }
+  for (const key of ['pinAccount', 'unpinAccount']) {
+    if (has(key) && !isUuid(req.body[key])) return res.status(400).json({ error: `${key} must be an account id` });
+  }
+  if (has('pinAccount') && has('unpinAccount')) {
+    return res.status(400).json({ error: 'pinAccount and unpinAccount cannot be sent together' });
+  }
+  const pinnedAccountsJson = (() => {
+    const clean = sanitizePinnedAccounts(pinnedAccounts);
+    return clean ? JSON.stringify(clean) : null;
+  })();
+  const pinAccountVal = has('pinAccount') ? req.body.pinAccount.toLowerCase() : null;
+  const unpinAccountVal = has('unpinAccount') ? req.body.unpinAccount.toLowerCase() : null;
   // #440: which hover quick actions the message list shows. Same vocabulary and canonical
   // order as frontend/src/utils/hoverActions.js; unknown keys are dropped rather than stored.
   const HOVER_ACTION_KEYS = ['markRead', 'star', 'archive', 'snooze', 'delete', 'move'];
@@ -896,6 +941,18 @@ export async function patchPreferences(req, res) {
       || CASE WHEN $39::text IS NOT NULL THEN jsonb_build_object('defaultSender', $39::text) ELSE '{}'::jsonb END
       || CASE WHEN $40::jsonb IS NOT NULL THEN jsonb_build_object('hoverActionSet', $40::jsonb) ELSE '{}'::jsonb END
       || CASE WHEN $41::boolean IS NOT NULL THEN jsonb_build_object('themeFollowsSystem', $41::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $42::jsonb IS NOT NULL THEN jsonb_build_object('pinnedAccounts', $42::jsonb) ELSE '{}'::jsonb END
+      || CASE WHEN $43::boolean IS NOT NULL THEN jsonb_build_object('sortAccountsByLatest', $43::boolean) ELSE '{}'::jsonb END
+      || CASE WHEN $44::text IS NOT NULL THEN jsonb_build_object('pinnedAccounts',
+           CASE WHEN COALESCE(preferences->'pinnedAccounts', '[]'::jsonb) @> to_jsonb($44::text)
+                  OR jsonb_array_length(COALESCE(preferences->'pinnedAccounts', '[]'::jsonb)) >= ${MAX_PINNED_ACCOUNTS}
+                THEN COALESCE(preferences->'pinnedAccounts', '[]'::jsonb)
+                ELSE COALESCE(preferences->'pinnedAccounts', '[]'::jsonb) || to_jsonb($44::text) END)
+           ELSE '{}'::jsonb END
+      || CASE WHEN $45::text IS NOT NULL THEN jsonb_build_object('pinnedAccounts',
+           COALESCE((SELECT jsonb_agg(e ORDER BY n) FROM jsonb_array_elements(COALESCE(preferences->'pinnedAccounts', '[]'::jsonb)) WITH ORDINALITY AS t(e, n)
+                     WHERE e <> to_jsonb($45::text)), '[]'::jsonb))
+           ELSE '{}'::jsonb END
     WHERE id = $1
   `, [req.session.userId, theme ?? null, font ?? null, layout ?? null, notificationSound ?? null,
       pageSize ?? null, scrollMode ?? null,
@@ -906,7 +963,8 @@ export async function patchPreferences(req, res) {
       markReadBehaviorVal, markReadDelayVal, aiActionsJson,
       rightSidebarWidth, rightSidebarHidden, gtdCollapsedSectionsJson, gtdPetSlug, autoLockMinutesVal,
       showMobileAvatars ?? null, gravatarAvatars ?? null, folderOrderJson, senderFaviconsVal,
-      showMessagePreviews ?? null, defaultSenderVal, hoverActionSetJson, themeFollowsSystemVal]);
+      showMessagePreviews ?? null, defaultSenderVal, hoverActionSetJson, themeFollowsSystemVal,
+      pinnedAccountsJson, sortAccountsByLatestVal, pinAccountVal, unpinAccountVal]);
 
   res.json({ ok: true });
 }
