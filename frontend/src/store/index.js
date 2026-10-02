@@ -605,6 +605,12 @@ export const useStore = create((set, get) => ({
   addAccountRequested: false,
   openAddAccount: () => set({ showAdmin: true, adminTab: 'accounts', addAccountRequested: true }),
   clearAddAccountRequest: () => set({ addAccountRequested: false }),
+  // Set by the sidebar's "Account settings" item with the account's id: the accounts tab opens
+  // that account's own settings view (the edit form) and clears it. Same hand-off as above, so
+  // the target survives the tab not being mounted yet.
+  accountSettingsRequested: null,
+  openAccountSettings: (accountId) => set({ showAdmin: true, adminTab: 'accounts', accountSettingsRequested: accountId || null }),
+  clearAccountSettingsRequest: () => set({ accountSettingsRequested: null }),
 
   // Contacts view
   showContacts: false,

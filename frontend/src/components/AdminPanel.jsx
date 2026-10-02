@@ -471,9 +471,10 @@ function threadingBlockedMessage(err, t) {
   }
 }
 
-function AccountsTab() {
+// Exported (like ThemesTab below) only so AccountsTab.render.test.js can mount it.
+export function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, addAccountRequested, clearAddAccountRequest } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, addAccountRequested, clearAddAccountRequest, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'add' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
@@ -514,6 +515,22 @@ function AccountsTab() {
     setAddKind(null);
     setSubview('add');
   }, [addAccountRequested, clearAddAccountRequest]);
+
+  // The sidebar's "Account settings" item names the account (openAccountSettings): open that
+  // account's own settings view, the edit form. The request stays until the account is in the
+  // list, because the form works from the whole account object; one that never arrives (deleted
+  // in the meantime) is dropped once the list is loaded, so it cannot linger and open a view later.
+  useEffect(() => {
+    if (!accountSettingsRequested) return;
+    const target = accounts.find(a => a.id === accountSettingsRequested);
+    if (!target) {
+      if (accountsReady) clearAccountSettingsRequest();
+      return;
+    }
+    clearAccountSettingsRequest();
+    setEditTarget(target);
+    setSubview('edit');
+  }, [accountSettingsRequested, accounts, accountsReady, clearAccountSettingsRequest]);
 
   // Alias form state
   const [aliasFormMode, setAliasFormMode] = useState(null); // null | 'add' | 'edit'
@@ -1337,7 +1354,7 @@ function AccountsTab() {
 }
 
 // ─── Themes Tab ───────────────────────────────────────────────────────────────
-// Exported (only this one, everything else here stays private) so ThemesTab.render.test.js can
+// Exported (with AccountsTab; everything else here stays private) so ThemesTab.render.test.js can
 // mount it directly instead of the whole admin panel, for the "как в системе" checkbox (#508).
 export function ThemesTab() {
   const { t } = useTranslation();
