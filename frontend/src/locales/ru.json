@@ -643,9 +643,6 @@
     },
     "outage": {
       "title": "Письма вам, задержанные или потерянные, пока почтовый узел не работал",
-      "summaryWaiting": "{{count}} из {{total}} ещё ждут в очереди Microsoft и придут, как только почтовый сервер их примет.",
-      "summaryLost": "{{count}} из {{total}} не дошли: их отправители получили уведомление о недоставке.",
-      "summaryDelayed": "{{count}} пришли с опозданием. Ничего не потеряно.",
       "show": "Показать письма",
       "hide": "Скрыть письма",
       "dismiss": "Понятно",
@@ -664,7 +661,19 @@
       "columnReceived": "Получено",
       "columnStatus": "Состояние",
       "receivedAt": "Microsoft получил {{at}}",
-      "noSubject": "(без темы)"
+      "noSubject": "(без темы)",
+      "summaryWaiting_one": "{{count}} из {{total}} ещё ждёт в очереди Microsoft и придёт, как только почтовый сервер его примет.",
+      "summaryWaiting_few": "{{count}} из {{total}} ещё ждут в очереди Microsoft и придут, как только почтовый сервер их примет.",
+      "summaryWaiting_many": "{{count}} из {{total}} ещё ждут в очереди Microsoft и придут, как только почтовый сервер их примет.",
+      "summaryWaiting_other": "{{count}} из {{total}} ещё ждут в очереди Microsoft и придут, как только почтовый сервер их примет.",
+      "summaryLost_one": "{{count}} из {{total}} не дошло: отправитель получил уведомление о недоставке.",
+      "summaryLost_few": "{{count}} из {{total}} не дошли: их отправители получили уведомление о недоставке.",
+      "summaryLost_many": "{{count}} из {{total}} не дошли: их отправители получили уведомление о недоставке.",
+      "summaryLost_other": "{{count}} из {{total}} не дошли: их отправители получили уведомление о недоставке.",
+      "summaryDelayed_one": "{{count}} письмо пришло с опозданием. Ничего не потеряно.",
+      "summaryDelayed_few": "{{count}} письма пришли с опозданием. Ничего не потеряно.",
+      "summaryDelayed_many": "{{count}} писем пришли с опозданием. Ничего не потеряно.",
+      "summaryDelayed_other": "{{count}} письма пришли с опозданием. Ничего не потеряно."
     }
   },
   "lockScreen": {
@@ -2608,8 +2617,15 @@
       "alertDetailBypass_many": "{{count}} писем ушли через {{relays}} вместо EOP за последний час, последнее {{at}}. Проверьте relayhost доменов и extra.cf.",
       "alertDetailBypass_other": "{{count}} письма ушли через {{relays}} вместо EOP за последний час, последнее {{at}}. Проверьте relayhost доменов и extra.cf.",
       "alertOutageLettersWaiting": "Письма ждут в очереди EOP после простоя узла",
-      "alertDetailOutageWaiting": "Ещё ждут: {{count}}; первое EOP вернёт отправителю {{at}}.",
-      "sourceTrace": "трассировка сообщений"
+      "sourceTrace": "трассировка сообщений",
+      "alertDetailOutageWaiting_one": "Ещё ждёт {{count}} письмо; EOP вернёт его отправителю {{at}}.",
+      "alertDetailOutageWaiting_few": "Ещё ждут {{count}} письма; первое EOP вернёт отправителю {{at}}.",
+      "alertDetailOutageWaiting_many": "Ещё ждут {{count}} писем; первое EOP вернёт отправителю {{at}}.",
+      "alertDetailOutageWaiting_other": "Ещё ждут {{count}} письма; первое EOP вернёт отправителю {{at}}.",
+      "alertDetailOutageWaitingAsOf_one": "Ещё ждёт {{count}} письмо (трассировка {{asOf}}); EOP вернёт его отправителю {{at}}.",
+      "alertDetailOutageWaitingAsOf_few": "Ещё ждут {{count}} письма (трассировка {{asOf}}); первое EOP вернёт отправителю {{at}}.",
+      "alertDetailOutageWaitingAsOf_many": "Ещё ждут {{count}} писем (трассировка {{asOf}}); первое EOP вернёт отправителю {{at}}.",
+      "alertDetailOutageWaitingAsOf_other": "Ещё ждут {{count}} письма (трассировка {{asOf}}); первое EOP вернёт отправителю {{at}}."
     },
     "quarantine": {
       "title": "Карантин почтового узла",
@@ -2684,7 +2700,6 @@
     "outages": {
       "title": "Простои почтового узла",
       "description": "Периоды, когда узел не мог принимать почту от EOP (найденные проверкой оповещений или отмеченные вручную), и что стало с письмами, которые EOP получил за это время. EOP повторяет попытки каждые 15 минут в течение 24 часов, затем возвращает письмо отправителю; заставить его повторить или переслать письмо панель не может.",
-      "bannerWaiting": "Писем ещё ждут в очереди EOP: {{count}}.",
       "bannerTimeLeft": "Первое из них EOP вернёт отправителю через {{hours}} ч {{minutes}} мин ({{at}}).",
       "bannerExpired": "24 часа EOP для первого письма прошли; следующая проверка трассировки покажет, что с ним стало.",
       "bannerAdvice": "Верните узел до этого времени. Не нажимайте «Fix now» в оповещении EAC: EOP сразу откажет письмам из очереди.",
@@ -2757,7 +2772,14 @@
       "errorNotFound": "Такого периода больше нет.",
       "errorAlreadyClosed": "Период уже закрыт.",
       "errorDeleteUnconfirmed": "Для удаления периода нужна причина.",
-      "errorRetention": "Срок хранения писем — целое число дней от 1 до 90."
+      "errorRetention": "Срок хранения писем — целое число дней от 1 до 90.",
+      "bannerWaiting_one": "{{count}} письмо ещё ждёт в очереди EOP.",
+      "bannerWaiting_few": "{{count}} письма ещё ждут в очереди EOP.",
+      "bannerWaiting_many": "{{count}} писем ещё ждут в очереди EOP.",
+      "bannerWaiting_other": "{{count}} письма ещё ждут в очереди EOP.",
+      "asOf": "По проверке трассировки {{at}}.",
+      "stalled": "С {{at}} ни одна проверка не подтвердила простой: проверки перестали что-либо сообщать (сменились настройки узла или ключ API?). Закройте период, когда узел принимает почту.",
+      "errorCooldown": "Трассировку только что проверяли: попробуйте через две минуты."
     }
   },
   "blockList": {

@@ -15,6 +15,8 @@ import {
 // answers the letters of all the panel's mailboxes and the screen keeps those of the one shown.
 
 const CACHE_MS = 2 * 60 * 1000;
+// While a mailbox stays open the notice looks again now and then (the trace changes every 15 min).
+const POLL_MS = 5 * 60 * 1000;
 const SEEN_KEY = 'mailexpert.outageNotice.seen';
 let cache = null; // { at, promise }
 
@@ -31,7 +33,9 @@ export function forgetOutageLetters() {
   cache = null;
 }
 
-const letterKey = (letter) => `${letter.outageId}|${letter.recipient}|${letter.receivedAt}|${letter.sender ?? ''}|${letter.outcome}`;
+// The server's key names the letter whatever window it shows under; with the outcome, a letter
+// that went from waiting to lost shows again after 'Got it'.
+const letterKey = (letter) => `${letter.key ?? `${letter.recipient}|${letter.receivedAt}|${letter.sender ?? ''}`}|${letter.outcome}`;
 
 function readSeen() {
   try {
@@ -58,8 +62,12 @@ export default function MailNodeOutageNotice({ accountId = null, showRecipient =
 
   useEffect(() => {
     let alive = true;
-    loadOutageLetters().then((data) => { if (alive) setLetters(Array.isArray(data?.letters) ? data.letters : []); });
-    return () => { alive = false; };
+    const load = () => loadOutageLetters().then((data) => { if (alive) setLetters(Array.isArray(data?.letters) ? data.letters : []); });
+    load();
+    const timer = setInterval(load, POLL_MS);
+    // Under Node (render tests) a timer object can be told not to hold the process; browsers have none.
+    timer?.unref?.();
+    return () => { alive = false; clearInterval(timer); };
   }, [accountId]);
 
   const mine = lettersFor(letters, accountId);
@@ -76,14 +84,13 @@ export default function MailNodeOutageNotice({ accountId = null, showRecipient =
   return (
     <section
       data-outage-notice
-      role="status"
       aria-label={t('messageList.outage.title')}
       style={{ flexShrink: 0, padding: '8px 14px', borderBottom: '1px solid var(--border-subtle)', background: tone, fontSize: 12, lineHeight: 1.5 }}
     >
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ flex: '1 1 220px', minWidth: 0, color: 'var(--text-primary)' }}>
           <div style={{ fontWeight: 600 }}>{t('messageList.outage.title')}</div>
-          <div style={{ color: 'var(--text-secondary)' }}>{t(summary.key, summary.values)}</div>
+          <div role="status" style={{ color: 'var(--text-secondary)' }}>{t(summary.key, summary.values)}</div>
         </div>
         <button
           type="button"

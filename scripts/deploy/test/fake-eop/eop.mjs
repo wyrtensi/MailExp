@@ -38,7 +38,7 @@ import {
   MODES, VERDICTS, eopHeaders, listMessages, loadMessage, readState, smtpSend, validateState, writeState,
 } from './lib.mjs';
 import {
-  composeLetter, listInbound, loadInbound, readInboundConfig, receiveInbound, runInboundPass, saveInbound, traceAnswer, writeInboundConfig,
+  clearInbound, composeLetter, listInbound, loadInbound, readInboundConfig, receiveInbound, retryInbound, runInboundPass, traceAnswer, writeInboundConfig,
 } from './inbound.mjs';
 import { createServer, loadTls } from './server.mjs';
 
@@ -58,11 +58,11 @@ const ADDRESS_RE = /^[^\s@<>]+@[^\s@<>]+$/;
 class UsageError extends Error {}
 
 // Hands an inbound letter to the node, as EOP does through the outbound connector: with EOP's
-// headers (a clean verdict).
-function deliverInbound(item, raw) {
+// headers (a clean verdict), to the recipients given.
+function deliverInbound(item, raw, to = item.to) {
   const headers = eopHeaders({ verdict: 'clean', envelope: item, nodeHost: NODE_HOST });
   return smtpSend({
-    host: NODE_HOST, port: 25, from: item.from, to: item.to, raw: Buffer.concat([Buffer.from(headers, 'latin1'), raw]), timeoutMs: 20000,
+    host: NODE_HOST, port: 25, from: item.from, to, raw: Buffer.concat([Buffer.from(headers, 'latin1'), raw]), timeoutMs: 20000,
   });
 }
 
@@ -125,20 +125,11 @@ function inboundCommand(sub, rest, flags) {
     case 'show':
       console.log(JSON.stringify(loadInbound(INBOUND, rest[0] || 'latest').item, null, 2));
       return;
-    case 'retry': {
-      let due = 0;
-      const now = new Date().toISOString();
-      for (const item of listInbound(INBOUND)) {
-        if (item.status !== 'pending') continue;
-        item.nextAttemptAt = now;
-        saveInbound(INBOUND, item);
-        due += 1;
-      }
-      console.log(`${due} pending letters due now`);
+    case 'retry':
+      console.log(`${retryInbound(INBOUND)} pending letters due now`);
       return;
-    }
     case 'clear':
-      fs.rmSync(INBOUND, { recursive: true, force: true });
+      clearInbound(INBOUND);
       console.log('inbound queue cleared');
       return;
     case 'config': {

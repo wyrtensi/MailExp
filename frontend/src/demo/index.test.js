@@ -607,7 +607,7 @@ test('the demo shows a past outage with delayed and lost letters and one going o
   const { letters } = await demoRequest('GET', `/mail-node/outages/${past.id}/letters`);
   assert.ok(letters.some(l => l.outcome === 'lost' && l.expired && l.statusCode === '4.4.7'));
   const mine = await demoRequest('GET', '/mail-node/outage-letters');
-  assert.ok(mine.letters.length > 0 && mine.letters.every(l => l.outcome !== 'other' && l.accountId && !('detail' in l)));
+  assert.ok(mine.letters.length > 0 && mine.letters.every(l => l.outcome !== 'other' && l.accountId && l.key && !('detail' in l) && !('statusCode' in l) && !('status' in l)));
   const alerts = await demoRequest('GET', '/mail-node/alerts');
   assert.ok(alerts.state.alerts.some(a => a.key === 'outage_letters_waiting'));
 });

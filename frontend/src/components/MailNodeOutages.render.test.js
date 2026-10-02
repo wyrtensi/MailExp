@@ -202,6 +202,16 @@ describe('MailNodeOutagesSection', () => {
     assert.equal(root.querySelector('[data-outage-form]'), null);
   });
 
+  test('changing only the reason sends no times, so the start does not move', async () => {
+    answers['PUT /api/mail-node/outages/w-past'] = { window: PAST };
+    const root = await mount(React.createElement(MailNodeOutagesSection));
+    await click(buttons(root.querySelector('[data-outage="w-past"]'), 'admin.outages.edit')[0]);
+    const form = root.querySelector('[data-outage-form="edit"]');
+    await setValue(form.querySelector('input:not([type])'), 'Wording');
+    await submit(form);
+    assert.deepEqual(calls.find((c) => c.method === 'PUT').body, { reason: 'Wording' });
+  });
+
   test('closes an open window with a reason, deletes one only with a reason', async () => {
     const root = await mount(React.createElement(MailNodeOutagesSection));
     await click(buttons(root.querySelector('[data-outage="w-open"]'), 'admin.outages.close')[0]);
@@ -252,8 +262,11 @@ describe('MailNodeOutageNotice', () => {
   test('sums up the mailbox\'s letters, lists them on demand, waiting and lost first, with what to do', async () => {
     const root = await mount(React.createElement(MailNodeOutageNotice, { accountId: 'acc-sales' }));
     const notice = root.querySelector('[data-outage-notice]');
-    assert.equal(notice.getAttribute('role'), 'status');
-    assert.match(notice.textContent, /messageList\.outage\.summaryWaiting/);
+    // Only the summary line is a live region, not the buttons and the list.
+    assert.equal(notice.getAttribute('role'), null);
+    const live = notice.querySelectorAll('[role="status"]');
+    assert.equal(live.length, 1);
+    assert.match(live[0].textContent, /messageList\.outage\.summaryWaiting/);
     assert.equal(notice.querySelector('ul'), null);
     const toggle = buttons(notice, 'messageList.outage.show')[0];
     await click(toggle);
@@ -266,6 +279,17 @@ describe('MailNodeOutageNotice', () => {
     assert.match(items[1].textContent, /messageList\.outage\.outcomeLostExpired/);
     assert.match(items[1].textContent, /messageList\.outage\.adviceLost/);
     assert.equal(notice.textContent.includes('Invoice'), false);
+  });
+
+  test('"Got it" holds when the same letter comes under another window', async () => {
+    const keyed = USER_LETTERS.map((l, i) => ({ ...l, key: `trace-${i}|${l.recipient}` }));
+    answers['GET /api/mail-node/outage-letters'] = { traceConnected: true, node: true, letters: keyed };
+    const root = await mount(React.createElement(MailNodeOutageNotice, { accountId: null }));
+    await click(buttons(root, 'messageList.outage.dismiss')[0]);
+    forgetOutageLetters();
+    answers['GET /api/mail-node/outage-letters'] = { traceConnected: true, node: true, letters: keyed.map((l) => ({ ...l, outageId: 'w-other' })) };
+    const again = await mount(React.createElement(MailNodeOutageNotice, { accountId: null }));
+    assert.equal(again.querySelector('[data-outage-notice]'), null);
   });
 
   test('names the mailbox in the unified inbox, and "Got it" hides it until a new letter comes', async () => {

@@ -109,8 +109,11 @@ export default function MailNodeOutagesSection() {
     } else if (form.mode === 'close') {
       await api.mailNode.closeOutage(form.id, { endedAt: fromLocalInput(form.end) ?? undefined, reason });
     } else {
-      const body = { startedAt: fromLocalInput(form.start), reason };
-      if (form.end) body.endedAt = fromLocalInput(form.end);
+      // Only the times the administrator changed: the field holds minutes, so sending an untouched
+      // start would move it, journal a change and reset the window's trace.
+      const body = { reason };
+      if (form.start !== form.initialStart) body.startedAt = fromLocalInput(form.start);
+      if (form.end && form.end !== form.initialEnd) body.endedAt = fromLocalInput(form.end);
       await api.mailNode.updateOutage(form.id, body);
     }
     setForm(null);
@@ -154,6 +157,7 @@ export default function MailNodeOutagesSection() {
           fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.5, marginBottom: 8,
         }}>
           <div style={{ fontWeight: 600 }}>{t('admin.outages.bannerWaiting', { count: banner.count })}</div>
+          {banner.asOf && <div>{t('admin.outages.asOf', { at: when(banner.asOf) })}</div>}
           {left && !left.past && <div>{t('admin.outages.bannerTimeLeft', { hours: left.hours, minutes: left.minutes, at: when(banner.soonest) })}</div>}
           {left?.past && <div>{t('admin.outages.bannerExpired')}</div>}
           <div>{t('admin.outages.bannerAdvice')}</div>
@@ -246,6 +250,9 @@ export default function MailNodeOutagesSection() {
                       <td style={cellStyle}>
                         <div>{when(w.startedAt)}{w.cause?.startUncertain ? ` ${t('admin.outages.startUncertain')}` : ''}</div>
                         <div>{w.open ? <strong style={{ color: 'var(--red)' }}>{t('admin.outages.ongoing')}</strong> : when(w.endedAt)}</div>
+                        {w.stalled && (
+                          <div data-stalled style={{ ...noteStyle, color: 'var(--amber)' }}>{t('admin.outages.stalled', { at: when(w.lastFailedAt || w.startedAt) })}</div>
+                        )}
                         <div style={noteStyle}>{t(duration.key, duration.values)}</div>
                       </td>
                       <td style={cellStyle}>
@@ -282,7 +289,10 @@ export default function MailNodeOutagesSection() {
                           {w.open && (
                             <button type="button" onClick={() => setForm({ mode: 'close', id: w.id, ...emptyForm() })} disabled={busy} style={buttonStyle}>{t('admin.outages.close')}</button>
                           )}
-                          <button type="button" onClick={() => setForm({ mode: 'edit', id: w.id, start: toLocalInput(w.startedAt), end: toLocalInput(w.endedAt), reason: '', planned: w.planned })} disabled={busy} style={buttonStyle}>
+                          <button type="button" onClick={() => setForm({
+                            mode: 'edit', id: w.id, start: toLocalInput(w.startedAt), end: toLocalInput(w.endedAt), reason: '', planned: w.planned,
+                            initialStart: toLocalInput(w.startedAt), initialEnd: toLocalInput(w.endedAt),
+                          })} disabled={busy} style={buttonStyle}>
                             {t('admin.outages.edit')}
                           </button>
                           <button type="button" onClick={() => setConfirmDelete({ id: w.id, reason: '' })} disabled={busy} style={buttonStyle}>{t('admin.outages.delete')}</button>

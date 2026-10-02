@@ -167,90 +167,195 @@ export function ndrMessage({ item, reply, reportingMta = 'eop.test.local', now =
   ].join('\r\n'));
 }
 
-function fail(item, { now, reply, expired, ndrDir }) {
-  item.status = 'failed';
-  item.expired = expired;
-  item.events.push({ at: now.toISOString(), event: 'Fail', description: `Reason: [{LED=${reply}};{FQDN=};{IP=}]` });
-  fs.mkdirSync(ndrDir, { recursive: true });
-  writeAtomic(path.join(ndrDir, `${item.id}.eml`), ndrMessage({ item, reply, now }));
-  writeAtomic(path.join(ndrDir, `${item.id}.json`), `${JSON.stringify({ id: item.id, to: item.from, reply, at: now.toISOString() })}\n`);
+// The recipients of an item with their own state: { [address]: { status, expired, at } }. An item
+// written before per-recipient state shares the item's status.
+export function recipientsOf(item) {
+  return Object.fromEntries(item.to.map((rcpt) => [rcpt, item.recipients?.[rcpt] ?? { status: item.status, expired: !!item.expired }]));
 }
 
-// One pass: every pending item that is due (all pending with force) expires, or is handed to the
-// node with deliver(item, raw) -> { ok, reply } (it throws when the connection fails). Returns
-// { tried, delivered, deferred, failed, expired } and logs one line per item.
+// The item's own status from its recipients: pending while one waits, delivered when all arrived,
+// else failed.
+function settle(item) {
+  const states = Object.values(item.recipients).map((r) => r.status);
+  item.status = states.includes('pending') ? 'pending' : states.every((s) => s === 'delivered') ? 'delivered' : 'failed';
+  item.expired = Object.values(item.recipients).some((r) => r.expired);
+}
+
+function fail(item, rcpts, { now, reply, expired, ndrDir }) {
+  for (const rcpt of rcpts) item.recipients[rcpt] = { status: 'failed', expired, at: now.toISOString() };
+  item.events.push({ at: now.toISOString(), event: 'Fail', rcpts, description: `Reason: [{LED=${reply}};{FQDN=};{IP=}]` });
+  fs.mkdirSync(ndrDir, { recursive: true });
+  const name = `${item.id}-${(item.ndrCount = (item.ndrCount ?? 0) + 1)}`;
+  writeAtomic(path.join(ndrDir, `${name}.eml`), ndrMessage({ item: { ...item, to: rcpts }, reply, now }));
+  writeAtomic(path.join(ndrDir, `${name}.json`), `${JSON.stringify({ id: name, to: item.from, rcpts, reply, at: now.toISOString() })}\n`);
+}
+
+// A lock directory beside the queue, so the serve timer and a command (retry, clear) never write
+// over each other's change. Held only around a read-modify-write, never across a delivery; a lock
+// older than LOCK_STALE_MS (a process that died holding it) is taken over.
+const LOCK_STALE_MS = 30000;
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+export function withQueueLock(dir, fn) {
+  const lock = `${dir}.lock`;
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  for (let tries = 0; ; tries += 1) {
+    try {
+      fs.mkdirSync(lock);
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS) fs.rmSync(lock, { recursive: true, force: true });
+      } catch {
+        // Gone meanwhile: try again.
+      }
+      if (tries > 200) throw new Error('the inbound queue is locked');
+      sleep(25);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+
+const readItem = (dir, id) => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, `${id}.json`), 'utf8'));
+  } catch {
+    return null;
+  }
+};
+
+// One pass: every pending item that is due (all pending with force) expires, or each of its
+// pending recipients is handed to the node with deliver(item, raw, [rcpt]) -> { ok, reply } (it
+// throws when the connection fails), so one refused recipient does not hold the others. Returns
+// { tried, delivered, deferred, failed, expired } (recipients) and logs one line per recipient.
 export async function runInboundPass({
   dir, ndrDir, deliver, host = 'postfix-mailcow', retrySeconds = INBOUND_DEFAULTS.retrySeconds, now = new Date(), force = false, log = () => {},
 }) {
   const summary = { tried: 0, delivered: 0, deferred: 0, failed: 0, expired: 0 };
-  for (const item of listInbound(dir)) {
-    if (item.status !== 'pending') continue;
-    if (now.getTime() >= Date.parse(item.expiresAt)) {
-      fail(item, { now, reply: EXPIRED_REPLY, expired: true, ndrDir });
+  for (const { id } of listInbound(dir)) {
+    // Claim the attempt under the lock: expire, or move the next attempt on.
+    const claimed = withQueueLock(dir, () => {
+      const item = readItem(dir, id);
+      if (!item || item.status !== 'pending') return null;
+      item.recipients = recipientsOf(item);
+      const pending = Object.keys(item.recipients).filter((rcpt) => item.recipients[rcpt].status === 'pending');
+      if (now.getTime() >= Date.parse(item.expiresAt)) {
+        fail(item, pending, { now, reply: EXPIRED_REPLY, expired: true, ndrDir });
+        settle(item);
+        saveInbound(dir, item);
+        summary.expired += pending.length;
+        log(`inbound=${item.id} event=fail rcpt=${pending.join(',')} reply="${EXPIRED_REPLY}" ndr_to=<${item.from}>`);
+        return null;
+      }
+      if (!force && now.getTime() < Date.parse(item.nextAttemptAt)) return null;
+      item.attempts += 1;
+      item.nextAttemptAt = new Date(now.getTime() + retrySeconds * 1000).toISOString();
       saveInbound(dir, item);
-      summary.expired += 1;
-      log(`inbound=${item.id} event=fail reply="${EXPIRED_REPLY}" ndr_to=<${item.from}>`);
-      continue;
-    }
-    if (!force && now.getTime() < Date.parse(item.nextAttemptAt)) continue;
-    summary.tried += 1;
-    item.attempts += 1;
-    item.nextAttemptAt = new Date(now.getTime() + retrySeconds * 1000).toISOString();
-    const raw = fs.readFileSync(path.join(dir, `${item.id}.eml`));
-    let result;
+      return { item, pending };
+    });
+    if (!claimed) continue;
+    const { item, pending } = claimed;
+    let raw;
     try {
-      result = await deliver(item, raw);
-    } catch (error) {
-      const reason = deferReason(error, host);
-      item.events.push({ at: now.toISOString(), event: 'Defer', description: `The message was deferred. ${reason.text}` });
-      summary.deferred += 1;
-      log(`inbound=${item.id} event=defer attempt=${item.attempts} reply="${reason.text}"`);
-      saveInbound(dir, item);
-      continue;
+      raw = fs.readFileSync(path.join(dir, `${item.id}.eml`));
+    } catch {
+      continue; // cleared meanwhile
     }
-    if (result.ok) {
-      item.status = 'delivered';
-      item.deliveredAt = now.toISOString();
-      item.events.push({ at: now.toISOString(), event: 'Send', description: `The message was sent to ${host}: ${result.reply}` });
-      summary.delivered += 1;
-      log(`inbound=${item.id} event=send attempt=${item.attempts} reply="${result.reply}"`);
-    } else if (/^4/.test(result.reply)) {
-      item.events.push({ at: now.toISOString(), event: 'Defer', description: `The message was deferred. Remote server returned '${result.reply}'` });
-      summary.deferred += 1;
-      log(`inbound=${item.id} event=defer attempt=${item.attempts} reply="${result.reply}"`);
-    } else {
-      fail(item, { now, reply: result.reply, expired: false, ndrDir });
-      summary.failed += 1;
-      log(`inbound=${item.id} event=fail reply="${result.reply}" ndr_to=<${item.from}>`);
+    const results = [];
+    for (const rcpt of pending) {
+      summary.tried += 1;
+      try {
+        results.push({ rcpt, result: await deliver(item, raw, [rcpt]) });
+      } catch (error) {
+        results.push({ rcpt, error });
+      }
     }
-    saveInbound(dir, item);
+    // Apply the results to the item as it is now (a command may have cleared it meanwhile).
+    withQueueLock(dir, () => {
+      const current = readItem(dir, item.id);
+      if (!current) return;
+      current.recipients = recipientsOf(current);
+      for (const { rcpt, result, error } of results) {
+        if (error) {
+          const reason = deferReason(error, host);
+          current.events.push({ at: now.toISOString(), event: 'Defer', rcpts: [rcpt], description: `The message was deferred. ${reason.text}` });
+          summary.deferred += 1;
+          log(`inbound=${item.id} event=defer rcpt=${rcpt} attempt=${current.attempts} reply="${reason.text}"`);
+        } else if (result.ok) {
+          current.recipients[rcpt] = { status: 'delivered', expired: false, at: now.toISOString() };
+          current.events.push({ at: now.toISOString(), event: 'Send', rcpts: [rcpt], description: `The message was sent to ${host}: ${result.reply}` });
+          summary.delivered += 1;
+          log(`inbound=${item.id} event=send rcpt=${rcpt} attempt=${current.attempts} reply="${result.reply}"`);
+        } else if (/^4/.test(result.reply)) {
+          current.events.push({ at: now.toISOString(), event: 'Defer', rcpts: [rcpt], description: `The message was deferred. Remote server returned '${result.reply}'` });
+          summary.deferred += 1;
+          log(`inbound=${item.id} event=defer rcpt=${rcpt} attempt=${current.attempts} reply="${result.reply}"`);
+        } else {
+          fail(current, [rcpt], { now, reply: result.reply, expired: false, ndrDir });
+          summary.failed += 1;
+          log(`inbound=${item.id} event=fail rcpt=${rcpt} reply="${result.reply}" ndr_to=<${item.from}>`);
+        }
+      }
+      settle(current);
+      if (current.status === 'delivered') current.deliveredAt = now.toISOString();
+      saveInbound(dir, current);
+    });
   }
   return summary;
 }
 
-// --- the trace, in Graph's shapes -----------------------------------------------------------
-
-// One row per recipient: exchangeMessageTrace.
-export function traceRows(items) {
-  return items.flatMap((item) => item.to.map((rcpt) => ({
-    id: item.traceId,
-    senderAddress: item.from,
-    recipientAddress: rcpt,
-    subject: item.subject,
-    messageId: item.messageId,
-    receivedDateTime: item.receivedAt,
-    size: item.size,
-    fromIP: SENDER_IP,
-    toIP: '',
-    status: item.status,
-  })));
+// Makes every pending letter due now; under the queue lock. Returns how many.
+export function retryInbound(dir, now = new Date()) {
+  return withQueueLock(dir, () => {
+    let due = 0;
+    for (const item of listInbound(dir)) {
+      if (item.status !== 'pending') continue;
+      item.nextAttemptAt = now.toISOString();
+      saveInbound(dir, item);
+      due += 1;
+    }
+    return due;
+  });
 }
 
-// exchangeMessageTraceDetail of one recipient.
-export function traceDetails(item) {
-  return item.events.map((event) => ({
-    id: item.traceId, messageId: item.messageId, dateTime: event.at, event: event.event, action: '', description: event.description, data: '<root></root>',
-  }));
+// Empties the queue; under the queue lock, so a pass in flight finds nothing to write back to.
+export function clearInbound(dir) {
+  withQueueLock(dir, () => fs.rmSync(dir, { recursive: true, force: true }));
+}
+
+// --- the trace, in Graph's shapes -----------------------------------------------------------
+
+// One row per recipient, with that recipient's status: exchangeMessageTrace.
+export function traceRows(items) {
+  return items.flatMap((item) => {
+    const recipients = recipientsOf(item);
+    return item.to.map((rcpt) => ({
+      id: item.traceId,
+      senderAddress: item.from,
+      recipientAddress: rcpt,
+      subject: item.subject,
+      messageId: item.messageId,
+      receivedDateTime: item.receivedAt,
+      size: item.size,
+      fromIP: SENDER_IP,
+      toIP: '',
+      status: recipients[rcpt].status,
+    }));
+  });
+}
+
+// exchangeMessageTraceDetail of one recipient: the events of the whole letter and its own.
+export function traceDetails(item, rcpt = null) {
+  const wanted = rcpt?.toLowerCase();
+  return item.events
+    .filter((event) => !event.rcpts || !wanted || event.rcpts.some((r) => r.toLowerCase() === wanted))
+    .map((event) => ({
+      id: item.traceId, messageId: item.messageId, dateTime: event.at, event: event.event, action: '', description: event.description, data: '<root></root>',
+    }));
 }
 
 // receivedDateTime ge X and receivedDateTime le Y, as Graph takes it; null bounds are open.
@@ -277,7 +382,7 @@ export function traceAnswer(dir, url, now = new Date()) {
     const recipient = rawRecipient.replace(/''/g, "'").toLowerCase();
     const item = items.find((entry) => entry.traceId === traceId && entry.to.some((to) => to.toLowerCase() === recipient));
     if (!item) return { status: 404, body: { error: { code: 'NotFound', message: 'No such message trace' } } };
-    return { status: 200, body: { value: traceDetails(item) } };
+    return { status: 200, body: { value: traceDetails(item, recipient) } };
   }
   if (!/\/admin\/exchange\/tracing\/messageTraces$/.test(url.pathname)) return { status: 404, body: { error: { code: 'NotFound' } } };
   const { start, end, recipient } = parseTraceFilter(url.searchParams.get('$filter'));

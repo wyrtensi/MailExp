@@ -149,6 +149,7 @@ const ERROR_KEYS = {
   outage_already_closed: 'admin.outages.errorAlreadyClosed',
   outage_delete_unconfirmed: 'admin.outages.errorDeleteUnconfirmed',
   retention_days_invalid: 'admin.outages.errorRetention',
+  trace_cooldown: 'admin.outages.errorCooldown',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -905,7 +906,11 @@ export function alertDetail(alert) {
     // Letters to the node still in EOP's queue after an outage (R-43): EOP gives up on the first
     // at `at`.
     case 'outage_letters_waiting':
-      return { key: 'admin.nodeOps.alertDetailOutageWaiting', values: { count: d.waiting ?? 0 }, at: d.soonestExpiresAt ?? null };
+      return {
+        key: d.asOf ? 'admin.nodeOps.alertDetailOutageWaitingAsOf' : 'admin.nodeOps.alertDetailOutageWaiting',
+        values: { count: d.waiting ?? 0, asOf: d.asOf ? new Date(d.asOf).toLocaleString() : '' },
+        at: d.soonestExpiresAt ?? null,
+      };
     default:
       return null;
   }

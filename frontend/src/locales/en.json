@@ -617,9 +617,6 @@
     },
     "outage": {
       "title": "Letters to you delayed or lost while the mail node was down",
-      "summaryWaiting": "{{count}} of {{total}} still wait in Microsoft's queue and arrive once the mail server takes them.",
-      "summaryLost": "{{count}} of {{total}} did not arrive: their senders received a non-delivery report.",
-      "summaryDelayed": "{{count}} arrived late. Nothing is missing.",
       "show": "Show letters",
       "hide": "Hide letters",
       "dismiss": "Got it",
@@ -638,7 +635,13 @@
       "columnReceived": "Received",
       "columnStatus": "Status",
       "receivedAt": "Received by Microsoft {{at}}",
-      "noSubject": "(no subject)"
+      "noSubject": "(no subject)",
+      "summaryWaiting_one": "{{count}} of {{total}} still waits in Microsoft's queue and arrives once the mail server takes it.",
+      "summaryWaiting_other": "{{count}} of {{total}} still wait in Microsoft's queue and arrive once the mail server takes them.",
+      "summaryLost_one": "{{count}} of {{total}} did not arrive: its sender received a non-delivery report.",
+      "summaryLost_other": "{{count}} of {{total}} did not arrive: their senders received a non-delivery report.",
+      "summaryDelayed_one": "{{count}} letter arrived late. Nothing is missing.",
+      "summaryDelayed_other": "{{count}} letters arrived late. Nothing is missing."
     }
   },
   "lockScreen": {
@@ -2568,8 +2571,11 @@
       "alertDetailBypass_one": "{{count}} message sent through {{relays}} instead of EOP in the last hour, at {{at}}. Check the relayhost of the domains and extra.cf.",
       "alertDetailBypass_other": "{{count}} messages sent through {{relays}} instead of EOP in the last hour, the last at {{at}}. Check the relayhost of the domains and extra.cf.",
       "alertOutageLettersWaiting": "Letters waiting in EOP's queue after a node outage",
-      "alertDetailOutageWaiting": "{{count}} still waiting; EOP gives up on the first {{at}}.",
-      "sourceTrace": "the message trace"
+      "sourceTrace": "the message trace",
+      "alertDetailOutageWaiting_one": "{{count}} letter still waiting; EOP gives up on it {{at}}.",
+      "alertDetailOutageWaiting_other": "{{count}} letters still waiting; EOP gives up on the first {{at}}.",
+      "alertDetailOutageWaitingAsOf_one": "{{count}} letter still waiting (trace of {{asOf}}); EOP gives up on it {{at}}.",
+      "alertDetailOutageWaitingAsOf_other": "{{count}} letters still waiting (trace of {{asOf}}); EOP gives up on the first {{at}}."
     },
     "quarantine": {
       "title": "Mail node quarantine",
@@ -2644,7 +2650,6 @@
     "outages": {
       "title": "Mail node outages",
       "description": "Times when the node could not take mail from EOP, found by the alert check or marked by hand, and what became of the letters EOP received meanwhile. EOP retries every 15 minutes for 24 hours, then returns a letter to its sender; the panel cannot make it retry or resend.",
-      "bannerWaiting": "Letters still waiting in EOP's queue: {{count}}.",
       "bannerTimeLeft": "EOP gives up on the first in {{hours}} h {{minutes}} min ({{at}}) and returns it to the sender.",
       "bannerExpired": "EOP's 24 hours for the first letter have passed; the next trace check shows what became of it.",
       "bannerAdvice": "Bring the node back before then. Do not click \"Fix now\" in the EAC alert: it makes EOP refuse the queued letters at once.",
@@ -2717,7 +2722,12 @@
       "errorNotFound": "The window no longer exists.",
       "errorAlreadyClosed": "The window is closed already.",
       "errorDeleteUnconfirmed": "Deleting a window needs a reason.",
-      "errorRetention": "Days to keep letters must be a whole number from 1 to 90."
+      "errorRetention": "Days to keep letters must be a whole number from 1 to 90.",
+      "bannerWaiting_one": "{{count}} letter is still waiting in EOP's queue.",
+      "bannerWaiting_other": "{{count}} letters are still waiting in EOP's queue.",
+      "asOf": "As of the trace check {{at}}.",
+      "stalled": "No failed check since {{at}}: the checks stopped telling (the node's settings or API key changed?). Close the window when the node takes mail.",
+      "errorCooldown": "The trace was checked a moment ago: try again in two minutes."
     }
   },
   "blockList": {

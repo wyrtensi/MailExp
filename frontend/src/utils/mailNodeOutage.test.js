@@ -76,7 +76,8 @@ describe('windows', () => {
 
   it('shows the banner only while letters wait', () => {
     assert.equal(waitingBanner({ waiting: 0 }), null);
-    assert.deepEqual(waitingBanner({ waiting: 2, soonestExpiresAt: '2026-10-03T10:00:00Z' }), { count: 2, soonest: '2026-10-03T10:00:00Z' });
+    assert.deepEqual(waitingBanner({ waiting: 2, soonestExpiresAt: '2026-10-03T10:00:00Z' }), { count: 2, soonest: '2026-10-03T10:00:00Z', asOf: null });
+    assert.equal(waitingBanner({ waiting: 1, soonestExpiresAt: 'x', asOf: '2026-10-02T09:00:00Z' }).asOf, '2026-10-02T09:00:00Z');
   });
 });
 

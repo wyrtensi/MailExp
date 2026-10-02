@@ -13,7 +13,8 @@ import {
 } from './lib.mjs';
 import { createServer, MAX_LINE, MAX_SIZE } from './server.mjs';
 import {
-  composeLetter, deferReason, loadInbound, parseTraceFilter, receiveInbound, runInboundPass, traceAnswer,
+  clearInbound, composeLetter, deferReason, loadInbound, parseTraceFilter, receiveInbound, retryInbound, runInboundPass, traceAnswer,
+  withQueueLock,
 } from './inbound.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -617,7 +618,7 @@ test('runInboundPass: a refused node defers every 15 minutes, a node back takes 
   assert.equal(stored.status, 'pending');
   assert.equal(stored.nextAttemptAt, '2026-10-02T10:15:00.000Z');
   assert.match(stored.events.at(-1).description, /450 4\.4\.316 Connection refused/);
-  assert.match(lines[0], /event=defer attempt=1 reply="450 4\.4\.316/);
+  assert.match(lines[0], /event=defer rcpt=anna@stage\.test attempt=1 reply="450 4\.4\.316/);
   // Not due before the next 15 minutes, unless forced.
   summary = await runInboundPass({ dir, ndrDir, deliver: refused, now: new Date('2026-10-02T10:05:00Z') });
   assert.equal(summary.tried, 0);
@@ -646,14 +647,14 @@ test('runInboundPass: past its expiry a letter fails with 4.4.7 and the sender g
   assert.equal(expired.status, 'failed');
   assert.equal(expired.expired, true);
   assert.match(expired.events.at(-1).description, /550 4\.4\.7 QUEUE\.Expired; message expired/);
-  const ndr = fs.readFileSync(path.join(ndrDir, `${expiring.id}.eml`), 'latin1');
+  const ndr = fs.readFileSync(path.join(ndrDir, `${expiring.id}-1.eml`), 'latin1');
   assert.match(ndr, /^To: partner@fabrikam\.example\r$/m);
   assert.match(ndr, /^Status: 4\.4\.7\r$/m);
   assert.match(ndr, /^Diagnostic-Code: smtp;550 4\.4\.7 QUEUE\.Expired; message expired\r$/m);
   assert.match(ndr, /report-type=delivery-status/);
   assert.equal(loadInbound(dir, refusedUser.id).item.expired, false);
-  assert.match(fs.readFileSync(path.join(ndrDir, `${refusedUser.id}.eml`), 'latin1'), /^Status: 5\.1\.1\r$/m);
-  assert.ok(lines.some((line) => /event=fail reply="550 4\.4\.7/.test(line) && /ndr_to=<partner@fabrikam\.example>/.test(line)));
+  assert.match(fs.readFileSync(path.join(ndrDir, `${refusedUser.id}-1.eml`), 'latin1'), /^Status: 5\.1\.1\r$/m);
+  assert.ok(lines.some((line) => /event=fail rcpt=anna@stage\.test reply="550 4\.4\.7/.test(line) && /ndr_to=<partner@fabrikam\.example>/.test(line)));
 });
 
 test('traceAnswer: Graph-shaped rows per recipient within the bounds, pages, details per recipient', () => {
@@ -692,4 +693,56 @@ test('eop.mjs: inbound send, list, retry, config, trace and ndr', T, async () =>
   assert.equal((await cli(['ndr', 'list'], env)).stdout, '');
   assert.equal((await cli(['ndr', 'show'], env)).code, 1);
   assert.match((await cli(['inbound', 'clear'], env)).stdout, /inbound queue cleared/);
+});
+
+test('runInboundPass: each recipient on its own; the trace shows each one\'s status and events', T, async () => {
+  const { dir, ndrDir } = inboundDirs('pass-3');
+  const item = letter(dir, { to: ['anna@stage.test', 'nobody@stage.test'] });
+  const summary = await runInboundPass({
+    dir, ndrDir, now: new Date('2026-10-02T10:00:00Z'),
+    deliver: async (_one, _raw, [rcpt]) => (rcpt === 'nobody@stage.test' ? { ok: false, reply: '550 5.1.1 User unknown' } : { ok: true, reply: '250 2.0.0 Ok' }),
+  });
+  assert.deepEqual(summary, { tried: 2, delivered: 1, deferred: 0, failed: 1, expired: 0 });
+  const stored = loadInbound(dir, item.id).item;
+  assert.equal(stored.recipients['anna@stage.test'].status, 'delivered');
+  assert.equal(stored.recipients['nobody@stage.test'].status, 'failed');
+  const rows = traceAnswer(dir, new URL('http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces')).body.value;
+  assert.deepEqual(rows.map((r) => [r.recipientAddress, r.status]), [['anna@stage.test', 'delivered'], ['nobody@stage.test', 'failed']]);
+  const base = `http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces/${item.traceId}/getDetailsByRecipient`;
+  assert.deepEqual(traceAnswer(dir, new URL(`${base}(recipientAddress='anna@stage.test')`)).body.value.map((e) => e.event), ['Receive', 'Send']);
+  assert.deepEqual(traceAnswer(dir, new URL(`${base}(recipientAddress='nobody@stage.test')`)).body.value.map((e) => e.event), ['Receive', 'Fail']);
+});
+
+test('smtpSend: a message the server accepted is delivered even if the connection drops before QUIT is answered', T, async () => {
+  const { server, port } = await sink((socket) => {
+    let body = false;
+    socket.write('220 sink\r\n');
+    socket.on('data', (chunk) => {
+      const text = chunk.toString('latin1');
+      if (body) { if (text.endsWith('\r\n.\r\n')) { body = false; socket.write('250 2.0.0 queued as XYZ\r\n'); } } else if (text.startsWith('DATA')) { body = true; socket.write('354 go\r\n'); } else if (text.startsWith('QUIT')) socket.destroy();
+      else socket.write('250 ok\r\n');
+    });
+  });
+  const result = await smtpSend({ host: '127.0.0.1', port, from: 'a@b', to: ['c@d'], raw: Buffer.from('Subject: s\r\n\r\nx\r\n') });
+  server.close();
+  assert.equal(result.ok, true);
+  assert.match(result.reply, /^250 2\.0\.0 queued as XYZ/);
+});
+
+test('retry and clear take the queue lock, wait for a holder and take over a stale lock', () => {
+  const { dir } = inboundDirs('lock-1');
+  letter(dir);
+  // A lock left by a process that died: older than 30 s.
+  fs.mkdirSync(`${dir}.lock`);
+  const old = new Date(Date.now() - 60000);
+  fs.utimesSync(`${dir}.lock`, old, old);
+  assert.equal(retryInbound(dir, new Date('2026-10-02T11:00:00Z')), 1);
+  assert.equal(fs.existsSync(`${dir}.lock`), false);
+  // While a holder works, nothing else writes; after it, clear empties the queue.
+  const order = [];
+  withQueueLock(dir, () => order.push('held'));
+  clearInbound(dir);
+  order.push('cleared');
+  assert.deepEqual(order, ['held', 'cleared']);
+  assert.equal(fs.existsSync(dir), false);
 });

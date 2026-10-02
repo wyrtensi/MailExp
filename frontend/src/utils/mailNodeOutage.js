@@ -129,9 +129,10 @@ export function causeParts(window) {
   return parts;
 }
 
-// The letters still waiting in EOP's queue over every window: { count, soonest } (soonest: the
-// expiry of the first EOP will give up on), from the server's summary.
+// The letters still waiting in EOP's queue over every window: { count, soonest, asOf } (soonest: the
+// expiry of the first EOP will give up on; asOf: the trace pass the count comes from), from the
+// server's summary.
 export function waitingBanner(waiting) {
   if (!waiting?.waiting) return null;
-  return { count: waiting.waiting, soonest: waiting.soonestExpiresAt ?? null };
+  return { count: waiting.waiting, soonest: waiting.soonestExpiresAt ?? null, asOf: waiting.asOf ?? null };
 }

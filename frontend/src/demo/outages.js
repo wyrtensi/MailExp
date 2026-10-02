@@ -89,7 +89,7 @@ export function demoOutageWaiting() {
   const now = Date.now();
   const waiting = letters.filter((l) => l.outcome === 'waiting' && Date.parse(l.receivedAt) + EXPIRY > now);
   const oldest = waiting.map((l) => Date.parse(l.receivedAt)).sort((a, b) => a - b)[0];
-  return { waiting: waiting.length, soonestExpiresAt: oldest ? new Date(oldest + EXPIRY).toISOString() : null };
+  return { waiting: waiting.length, soonestExpiresAt: oldest ? new Date(oldest + EXPIRY).toISOString() : null, asOf: waiting.length ? NOW_WINDOW.trace.checkedAt : null };
 }
 
 const parseTime = (value) => {
@@ -130,15 +130,16 @@ const find = (id) => {
 export function demoOutageRequest(verb, pathname, body) {
   if (verb === 'GET' && pathname === '/mail-node/outage-letters') {
     return clone({
-      traceConnected: true, node: true,
+      traceConnected: true, node: true, truncated: false,
       letters: letters
         .filter((l) => panelBoxes.has(l.recipient) && l.outcome !== 'other')
         // What the server gives users: no EOP details or node log fields.
         .map((l) => {
           const w = windows.find((entry) => entry.id === l.outageId);
           return {
+            key: `${l.messageId}|${l.recipient}`,
             outageId: l.outageId, recipient: l.recipient, sender: l.sender, subject: l.subject, receivedAt: l.receivedAt, outcome: l.outcome,
-            status: l.status, expired: l.expired, expiresAt: l.expiresAt, statusCode: l.statusCode, accountId: accountOf[l.recipient],
+            expired: l.expired, expiresAt: l.expiresAt, accountId: accountOf[l.recipient],
             outageStartedAt: w?.startedAt ?? null, outageEndedAt: w?.endedAt ?? null,
           };
         })
@@ -177,7 +178,7 @@ export function demoOutageRequest(verb, pathname, body) {
   const [, id, sub] = match;
   if (verb === 'GET' && sub === 'letters') {
     const w = find(id);
-    return clone({ window: present(w), letters: letters.filter((l) => l.outageId === id) });
+    return clone({ window: present(w), letters: letters.filter((l) => l.outageId === id).map((l) => ({ ...l, key: `${l.messageId}|${l.recipient}` })) });
   }
   if (verb === 'POST' && sub === 'close') {
     const w = find(id);
