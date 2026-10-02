@@ -466,8 +466,15 @@
         "bounced": "Not delivered",
         "expired": "Not delivered: the mail node gave up trying",
         "failed": "Not delivered (delivery report)",
-        "delayed": "Delayed (delivery report)"
+        "delayed": "Delayed (delivery report)",
+        "unknown": "Outcome unknown",
+        "leftQueue": "Outcome unknown: the letter left the mail node's queue without a final answer (an administrator may have deleted it)",
+        "stale": "No news for days: outcome unknown",
+        "sentDiscard": "Discarded on the mail node by a rule: not delivered to anyone",
+        "other": "Status: {{state}}"
       },
+      "notSent": "This letter was not sent from this mailbox, so there are no delivery details for it.",
+      "finalRecipient": "Handed on as {{address}}",
       "relay": "Handed to",
       "tls": "Encryption",
       "tlsLevel": {
@@ -481,8 +488,9 @@
       "acceptance": "Accepted by EOP as",
       "reply": "The server said",
       "queueId": "Queue id on the node",
-      "report": "Delivery report from {{mta}}: {{state}}, {{diagnostic}}",
-      "reportNoMta": "Delivery report: {{state}}, {{diagnostic}}",
+      "report": "Delivery report",
+      "reportFrom": "from {{mta}}",
+      "reportWords": "The remote server wrote",
       "none": "No delivery report came back for this letter. Delivery to each recipient is not confirmed: only failures and delays come back as reports.",
       "noneNode": "The mail node's log shows nothing more for this letter.",
       "noMessageId": "The letter has no Message-ID, so its delivery cannot be traced.",
@@ -499,7 +507,7 @@
         "terrl_trial": "The trial tenant reached its limit of external recipients (5.7.232). External mail stops until the limit frees up; tell the administrator.",
         "recipient_not_accepted": "The recipient's address was not accepted (5.4.1): it does not exist, or its domain refuses unknown addresses (Directory-Based Edge Blocking). Check the address.",
         "routing_loop": "The letter went round in a loop (5.4.14): the domain's MX, connectors or accepted domain type disagree. Tell the administrator.",
-        "temporary": "A temporary refusal (4.x.x): the mail node keeps trying for several days and reports if it gives up.",
+        "temporary": "A temporary refusal (4.x.x): the sending server tries again for a while and sends a report if it gives up. This is not a final failure.",
         "permanent": "A permanent refusal (5.x.x): this recipient will not get the letter as it is."
       }
     }

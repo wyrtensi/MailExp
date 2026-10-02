@@ -10,6 +10,8 @@ import { useMobile } from '../hooks/useMobile.js';
 import { safeViewMarkup, safeViewState } from '../utils/safeView.js';
 import SafeViewNotice from './SafeViewNotice.jsx';
 import SpamVerdict from './SpamVerdict.jsx';
+import DeliveryDetails from './DeliveryDetails.jsx';
+import DeliveryMarker from './DeliveryMarker.jsx';
 
 // The whole conversation stacked under an open letter, the way Gmail shows it: every letter of
 // the thread in this mailbox, oldest first. Each letter is a card: its header (sent or received,
@@ -18,7 +20,8 @@ import SpamVerdict from './SpamVerdict.jsx';
 // Shown only while the "Whole conversation" box above is ticked; the box resets on every open.
 // A stacked letter in Spam (spamFolderPaths, the open letter's account) or one EOP marked as
 // dangerous opens in safe view, like the open letter (utils/safeView.js). In a mail node mailbox
-// (nodeMailbox) such a letter in Spam also offers rspamd's verdict (SpamVerdict, R-20).
+// (nodeMailbox) such a letter in Spam also offers rspamd's verdict (SpamVerdict, R-20). A letter the
+// mailbox sent carries its delivery mark and, once expanded, its delivery details (R-17).
 export default function ConversationThread({ conversation, currentId, onOpen, spamFolderPaths = null, nodeMailbox = false }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
@@ -100,6 +103,7 @@ function ThreadLetter({ item, open, onToggle, onOpen, inSpamFolder, nodeMailbox,
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13 }}>
           <DirectionBadge direction={item.direction} compact={isMobile} />
+          <DeliveryMarker state={item.delivery_state} compact={isMobile} />
           <span style={{ fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>
             {personLabel(item.from_name, item.from_email)}
           </span>
@@ -119,6 +123,12 @@ function ThreadLetter({ item, open, onToggle, onOpen, inSpamFolder, nodeMailbox,
         )}
       </button>
       {open && <ThreadLetterBody id={item.id} onOpen={onOpen} inSpamFolder={inSpamFolder} nodeMailbox={nodeMailbox} t={t} />}
+      {/* A letter of this mailbox's own: what became of it, on request (R-17). */}
+      {open && item.direction === 'out' && (
+        <div style={{ padding: '0 14px' }}>
+          <DeliveryDetails messageId={item.id} deliveryState={item.delivery_state ?? null} compact />
+        </div>
+      )}
     </article>
   );
 }

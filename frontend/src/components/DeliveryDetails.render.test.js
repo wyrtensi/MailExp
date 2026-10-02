@@ -115,9 +115,12 @@ describe('DeliveryDetails', () => {
     const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-1' }));
     assert.equal(calls.length, 0);
     assert.equal(toggle(host).getAttribute('aria-expanded'), 'false');
+    // The panel exists only while open, so aria-controls names it only then.
+    assert.equal(toggle(host).getAttribute('aria-controls'), null);
     await click(toggle(host));
     assert.deepEqual(calls.map((c) => c.path), ['/api/mail/messages/m-1/delivery']);
     assert.equal(toggle(host).getAttribute('aria-expanded'), 'true');
+    assert.ok(dom.window.document.getElementById(toggle(host).getAttribute('aria-controls')));
     const row = host.querySelector('[data-delivery-recipient="test@example.com"]');
     assert.ok(row.textContent.includes('message.delivery.state.sentEop'));
     assert.equal(row.querySelector('[data-delivery-relay]').textContent, 'eop.test.local [172.22.1.7]:25');
@@ -163,13 +166,47 @@ describe('DeliveryDetails', () => {
     };
     const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-4' }));
     await click(toggle(host));
-    assert.equal(host.querySelector('[data-delivery-report]').textContent, 'message.delivery.report');
+    const report = host.querySelector('[data-delivery-report]');
+    assert.ok(report.textContent.startsWith('message.delivery.report'));
+    // The remote server's words: quoted plain text, never a link.
+    const words = report.querySelector('q[data-delivery-remote-words]');
+    assert.equal(words.textContent, '550 5.7.64 TenantAttribution');
+    assert.equal(report.querySelector('a'), null);
     assert.equal(host.querySelector('[data-delivery-coverage]'), null);
 
     answers['GET /api/mail/messages/m-5/delivery'] = { messageId: '<n@x>', node: false, log: null, recipients: [] };
     const empty = await mount(React.createElement(DeliveryDetails, { messageId: 'm-5' }));
     await click(toggle(empty));
     assert.equal(empty.querySelector('[data-delivery-note]').getAttribute('data-delivery-note'), 'none');
+  });
+
+  test('says a letter the mailbox did not send has no details', async () => {
+    answers['GET /api/mail/messages/m-7/delivery'] = { messageId: '<in@x>', owned: false, node: false, log: null, recipients: [] };
+    const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-7' }));
+    await click(toggle(host));
+    assert.equal(host.querySelector('[data-delivery-note]').getAttribute('data-delivery-note'), 'not-sent');
+  });
+
+  test('says an unknown outcome in words with a neutral tone, never as delivered', async () => {
+    answers['GET /api/mail/messages/m-8/delivery'] = {
+      messageId: '<u@x>', owned: true, node: true, log: { coverage: 'stored', error: null },
+      recipients: [
+        { recipient: 'a@example.org', state: 'unknown', stale: null, source: 'log', at: '2026-10-02T09:00:00.000Z', statusCode: '4.7.500', diagnostic: '451 busy', explanation: null, log: { ...LOG, state: 'unknown', reply: '451 busy', leftQueue: true, tls: null }, report: null },
+        { recipient: 'b@example.org', state: 'unknown', stale: 'deferred', source: 'log', at: '2026-09-20T09:00:00.000Z', statusCode: '4.7.500', diagnostic: '451 busy', explanation: null, log: { ...LOG, state: 'deferred', reply: '451 busy', tls: null }, report: null },
+        { recipient: 'c@example.org', state: 'sent', source: 'log', at: '2026-10-02T09:00:00.000Z', statusCode: '2.0.0', diagnostic: null, explanation: null, log: { relayHost: 'none', relayKind: 'discard', state: 'sent' }, report: null },
+      ],
+    };
+    const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-8' }));
+    await click(toggle(host));
+    const row = (address) => host.querySelector(`[data-delivery-recipient="${address}"]`);
+    assert.ok(row('a@example.org').textContent.includes('message.delivery.state.leftQueue'));
+    assert.equal(row('a@example.org').querySelector('[data-delivery-tone]').getAttribute('data-delivery-tone'), 'neutral');
+    assert.ok(row('b@example.org').textContent.includes('message.delivery.state.stale'));
+    assert.ok(row('c@example.org').textContent.includes('message.delivery.state.sentDiscard'));
+    assert.equal(row('c@example.org').querySelector('[data-delivery-tone]').getAttribute('data-delivery-tone'), 'failed');
+    assert.equal(row('c@example.org').querySelector('[data-delivery-tls]'), null);
+    // The node's reply is quoted too.
+    assert.equal(row('a@example.org').querySelector('q[data-delivery-remote-words]').textContent, '451 busy');
   });
 
   test('says when the details could not be read, with a retry', async () => {

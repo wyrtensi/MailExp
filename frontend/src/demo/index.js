@@ -1482,6 +1482,7 @@ function demoConversation(id) {
       id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
       from_name: m.from_name, from_email: m.from_email, to_addresses: m.to_addresses, cc_addresses: m.cc_addresses,
       has_attachments: !!m.has_attachments,
+      delivery_state: m.folder === 'Sent' ? (m.delivery_state ?? null) : null,
       direction: m.folder === mappings.drafts ? 'draft' : letterDirection(m, mappings, own),
     }));
   return { threadKey: current.thread_key, total: items.length, items };
@@ -1564,7 +1565,12 @@ function demoMessageIdFor(id) {
 function demoDelivery(id) {
   const item = messageById(id);
   if (!item) throw demoError('Message not found', 'message_not_found');
-  const node = !!accountFor(item.account_id)?.mail_node;
+  const account = accountFor(item.account_id);
+  // As on the server: only a letter the mailbox sent has delivery details.
+  if (item.folder !== 'Sent' || normalizeEmail(item.from_email) !== normalizeEmail(account?.email_address)) {
+    return { messageId: item.message_id, owned: false, node: false, log: null, recipients: [] };
+  }
+  const node = !!account?.mail_node;
   const kind = DEMO_DELIVERY_CASES.get(id);
   const at = new Date(Date.parse(item.date) + 2000).toISOString();
   const to = (item.to_addresses ?? []).map(r => normalizeEmail(r.email));
@@ -1600,6 +1606,7 @@ function demoDelivery(id) {
   const sentAt = item.date;
   return {
     messageId: item.message_id,
+    owned: true,
     node,
     log: node ? {
       coverage: recipients.length ? 'found' : (sentAt < DEMO_LOG_OLDEST ? 'gone' : 'not_found'), error: null, oldestAt: DEMO_LOG_OLDEST, sentAt,

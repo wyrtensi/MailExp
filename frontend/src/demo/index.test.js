@@ -32,8 +32,10 @@ test('sent letters carry delivery marks and details like the server answers them
   assert.ok(failed.recipients.length > 0);
   assert.ok(failed.recipients.every((r) => ['bounced', 'failed'].includes(r.state) && r.explanation?.key));
   assert.deepEqual(await demoRequest('GET', '/mail/messages/demo-005/delivery'), {
-    messageId: (await demoRequest('GET', '/mail/messages/demo-005')).message_id, node: false, log: null, recipients: [],
+    messageId: (await demoRequest('GET', '/mail/messages/demo-005')).message_id, owned: true, node: false, log: null, recipients: [],
   });
+  // A received letter has none.
+  assert.equal((await demoRequest('GET', '/mail/messages/demo-001/delivery')).owned, false);
 });
 
 test('advertised demo attachments expose pane fields and resolve to local content', async () => {

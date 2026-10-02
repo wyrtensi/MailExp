@@ -19,11 +19,21 @@ test('a sent recipient says where the letter went, never that it was read', () =
   assert.equal(deliveryStateKey({ state: 'sent', log: { relayKind: 'other' } }), 'message.delivery.state.sent');
   assert.equal(deliveryStateKey({ state: 'bounced' }), 'message.delivery.state.bounced');
   assert.equal(deliveryStateKey({ state: 'failed' }), 'message.delivery.state.failed');
-  assert.equal(deliveryStateKey({ state: 'weird' }), null);
+  assert.equal(deliveryStateKey({ state: 'sent', log: { relayKind: 'discard' } }), 'message.delivery.state.sentDiscard');
+});
+
+test('unknown outcomes are said as such, and an unexpected state never reads as delivered', () => {
+  assert.equal(deliveryStateKey({ state: 'unknown' }), 'message.delivery.state.unknown');
+  assert.equal(deliveryStateKey({ state: 'unknown', stale: 'deferred' }), 'message.delivery.state.stale');
+  assert.equal(deliveryStateKey({ state: 'unknown', log: { leftQueue: true } }), 'message.delivery.state.leftQueue');
+  assert.equal(deliveryStateKey({ state: 'weird' }), 'message.delivery.state.other');
+  assert.equal(deliveryStateKey({ state: 'toString' }), 'message.delivery.state.other');
 });
 
 test('tones follow the states', () => {
-  assert.deepEqual(['bounced', 'expired', 'failed', 'deferred', 'delayed', 'sent'].map(deliveryTone), ['failed', 'failed', 'failed', 'delayed', 'delayed', 'ok']);
+  assert.deepEqual(['bounced', 'expired', 'failed', 'deferred', 'delayed', 'sent', 'unknown', 'weird'].map((state) => deliveryTone({ state })),
+    ['failed', 'failed', 'failed', 'delayed', 'delayed', 'ok', 'neutral', 'neutral']);
+  assert.equal(deliveryTone({ state: 'sent', log: { relayKind: 'discard' } }), 'failed');
 });
 
 test('explanations only for the keys the server knows', () => {

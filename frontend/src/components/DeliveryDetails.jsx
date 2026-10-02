@@ -11,7 +11,8 @@ const linkButtonStyle = {
   background: 'none', border: 'none', padding: 0, color: 'var(--accent)', fontSize: 12, fontWeight: 500,
   cursor: 'pointer', fontFamily: 'inherit', textDecoration: 'underline',
 };
-const TONE_COLOR = { failed: 'var(--red)', delayed: 'var(--amber)', ok: 'var(--green, #22c55e)' };
+const TONE_COLOR = { failed: 'var(--red)', delayed: 'var(--amber)', ok: 'var(--green, #22c55e)', neutral: 'var(--text-secondary)' };
+const quoteStyle = { fontStyle: 'normal', wordBreak: 'break-word', whiteSpace: 'pre-wrap' };
 
 // "Delivery details" of a sent letter (R-17), under the letter in the message pane: an expander
 // that asks the server on request (GET /api/mail/messages/:id/delivery) what became of the letter
@@ -64,7 +65,7 @@ export default function DeliveryDetails({ messageId, deliveryState = null, compa
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        aria-controls={panelId}
+        aria-controls={open ? panelId : undefined}
         style={{
           display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: 'none', border: 'none', padding: 0,
           cursor: 'pointer', fontFamily: 'inherit', color: 'var(--text-primary)', fontSize: 13, fontWeight: 600, textAlign: 'left',
@@ -100,6 +101,7 @@ export default function DeliveryDetails({ messageId, deliveryState = null, compa
 function DeliveryBody({ details }) {
   const { t } = useTranslation();
   if (!details.messageId) return <div data-delivery-note="no-message-id">{t('message.delivery.noMessageId')}</div>;
+  if (details.owned === false) return <div data-delivery-note="not-sent">{t('message.delivery.notSent')}</div>;
   const note = coverageKey(details.log);
   const rows = details.recipients ?? [];
   return (
@@ -121,27 +123,46 @@ function DeliveryBody({ details }) {
   );
 }
 
+// A remote server's own words (a reply in the node's log, a report's diagnostic): quoted plain
+// text, never a link, and said to be the remote server's, not MailExpert's.
+function RemoteWords({ text, label }) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd style={{ margin: 0 }}>
+        <q data-delivery-remote-words style={quoteStyle}>{text}</q>
+      </dd>
+    </>
+  );
+}
+
+const dlStyle = { margin: '4px 0 0', display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 8, rowGap: 2, fontSize: 11 };
+
 function RecipientRow({ row }) {
   const { t } = useTranslation();
-  const tone = deliveryTone(row.state);
-  const stateKey = deliveryStateKey(row);
+  const tone = deliveryTone(row);
   const explain = explanationKey(row.explanation);
   const log = row.log;
   const report = row.report;
+  const finalRecipient = log?.finalRecipient || report?.finalRecipient || null;
+  const reportState = report ? reportStateKey(report.state) : null;
   return (
     <li data-delivery-recipient={row.recipient} data-delivery-state={row.state} style={{ borderTop: '1px solid var(--border)', paddingTop: 6 }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'baseline' }}>
         <span style={{ color: 'var(--text-primary)', fontWeight: 500, wordBreak: 'break-all' }}>{row.recipient}</span>
-        <span style={{ fontWeight: 600, color: TONE_COLOR[tone] }}>
-          {stateKey ? t(stateKey) : row.state}
-          {row.statusCode && tone !== 'ok' ? ` (${row.statusCode})` : ''}
+        <span data-delivery-tone={tone} style={{ fontWeight: 600, color: TONE_COLOR[tone] }}>
+          {t(deliveryStateKey(row), { state: row.state })}
+          {row.statusCode && (tone === 'failed' || tone === 'delayed') ? ` (${row.statusCode})` : ''}
         </span>
         {row.at && <span style={{ fontSize: 11 }}>{formatDateTime(row.at)}</span>}
       </div>
       {explain && <div data-delivery-explanation={row.explanation.key} style={{ color: 'var(--text-primary)' }}>{t(explain)}</div>}
+      {finalRecipient && (
+        <div data-delivery-final style={{ fontSize: 11 }}>{t('message.delivery.finalRecipient', { address: finalRecipient })}</div>
+      )}
       {log && (
-        <dl style={{ margin: '4px 0 0', display: 'grid', gridTemplateColumns: 'max-content 1fr', columnGap: 8, rowGap: 2, fontSize: 11 }}>
-          {log.relayHost && (
+        <dl style={dlStyle}>
+          {log.relayHost && log.relayKind !== 'discard' && (
             <>
               <dt>{t('message.delivery.relay')}</dt>
               <dd style={{ margin: 0, wordBreak: 'break-all' }} data-delivery-relay>
@@ -149,7 +170,7 @@ function RecipientRow({ row }) {
               </dd>
             </>
           )}
-          {log.relayKind !== 'local' && (
+          {log.relayKind !== 'local' && log.relayKind !== 'discard' && (
             <>
               <dt>{t('message.delivery.tls')}</dt>
               <dd style={{ margin: 0 }} data-delivery-tls={log.tls ? log.tls.level : 'missing'}>
@@ -171,12 +192,7 @@ function RecipientRow({ row }) {
               </dd>
             </>
           )}
-          {log.reply && log.state !== 'sent' && (
-            <>
-              <dt>{t('message.delivery.reply')}</dt>
-              <dd style={{ margin: 0, wordBreak: 'break-word' }}>{log.reply}</dd>
-            </>
-          )}
+          {log.reply && log.state !== 'sent' && <RemoteWords text={log.reply} label={t('message.delivery.reply')} />}
           {log.queueId && (
             <>
               <dt>{t('message.delivery.queueId')}</dt>
@@ -186,12 +202,17 @@ function RecipientRow({ row }) {
         </dl>
       )}
       {report && (
-        <div data-delivery-report={report.state} style={{ marginTop: 4, fontSize: 11 }}>
-          {t(report.remoteMta ? 'message.delivery.report' : 'message.delivery.reportNoMta', {
-            mta: report.remoteMta ?? '', state: reportStateKey(report.state) ? t(reportStateKey(report.state)) : report.state, diagnostic: report.diagnostic ?? report.statusCode ?? '',
-          })}
-        </div>
+        <dl data-delivery-report={report.state} style={dlStyle}>
+          <dt>{t('message.delivery.report')}</dt>
+          <dd style={{ margin: 0, wordBreak: 'break-word' }}>
+            {reportState ? t(reportState) : report.state}
+            {report.statusCode ? ` (${report.statusCode})` : ''}
+            {report.remoteMta ? `, ${t('message.delivery.reportFrom', { mta: report.remoteMta })}` : ''}
+          </dd>
+          {report.diagnostic && <RemoteWords text={report.diagnostic} label={t('message.delivery.reportWords')} />}
+        </dl>
       )}
     </li>
   );
 }
+

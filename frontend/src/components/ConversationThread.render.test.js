@@ -59,6 +59,7 @@ const BODIES = {
   plain: { html: '<p>See you at ten</p>', text: 'See you at ten', attachments: [], eopCategory: null },
   attachonly: { html: null, text: null, attachments: [{ filename: 'invoice.zip', part: '2' }], eopCategory: 'MALW' },
   spoofed: { html: '<p>Wire the money</p>', text: '', attachments: [], eopCategory: 'SPOOF' },
+  mine: { html: '<p>Our offer</p>', text: 'Our offer', attachments: [], eopCategory: null },
 };
 globalThis.fetch = async (url) => {
   const id = /\/messages\/([^/]+)\/body/.exec(String(url))?.[1];
@@ -75,6 +76,7 @@ const item = (id, folder = 'INBOX') => ({
 });
 const CONVERSATION = { threadKey: 't', total: 4, items: [
   item('open'), item('phish'), item('junk', 'Junk'), item('plain'), item('attachonly'), item('spoofed'),
+  { ...item('mine', 'Sent'), direction: 'out', delivery_state: 'failed' },
 ] };
 
 let root;
@@ -160,5 +162,18 @@ describe('Stacked letters in safe view (R-41)', () => {
     });
     assert.ok(ask(card('junk')), 'a node mailbox letter in Spam offers it');
     assert.equal(ask(card('plain')), undefined, 'not outside Spam');
+  });
+});
+
+describe('Delivery of a letter the mailbox sent (R-17)', () => {
+  test('carries its mark in the header and its delivery details once expanded, a received letter neither', async () => {
+    const mark = card('mine').querySelector('[data-delivery-marker]');
+    assert.equal(mark.getAttribute('data-delivery-marker'), 'failed');
+    assert.equal(card('mine').querySelector('[data-delivery-details]'), null, 'nothing until expanded');
+    const el = await expand('mine');
+    assert.ok(el.querySelector('[data-delivery-details]'));
+    assert.equal(el.querySelector('[data-delivery-summary]').getAttribute('data-delivery-summary'), 'failed');
+    assert.equal(card('plain').querySelector('[data-delivery-details]'), null);
+    assert.equal(card('plain').querySelector('[data-delivery-marker]'), null);
   });
 });

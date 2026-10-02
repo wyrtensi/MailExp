@@ -28,10 +28,16 @@ const STATE_KEYS = Object.freeze({
   expired: 'message.delivery.state.expired',
   failed: 'message.delivery.state.failed',
   delayed: 'message.delivery.state.delayed',
+  unknown: 'message.delivery.state.unknown',
 });
+// Not one of the states above (a newer server): said as such, never as delivered.
+const OTHER_STATE_KEY = 'message.delivery.state.other';
+const STALE_KEY = 'message.delivery.state.stale';
+const LEFT_QUEUE_KEY = 'message.delivery.state.leftQueue';
 const SENT_KEYS = Object.freeze({
   eop: 'message.delivery.state.sentEop',
   local: 'message.delivery.state.sentLocal',
+  discard: 'message.delivery.state.sentDiscard',
   other: 'message.delivery.state.sent',
 });
 const COVERAGE_KEYS = Object.freeze({
@@ -60,9 +66,13 @@ export function deliveryMark(state) {
 
 // The words for one recipient's state. A letter the log shows sent was handed to the next server:
 // EOP (relay named <EOP_HOST>), a mailbox on the node itself, or another server; never "read".
+// A rule on the node that discarded it is said as such. A delay with no news for the queue
+// lifetime (stale) and a letter that left the queue without a final line read as unknown.
 export function deliveryStateKey(row) {
   if (row?.state === 'sent') return own(SENT_KEYS, row.log?.relayKind) ?? SENT_KEYS.other;
-  return own(STATE_KEYS, row?.state);
+  if (row?.state === 'unknown' && row.stale) return STALE_KEY;
+  if (row?.state === 'unknown' && row.log?.leftQueue) return LEFT_QUEUE_KEY;
+  return own(STATE_KEYS, row?.state) ?? OTHER_STATE_KEY;
 }
 
 // The words for a state of a delivery report (failed or delayed), or null.
@@ -70,12 +80,14 @@ export function reportStateKey(state) {
   return state === 'failed' || state === 'delayed' ? STATE_KEYS[state] : null;
 }
 
-// 'failed', 'delayed' or 'ok': what the row's state is, for its icon and its colour (never the
-// only sign: the state is written out).
-export function deliveryTone(state) {
-  if (FAILED_STATES.includes(state)) return 'failed';
+// 'failed', 'delayed', 'ok' or 'neutral': what the row's state is, for its colour (never the only
+// sign: the state is written out). ok only for a letter handed on (sent, not discarded); unknown
+// and any state this screen does not know are neutral.
+export function deliveryTone(row) {
+  const state = row?.state;
+  if (FAILED_STATES.includes(state) || (state === 'sent' && row.log?.relayKind === 'discard')) return 'failed';
   if (DELAYED_STATES.includes(state)) return 'delayed';
-  return 'ok';
+  return state === 'sent' ? 'ok' : 'neutral';
 }
 
 // The plain-language explanation of a refusal or delay, or null.
