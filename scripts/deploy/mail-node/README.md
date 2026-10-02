@@ -47,6 +47,9 @@ Without `--dry-run` it does, in this order, and only where something differs:
 Exit codes: 0 done, 1 a step failed, 2 invalid input. Missing tools (`curl`, `jq`, `ipset`,
 `iptables`, `flock`) are installed with `apt-get`.
 
+The timer runs the copy in `/opt/mailexpert-node`, which every run of `setup.sh` replaces: to update
+it, pull the checkout and run `setup.sh` again (without options it reuses `node.env`).
+
 ## The firewall
 
 Docker publishes mailcow's ports past `ufw`, so the rules live in `DOCKER-USER`, which jumps to the
