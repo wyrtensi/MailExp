@@ -74,6 +74,11 @@ services:
       # the API definitely did not accept the message. smtp: always use SMTP for Gmail, like
       # every other provider. See docs/operations/google-oauth.md.
       GMAIL_SEND_TRANSPORT: ${GMAIL_SEND_TRANSPORT:-}
+      # The Microsoft tenant (EOP stage 7a): the tenant worker below and the shared secret both
+      # sides know (32+ characters). Empty: no tenant driver, the tenant steps stay manual. See
+      # docs/operations/mail-node.md, "Microsoft tenant".
+      TENANT_WORKER_URL: ${TENANT_WORKER_URL:-}
+      TENANT_WORKER_TOKEN: ${TENANT_WORKER_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +90,30 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    networks:
+      - mailexpert
+
+  # ── Tenant worker (Microsoft tenant, optional) ───────────────────────────────
+  # EXO PowerShell behind a whitelist of typed operations (deploy/tenant-worker). Only with
+  # COMPOSE_PROFILES=tenant; installs without a tenant never start or pull it. The application
+  # certificate (PFX) is mounted read-only from TENANT_CERT_DIR (app.pfx), its password is a
+  # compose secret from TENANT_PFX_PASSWORD_FILE; the worker refuses to start without either.
+  # No host port: the backend reaches it as http://tenant-worker:8080 (TENANT_WORKER_URL).
+  tenant-worker:
+    profiles: ["tenant"]
+    build:
+      context: deploy/tenant-worker
+    container_name: ${COMPOSE_PROJECT_NAME:-mailexpert}-tenant-worker
+    restart: unless-stopped
+    environment:
+      TENANT_WORKER_TOKEN: ${TENANT_WORKER_TOKEN:-}
+    volumes:
+      - ${TENANT_CERT_DIR:-./tenant-cert}:/certs:ro
+    secrets:
+      - tenant_pfx_password
+    read_only: true
+    tmpfs:
+      - /tmp
     networks:
       - mailexpert
 
@@ -158,6 +187,12 @@ services:
       - frontend
     networks:
       - mailexpert
+
+secrets:
+  # Read only by the tenant worker (profile "tenant"); compose resolves the file only for the
+  # services that start.
+  tenant_pfx_password:
+    file: ${TENANT_PFX_PASSWORD_FILE:-./tenant-cert/app.pfx.password}
 
 volumes:
   postgres_data:

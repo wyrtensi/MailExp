@@ -326,6 +326,15 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
   }
 });
 
+const hasModule = hasPwsh && spawnSync('pwsh', ['-NoProfile', '-Command', 'if (Get-Module -ListAvailable ExchangeOnlineManagement) { exit 0 } else { exit 1 }'], { stdio: 'ignore' }).status === 0;
+
+test('the image: ExchangeOnlineManagement imports as the worker user', { skip: !hasModule && 'the module is not installed here', timeout: 120000 }, () => {
+  const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+    'Import-Module ExchangeOnlineManagement -ErrorAction Stop; (Get-Command Connect-ExchangeOnline).Source'], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /ExchangeOnlineManagement/);
+});
+
 test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not on PATH', timeout: 60000 }, () => {
   // Written straight to the runner, past the Node checks: it must refuse on its own.
   const lines = [

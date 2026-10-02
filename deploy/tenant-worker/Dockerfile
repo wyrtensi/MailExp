@@ -12,17 +12,25 @@ FROM node:22-bookworm-slim AS node
 FROM mcr.microsoft.com/powershell:7.5-ubuntu-24.04@sha256:042240d57ec9e47e511033b92625a8d95875ee5860af3015992c248b58a8be81
 
 ARG EXO_MODULE_VERSION=3.9.2
-ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
+# HOME on /tmp: pwsh writes its config and module cache there, and the container runs with a
+# read-only root file system (/tmp is a tmpfs in docker-compose.yml).
+ENV HOME=/tmp \
+    POWERSHELL_TELEMETRY_OPTOUT=1 \
     POWERSHELL_UPDATECHECK=Off \
     TENANT_PFX_PATH=/certs/app.pfx \
     TENANT_PFX_PASSWORD_FILE=/run/secrets/tenant_pfx_password \
     TENANT_WORKER_PORT=8080
 
+# The install runs as root with HOME=/tmp: what it leaves there is removed. The module's import
+# looks into the all-users Scripts/InstalledScriptInfos folder (PowerShellGet); without it the
+# unprivileged worker user is refused there and the import fails.
 RUN pwsh -NoLogo -NoProfile -NonInteractive -Command \
       "\$ErrorActionPreference = 'Stop'; \
        Install-PSResource -Name ExchangeOnlineManagement -Version '${EXO_MODULE_VERSION}' -Scope AllUsers -TrustRepository -Quiet; \
        \$m = Get-Module -ListAvailable ExchangeOnlineManagement; \
        if (\$m.Version.ToString() -ne '${EXO_MODULE_VERSION}') { throw \"ExchangeOnlineManagement \$(\$m.Version) installed\" }" \
+ && rm -rf /tmp/.config /tmp/.local /tmp/.cache /tmp/* \
+ && mkdir -p /opt/microsoft/powershell/7/Scripts/InstalledScriptInfos \
  && useradd --system --uid 10001 --home-dir /app --shell /usr/sbin/nologin worker
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
