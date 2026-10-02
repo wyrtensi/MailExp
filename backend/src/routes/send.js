@@ -1,5 +1,7 @@
-import nodemailer from 'nodemailer';
-import { randomBytes, createHash, randomUUID } from 'crypto';
+// POST /send builds and checks a letter while the writer waits, then hands it to the durable job
+// queue (services/sendQueue.js): it goes out SEND_UNDO_WINDOW_MS later, so the writer can undo it,
+// or at the time they chose (send later). services/sendDelivery.js sends it from the job.
+import { randomBytes } from 'crypto';
 import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -7,83 +9,26 @@ import { sanitizeSignature, sanitizeComposeBody } from '../services/emailSanitiz
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { wrapSignatureHtml } from '../utils/signatureWrapper.js';
 import { htmlToText } from '../utils/htmlToText.js';
-import { redisClient } from '../services/redis.js';
-import { redactEmail } from '../utils/redact.js';
-import { resolveSentFolder } from '../utils/mailUtils.js';
-import { generateVCard } from '../utils/vcard.js';
-import { defaultAddressBookId } from '../services/addressBooks.js';
-import { recordAudit } from '../services/auditLog.js';
-import { createAccountSendTransport } from '../services/mailSendTransport.js';
-import { gmailThreadIdFromProviderThreadId } from '../services/gmailApiSender.js';
+import { buildRawMessage } from '../services/gmailApiSender.js';
 import { imapManager } from '../index.js';
-import { pluginRegistry } from '../plugins/registry.js';
 import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
-import { smtpFailureIsDefinite, sendFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
+import { smtpFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
+import { enqueueOutgoingSend, existingSendJob, parseSendAt, sendJobResponse } from '../services/sendQueue.js';
 
 // Re-exported for send.smtpConnectionFailure.test.js — the logic itself lives in
 // services/smtpErrors.js, shared with services/mailSendTransport.js and services/ruleForwarder.js.
 export { smtpFailureIsDefinite, smtpConnectionFailure };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The client's own context of a letter (reply or forward, the thread), handed back on undo or edit.
+const COMPOSE_CONTEXT_MAX_BYTES = 16 * 1024;
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function sanitizeSmtpError(err) {
-  const msg = err.message || '';
-  if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EHOSTUNREACH/i.test(msg)) {
-    return 'Could not connect to the mail server. Check your SMTP settings.';
-  }
-  if (/535|534|530|invalid.?login|authentication.?fail|bad.*credentials|username.*password|password.*username/i.test(msg)) {
-    return 'Authentication failed. Check your email account credentials.';
-  }
-  if (/throttl|rate.?limit|too many|4\.2\.|4\.7\.94/i.test(msg)) {
-    return 'The mail server is rate limiting sends. Please try again shortly.';
-  }
-  if (/550|5\.[13]\.|reject|blacklist|spam|not.?accept/i.test(msg)) {
-    return 'Message was rejected by the mail server.';
-  }
-  if (/TLS|SSL|certificate|handshake/i.test(msg)) {
-    return 'Secure connection to the mail server failed. Check your TLS settings.';
-  }
-  return 'Failed to send message. Please try again.';
-}
-
-// Extract name and email from an RFC 5322 address string.
-// Handles "Name <email>", "Name<email>", bare "<email>", and bare "email" forms.
-function parseAddress(str) {
-  const m = str.match(/^(.+?)\s*<([^>]+)>\s*$/);
-  if (m) return { name: m[1].trim().replace(/^"|"$/g, '').trim(), email: m[2].trim().toLowerCase() };
-  const bare = str.match(/^\s*<([^>]+)>\s*$/);
-  if (bare) return { name: '', email: bare[1].trim().toLowerCase() };
-  return { name: '', email: str.trim().toLowerCase() };
-}
-
-function mapRecipientList(list) {
-  return (list || []).map(addr => parseAddress(addr));
-}
-
 function buildSentSnippet(body, bodyIsHtml) {
   return bodyToPlain(body, bodyIsHtml).replace(/\s+/g, ' ').trim().substring(0, 200);
-}
-
-function scheduleSentMetadataUpsert(account, sentFolder, mailOptions, meta) {
-  if (!sentFolder || !mailOptions.messageId) return;
-  setImmediate(async () => {
-    for (const delay of [3000, 10000, 20000]) {
-      await new Promise(r => setTimeout(r, delay));
-      try {
-        const uid = await imapManager.findUidByMessageId(account, sentFolder, mailOptions.messageId);
-        if (uid) {
-          await imapManager.upsertSentMessageRecord(account, sentFolder, uid, meta);
-          return;
-        }
-      } catch (err) {
-        console.warn('Post-send sent metadata upsert failed:', err.message);
-      }
-    }
-  });
 }
 
 // Reject any recipient address that contains newlines, null bytes, or looks
@@ -146,20 +91,29 @@ router.post('/send', async (req, res) => {
     return res.status(400).json({ error: 'At least one recipient is required' });
   }
 
-  // Idempotency guard. The client sends a stable X-Idempotency-Key per logical send: a
-  // sequential retry after a lost success response returns the cached result, and a
-  // concurrent same-key submit is blocked by the reservation set just before delivery
-  // (below). Neither can produce a duplicate email.
+  const parsedSendAt = parseSendAt(req.body.sendAt);
+  if (parsedSendAt.error) return res.status(400).json({ error: parsedSendAt.error, code: parsedSendAt.code });
+  const { sendAt } = parsedSendAt;
+
+  let composeContext = null;
+  if (req.body.context !== undefined && req.body.context !== null) {
+    const serialized = typeof req.body.context === 'object' ? JSON.stringify(req.body.context) : null;
+    if (!serialized || Buffer.byteLength(serialized) > COMPOSE_CONTEXT_MAX_BYTES) {
+      return res.status(400).json({ error: 'context must be an object under 16 KB' });
+    }
+    composeContext = req.body.context;
+  }
+
+  // Idempotency: the client sends a stable X-Idempotency-Key per logical send. A retry (or a
+  // second click) with the same key gets the job the first one enqueued; the database's unique
+  // (kind, dedupe_key) makes two concurrent submits enqueue one job between them.
   const idempotencyKey = typeof req.headers['x-idempotency-key'] === 'string'
     ? req.headers['x-idempotency-key'].slice(0, 128)
     : null;
-  const idemKeyRedis = idempotencyKey ? `send_idem:${req.session.userId}:${idempotencyKey}` : null;
-  if (idemKeyRedis) {
-    let cached;
-    try { cached = await redisClient.get(idemKeyRedis); }
-    catch { return res.status(503).json({ error: 'Sending is temporarily unavailable. Please try again shortly.' }); }
-    if (cached === '__inflight__') return res.status(409).json({ error: 'This message is already being sent.', code: 'send_in_progress' });
-    if (cached) return res.json(JSON.parse(cached));
+  const dedupeKey = idempotencyKey ? `${req.session.userId}:${idempotencyKey}` : null;
+  if (dedupeKey) {
+    const existing = await existingSendJob(dedupeKey);
+    if (existing) return res.json(sendJobResponse(existing));
   }
 
   if (attachments !== undefined) {
@@ -198,7 +152,12 @@ router.post('/send', async (req, res) => {
   ]);
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
   const plaintextEmail = prefResult.rows[0]?.preferences?.plaintextEmail === true;
-  let account = result.rows[0];
+  const account = result.rows[0];
+  // A mailbox whose OAuth grant is gone cannot send: say so now, not after the undo window.
+  if (account.oauth_reconnect_required) {
+    const failure = OAUTH_SEND_FAILURES.oauth_reconnect_required;
+    return res.status(failure.status).json({ error: failure.error, code: 'oauth_reconnect_required' });
+  }
 
   // Resolve the From identity — account by default, alias if requested
   let fromName = account.sender_name || account.name;
@@ -299,334 +258,114 @@ router.post('/send', async (req, res) => {
     }
   }
 
-  let reservationAcquired = false;
-  let delivered = false; // true once transport.sendMail has actually handed off the message
+  const domain = fromEmail.split('@')[1] || 'mailexpert.local';
+  // A stable Message-ID, chosen now: the undo, the journal and the Sent copy all name the letter by it.
+  const mailOptions = {
+    messageId: `<${randomBytes(16).toString('hex')}@${domain}>`,
+    from: `${fromName} <${fromEmail}>`,
+    ...(fromReplyTo ? { replyTo: fromReplyTo } : {}),
+    to: normalizedTo.join(', ') || undefined,
+    cc: normalizedCc.join(', ') || undefined,
+    bcc: normalizedBcc.join(', ') || undefined,
+    subject: normalizedSubject,
+    ...(emailPriority !== 'normal' ? { priority: emailPriority } : {}),
+    text: effectiveSignature
+      ? bodyToPlain(body, bodyIsHtml) + '\n\n-- \n' + sigToPlainText(effectiveSignature) + (quotedBody || '')
+      : bodyToPlain(body, bodyIsHtml) + (quotedBody || ''),
+  };
+
+  let inlineImageAttachments = [];
+  if (!plaintextEmail) {
+    const rawHtml = bodyToHtml(body, bodyIsHtml) +
+      (effectiveSignature
+        ? wrapSignatureHtml(effectiveSignature)
+        : '') +
+      (quotedBodyHtml || (quotedBody ? textToHtml(quotedBody) : ''));
+    const embedded = embedInlineDataImages(rawHtml);
+    mailOptions.html = embedded.html;
+    inlineImageAttachments = embedded.attachments;
+  }
+
+  if (inReplyTo) {
+    mailOptions.inReplyTo = sanitizeHeaderValue(inReplyTo);
+    // Use the full prior references chain if available; fall back to just inReplyTo.
+    mailOptions.references = sanitizeHeaderValue(references || inReplyTo);
+  }
+
+  const uploadedAttachments = attachments?.length ? attachments.map(a => ({
+    filename: sanitizeHeaderValue(a.filename),
+    content: Buffer.from(a.content, 'base64'),
+    contentType: typeof a.contentType === 'string' ? a.contentType : 'application/octet-stream',
+  })) : [];
+  const allAttachments = [...inlineImageAttachments, ...uploadedAttachments, ...resolvedFwdAttachments];
+  // Final backstop over the whole set. The earlier checks (above, and inside the
+  // forwardedAttachments block) run before embedInlineDataImages() decodes any inline data:
+  // images in the body into their own attachments, so a message that stays under the cap only
+  // by way of its explicit/forwarded attachments but carries large embedded images would
+  // otherwise slip through uncounted.
+  const totalAttachmentBytes = allAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
+  if (totalAttachmentBytes > 26_214_400) {
+    return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+  }
+  if (allAttachments.length) {
+    mailOptions.attachments = allAttachments;
+  }
+
+  // Compile the letter once now, so a message nodemailer cannot build is refused while the writer
+  // waits rather than failing later in the queue. It is compiled again when it is sent, so its
+  // Date header is the moment of sending.
   try {
-    const sendTransport = await createAccountSendTransport(account);
-    if (sendTransport.error) {
-      return res.status(sendTransport.status).json(sendTransport.code ? { error: sendTransport.error, code: sendTransport.code } : { error: sendTransport.error });
-    }
-    account = sendTransport.account;
-    const transport = sendTransport.transport;
-
-    // Use a stable Message-ID so the SMTP copy and any IMAP APPEND reference the same message.
-    const domain = fromEmail.split('@')[1] || 'mailexpert.local';
-    const mailOptions = {
-      messageId: `<${randomBytes(16).toString('hex')}@${domain}>`,
-      from: `${fromName} <${fromEmail}>`,
-      ...(fromReplyTo ? { replyTo: fromReplyTo } : {}),
-      to: normalizedTo.join(', ') || undefined,
-      cc: normalizedCc.join(', ') || undefined,
-      bcc: normalizedBcc.join(', ') || undefined,
-      subject: normalizedSubject,
-      ...(emailPriority !== 'normal' ? { priority: emailPriority } : {}),
-      text: effectiveSignature
-        ? bodyToPlain(body, bodyIsHtml) + '\n\n-- \n' + sigToPlainText(effectiveSignature) + (quotedBody || '')
-        : bodyToPlain(body, bodyIsHtml) + (quotedBody || ''),
-    };
-
-    let inlineImageAttachments = [];
-    if (!plaintextEmail) {
-      const rawHtml = bodyToHtml(body, bodyIsHtml) +
-        (effectiveSignature
-          ? wrapSignatureHtml(effectiveSignature)
-          : '') +
-        (quotedBodyHtml || (quotedBody ? textToHtml(quotedBody) : ''));
-      const embedded = embedInlineDataImages(rawHtml);
-      mailOptions.html = embedded.html;
-      inlineImageAttachments = embedded.attachments;
-    }
-
-    if (inReplyTo) {
-      mailOptions.inReplyTo = sanitizeHeaderValue(inReplyTo);
-      // Use the full prior references chain if available; fall back to just inReplyTo.
-      mailOptions.references = sanitizeHeaderValue(references || inReplyTo);
-    }
-
-    // Gmail API threading: when replying, look up the original's X-GM-THRID (stored decimal, see
-    // services/threading/providerIds.js) and convert it to the hex form the API's `threadId`
-    // expects. Only meaningful for a Gmail mailbox; ignored by the SMTP path and by the fallback.
-    // message_id is stored with or without angle brackets depending on the ingest path (see
-    // gtdTransitions.js's runTransitionsForSentMessage and mailAccess.js's
-    // getThreadKeysForMessageIdHeaders), so both forms are matched here too.
-    let threadId = null;
-    if (mailOptions.inReplyTo && account.oauth_provider === 'google') {
-      const repliedToId = mailOptions.inReplyTo.replace(/[<>]/g, '').trim();
-      const threadRow = await query(
-        `SELECT provider_thread_id FROM messages
-          WHERE account_id = $1 AND message_id = ANY($2::text[]) AND provider_thread_id IS NOT NULL LIMIT 1`,
-        [account.id, [repliedToId, `<${repliedToId}>`]]
-      );
-      threadId = gmailThreadIdFromProviderThreadId(threadRow.rows[0]?.provider_thread_id ?? null);
-    }
-
-    const allAttachments = [
-      ...inlineImageAttachments,
-      ...(attachments?.length ? attachments.map(a => ({
-        filename: sanitizeHeaderValue(a.filename),
-        content: Buffer.from(a.content, 'base64'),
-        contentType: typeof a.contentType === 'string' ? a.contentType : 'application/octet-stream',
-      })) : []),
-      ...resolvedFwdAttachments,
-    ];
-    // Final backstop over the whole set. The earlier checks (above, and inside the
-    // forwardedAttachments block) run before embedInlineDataImages() decodes any inline data:
-    // images in the body into their own attachments, so a message that stays under the cap only
-    // by way of its explicit/forwarded attachments but carries large embedded images would
-    // otherwise slip through uncounted.
-    const totalAttachmentBytes = allAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
-    if (totalAttachmentBytes > 26_214_400) {
-      return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
-    }
-    if (allAttachments.length) {
-      mailOptions.attachments = allAttachments;
-    }
-
-    // OAuth providers (Gmail, Microsoft) save sent mail to IMAP automatically via their
-    // servers — skip APPEND and sync after a delay.  All other accounts use direct IMAP
-    // APPEND so sent mail reliably appears regardless of what the SMTP server does.
-    const serverAutoSaves = !!account.oauth_provider;
-
-    // For servers that don't auto-save, generate the raw MIME now so we can APPEND it.
-    // Use CRLF newlines ('windows'): RFC 5322 / IMAP APPEND require CRLF. A bare-LF message is
-    // stored verbatim by strict servers (e.g. PurelyMail/Dovecot), and downstream clients then
-    // mis-parse the headers — the reporter saw Subject and the To display-name dropped (#365). This
-    // only affects non-OAuth accounts (OAuth servers auto-save and skip this path); the SMTP-
-    // delivered copy uses a separate transport that is already CRLF, so only the Sent copy was wrong.
-    let rawMessage = null;
-    if (!serverAutoSaves) {
-      const streamTransport = nodemailer.createTransport({ streamTransport: true, newline: 'windows' });
-      const streamInfo = await streamTransport.sendMail(mailOptions);
-      const chunks = [];
-      await new Promise((resolve, reject) => {
-        streamInfo.message.on('data', c => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-        streamInfo.message.on('end', resolve);
-        streamInfo.message.on('error', reject);
-      });
-      rawMessage = Buffer.concat(chunks);
-    }
-
-    // Reserve the idempotency key atomically right before delivery so a concurrent
-    // same-key submit cannot also send (the post-send cache alone can't stop concurrent
-    // duplicates). Overwritten with the result on success; released in the catch only if
-    // delivery never happened, so a genuine retry after a pre-send failure can proceed.
-    if (idemKeyRedis) {
-      // TTL comfortably above the worst-case send (large attachment over a slow SMTP
-      // server) so the in-flight guard cannot lapse while this request is still running.
-      let reserved;
-      try { reserved = await redisClient.set(idemKeyRedis, '__inflight__', { NX: true, EX: 300 }); }
-      catch { return res.status(503).json({ error: 'Sending is temporarily unavailable. Please try again shortly.' }); }
-      if (reserved !== 'OK') return res.status(409).json({ error: 'This message is already being sent.', code: 'send_in_progress' });
-      reservationAcquired = true;
-    }
-
-    const sendInfo = await transport.sendMail(mailOptions, { threadId });
-    delivered = true;
-    // The Gmail API path normally keeps our own Message-ID (it sends the raw message as-is), but
-    // when it differs — verified via a post-send metadata GET, see gmailApiSender.js — adopt
-    // Gmail's id so the Sent-row reconciliation below (by Message-ID) actually finds the copy.
-    if (sendInfo?.messageId && sendInfo.messageId !== mailOptions.messageId) {
-      mailOptions.messageId = sendInfo.messageId;
-    }
-    // Journal the accepted message by its Message-ID and recipients; never its subject or body.
-    recordAudit({
-      actorUserId: req.session.userId,
-      accountId: account.id,
-      action: 'message.sent',
-      details: { messageId: mailOptions.messageId, to: normalizedTo, cc: normalizedCc, bcc: normalizedBcc },
-    });
-
-    // Auto-learn sent recipients so they rank above inbound-only senders in autocomplete.
-    // Fire-and-forget — a DB error here must never affect the send response.
-    const allRecipients = [...normalizedTo, ...normalizedCc, ...normalizedBcc];
-    if (allRecipients.length) {
-      const now = new Date();
-      setImmediate(async () => {
-        try {
-          const addressBookId = await defaultAddressBookId();
-
-          const results = await Promise.allSettled(allRecipients.map(addr => {
-            const { name, email } = parseAddress(addr);
-            if (!email) return Promise.resolve();
-            const primaryEmail = email.toLowerCase();
-            const displayName = name || primaryEmail;
-            const uid    = randomUUID();
-            const emails = [{ value: primaryEmail, type: 'other', primary: true }];
-            const vcard  = generateVCard({ uid, displayName, emails });
-            const etag   = createHash('md5').update(vcard).digest('hex');
-            // Upsert by (address book, primary_email) — bump send_count and promote from is_auto.
-            // On conflict, preserve an existing vcard; only fill it in if the row had none.
-            return query(`
-              INSERT INTO contacts (
-                address_book_id, uid, vcard, etag,
-                display_name, primary_email, emails, is_auto, send_count, last_sent
-              )
-              VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, false, 1, $8)
-              ON CONFLICT (address_book_id, primary_email) WHERE primary_email IS NOT NULL DO UPDATE
-                SET send_count   = contacts.send_count + 1,
-                    last_sent    = $8,
-                    is_auto      = false,
-                    display_name = CASE WHEN contacts.is_auto THEN $5 ELSE contacts.display_name END,
-                    vcard        = COALESCE(contacts.vcard, EXCLUDED.vcard),
-                    etag         = COALESCE(contacts.etag,  EXCLUDED.etag),
-                    updated_at   = NOW()
-            `, [addressBookId, uid, vcard, etag, displayName, primaryEmail, JSON.stringify(emails), now]);
-          }));
-
-          const failed = results.filter(r => r.status === 'rejected');
-          if (failed.length) console.warn('Contact upsert errors:', failed.map(r => r.reason?.message));
-        } catch (err) {
-          console.warn('Contact upsert setup error:', err.message);
-        }
-      });
-    }
-
-    // Get the Sent folder path (manual mapping takes priority over special_use auto-detect,
-    // but a mapping pointing at a non-selectable folder is ignored in favour of \Sent — #386).
-    const sentFolder = await resolveSentFolder(accountId, account.folder_mappings);
-    console.log(`Post-send: ${redactEmail(account.email_address)} sentFolder=${sentFolder} autoSaves=${serverAutoSaves}`);
-
-    // sentCopySaved: null = not applicable (server auto-saves, or no Sent folder resolved);
-    // true/false = whether OUR IMAP APPEND landed the Sent copy. Surfaced to the client so
-    // it can warn when a delivered message could not be saved to Sent.
-    let sentCopySaved = null;
-    const sentMeta = sentFolder ? {
-      messageId: mailOptions.messageId,
-      subject: normalizedSubject,
-      fromName,
-      fromEmail,
-      to: mapRecipientList(normalizedTo),
-      cc: mapRecipientList(normalizedCc),
-      snippet: buildSentSnippet(body, bodyIsHtml),
-      date: new Date(),
-      // Carried so the Sent row threads into its conversation via the References chain
-      // rather than orphaning at its own Message-ID (#378).
-      inReplyTo: mailOptions.inReplyTo || null,
-      references: mailOptions.references || null,
-    } : null;
-
-    if (sentFolder) {
-      if (rawMessage) {
-        // Non-auto-saving account: APPEND the Sent copy ourselves — exactly ONCE. IMAP
-        // APPEND is NOT idempotent (unlike a \Seen flag), so we must not retry: a retry
-        // whose first attempt merely timed out (but still lands on the server) would store
-        // a SECOND copy. Bound the wait so a stalled connection can't hang the response;
-        // the abandoned append can at worst still save the single copy. On failure, warn
-        // the user and schedule a fallback sync in case the append landed late. Audit [2].
-        sentCopySaved = false;
-        try {
-          const { uid } = await Promise.race([
-            imapManager.appendToSent(account, sentFolder, rawMessage),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('Sent APPEND timed out')), 20000)),
-          ]);
-          sentCopySaved = true;
-          if (uid && sentMeta) {
-            await imapManager.upsertSentMessageRecord(account, sentFolder, uid, sentMeta)
-              .catch(err => console.warn('Sent metadata upsert failed:', err.message));
-          }
-          setTimeout(() => {
-            imapManager.syncFolderOnDemand(account, sentFolder, { background: true })
-              // Once the Sent copy is in the DB, notify label plugins the message synced: GTD
-              // re-runs transitions for its thread (a reply to a Todo/Someday thread means the
-              // owner acted, so that label should drop). The sent message reaches no other hook
-              // (Sent isn't INBOX, and the tick watches only the state folders), so this is the
-              // only trigger. The hook swallows per-plugin errors — the next inbound sync / tick
-              // self-heals.
-              .then(() => pluginRegistry.runHook('onSentMessage', { imapManager: imapManager.pluginFacade, account, messageId: mailOptions.messageId }))
-              .catch(e => console.error(`Post-append sync failed: ${e.message}`));
-          }, 1000);
-        } catch (appendErr) {
-          console.error(`IMAP append to Sent failed for ${redactEmail(account.email_address)}/${sentFolder}: ${appendErr.message}`);
-          // The append may still have landed (or land shortly) — pull the folder so a
-          // late-completing append self-corrects the DB rather than staying invisible.
-          setTimeout(() => {
-            imapManager.syncFolderOnDemand(account, sentFolder, { background: true })
-              .catch(e => console.error(`Post-append fallback sync failed: ${e.message}`));
-          }, 8000);
-        }
-      } else {
-        // Server auto-saves via SMTP; seed metadata once the Sent copy is searchable.
-        if (sentMeta) scheduleSentMetadataUpsert(account, sentFolder, mailOptions, sentMeta);
-        // Server auto-saves via SMTP; just sync after a delay. Two attempts because the
-        // provider (e.g. Gmail) can be slow to expose the sent message; the 3s pass usually
-        // catches it, the 15s pass is the safety net. GTD transitions run after each: the 3s
-        // attempt may miss (Sent copy not yet visible → empty thread set → no-op) and the 15s
-        // attempt then catches it; if 3s already stripped, 15s is an idempotent no-op.
-        const syncAttempt = (label) => imapManager.syncFolderOnDemand(account, sentFolder, { background: true })
-          .then(() => {
-            console.log(`Post-send ${label} sync done: ${redactEmail(account.email_address)}/${sentFolder}`);
-            return pluginRegistry.runHook('onSentMessage', { imapManager: imapManager.pluginFacade, account, messageId: mailOptions.messageId });
-          })
-          .catch(e => console.error(`Post-send ${label} sync failed: ${e.message}`));
-        setTimeout(() => syncAttempt('3s'), 3000);
-        setTimeout(() => syncAttempt('15s'), 15000);
-      }
-    }
-
-    const sendResult = { ok: true };
-    // Surface only the problem case so existing success handling is unchanged; the UI warns
-    // when a delivered message could not be saved to the account's Sent folder.
-    if (sentCopySaved === false) sendResult.sentCopySaved = false;
-    // Tell the client which Sent folder we actually resolved to, so its post-send "View"
-    // navigates to the real folder rather than recomputing from a possibly-stale mapping (#386).
-    if (sentFolder) sendResult.sentFolder = sentFolder;
-    // Overwrite the in-flight reservation with the final result so a retry after a lost
-    // response returns this instead of re-sending.
-    if (idemKeyRedis) redisClient.set(idemKeyRedis, JSON.stringify(sendResult), { EX: 86400 }).catch(() => {});
-    res.json(sendResult);
+    await buildRawMessage(mailOptions);
   } catch (err) {
-    if (delivered) {
-      // SMTP already accepted this message. A Sent-folder or metadata failure
-      // must not invite the user to send it again.
-      console.error('Post-send processing failed:', err.message);
-      const sendResult = { ok: true, sentCopySaved: false };
-      if (idemKeyRedis) redisClient.set(idemKeyRedis, JSON.stringify(sendResult), { EX: 86400 }).catch(() => {});
-      return res.json(sendResult);
-    }
-    // A connection/handshake failure never reached AUTH, so it always names accountId's own
-    // configured host — safe (and useful) to log even before we know which branch below applies.
-    const connectionFailure = smtpConnectionFailure(err, account);
-    if (connectionFailure) {
-      console.error(`Send failed: ${err.message} [${connectionFailure.code}=${connectionFailure.reason} target=${connectionFailure.host}:${connectionFailure.port}]`);
-    } else {
-      console.error('Send failed:', err.message);
-    }
-    // The transport's forced token refresh after an SMTP AUTH rejection (or a Gmail API 401
-    // that survived its own forced retry) failed. AUTH precedes MAIL FROM and the Gmail API
-    // request was never accepted either way, so nothing was delivered; answer with the token
-    // manager's stable code only.
-    const oauthFailure = Object.hasOwn(OAUTH_SEND_FAILURES, err?.code) ? OAUTH_SEND_FAILURES[err.code] : null;
-    // A definite, non-OAuth mail-send failure that isn't SMTP-shaped: a classified Gmail API
-    // rejection, or the SMTP transport setup failing while falling back from the API (see
-    // services/mailSendTransport.js, which sets `.definite`/`.status`/`.code` on these). Checked
-    // before the uncertain branch so it is never mistaken for "may have been delivered".
-    const mailSendFailure = (!oauthFailure && err?.definite === true && typeof err?.status === 'number')
-      ? { status: err.status, code: err.code, error: err.message }
-      : null;
-    if (reservationAcquired && !oauthFailure && !mailSendFailure && !sendFailureIsDefinite(err)) {
-      // The server may already have accepted the message. Keep the reservation, so a retry with
-      // the same key is refused while it lasts instead of delivering a second copy.
-      return res.status(502).json({
-        error: 'The connection to the mail server broke while sending. The message may have been delivered: check Sent before sending it again.',
-        code: 'send_uncertain',
-      });
-    }
-    // A failure before reservation must not delete a concurrent request's lock.
-    if (idemKeyRedis && reservationAcquired) redisClient.del(idemKeyRedis).catch(() => {});
-    if (oauthFailure) return res.status(oauthFailure.status).json({ error: oauthFailure.error, code: err.code });
-    if (mailSendFailure) {
-      return res.status(mailSendFailure.status).json(mailSendFailure.code ? { error: mailSendFailure.error, code: mailSendFailure.code } : { error: mailSendFailure.error });
-    }
-    if (connectionFailure) {
-      return res.status(502).json({
-        error: connectionFailure.error,
-        code: connectionFailure.code,
-        reason: connectionFailure.reason,
-        host: connectionFailure.host,
-        port: connectionFailure.port,
-      });
-    }
-    res.status(500).json({ error: sanitizeSmtpError(err) });
+    console.error('Send: failed to build the message:', err.message);
+    return res.status(400).json({ error: 'Failed to build the message for sending.', code: 'mail_build_failed' });
+  }
+
+  // What the composer reopens with on undo or edit (no attachment contents: those are in the
+  // letter itself), and a small client context (reply or forward, the thread) it hands back as is.
+  const compose = {
+    accountId: account.id,
+    aliasId: aliasId || null,
+    to: normalizedTo,
+    cc: normalizedCc,
+    bcc: normalizedBcc,
+    subject: normalizedSubject,
+    body: typeof body === 'string' ? body : '',
+    bodyIsHtml: !!bodyIsHtml,
+    quotedBody: typeof quotedBody === 'string' ? quotedBody : null,
+    quotedBodyHtml: typeof quotedBodyHtml === 'string' ? quotedBodyHtml : null,
+    ...(editedSignature !== undefined ? { editedSignature: editedSignature || null } : {}),
+    inReplyTo: inReplyTo ? sanitizeHeaderValue(inReplyTo) : null,
+    references: references ? sanitizeHeaderValue(references) : null,
+    priority: emailPriority,
+    attachments: uploadedAttachments.map(a => ({ filename: a.filename, contentType: a.contentType, size: a.content.length })),
+    forwardedAttachments: (forwardedAttachments || []).map(fa => ({ messageId: fa.messageId, part: fa.part })),
+    context: composeContext,
+  };
+  const meta = {
+    to: normalizedTo,
+    cc: normalizedCc,
+    bcc: normalizedBcc,
+    subject: normalizedSubject,
+    fromName,
+    fromEmail,
+    snippet: buildSentSnippet(body, bodyIsHtml),
+  };
+  const uploads = uploadedAttachments.map((_, i) => inlineImageAttachments.length + i);
+
+  try {
+    const { job } = await enqueueOutgoingSend({
+      userId: req.session.userId,
+      accountId: account.id,
+      dedupeKey,
+      sendAt,
+      compose,
+      mail: { options: mailOptions, meta, uploads },
+    });
+    res.json(sendJobResponse(job));
+  } catch (err) {
+    console.error('Send: enqueue failed:', err.message);
+    res.status(503).json({ error: 'Sending is temporarily unavailable. Please try again shortly.' });
   }
 });
 

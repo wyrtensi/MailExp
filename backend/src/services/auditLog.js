@@ -1,6 +1,7 @@
 import { query } from './db.js';
 
-// Everything a user can do that the journal records, plus the Cloudflare Access sync stopping
+// Everything a user can do that the journal records (a letter queued, cancelled, moved to another
+// time or failed after its author left included), plus the Cloudflare Access sync stopping
 // itself, MailExpert restoring a rejected mail node password, taking in the mail node domains
 // that already had mailboxes, a scheduled DNS check whose result changed, a mail node alert that
 // was raised or cleared, and an administrator releasing, deleting or training a letter of the
@@ -9,7 +10,9 @@ export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
   'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
-  'message.sent', 'message.deleted', 'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+  'message.sent', 'message.deleted', 'message.move_reverted',
+  'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
+  'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
   'access.sync_aborted',
   'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
   'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',

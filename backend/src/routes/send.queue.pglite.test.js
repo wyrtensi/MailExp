@@ -1,0 +1,293 @@
+// Undo send and send later end to end against a real (in-process) Postgres engine and the real
+// migrations: POST /send enqueues the letter, the undo cancels it while it waits, the worker sends
+// it once the window or the scheduled time has passed (the journal's message.sent with the real
+// Message-ID), a worker that dies mid-delivery leaves it for its author, and a failure keeps it.
+// The mail server is a mock transport; PGlite is one connection, so a race is its two orders.
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createRealSchemaDb } from '../services/testing/realSchema.js';
+
+const dbState = { db: null };
+vi.mock('../services/db.js', () => ({
+  query: (sql, params) => dbState.db.query(sql, params),
+  withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
+}));
+vi.mock('../middleware/auth.js', () => ({
+  requireAuth: (req, _res, next) => { req.session = { userId: req.get('x-test-user') }; next(); },
+}));
+const imapManager = vi.hoisted(() => ({
+  broadcast: () => {},
+  syncFolderOnDemand: async () => {},
+  findUidByMessageId: async () => null,
+}));
+vi.mock('../index.js', () => ({ imapManager }));
+vi.mock('../services/mailSendTransport.js', () => ({ createAccountSendTransport: vi.fn() }));
+vi.mock('../utils/mailUtils.js', () => ({ resolveSentFolder: vi.fn(async () => null) }));
+
+const express = (await import('express')).default;
+const sendRoutes = (await import('./send.js')).default;
+const scheduledRoutes = (await import('./scheduled.js')).default;
+const { createAccountSendTransport } = await import('../services/mailSendTransport.js');
+const { registerSendJobKind, SEND_JOB_KIND } = await import('../services/sendQueue.js');
+const { claimDueJobs, runJob, runDueJobs, sweepExpiredLeases, unregisterJobKind } = await import('../services/jobQueue.js');
+
+const ACCOUNT = '40000000-0000-4000-8000-000000000001';
+const ANNA = '42000000-0000-4000-8000-000000000001';
+const BOB = '42000000-0000-4000-8000-000000000002';
+const ADMIN = '42000000-0000-4000-8000-000000000003';
+let db;
+let server;
+let base;
+const sendMail = vi.fn();
+
+beforeAll(async () => {
+  db = await createRealSchemaDb();
+  dbState.db = db;
+  const app = express();
+  app.use(express.json({ limit: '35mb' }));
+  app.use('/api/mail', sendRoutes);
+  app.use('/api/mail', scheduledRoutes);
+  await new Promise(resolve => { server = app.listen(0, resolve); });
+  base = `http://127.0.0.1:${server.address().port}`;
+}, 120000);
+afterAll(async () => {
+  await new Promise(resolve => server.close(resolve));
+  await db.close();
+});
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(console, 'log').mockImplementation(() => {});
+  imapManager.broadcast = vi.fn();
+  registerSendJobKind({ imapManager });
+  await db.exec('DELETE FROM outgoing_messages; DELETE FROM jobs; DELETE FROM mailbox_audit_log; DELETE FROM contacts; DELETE FROM email_accounts; DELETE FROM users;');
+  await db.query("INSERT INTO users (id, username, email) VALUES ($1, 'anna', 'anna@example.com'), ($2, 'bob', 'bob@example.com')", [ANNA, BOB]);
+  await db.query("INSERT INTO users (id, username, email, is_admin) VALUES ($1, 'root', 'root@example.com', true)", [ADMIN]);
+  await db.query("INSERT INTO email_accounts (id, name, email_address) VALUES ($1, 'Office', 'office@example.com')", [ACCOUNT]);
+  const account = (await db.query('SELECT * FROM email_accounts WHERE id = $1', [ACCOUNT])).rows[0];
+  createAccountSendTransport.mockResolvedValue({ account, transport: { sendMail } });
+  sendMail.mockReset();
+  sendMail.mockResolvedValue({});
+});
+
+const call = (method, path, { user = ANNA, body, key } = {}) => fetch(`${base}/api/mail${path}`, {
+  method,
+  headers: { 'Content-Type': 'application/json', 'x-test-user': user, ...(key ? { 'X-Idempotency-Key': key } : {}) },
+  ...(body ? { body: JSON.stringify(body) } : {}),
+});
+const LETTER = {
+  accountId: ACCOUNT, to: ['you@example.com'], bcc: ['hidden@example.com'], subject: 'Quarterly numbers',
+  body: '<p>Confidential body text</p>', bodyIsHtml: true,
+  attachments: [{ filename: 'notes.txt', content: Buffer.from('hello notes').toString('base64'), contentType: 'text/plain' }],
+  context: { isReply: false, threadId: null },
+};
+const send = async (extra = {}, opts = {}) => {
+  const res = await call('POST', '/send', { body: { ...LETTER, ...extra }, key: opts.key ?? `k-${Math.random()}`, user: opts.user });
+  return { status: res.status, body: await res.json() };
+};
+const job = async (id) => (await db.query('SELECT * FROM jobs WHERE id = $1', [id])).rows[0];
+const content = async (id) => (await db.query('SELECT job_id FROM outgoing_messages WHERE job_id = $1', [id])).rows[0];
+const makeDue = (id) => db.query("UPDATE jobs SET run_at = now() - interval '1 second' WHERE id = $1", [id]);
+const audit = async (action) => (await db.query('SELECT * FROM mailbox_audit_log WHERE action = $1 ORDER BY id', [action])).rows;
+
+describe('Send with the undo window', () => {
+  it('enqueues the letter due five seconds later and sends nothing yet', async () => {
+    const { status, body } = await send();
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: true, status: 'queued', scheduled: false });
+    const secs = (Date.parse(body.sendAt) - Date.now()) / 1000;
+    expect(secs).toBeGreaterThan(3);
+    expect(secs).toBeLessThanOrEqual(5.5);
+    expect(await job(body.jobId)).toMatchObject({ kind: SEND_JOB_KIND, status: 'queued', created_by: ANNA, account_id: ACCOUNT });
+    expect(await content(body.jobId)).toBeTruthy();
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    await vi.waitFor(async () => expect(await audit('message.send_queued')).toHaveLength(1));
+    const [entry] = await audit('message.send_queued');
+    expect(entry.details).toMatchObject({ jobId: body.jobId, scheduled: false });
+    expect(JSON.stringify(entry.details)).not.toMatch(/Quarterly|Confidential/);
+  });
+
+  it('enqueues once for a double click with the same idempotency key', async () => {
+    const first = await send({}, { key: 'same' });
+    const second = await send({}, { key: 'same' });
+    expect(second.body.jobId).toBe(first.body.jobId);
+    expect((await db.query('SELECT count(*)::int AS n FROM jobs')).rows[0].n).toBe(1);
+  });
+
+  it('undo cancels the letter and gives back what was composed, attachments included', async () => {
+    const { body } = await send();
+    const res = await call('POST', `/scheduled/${body.jobId}/cancel`, { body: { reason: 'undo' } });
+    expect(res.status).toBe(200);
+    const { compose } = await res.json();
+    expect(compose).toMatchObject({
+      accountId: ACCOUNT, to: ['you@example.com'], bcc: ['hidden@example.com'], subject: 'Quarterly numbers',
+      body: '<p>Confidential body text</p>', bodyIsHtml: true, context: { isReply: false, threadId: null },
+    });
+    expect(compose.attachments).toEqual([{ filename: 'notes.txt', contentType: 'text/plain', size: 11, content: Buffer.from('hello notes').toString('base64') }]);
+    expect(await job(body.jobId)).toMatchObject({ status: 'cancelled' });
+    expect(await content(body.jobId)).toBeUndefined();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    await vi.waitFor(async () => expect(await audit('message.send_cancelled')).toHaveLength(1));
+  });
+
+  it('refuses the undo once a worker has started sending', async () => {
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await claimDueJobs(10);
+    const res = await call('POST', `/scheduled/${body.jobId}/cancel`, { body: { reason: 'undo' } });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('send_started');
+  });
+
+  it('sends once the window has passed: the real Message-ID journaled, the letter content gone, the author told', async () => {
+    let ours;
+    sendMail.mockImplementation(async (options) => {
+      ours = options.messageId;
+      return { via: 'api', messageId: ours.replace('@', '.real@') };
+    });
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+    const [options] = sendMail.mock.calls[0];
+    expect(options).toMatchObject({ subject: 'Quarterly numbers', to: 'you@example.com', bcc: 'hidden@example.com' });
+    expect(options.attachments.map(a => a.filename)).toContain('notes.txt');
+    expect(Buffer.isBuffer(options.attachments.find(a => a.filename === 'notes.txt').content)).toBe(true);
+    expect(await job(body.jobId)).toMatchObject({ status: 'done' });
+    expect(await content(body.jobId)).toBeUndefined();
+    await vi.waitFor(async () => expect(await audit('message.sent')).toHaveLength(1));
+    const [sent] = await audit('message.sent');
+    expect(sent.actor_user_id).toBe(ANNA);
+    expect(ours).toMatch(/^<[0-9a-f]{32}@example\.com>$/);
+    expect(sent.details).toEqual({ messageId: ours.replace('@', '.real@'), to: ['you@example.com'], cc: [], bcc: ['hidden@example.com'] });
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'send_done', jobId: body.jobId }), ANNA));
+    // A second run sends nothing more.
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+  });
+
+  it('still sends a letter queued before a restart', async () => {
+    const { body } = await send();
+    unregisterJobKind(SEND_JOB_KIND);
+    registerSendJobKind({ imapManager });
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+    expect((await job(body.jobId)).status).toBe('done');
+  });
+
+  it('refuses a letter it cannot build before anything is queued', async () => {
+    const { status } = await send({ to: [], cc: [], bcc: [] });
+    expect(status).toBe(400);
+    expect((await db.query('SELECT count(*)::int AS n FROM jobs')).rows[0].n).toBe(0);
+  });
+});
+
+describe('Send later', () => {
+  it('keeps the letter until the chosen time, lists it, and moves it to another time', async () => {
+    const at = new Date(Date.now() + 3 * 3600 * 1000);
+    const { body } = await send({ sendAt: at.toISOString() });
+    expect(body).toMatchObject({ scheduled: true, sendAt: at.toISOString() });
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+
+    const mine = await (await call('GET', `/scheduled?accountId=${ACCOUNT}`)).json();
+    expect(mine.letters).toEqual([expect.objectContaining({
+      id: body.jobId, status: 'queued', scheduled: true, subject: 'Quarterly numbers', to: ['you@example.com'],
+      bcc: ['hidden@example.com'], canManage: true, attachmentCount: 1, author: { id: ANNA, email: 'anna@example.com' },
+    })]);
+    // Another user of the shared mailbox sees it waiting, without its Bcc, and cannot change it.
+    const theirs = await (await call('GET', '/scheduled', { user: BOB })).json();
+    expect(theirs.letters[0]).toMatchObject({ id: body.jobId, canManage: false });
+    expect(theirs.letters[0].bcc).toBeUndefined();
+    expect(JSON.stringify(theirs)).not.toMatch(/Confidential/);
+    const refused = await call('PATCH', `/scheduled/${body.jobId}`, { user: BOB, body: { sendAt: new Date(Date.now() + 7200e3).toISOString() } });
+    expect(refused.status).toBe(403);
+
+    const later = new Date(Date.now() + 26 * 3600 * 1000);
+    const moved = await call('PATCH', `/scheduled/${body.jobId}`, { body: { sendAt: later.toISOString() } });
+    expect(moved.status).toBe(200);
+    expect((await moved.json()).letter.sendAt).toBe(later.toISOString());
+    await vi.waitFor(async () => expect(await audit('message.send_rescheduled')).toHaveLength(1));
+
+    // An administrator can cancel it too.
+    const cancelled = await call('POST', `/scheduled/${body.jobId}/cancel`, { user: ADMIN, body: {} });
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toEqual({ ok: true });
+  });
+
+  it('refuses a time that has passed', async () => {
+    const { status, body } = await send({ sendAt: new Date(Date.now() - 60000).toISOString() });
+    expect(status).toBe(400);
+    expect(body.code).toBe('send_at_past');
+    const { body: queued } = await send({ sendAt: new Date(Date.now() + 3600e3).toISOString() });
+    const res = await call('PATCH', `/scheduled/${queued.jobId}`, { body: { sendAt: new Date(Date.now() - 1000).toISOString() } });
+    expect(res.status).toBe(400);
+  });
+});
+
+describe('Failures after the writer left', () => {
+  it('a worker that dies mid-delivery leaves the letter needs_attention: never resent, the author told', async () => {
+    sendMail.mockImplementation(() => new Promise(() => {})); // the server never answers
+    const { body } = await send();
+    await makeDue(body.jobId);
+    const [claimed] = await claimDueJobs(10);
+    runJob(claimed); // the worker that will "die"
+    await vi.waitFor(async () => expect((await job(body.jobId)).effect_started_at).not.toBeNull());
+    await db.query("UPDATE jobs SET lease_until = now() - interval '1 second' WHERE id = $1", [body.jobId]);
+    await sweepExpiredLeases();
+    expect(await job(body.jobId)).toMatchObject({ status: 'needs_attention', error_code: 'lease_expired' });
+    expect(await content(body.jobId)).toBeTruthy(); // kept, so the author can decide
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'send_failed', jobId: body.jobId, status: 'needs_attention' }), ANNA));
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+
+    // Sending it again needs an explicit resend.
+    const plain = await call('PATCH', `/scheduled/${body.jobId}`, { body: { sendAt: new Date(Date.now() + 3600e3).toISOString() } });
+    expect(plain.status).toBe(409);
+    expect((await plain.json()).code).toBe('resend_required');
+    const resend = await call('PATCH', `/scheduled/${body.jobId}`, { body: { resend: true } });
+    expect(resend.status).toBe(200);
+    expect((await job(body.jobId)).status).toBe('queued');
+  });
+
+  it('a rejected letter fails, stays listed with its error, and can be reopened to edit', async () => {
+    sendMail.mockRejectedValue(Object.assign(new Error('Message failed: 550 rejected'), { code: 'EMESSAGE', responseCode: 550, command: 'DATA' }));
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'smtp_rejected' });
+    const { letters } = await (await call('GET', '/scheduled')).json();
+    expect(letters[0]).toMatchObject({ id: body.jobId, status: 'failed', errorCode: 'smtp_rejected', error: 'Message was rejected by the mail server.' });
+    await vi.waitFor(async () => expect(await audit('message.send_failed')).toHaveLength(1));
+    const edit = await call('POST', `/scheduled/${body.jobId}/cancel`, { body: { reason: 'edit' } });
+    expect((await edit.json()).compose).toMatchObject({ subject: 'Quarterly numbers' });
+  });
+
+  it('retries a temporary failure later instead of failing', async () => {
+    sendMail.mockRejectedValueOnce(Object.assign(new Error('451 try later'), { responseCode: 451, command: 'RCPT TO' }));
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    const row = await job(body.jobId);
+    expect(row).toMatchObject({ status: 'queued', attempts: 1, error_code: 'smtp_temporary', effect_started_at: null });
+    expect(new Date(row.run_at).getTime()).toBeGreaterThan(Date.now() + 30000);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect((await job(body.jobId)).status).toBe('done');
+  });
+
+  it('does not send for an author who was disabled meanwhile', async () => {
+    const { body } = await send();
+    await db.query('UPDATE users SET disabled_at = now() WHERE id = $1', [ANNA]);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'author_disabled' });
+  });
+});

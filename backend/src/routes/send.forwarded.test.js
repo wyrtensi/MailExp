@@ -5,11 +5,7 @@ vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
 }));
-vi.mock('../services/redis.js', () => ({
-  redisClient: { get: vi.fn().mockResolvedValue(null), set: vi.fn().mockResolvedValue('OK'), del: vi.fn() },
-}));
 vi.mock('../index.js', () => ({ imapManager: { fetchAttachment: vi.fn(), moveQueue: { serverLocation: vi.fn() } } }));
-vi.mock('../services/smtpTransport.js', () => ({ createAccountSmtpTransport: vi.fn() }));
 
 import express from 'express';
 import sendRoutes from './send.js';
