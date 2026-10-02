@@ -9,7 +9,7 @@ import test from 'node:test';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import {
-  attribute, dotStuff, eopHeaders, fold, listMessages, loadMessage, modeReply, newId, parseAddress, readState, saveMessage, smtpSend, writeState,
+  acceptReply, attribute, dotStuff, eopHeaders, headerMessageId, fold, listMessages, loadMessage, modeReply, newId, parseAddress, readState, saveMessage, smtpSend, writeState,
 } from './lib.mjs';
 import { createServer, MAX_LINE, MAX_SIZE } from './server.mjs';
 
@@ -68,6 +68,18 @@ test('modeReply answers with EOP wording, fills in the address and accepts in ac
   assert.equal(modeReply('drop', 'x').drop, true);
   assert.match(modeReply('tenant-limit', 'x').text, /^5\.7\.233/);
   assert.match(modeReply('recipient-denied', 'x').text, /^5\.4\.1 Recipient address rejected: Access denied/);
+});
+
+test('headerMessageId: the first Message-ID of the header block, folded or not, never from the body', () => {
+  assert.equal(headerMessageId(Buffer.from('Subject: s\r\nMessage-ID: <a@b>\r\n\r\nMessage-ID: <c@d>\r\n')), '<a@b>');
+  assert.equal(headerMessageId('message-id:\r\n <folded@x>\r\n\r\nbody'), '<folded@x>');
+  assert.equal(headerMessageId('Subject: s\r\n\r\nMessage-ID: <body@x>\r\n'), null);
+});
+
+test("acceptReply: the shape of EOP's 250 after DATA, with the letter's Message-ID or the fallback", () => {
+  const reply = acceptReply({ messageId: '<m@x>', fallbackId: '<f@y>', internalId: 1099511627777, hostname: 'EOP01.prod.test', bytes: 2048, seconds: 0.5 });
+  assert.equal(reply, '250 2.6.0 <m@x> [InternalId=1099511627777, Hostname=EOP01.prod.test] 2048 bytes in 0.500, 4.000 KB/sec Queued mail for delivery');
+  assert.match(acceptReply({ messageId: null, fallbackId: '<f@y>', internalId: 1, hostname: 'h', bytes: 1, seconds: 0 }), /^250 2\.6\.0 <f@y> \[InternalId=1, Hostname=h\] 1 bytes in 0\.001, /);
 });
 
 test('state: defaults, env connector, validated writes, file wins over env', () => {
@@ -300,7 +312,8 @@ test('server: no STARTTLS, no MAIL', T, () => withServer(async ({ port }) => {
 test('server: the connector certificate is accepted, the message is stored unstuffed, the session is logged', T, () => withServer(async ({ port, spool, lines }) => {
   const r = await deliver(port, mailCert());
   assert.match(r.rcpt, /^250 2\.1\.5/);
-  assert.match(r.end, /^250 2\.6\.0 <.*@eop\.test\.local>/);
+  // No Message-ID in the letter: the reply names one made up by fake-EOP, in EOP's shape.
+  assert.match(r.end, /^250 2\.6\.0 <.*@eop\.test\.local> \[InternalId=\d{13,14}, Hostname=[^\]\s]+\] \d+ bytes in [\d.]+, [\d.]+ KB\/sec Queued mail for delivery$/);
   const [envelope] = listMessages(spool);
   assert.equal(envelope.from, 'a@stage.test');
   assert.deepEqual(envelope.to, ['test@example.com']);
@@ -309,6 +322,14 @@ test('server: the connector certificate is accepted, the message is stored unstu
   assert.equal(loadMessage(spool, 'latest').raw.toString(), 'Subject: t\r\n\r\nhello\r\n.dot\r\n');
   assert.ok(lines.some((l) => /event=starttls attribution=ok/.test(l) && /tls=TLSv1\.[23]/.test(l) && /cert="CN=mail\.test\.local"/.test(l)));
   assert.ok(lines.some((l) => /event=accept .*verdict=accepted/.test(l)));
+}));
+
+test("server: the accept reply echoes the letter's Message-ID, and each letter gets its own InternalId", T, () => withServer(async ({ port }) => {
+  const first = await deliver(port, mailCert(), { body: 'Message-ID: <one@stage.test>\r\nSubject: t\r\n\r\nx\r\n.' });
+  const second = await deliver(port, mailCert(), { body: 'Message-ID: <two@stage.test>\r\nSubject: t\r\n\r\nx\r\n.' });
+  assert.match(first.end, /^250 2\.6\.0 <one@stage\.test> \[InternalId=\d+, Hostname=/);
+  assert.match(second.end, /^250 2\.6\.0 <two@stage\.test> \[InternalId=\d+, Hostname=/);
+  assert.notEqual(/InternalId=(\d+)/.exec(first.end)[1], /InternalId=(\d+)/.exec(second.end)[1]);
 }));
 
 test('server: dot-unstuffing counts CRLF-delimited lines only', T, () => withServer(async ({ port, spool }) => {

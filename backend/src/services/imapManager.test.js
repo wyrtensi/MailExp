@@ -16,6 +16,7 @@ vi.mock('./pushNotifications.js', () => ({ sendPushToActiveUsers: vi.fn() }));
 vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
+vi.mock('./deliveryReport.js', async (importOriginal) => ({ ...(await importOriginal()), readDeliveryReports: vi.fn(async () => 0) }));
 
 import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
@@ -30,6 +31,8 @@ import { parseMessage } from './messageParser.js';
 import { sendPushToActiveUsers } from './pushNotifications.js';
 import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { GMAIL_KEY_PREFIX } from './threading/threadId.js';
+import { readDeliveryReports } from './deliveryReport.js';
+import { STAND_DSN_STRUCTURE } from './deliveryReport.fixtures.js';
 
 const account = (imap_host, oauth_provider = null) => ({ imap_host, oauth_provider });
 
@@ -5591,6 +5594,35 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
       expect(bodyFetchOrder).toEqual(Array.from({ length: 12 }, (_, i) => WATERMARK + 12 - i));
       // One pooled session did it all, as background work.
       expect(pooledLogins).toBe(1);
+    } finally { evictPool(acct.id); }
+  });
+
+  it('reads the delivery reports among the new letters on a background session after the sync (R-17)', async () => {
+    const acct = mailbox('node-dsn');
+    const mgr = ladderManager();
+    // A report of today (an older one is no longer read, deliveryReport.js reportsToRead).
+    const today = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const parsed = parseMessage.getMockImplementation();
+    parseMessage.mockImplementation(async (msg) => ({ ...(await parsed(msg)), date: today }));
+    const client = {
+      ...syncClient(2),
+      fetch: vi.fn(async function* (range) {
+        if (range !== `${WATERMARK + 1}:*`) return;
+        yield { uid: WATERMARK + 1, bodyStructure: { type: 'text/plain' } };
+        yield { uid: WATERMARK + 2, bodyStructure: STAND_DSN_STRUCTURE };
+      }),
+    };
+    try {
+      await mgr.syncMessages(acct, client, 'INBOX', 20, false, true);
+      await vi.waitFor(() => expect(readDeliveryReports).toHaveBeenCalledTimes(1));
+      const [session, accountId, reports] = readDeliveryReports.mock.calls[0];
+      expect(session).not.toBe(client);
+      expect(accountId).toBe(acct.id);
+      expect(reports).toEqual([{
+        uid: WATERMARK + 2,
+        report: expect.objectContaining({ statusPart: '2', returnedMessageId: '<r17-denied-1790933353895@stage.test>' }),
+        inReplyTo: null, references: null, date: today,
+      }]);
     } finally { evictPool(acct.id); }
   });
 

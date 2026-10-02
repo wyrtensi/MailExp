@@ -36,6 +36,8 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, name text, email_address text, color text, folder_mappings jsonb,
       enabled boolean NOT NULL DEFAULT true, include_in_unified_inbox boolean NOT NULL DEFAULT true
     );
+    CREATE TABLE message_delivery_status (account_id uuid NOT NULL, message_id text NOT NULL, recipient text NOT NULL,
+                          state text NOT NULL, event_at timestamptz, updated_at timestamptz NOT NULL DEFAULT NOW());
     CREATE TABLE folders (account_id uuid NOT NULL, path text NOT NULL, name text NOT NULL,
                           special_use text, no_select boolean NOT NULL DEFAULT false);
     CREATE TABLE messages (
@@ -97,6 +99,19 @@ describe('GET /api/mail/thread in Postgres', () => {
 
   it('keeps the same copies in a unified call', async () => {
     expect(await thread('?unified=true')).toEqual([id(3), id(4), id(5), id(7), id(8), id(9), id(10)]);
+  });
+
+  it('carries the delivery mark of the Sent copy (R-17)', async () => {
+    await db.query("INSERT INTO folders (account_id, path, name, special_use) VALUES ($1, 'Sent', 'Sent', '\\Sent')", [SALES]);
+    await db.query("INSERT INTO message_delivery_status (account_id, message_id, recipient, state, event_at) VALUES ($1, '<y@x>', 'a@c', 'deferred', NOW())", [SALES]);
+    try {
+      const response = await fetch(`${base}/api/mail/thread/t1?accountId=${SALES}`);
+      const { messages } = await response.json();
+      expect(Object.fromEntries(messages.map((m) => [m.id, m.delivery_state])))
+        .toMatchObject({ [id(3)]: null, [id(5)]: 'delayed', [id(7)]: null });
+    } finally {
+      await db.exec('DELETE FROM message_delivery_status; DELETE FROM folders');
+    }
   });
 
   it('holds a scoped call to its mailbox', async () => {

@@ -8,11 +8,15 @@ import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
 import {
-  attribute, modeReply, parseAddress, readState, saveMessage,
+  acceptReply, attribute, headerMessageId, modeReply, parseAddress, readState, saveMessage,
 } from './lib.mjs';
 
 export const MAX_SIZE = 25 * 1024 * 1024;
 export const MAX_LINE = 2048;
+// The accept reply's InternalId (Exchange's are 13-14 digit numbers) and Hostname (the EOP server
+// that took the letter, a made-up name in Exchange's form).
+const INTERNAL_ID_BASE = 1099511627776;
+const EOP_SERVER = 'EOPSTAGE01MB0001.stageprd01.prod.eop.test.local';
 const IDLE_MS = 60000;
 
 // options: { host, key, cert, caPem, stateFile, spoolDir, log(line) }
@@ -26,6 +30,7 @@ export function createServer(options) {
     key, cert, ca: caPem, sessionIdContext: 'fake-eop',
   });
   let counter = 0;
+  let accepted = 0;
 
   return net.createServer((raw) => {
     counter += 1;
@@ -111,7 +116,14 @@ export function createServer(options) {
         return;
       }
       note(`event=accept id=${id} from="<${session.from}>" rcpt="${session.rcpts.join(',')}" bytes=${message.length}`, 'verdict=accepted');
-      say(`250 2.6.0 <${id}@${host}> [InternalId=${counter}] Queued mail for delivery`);
+      say(acceptReply({
+        messageId: headerMessageId(message),
+        fallbackId: `<${id}@${host}>`,
+        internalId: INTERNAL_ID_BASE + (accepted += 1),
+        hostname: EOP_SERVER,
+        bytes: message.length,
+        seconds: (Date.now() - session.dataAt) / 1000,
+      }));
       reset();
     };
 
@@ -170,6 +182,7 @@ export function createServer(options) {
           // A virtual CRLF in front lets ".\r\n" as the first line and "\r\n.." stuffing be handled alike.
           inbuf = `\r\n${inbuf}`;
           inData = true;
+          session.dataAt = Date.now();
           scanFrom = 0;
           say('354 Start mail input; end with <CRLF>.<CRLF>');
           return null;

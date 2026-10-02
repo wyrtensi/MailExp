@@ -439,6 +439,26 @@ function cleanupPreviewFor(accountId, fromEmail) {
   return { accountId, fromEmail: String(fromEmail || '').trim(), count: ids.length, ids };
 }
 
+// Delivery details of sent letters (R-17, GET /mail/messages/:id/delivery), by letter id: the first
+// three letters sent from mail node mailboxes are one not delivered to its recipient (EOP refused
+// it, 5.4.1), one delayed (EOP answered 451 and the node keeps trying) and one accepted by EOP
+// with TLS and EOP's acceptance; the first letter a Gmail mailbox sent came back as a report of
+// the remote server. The list marks the first, second and fourth. Every other letter of a node
+// mailbox is older than the demo node's log.
+const DEMO_LOG_OLDEST = '2026-09-14T00:00:00.000Z';
+const DEMO_DELIVERY_CASES = new Map();
+{
+  const nodeSent = MESSAGE_FIXTURES.filter(row => row.folder === 'Sent' && accountFor(row.account_id)?.mail_node && row.date >= DEMO_LOG_OLDEST);
+  ['failed', 'delayed', 'sent'].forEach((kind, i) => { if (nodeSent[i]) DEMO_DELIVERY_CASES.set(nodeSent[i].id, kind); });
+  const gmailSent = MESSAGE_FIXTURES.find(row => row.folder === 'Sent' && accountFor(row.account_id)?.oauth_provider === 'google');
+  if (gmailSent) DEMO_DELIVERY_CASES.set(gmailSent.id, 'report');
+  for (const row of MESSAGE_FIXTURES) {
+    const kind = DEMO_DELIVERY_CASES.get(row.id);
+    if (kind === 'failed' || kind === 'report') row.delivery_state = 'failed';
+    if (kind === 'delayed') row.delivery_state = 'delayed';
+  }
+}
+
 let messages = structuredClone(MESSAGE_FIXTURES);
 let contacts = structuredClone(CONTACT_FIXTURES);
 let preferences = structuredClone(DEFAULT_PREFERENCES);
@@ -1462,6 +1482,7 @@ function demoConversation(id) {
       id: m.id, folder: m.folder, subject: m.subject, snippet: m.snippet, date: m.date,
       from_name: m.from_name, from_email: m.from_email, to_addresses: m.to_addresses, cc_addresses: m.cc_addresses,
       has_attachments: !!m.has_attachments,
+      delivery_state: m.folder === 'Sent' ? (m.delivery_state ?? null) : null,
       direction: m.folder === mappings.drafts ? 'draft' : letterDirection(m, mappings, own),
     }));
   return { threadKey: current.thread_key, total: items.length, items };
@@ -1536,6 +1557,62 @@ function demoContactLetters(contactId, { limit = 20, offset = 0 } = {}) {
 
 function demoMessageIdFor(id) {
   return `<${id}@demo.mailexpert.local>`;
+}
+
+// "Delivery details" as the server answers them (backend routes/delivery.js), for the letters of
+// DEMO_DELIVERY_CASES; any other letter of a node mailbox is older than the node's log, and a
+// letter of another mailbox has no report.
+function demoDelivery(id) {
+  const item = messageById(id);
+  if (!item) throw demoError('Message not found', 'message_not_found');
+  const account = accountFor(item.account_id);
+  // As on the server: only a letter the mailbox sent has delivery details.
+  if (item.folder !== 'Sent' || normalizeEmail(item.from_email) !== normalizeEmail(account?.email_address)) {
+    return { messageId: item.message_id, owned: false, node: false, log: null, recipients: [] };
+  }
+  const node = !!account?.mail_node;
+  const kind = DEMO_DELIVERY_CASES.get(id);
+  const at = new Date(Date.parse(item.date) + 2000).toISOString();
+  const to = (item.to_addresses ?? []).map(r => normalizeEmail(r.email));
+  const eopHost = demoEopSettings.eopHost || 'demo-mailexpert-local.mail.protection.outlook.com';
+  const tls = { level: 'verified', protocol: 'TLSv1.3', cipher: 'TLS_AES_256_GCM_SHA384', bits: '256/256 bits', matchedBy: 'time' };
+  const log = (state, statusCode, reply, extra = {}) => ({
+    state, at, statusCode, diagnostic: state === 'sent' ? null : reply, queueId: '4F2A81C0D3E',
+    relayHost: eopHost, relayIp: '52.101.68.17', relayPort: 25, relayKind: 'eop', reply, tls, acceptance: null, ...extra,
+  });
+  const row = (recipient, state, statusCode, diagnostic, explanation, sources) => ({
+    recipient, state, source: sources.report ? 'dsn' : 'log', at, statusCode, diagnostic, explanation,
+    log: sources.log ?? null, report: sources.report ?? null,
+  });
+  let recipients = [];
+  if (kind === 'failed') {
+    const reply = '550 5.4.1 Recipient address rejected: Access denied. AS(201806281)';
+    recipients = to.map(r => row(r, 'bounced', '5.4.1', reply, { key: 'recipient_not_accepted', class: 'permanent', code: '5.4.1' }, { log: log('bounced', '5.4.1', reply) }));
+  } else if (kind === 'delayed') {
+    const reply = '451 4.7.500 Server busy. Please try again later from [203.0.113.10]. (S77)';
+    recipients = to.map(r => row(r, 'deferred', '4.7.500', reply, { key: 'temporary', class: 'temporary', code: '4.7.500' }, { log: log('deferred', '4.7.500', reply, { tls: null }) }));
+  } else if (kind === 'sent') {
+    recipients = to.map(r => row(r, 'sent', '2.6.0', null, null, {
+      log: log('sent', '2.6.0', `250 2.6.0 ${item.message_id} [InternalId=21233419887456, Hostname=AM0PR01MB1234.eurprd01.prod.outlook.com] Queued mail for delivery`, {
+        acceptance: { messageId: item.message_id, internalId: '21233419887456', hostname: 'AM0PR01MB1234.eurprd01.prod.outlook.com' },
+      }),
+    }));
+  } else if (kind === 'report') {
+    const diagnostic = '550 5.1.1 The email account that you tried to reach does not exist.';
+    recipients = to.map(r => row(r, 'failed', '5.1.1', diagnostic, { key: 'permanent', class: 'permanent', code: '5.1.1' }, {
+      report: { state: 'failed', at, statusCode: '5.1.1', diagnostic, action: 'failed', remoteMta: 'mx.partner.example', reportingMta: 'mail.gmail.com' },
+    }));
+  }
+  const sentAt = item.date;
+  return {
+    messageId: item.message_id,
+    owned: true,
+    node,
+    log: node ? {
+      coverage: recipients.length ? 'found' : (sentAt < DEMO_LOG_OLDEST ? 'gone' : 'not_found'), error: null, oldestAt: DEMO_LOG_OLDEST, sentAt,
+    } : null,
+    recipients,
+  };
 }
 
 // Per-message threading diagnostics (GET /mail/messages/:id/threading), same shape the server
@@ -1868,6 +1945,9 @@ export async function demoRequest(method, path, body = {}) {
 
   const headersMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/headers$/);
   if (verb === 'GET' && headersMatch) return clone(demoHeaders(decodeURIComponent(headersMatch[1])));
+
+  const deliveryMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/delivery$/);
+  if (verb === 'GET' && deliveryMatch) return clone(demoDelivery(decodeURIComponent(deliveryMatch[1])));
 
   // No demo letter carries a stored Bcc, so a reopened demo draft always answers "known empty"
   // rather than going through the real route's unknown-Bcc/read-only-open path.

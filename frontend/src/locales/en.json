@@ -443,6 +443,73 @@
         "noAction": "no action"
       },
       "matchedOtherRcpt": "Found by Message-ID on a letter to another address of the mail node: this copy came through an address the panel does not know, such as an alias."
+    },
+    "delivery": {
+      "title": "Delivery details",
+      "loading": "Reading the delivery details...",
+      "failed": "Could not read the delivery details: {{message}}",
+      "retry": "Try again",
+      "recipients": "Recipients",
+      "summary": {
+        "failed": "Not delivered to some recipients",
+        "delayed": "Delayed for some recipients"
+      },
+      "marker": {
+        "failed": "Not delivered",
+        "delayed": "Delivery delayed"
+      },
+      "state": {
+        "sent": "Accepted by the next server",
+        "sentEop": "Accepted by Microsoft EOP",
+        "sentLocal": "Delivered to a mailbox on the mail node",
+        "deferred": "Delayed: the mail node will try again",
+        "bounced": "Not delivered",
+        "expired": "Not delivered: the mail node gave up trying",
+        "failed": "Not delivered (delivery report)",
+        "delayed": "Delayed (delivery report)",
+        "unknown": "Outcome unknown",
+        "leftQueue": "Outcome unknown: the letter left the mail node's queue without a final answer (an administrator may have deleted it)",
+        "stale": "No news for days: outcome unknown",
+        "sentDiscard": "Discarded on the mail node by a rule: not delivered to anyone",
+        "other": "Status: {{state}}"
+      },
+      "notSent": "This letter was not sent from this mailbox, so there are no delivery details for it.",
+      "finalRecipient": "Handed on as {{address}}",
+      "relay": "Handed to",
+      "tls": "Encryption",
+      "tlsLevel": {
+        "verified": "TLS, server certificate verified",
+        "trusted": "TLS, certificate chain trusted, name not checked",
+        "untrusted": "TLS, server certificate not verified",
+        "anonymous": "TLS without a server certificate"
+      },
+      "tlsByTime": "matched by server and time: the mail node's log has no process ids",
+      "tlsMissing": "not in the mail node's log",
+      "acceptance": "Accepted by EOP as",
+      "reply": "The server said",
+      "queueId": "Queue id on the node",
+      "report": "Delivery report",
+      "reportFrom": "from {{mta}}",
+      "reportWords": "The remote server wrote",
+      "none": "No delivery report came back for this letter. Delivery to each recipient is not confirmed: only failures and delays come back as reports.",
+      "noneNode": "The mail node's log shows nothing more for this letter.",
+      "noMessageId": "The letter has no Message-ID, so its delivery cannot be traced.",
+      "coverage": {
+        "stored": "Saved from an earlier read of the mail node's log: the log no longer covers this letter.",
+        "gone": "The mail node's log no longer covers this letter: there is no delivery data. This does not mean it was delivered.",
+        "not_found": "The mail node's log has no lines for this letter yet: no delivery data.",
+        "unavailable": "The mail node's log could not be read ({{error}}): only what was saved before is shown."
+      },
+      "code": {
+        "tenant_attribution": "Microsoft EOP did not accept the mail node as the tenant's connector (5.7.64): the node's certificate does not match the inbound connector, or its chain is incomplete. Nothing reaches the outside until an administrator fixes the certificate.",
+        "connector_blocked": "Microsoft blocked the tenant's inbound connector (5.7.711, AS(2204)), usually because spam was sent through it. No mail from the node gets out until an administrator has it unblocked.",
+        "terrl_exceeded": "The tenant reached its daily limit of external recipients (5.7.233). External mail stops until the last 24 hours free up room; tell the administrator.",
+        "terrl_trial": "The trial tenant reached its limit of external recipients (5.7.232). External mail stops until the limit frees up; tell the administrator.",
+        "recipient_not_accepted": "The recipient's address was not accepted (5.4.1): it does not exist, or its domain refuses unknown addresses (Directory-Based Edge Blocking). Check the address.",
+        "routing_loop": "The letter went round in a loop (5.4.14): the domain's MX, connectors or accepted domain type disagree. Tell the administrator.",
+        "temporary": "A temporary refusal (4.x.x): the sending server tries again for a while and sends a report if it gives up. This is not a final failure.",
+        "permanent": "A permanent refusal (5.x.x): this recipient will not get the letter as it is."
+      }
     }
   },
   "messageList": {

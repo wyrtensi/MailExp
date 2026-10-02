@@ -1,5 +1,6 @@
 import { query } from './db.js';
 import { resolveAccountScope } from './unifiedInbox.js';
+import { deliveryStateColumn } from './deliveryStatus.js';
 
 export async function listMessages({ accountId, folder = 'INBOX', limit = 50, offset = 0, unreadOnly, threaded, category }) {
   const accountsResult = await query('SELECT id, include_in_unified_inbox FROM email_accounts WHERE enabled = true');
@@ -108,6 +109,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
                m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses, m.eop_category,
+               ${deliveryStateColumn('m')} AS delivery_state,
                a.name  AS account_name,
                a.email_address AS account_email,
                a.color AS account_color,
@@ -166,7 +168,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
              to_addresses, cc_addresses, reply_to, in_reply_to,
              date, snippet, is_starred, is_read, has_attachments, account_id,
              account_name, account_email, account_color,
-             category, list_unsubscribe, list_unsubscribe_post, delivery_addresses, eop_category,
+             category, list_unsubscribe, list_unsubscribe_post, delivery_addresses, eop_category, delivery_state,
              message_count, unread_count,
              thread_has_contact_photo AS has_contact_photo
       FROM ranked
@@ -204,6 +206,7 @@ export async function listMessages({ accountId, folder = 'INBOX', limit = 50, of
            m.date, m.snippet, m.is_read, m.is_starred,
            m.has_attachments, m.account_id, m.category,
            m.list_unsubscribe, m.list_unsubscribe_post, m.delivery_addresses, m.eop_category,
+           ${deliveryStateColumn('m')} AS delivery_state,
            a.name as account_name, a.email_address as account_email, a.color as account_color,
            EXISTS (SELECT 1 FROM contacts co
                     WHERE co.primary_email = lower(m.from_email)

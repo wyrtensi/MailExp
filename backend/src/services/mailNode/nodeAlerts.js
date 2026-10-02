@@ -6,6 +6,8 @@ import { getEopSettings } from './eopSettings.js';
 import { getNodeDnsCheck } from './dnsCheckJob.js';
 import { SYSTEM_ACTOR } from './domains.js';
 import { summarizeQueue } from './mailQueue.js';
+import { captureFromLog } from '../deliveryStatus.js';
+import { matchDeliveryCodes } from './deliveryCodes.js';
 import { readPostfixLog, relayKind } from './postfixLog.js';
 import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from './terrl.js';
 
@@ -63,15 +65,12 @@ export const ALERTS = Object.freeze({
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
 
-// The refusal codes of EOP the log signals look for: the dsn= field exactly, or the code in the
-// status text standing alone (not part of a longer code or of an address like [5.7.64.12]).
-const code = (text) => new RegExp(`(?<![\\d.])${text.replaceAll('.', '\\.')}(?![\\d.])`);
-const REFUSALS = [
-  ['connector_blocked', ['5.7.711'], [code('5.7.711'), /AS\(2204\)/]],
-  ['tenant_attribution', ['5.7.64'], [code('5.7.64')]],
-  ['terrl_exceeded', ['5.7.233', '5.7.232'], [code('5.7.233'), code('5.7.232')]],
-];
-const refused = (line, codes, patterns) => codes.includes(line.dsn) || patterns.some((re) => re.test(line.statusText ?? ''));
+// The refusal codes of EOP the log signals look for come from the shared code list
+// (services/mailNode/deliveryCodes.js, entries with an alert): the dsn= field exactly, or the code
+// in the status text standing alone (not part of a longer code or of an address like [5.7.64.12]).
+// 5.7.233 and the trial tenant's 5.7.232 both raise terrl_exceeded.
+const REFUSAL_KEYS = ['connector_blocked', 'tenant_attribution', 'terrl_exceeded'];
+const refused = (line, alert) => matchDeliveryCodes({ code: line.dsn, text: line.statusText ?? '' }).some((entry) => entry.alert === alert);
 const FAILED_EVENTS = new Set(['deferred', 'bounced', 'expired', 'undeliverable']);
 
 let timer = null;
@@ -95,8 +94,8 @@ function signal(key, lines, extra = {}) {
 export function logSignals(lines, { now = Date.now(), eopHost = null } = {}) {
   const recent = lines.filter((line) => line.epoch != null && line.epoch >= now - SIGNAL_WINDOW_MS);
   const alerts = [];
-  for (const [key, codes, patterns] of REFUSALS) {
-    const hits = recent.filter((line) => FAILED_EVENTS.has(line.event) && refused(line, codes, patterns));
+  for (const key of REFUSAL_KEYS) {
+    const hits = recent.filter((line) => FAILED_EVENTS.has(line.event) && refused(line, key));
     if (hits.length) alerts.push(signal(key, hits));
   }
   if (!eopHost) return alerts;
@@ -272,9 +271,23 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   };
 
   fresh.push(...eopHostSignal(eop.eopHost));
+  // The queue before the log: a letter that leaves the queue after this point has its final line in
+  // the log read below (or in the next run's), so the delivery details never take a letter still on
+  // its way for one that left the queue without a final line.
+  const queueItems = await read('queue', () => listQueue(cfg));
   const log = await read('log', () => readPostfixLog(cfg, { since: now - TERRL_WINDOW_MS }));
   if (log) fresh.push(...logSignals(log.lines, { now, eopHost: eop.eopHost }));
-  const queue = await read('queue', async () => summarizeQueue(await listQueue(cfg), now));
+  // The delivery details of sent letters (R-17, services/deliveryStatus.js) from the same read. Not
+  // an alert source: its failure is logged and changes neither the alerts nor the ping.
+  if (log) {
+    try {
+      const queueIds = queueItems ? new Set(queueItems.map((item) => item.queueId)) : null;
+      await captureFromLog({ cfg, log, eopHost: eop.eopHost, now, queueIds });
+    } catch (err) {
+      console.error(`Mail node delivery details were not captured: ${err?.code || err?.message || 'error'}`);
+    }
+  }
+  const queue = queueItems ? summarizeQueue(queueItems, now) : null;
   if (queue) fresh.push(...queueSignal(queue, settings));
   const nodeDns = await read('certificate', () => getNodeDnsCheck());
   if (!failed.includes('certificate')) fresh.push(...certificateSignal(nodeDns));

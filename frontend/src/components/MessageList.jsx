@@ -18,6 +18,7 @@ import ContextMenu from './ContextMenu.jsx';
 import RowHoverActions from './RowHoverActions.jsx';
 import GtdTabList from './GtdTabList.jsx';
 import DirectionBadge from './DirectionBadge.jsx';
+import DeliveryMarker from './DeliveryMarker.jsx';
 import { mailboxBanner, isDraftFolder } from '../utils/mailboxBanner.js';
 import { isTrashOrJunkFolder } from '../utils/specialFolders.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
@@ -4578,6 +4579,7 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
                   compact={isNarrow || isMobile}
                 />
               )}
+              <DeliveryMarker state={message.delivery_state} compact={isNarrow || isMobile} />
               {message.has_attachments && (
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
@@ -4690,6 +4692,7 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
                         compact={isNarrow || isMobile}
                       />
                     )}
+                    <DeliveryMarker state={msg.delivery_state} compact={isNarrow || isMobile} />
                     <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                       {formatDate(msg.date)}
                     </span>
@@ -4922,6 +4925,7 @@ function MessageRow({ message, account, folderList, selected, lastViewed, isChec
                 compact={isNarrow || isMobile}
               />
             )}
+            <DeliveryMarker state={message.delivery_state} compact={isNarrow || isMobile} />
             {message.has_attachments && (
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--text-tertiary)" strokeWidth="2">
                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>

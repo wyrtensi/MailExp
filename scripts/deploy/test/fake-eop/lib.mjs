@@ -62,6 +62,26 @@ export function writeState(file, patch, env = process.env) {
   return next;
 }
 
+// The first Message-ID header of a raw message (a Buffer or string), with its angle brackets, or
+// null when the header block has none. Folded headers are unfolded first.
+export function headerMessageId(raw) {
+  const text = Buffer.isBuffer(raw) ? raw.toString('latin1') : String(raw ?? '');
+  const end = text.search(/\r?\n\r?\n/);
+  const head = (end < 0 ? text : text.slice(0, end)).replace(/\r?\n[ \t]+/g, ' ');
+  const match = /^message-id:[ \t]*(<[^<>\s]+>)/im.exec(head);
+  return match ? match[1] : null;
+}
+
+// The 250 Exchange Online Protection gives after DATA, in its shape:
+//   250 2.6.0 <message-id> [InternalId=<number>, Hostname=<EOP server>] <n> bytes in <s>, <r> KB/sec Queued mail for delivery
+// with the letter's own Message-ID (Exchange echoes it; a letter without one gets `fallbackId`).
+export function acceptReply({ messageId, fallbackId, internalId, hostname, bytes, seconds }) {
+  const secs = Math.max(seconds, 0.001);
+  const rate = bytes / 1024 / secs;
+  return `250 2.6.0 ${messageId || fallbackId} [InternalId=${internalId}, Hostname=${hostname}] `
+    + `${bytes} bytes in ${secs.toFixed(3)}, ${rate.toFixed(3)} KB/sec Queued mail for delivery`;
+}
+
 // The reply a mode gives, `{ code, text }`, `{ drop: true }`, or null to accept.
 export function modeReply(mode, ip) {
   const entry = MODES[mode];

@@ -14,7 +14,7 @@ import { getResults, removeResult } from '../aiResults.js';
 import { startRun, cancelRun, getAiState, subscribeRuns } from '../aiRuns.js';
 import { renderMarkdown } from '../utils/renderMarkdown.js';
 import { pickReplyAlias } from '../utils/replyAlias.js';
-import { mailboxBanner } from '../utils/mailboxBanner.js';
+import { isDraftFolder, mailboxBanner } from '../utils/mailboxBanner.js';
 import { emailFontFor } from '../utils/emailFont.js';
 import { buildQuote, identityName, quoteMetaFor, senderLanguage } from '../utils/quoteHeader.js';
 import SenderHistory from './SenderHistory.jsx';
@@ -30,6 +30,7 @@ import {
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import SafeViewNotice from './SafeViewNotice.jsx';
 import SpamVerdict from './SpamVerdict.jsx';
+import DeliveryDetails from './DeliveryDetails.jsx';
 const USE_DIV_RENDER = import.meta.env.VITE_EMAIL_DIV_RENDER === 'true';
 const MESSAGE_OPENING_EVENT = 'mailexpert:message-opening';
 // riskArmed value for the "Download all" link. Attachment parts are dotted numbers, so it cannot collide.
@@ -2794,6 +2795,12 @@ ${bodyContent}
 
         {/* A letter in Spam of a mail node mailbox: rspamd's verdict on request (R-20). */}
         {inSpamFolder && account?.mail_node === true && <SpamVerdict messageId={message.id} eopCategory={eopCategory} />}
+
+        {/* A letter sent from the mailbox, or one a delivery report marked: what became of it per
+            recipient, on request (R-17). */}
+        {account && !isDraftFolder(message.folder, account.folder_mappings)
+          && (message.delivery_state || mailboxBanner(message, account, folders[message.account_id]).direction === 'out')
+          && <DeliveryDetails messageId={message.id} deliveryState={message.delivery_state ?? null} />}
 
         {/* Attachments in safe view: named, never fetched. "Show in full" brings the buttons back. */}
         {safeView && attachments.length > 0 && (

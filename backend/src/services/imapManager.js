@@ -19,6 +19,7 @@ import { sendPushToActiveUsers } from './pushNotifications.js';
 import { defaultAddressBookId } from './addressBooks.js';
 import { redactEmail } from '../utils/redact.js';
 import { eopCategory } from '../utils/antispamReport.js';
+import { deliveryReportOf, readDeliveryReports, reportsToRead } from './deliveryReport.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -4676,6 +4677,9 @@ export class ImapManager {
         const wantsInboxIngest = folder === 'INBOX' && await pluginRegistry.hasActiveAsync('inboxIngest', { account });
         const newInboxIds = [];
         const ingestDeletedIds = new Set();
+        // Delivery reports among the letters this sync newly stored (services/deliveryReport.js),
+        // read right after it: their status part cannot be fetched while this FETCH is running.
+        const deliveryReports = [];
 
         // Insert/update a single fetched message and track it as new if appropriate.
         // Called from both Phase 1 and Phase 2; ON CONFLICT handles deduplication so
@@ -4841,6 +4845,10 @@ export class ImapManager {
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
+              const report = deliveryReportOf(msg.bodyStructure);
+              if (report) {
+                deliveryReports.push({ uid: Number(parsed.uid), report, inReplyTo, references: refs, date: safeDate(parsed.date) });
+              }
               // Inbox-ingest candidate: any newly-inserted INBOX row, read OR unread (read state
               // is not a gate here — the plugin decides). The unread-only push below still drives
               // notifications. Gated on wantsInboxIngest so a mailbox with no ingest plugin builds
@@ -5189,6 +5197,8 @@ export class ImapManager {
            WHERE account_id = $1 AND path = $2`,
           [account.id, folder]
         );
+        const reportsDue = reportsToRead(deliveryReports);
+        if (reportsDue.length) this._scheduleDeliveryReports(account, folder, reportsDue);
         await stampLastSync(account.id);
         return { insertedCount, broadcastedNewMessages };
       } finally {
@@ -6689,6 +6699,35 @@ export class ImapManager {
     } finally {
       this.onDemandSyncing.delete(key);
     }
+  }
+
+  // Delivery reports a sync of `folder` just stored mark the original letters of the mailbox
+  // (R-17, services/deliveryReport.js): right after the sync, on one background pooled session
+  // under the per-host background semaphore, each report's status part (a few hundred bytes) is
+  // fetched and recorded. Only the newest reports of the last 30 days, at most 50 a sync
+  // (reportsToRead: a first sync stores a whole history as new). Best effort and never retried: a
+  // report that could not be read marks nothing, and the sync never waits for it.
+  _scheduleDeliveryReports(account, folder, reports) {
+    setImmediate(async () => {
+      const host = (account.imap_host || '').toLowerCase();
+      try {
+        await this._bgConnSem.acquire(host);
+        try {
+          await withFreshClient(account, async (client) => {
+            const lock = await client.getMailboxLock(folder);
+            try {
+              await readDeliveryReports(client, account.id, reports);
+            } finally {
+              lock.release();
+            }
+          }, { background: true, ...this._poolLoginOpts(account.id) });
+        } finally {
+          this._bgConnSem.release(host);
+        }
+      } catch (err) {
+        console.warn(`Delivery reports of ${logAccount(account)}/${folder} were not read:`, err.message);
+      }
+    });
   }
 
   // Pre-fetch and cache the body for newly arrived messages immediately after sync.

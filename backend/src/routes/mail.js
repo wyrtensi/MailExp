@@ -22,6 +22,7 @@ import { recordSyncSignal } from '../services/diagnosticsRing.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
+import { deliveryStateColumn } from '../services/deliveryStatus.js';
 import { safeFilename, attachmentDisposition, truncateFilename } from '../utils/contentDisposition.js';
 
 const router = Router();
@@ -171,6 +172,7 @@ router.get('/messages/:id', async (req, res) => {
              m.date, m.snippet, m.is_read, m.is_starred,
              m.has_attachments, m.account_id, m.category,
              m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses, m.eop_category,
+             ${deliveryStateColumn('m')} AS delivery_state,
              a.name AS account_name, a.email_address AS account_email,
              a.color AS account_color
       FROM messages m
@@ -289,6 +291,7 @@ router.get('/thread/:threadId', async (req, res) => {
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
                m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses, m.eop_category,
+               ${deliveryStateColumn('m', 'a')} AS delivery_state,
                a.name AS account_name, a.email_address AS account_email, a.color AS account_color
         FROM messages m
         JOIN email_accounts a ON m.account_id = a.id
