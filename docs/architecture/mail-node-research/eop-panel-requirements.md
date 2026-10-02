@@ -505,6 +505,50 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   считают сообщения, не получателей (раздел 2.9).
 - Без EOP: да — чистая функция, таблица значений: 100 лицензий → 22 059, 500 → 48 248; 10% и 25%.
 
+**R-43. Письма, задержанные или потерянные во время простоя узла.** M.
+- Зачем: пока узел не принимает почту (не работает Postfix или Dovecot, сервер недоступен), EOP держит
+  входящие письма в своей очереди не больше 24 часов и повторяет попытку каждые 15 минут; с ошибками
+  `450 4.4.312` (DNS), `4.4.315` (таймаут), `4.4.316` (соединение отклонено), `4.4.317`, `4.4.318`,
+  `4.7.320` (сертификат). По истечении внешний отправитель получает `550 4.4.7 QUEUE.Expired; message
+  expired`, а сотрудники — ничего. `Set-TransportConfig -MessageExpiration` принимает только 12-24 часа,
+  то есть срок можно лишь сократить. Повторить, вытолкнуть или переслать такие письма клиент EOP не
+  может: `Get-QueueDigest` и `Retry-Queue` есть только в on-prem Exchange. «Fix now» в оповещении EAC о
+  `4.4.316` отключает коннектор или релей домена и превращает 24 часа ожидания в немедленные отбивки.
+  Что письмо было и что с ним стало, видно только в трассировке тенанта.
+- Как: окна простоя — по проверке задания оповещений (R-18) раз в пять минут: API mailcow не отвечает
+  вовсе или `postfix-mailcow`/`dovecot-mailcow` не `running` (`get/status/containers`); порт 25 панель
+  проверить не может (он открыт только диапазонам EOP). Начало — последняя успешная проверка перед
+  первой неудачной (с запасом), конец — первая успешная. Лог Postfix — свидетельство вокруг окна, но не
+  повод открыть его: тихий узел молчит часами. Администратор отмечает окно вручную (плановое
+  обслуживание, простой самой панели) с причиной, изменения — в журнал. Трассировка (Graph
+  `GET /admin/exchange/tracing/messageTraces` и `getDetailsByRecipient`, как в R-30) по окну ±1 час,
+  получатели на доменах узла: `pending` — ждёт в очереди EOP (сколько осталось до 24 часов), `failed` —
+  потеряно, отправитель получил NDR (`4.4.7`/`QUEUE.Expired` — истёк срок), `delivered` — пришло с
+  опозданием (сверка с `cleanup ... message-id=` лога узла), `quarantined`/`filteredAsSpam` — не из-за
+  простоя. Сотрудникам — список писем их ящиков с отправителем и темой, администратору — окна, все
+  письма и баннер, пока письма ждут; оповещение R-18 и пометка в пинге Healthchecks. Лимиты Graph: 100
+  запросов за 5 минут отдельно на список и на подробности, окно запроса до 10 суток, история 90 суток,
+  данные запаздывают на 5-30 минут.
+- Решение владельца D-15 (раздел 7.1): только наблюдение и сообщение (вариант A), без промежуточного
+  релея.
+- Источники: [лимиты EOP](https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-protection-service-description/exchange-online-protection-limits)
+  («Message deferral limit: 1 day, retried every 15 minutes»);
+  [Mail flow intelligence](https://learn.microsoft.com/en-us/defender-office-365/connectors-mail-flow-intelligence)
+  (коды `4.4.312`-`4.4.318`, `4.7.320`, «Fix now»);
+  [отчёт об очереди](https://learn.microsoft.com/en-us/exchange/monitoring/mail-flow-reports/mfr-queued-messages-report);
+  [NDR 4.4.7](https://learn.microsoft.com/en-us/troubleshoot/exchange/email-delivery/ndr/fix-error-code-550-4-4-7-in-exchange-online);
+  [Set-TransportConfig](https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-transportconfig)
+  (`-MessageExpiration`, 12-24 часа);
+  [Graph messageTraces](https://learn.microsoft.com/en-us/graph/api/messagetracingroot-list-messagetraces) и
+  [getDetailsByRecipient](https://learn.microsoft.com/en-us/graph/api/exchangemessagetrace-getdetailsbyrecipient);
+  [задержка трассировки](https://learn.microsoft.com/en-us/exchange/monitoring/monitoring);
+  [оповещения Defender](https://learn.microsoft.com/en-us/defender-xdr/alert-policies) («Messages have
+  been delayed» — от 2000 писем старше часа, для малого тенанта практически не срабатывает).
+- Без EOP: да — fake-EOP в режиме очереди и его трассировка в форме Graph на стенде; на тенанте —
+  трассировка в add-on, точные строки статусов и событий, `MessageExpiration` (раздел 6, эксперименты
+  19-21).
+- Сделано (2026-10-02): раздел 5.9.
+
 ### Тенант
 
 **R-22. `TenantDriver` и `tenant-worker`.** L.
@@ -1267,6 +1311,66 @@ queue id другому письму) или другой отправитель
 Тесты: backend — `npm run lint` чисто, `vitest run` 245 файлов, 3909 тестов; frontend — `npm run lint`
 чисто, `npm test` 3804 теста, `npm run build` собирается; fake-EOP — `node --test eop.test.mjs` 33 теста.
 
+### 5.9. R-43: письма во время простоя узла (2026-10-02)
+
+Решение владельца D-15: вариант A — наблюдать и сообщать, без промежуточного релея. Код — окна простоя
+`backend/src/services/mailNode/outages.js`, трассировка `services/mailNode/traceSource.js` (интерфейс и
+драйверы) и `services/mailNode/outageTrace.js` (сопоставление), крючок в задании оповещений
+`nodeAlerts.js` (`outageStep`), маршруты `routes/mailNodeOutages.js` (смонтированы на `/api/mail-node`);
+экраны — `MailNodeOutagesSection` («Интеграции» администратора, под «Эксплуатацией узла»),
+`MailNodeOutageNotice` (над списком писем ящика, `MessageList`), правила — `frontend/src/utils/mailNodeOutage.js`,
+демо — `frontend/src/demo/outages.js`; fake-EOP — `scripts/deploy/test/fake-eop/inbound.mjs`. Порядок для
+администратора — [runbook, раздел 6д](../../operations/mail-node.md). Миграция `0085_mail_node_outages.sql`:
+`mail_node_outages` (окно: начало, конец, `detected`/`manual`, плановое ли, причина, что упало, свидетельства
+лога, последний проход трассировки; открытое найденное окно — не больше одного) и `mail_node_outage_letters`
+(строка на окно, id трассировки и получателя: отправитель, тема, когда EOP получил, статус трассировки,
+исход, истёк ли срок, код и слова подробностей до 300 символов, что видно в логе узла). Настройки —
+`integration_config` `mail_node_outages` (`retentionDays`, по умолчанию 30, от 1 до 90), последняя проверка —
+`mail_node_outage_state`. Новые записи журнала: `mail_node.outage_opened`, `outage_closed`, `outage_added`,
+`outage_changed`, `outage_deleted`; срок хранения — `mail_node.config_changed` с `settings: 'outages'`.
+
+| Что | Сделано | Отличия и оговорки |
+|---|---|---|
+| Окна | Проверка задания оповещений: `failed` — API mailcow не ответил вовсе (`mail_node_unreachable`) или `postfix-mailcow`/`dovecot-mailcow` не `running` (имя ищется подстрокой: и `postfix-mailcow`, и `mailcowdockerized-postfix-mailcow-1`); `good` — контейнеры прочитаны, оба работают; `unknown` (ключ отклонён, ошибка API, контейнера нет в ответе) окно не открывает и не закрывает. Окно открывается на первой `failed` с началом в последней `good`, закрывается на первой `good`; без прежней `good` или после перерыва в проверках больше 15 минут (не работала панель) начало помечено «неточно». Свидетельства лога (сеанс `postfix/smtpd ... client=` на порту 25 — только от EOP): последний до окна, первый после, сколько во время; пишутся, пока окно открыто и 25 часов после | Порт 25 не проверяется (открыт только EOP). Тишина в логе окно не открывает ни сама, ни вместе с `unknown`: на тихом узле это ложные тревоги, а в живом прогоне лог и так прочитан. Ошибка этого шага пишется в лог панели и не трогает остальные оповещения |
+| Вручную | «Отметить период» (начало, конец или пусто — пока длится, причина обязательна, «плановое»), «Изменить» (причина обязательна, смена времени сбрасывает трассировку окна), «Закрыть», «Удалить» (подтверждение и причина); журнал с временами и причиной | Окно можно отметить на месяц вперёд (плановое обслуживание); трассировка берёт его, когда оно началось |
+| Трассировка | Интерфейс `list({ start, end, recipientDomains, statuses, maxRequests }) → { rows, requests, complete }` и `details(row) → { events, requests }` в формах Graph. Драйверы: Graph-образный HTTP (`$filter` по `receivedDateTime` с обеими границами, `$top`, `@odata.nextLink` только на тот же хост, части по 10 суток, не старше 90; без токена — только для стенда через `MAIL_NODE_TRACE_URL`), фикстуры (тесты, демо). Без настроенной трассировки экран пишет «не подключена» и показывает окна | Драйвер тенанта — этап 7 (R-22, R-30): ему остаётся дать токен (сертификат приложения) или подставить `Get-MessageTraceV2` через `ExoRunner` за тем же интерфейсом. `$filter` Graph не умеет домен получателя, поэтому один запрос по времени на окно, а домены узла отбираются на стороне панели (вместо «запрос на домен» — меньше запросов) |
+| Сопоставление | Окно ±1 час, проход раз в 15 минут, пока окно открыто и 25 часов после закрытия; за проход не больше 40 запросов, подробности только для `pending` и `failed`; не хватило лимита — помечено «не полностью», следующий проход продолжает. `pending` → ждёт (срок — получено + 24 часа); `failed` → потеряно (`expired`, если в `Fail` есть `4.4.7`/`QUEUE.Expired`; отказ в часе вокруг окна, но не во время него, считается, только если истёк); `delivered` → задержано, если получено во время окна, или в часе вокруг — если лог узла показал позднее прибытие или прежний проход видел его ждущим; письмо, которое по логу узла (`cleanup message-id=` очереди с `smtpd client=`) пришло не позже 10 минут после приёма EOP, задержанным не считается; `quarantined`/`filteredAsSpam` во время окна → «другое» (только администратору); `gettingStatus`, `expanded` — до следующего прохода. Хранится последний известный исход; `data` (XML) не хранится. Строки старше срока хранения удаляются каждым проходом | Событие и слова подробностей сравниваются без учёта регистра (Learn пишет `Receive`/`Deliver`, командлеты — `RECEIVE`/`FAIL`); точные строки для истёкшего письма — эксперимент 20 |
+| Кто что видит | Любой вошедший — письма ящиков панели (ящики общие, `services/mailAccess.js`) по адресу входа ящика: задержанные, ждущие, потерянные, с отправителем, темой и временем, без кодов и лога. Администратор — окна, все письма окна (и получателей без ящика в панели, и «другое»), коды, слова EOP и лог | Псевдонимы панели для сопоставления не используются (их может добавить любой, R-17) |
+| Оповещение | `outage_letters_waiting` (источник `trace`, `warning`): сколько писем ещё ждёт и когда EOP вернёт первое; в теле пинга Healthchecks, `/fail` не вызывает; в журнал — появление и снятие с числом и временем, без адресов и тем | Пока API узла не отвечает, задание пинга не шлёт вовсе (как раньше), поэтому пометка видна в Healthchecks только после того, как узел ответил; ошибка трассировки оставляет оповещение прежним |
+| Экраны | Администратор: баннер (`role="alert"`) с числом ждущих, временем до первого возврата и «не нажимать Fix now», окна с тем, как найдены, причиной, свидетельствами и счётчиками, письма окна, формы, «Проверить трассировку сейчас», срок хранения. Сотрудник: заметка над списком писем ящика (во «Всех входящих» — всех ящиков, с адресом), свёрнута в одну строку, список по кнопке (`aria-expanded`), «Понятно» скрывает её в этом браузере до нового письма. en/ru, демо: прошлый простой на 26 часов (два задержанных, одно истёкшее, одно в карантине EOP), текущий с двумя ждущими, плановое обслуживание без писем | — |
+| fake-EOP | Очередь входящей почты: `eop inbound send` ставит письмо «из интернета» ящику узла, процесс `serve` раз в 10 с смотрит очередь и пытается отдать его `postfix-mailcow:25` каждые `retrySeconds` (15 минут, для тестов меньше); пока узел не отвечает — `Defer` с `450 4.4.312`/`4.4.315`/`4.4.316`/`4.4.317`/`4.4.318` или ответом узла `4xx`; после `expirySeconds` (24 часа, у письма — `--expire-seconds`) — `Fail` с `550 4.4.7 QUEUE.Expired; message expired` и отбивка отправителю в `ndr/`; `5xx` узла — `Fail` сразу. Трассировка в формах Graph на порту 8080 и `eop trace` | Отбивки никуда не уходят (отправители «в интернете»). Остановленный контейнер пропадает из DNS Docker, поэтому на стенде видно `4.4.312`, а не `4.4.316`, как у настоящего EOP при живом DNS узла |
+
+Проверено на стенде (2026-10-02 по UTC; код ветки в одноразовом контейнере образа backend стенда
+`sha-9bef5483377f` на сети `stage_mailexpert` и сети mailcow, окружение `stage-backend` с временной базой
+`r43check` (все 85 миграций), из базы панели прочитана только строка настроек узла; fake-EOP ветки — `eop up`,
+`eop inbound config --retry-seconds 660`; тестовый ящик `r43-outage@stage.test` заведён и удалён):
+- 12:22:40 проверка — `good`; 12:22:53 `docker compose stop postfix-mailcow`; 12:22:59-12:23:01 три письма
+  `eop inbound send` на тестовый ящик (одно с `--expire-seconds 150`);
+- 12:23:10 проверка — `failed` (`postfix-mailcow` `exited`): окно открыто с началом 12:22:40 (последняя `good`),
+  оповещения `containers` (error) и `outage_letters_waiting` (warning, 3 письма, первое вернётся 2026-10-03
+  12:22:59); проход трассировки — 3 ждут, 4 запроса;
+- журнал fake-EOP: 12:23:11-12:23:21 `event=defer attempt=1 reply="450 4.4.312 DNS query failed [Message=EAI_AGAIN]"`
+  по каждому письму; 12:25:36 `event=fail reply="550 4.4.7 QUEUE.Expired; message expired" ndr_to=<...>`;
+  отбивка: `Status: 4.4.7`, `Diagnostic-Code: smtp;550 4.4.7 QUEUE.Expired; message expired`, тема
+  `Undeliverable: ...`;
+- проход трассировки 12:26:00 — 2 ждут, 1 потеряно (`expired`, `4.4.7`);
+- 12:26:11 `start postfix-mailcow`, 12:26:21 проверка — `good`: окно закрыто (3 мин 41 с), журнал —
+  `outage_opened`, `outage_closed`, `alert_raised`/`alert_cleared` для `containers`;
+- 12:34:06 fake-EOP повторил (вторая попытка через 11 минут) — `250 2.0.0 Ok: queued as ...` по двум письмам;
+  свидетельства окна — первый сеанс после окна 12:34:06;
+- проход трассировки 12:34:31 (2 запроса: список и подробности потерянного) — 2 задержано (`nodeLog: seen`,
+  по логу узла пришли в 12:34:06, через 11 минут после приёма EOP), 1 потеряно, 0 ждут; список сотрудника —
+  все три письма ящика;
+- в конце: ящик удалён, очередь и отбивки fake-EOP очищены, `retrySeconds` и `expirySeconds` возвращены к
+  900 и 86400, режим `accept`, очередь Postfix пуста, все контейнеры mailcow `running`, временная база удалена.
+
+Не проверено на стенде: экраны (тесты рендера и демо, демо просмотрено в браузере), Graph-драйвер с
+токеном и настоящая трассировка (этап 7, эксперименты 19-21), окно по недоступному API (проверено тестом:
+недоступный API — `failed`, как и упавший контейнер).
+
+Тесты: backend — `npm run lint` чисто, `vitest run` 248 файлов, 3944 теста; frontend — `npm run lint`
+чисто, `npm test` 3947 тестов, `npm run build` собирается; fake-EOP — `node --test eop.test.mjs` 38 тестов.
+
 ## 6. Что требует живого тенанта
 
 Нужен платный или пробный тенант с add-on (в E5 developer Inbound connector не создать) и пробный домен
@@ -1292,6 +1396,9 @@ queue id другому письму) или другой отправитель
 | 16 | Минимальные роли EXO для кастомной группы ролей | `Get-ManagementRoleAssignment`, прогон операций R-22..R-29 под суженной ролью |
 | 17 | Выпуск из карантина на локального получателя (если D-2 — карантин) | `Release-QuarantineMessage`, письмо доходит и не возвращается в карантин |
 | 18 | Лицензирование: минимум, считаются ли контакты или mail users получателями, цена | вопрос партнёру (CSP) |
+| 19 | Трассировка в add-on тенанте для R-43: работает ли Graph `messageTraces` с правом приложения `ExchangeMessageTrace.Read.All` (иначе `Get-MessageTraceV2` через `ExoRunner`); отдаёт ли `Get-MessageTraceV2` тему | запрос по окну и `getDetailsByRecipient` по одному письму; сохранить ответы как фикстуры `traceSource.fixtures.js` |
+| 20 | Точные строки письма в очереди коннектора и истёкшего: статус (`pending`, `failed`), слова событий (`Defer`, `Fail` или иначе), есть ли в `description`/`data` `4.4.7` и `QUEUE.Expired`; через сколько после возврата узла EOP повторяет попытку | тестовый домен с остановленным узлом: письмо снаружи, трассировка каждые 15 минут, затем `MessageExpiration` 12 часов (если есть), чтобы дождаться истечения быстрее |
+| 21 | Есть ли `Set-TransportConfig -MessageExpiration` в add-on (в Learn add-on не указан) и действует ли он на очередь коннектора | `Get-TransportConfig \| Format-List MessageExpiration`; значение влияет на «сколько осталось» R-43 (сейчас 24 часа) |
 
 ## 7. Решения владельца
 
@@ -1317,6 +1424,7 @@ queue id другому письму) или другой отправитель
 | D-12 | Relayhost | только `extra.cf`; `extra.cf` и relayhost домена через API | оба, одной строкой `<EOP_HOST>`: `extra.cf` нужен отбивкам, relayhost домена виден и сверяется из панели |
 | D-13 | IPv6 узла | `ENABLE_IPV6=false`; привязка портов к IPv4; `ip6tables` | `ENABLE_IPV6=false` явно |
 | D-14 | Отключение ящика в панели | пауза только в панели; `active: 2` на узле | пауза в панели, как сейчас, но с явным текстом в интерфейсе |
+| D-15 | Простой узла дольше 24 часов (R-43) | A — наблюдать и сообщать: окна простоя, трассировка, списки писем; B — A и промежуточный релей (store-and-forward) за smart host с MX-приоритетом; C — A и холодный релей, который добавляют в коннектор вручную | A сразу; B — если простои дольше ~20 часов станут реальным риском (нужны второй сервер, общий сертификат, список диапазонов EOP на релее и проверка MX-приоритета smart host на тенанте); C — только если не сработает приём B |
 
 ### 7.1. Принятые решения (2026-10-01)
 
@@ -1336,6 +1444,7 @@ queue id другому письму) или другой отправитель
 | D-12 | И `extra.cf`, и relayhost домена, одной строкой `<EOP_HOST>`. |
 | D-13 | `ENABLE_IPV6=false`. |
 | D-14 | У ящиков узла нет «Отключить». Удаление (2026-10-01): запросить может любой вошедший — ввод адреса ящика и обязательная причина; ящик продолжает работать N дней (по умолчанию 5, администратор задаёт от 1 до 90), отменить может любой; затем задание удаляет его безвозвратно с узла (`delete/mailbox`) и из панели, журнал хранит причину (R-33). Удаление в тенанте добавится в то же задание вместе с драйвером тенанта (R-29). |
+| D-15 | 2026-10-02: вариант A — наблюдать и сообщать (R-43); промежуточного релея (store-and-forward) пока нет; вернуться к вопросу, если простои дольше ~20 часов станут реальным риском. |
 
 Модули: логика EOP живёт в backend панели (состояние доменов и ящиков, очередь заданий `tenant_jobs`,
 повторы, журнал, вызовы Graph); отдельный контейнер `tenant-worker` только выполняет типизированные
@@ -1418,6 +1527,12 @@ queue id другому письму) или другой отправитель
   - Get-MessageTraceV2: https://learn.microsoft.com/en-us/powershell/module/exchange/get-messagetracev2 ;
     Graph messageTraces: https://learn.microsoft.com/en-us/graph/api/messagetracingroot-list-messagetraces
   - Лимиты EOP (2026-02-10): https://learn.microsoft.com/en-us/office365/servicedescriptions/exchange-online-protection-service-description/exchange-online-protection-limits
+  - Очередь EOP при недоступном узле (R-43): https://learn.microsoft.com/en-us/defender-office-365/connectors-mail-flow-intelligence ;
+    https://learn.microsoft.com/en-us/exchange/monitoring/mail-flow-reports/mfr-queued-messages-report ;
+    https://learn.microsoft.com/en-us/troubleshoot/exchange/email-delivery/ndr/fix-error-code-550-4-4-7-in-exchange-online ;
+    https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-transportconfig ;
+    https://learn.microsoft.com/en-us/exchange/monitoring/monitoring ; https://learn.microsoft.com/en-us/defender-xdr/alert-policies
+  - Graph getDetailsByRecipient (2026-01-27): https://learn.microsoft.com/en-us/graph/api/exchangemessagetrace-getdetailsbyrecipient
   - Лимиты исходящей почты (2026-08-25): https://learn.microsoft.com/en-us/defender-office-365/outbound-spam-sending-limits-troubleshoot
   - Веб-сервис IP-адресов (2026-08-20): https://learn.microsoft.com/en-us/microsoft-365/enterprise/microsoft-365-ip-web-service
   - Внешние DNS-записи Microsoft 365 (2026-08-20): https://learn.microsoft.com/en-us/microsoft-365/enterprise/external-domain-name-system-records
