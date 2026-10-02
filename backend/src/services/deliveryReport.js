@@ -1,5 +1,5 @@
 import { decodeBodyPart } from './messageParser.js';
-import { recordOutcomes, trimDiagnostic } from './deliveryStatus.js';
+import { recordOutcomes, sentLetterOf, trimDiagnostic } from './deliveryStatus.js';
 
 // Delivery status notifications (RFC 3464, multipart/report; report-type=delivery-status, and the
 // UTF-8 form of RFC 6533) that come back to a mailbox mark the original letter of the same mailbox,
@@ -16,8 +16,17 @@ import { recordOutcomes, trimDiagnostic } from './deliveryStatus.js';
 // - In-Reply-To of the report, else the last References entry (Exchange's reports carry them;
 //   Postfix's do not);
 // - the Message-ID of a text/rfc822-headers part, fetched only then.
-// Only the message/delivery-status part itself (a few hundred bytes) is fetched for every report.
+// Only the message/delivery-status part itself (a few hundred bytes) is fetched for every report,
+// and not at all when the structure says it is larger than MAX_STATUS_BYTES.
+//
+// A report marks only a letter the mailbox itself sent (deliveryStatus.js sentLetterOf: the
+// panel's journal or a Sent copy from its own login address), and when the journal knows the
+// letter, only the recipients it was sent to: anyone can mail a report naming any Message-ID, so a
+// report about a received letter, another mailbox's letter or a stranger is ignored. Its diagnostic
+// is shown as the remote server's quoted words, as plain text.
 
+export const MAX_STATUS_BYTES = 64 * 1024;
+export const MAX_REPORT_RECIPIENTS = 100;
 const REPORT_TYPES = new Set(['delivery-status', 'global-delivery-status']);
 const STATUS_TYPES = new Set(['message/delivery-status', 'message/global-delivery-status']);
 const RETURNED_TYPES = new Set(['message/rfc822', 'message/global']);
@@ -33,7 +42,7 @@ const param = (node, name) => {
 };
 
 // A letter's BODYSTRUCTURE (imapflow's form) as a delivery report: { statusPart, statusEncoding,
-// statusCharset, headersPart, headersEncoding, returnedMessageId } or null when the letter is not one
+// statusCharset, statusSize, headersPart, headersEncoding, returnedMessageId } or null when the letter is not one
 // (the top level is not multipart/report with a delivery-status report type, or no status part).
 export function deliveryReportOf(structure) {
   if (!structure || lower(structure.type) !== 'multipart/report') return null;
@@ -48,6 +57,7 @@ export function deliveryReportOf(structure) {
     statusPart: status.part,
     statusEncoding: status.encoding ?? null,
     statusCharset: param(status, 'charset'),
+    statusSize: Number.isFinite(Number(status.size)) ? Number(status.size) : null,
     headersPart: headers?.part ?? null,
     headersEncoding: headers?.encoding ?? null,
     returnedMessageId: MESSAGE_ID_RE.test(returnedId ?? '') ? MESSAGE_ID_RE.exec(returnedId)[0] : null,
@@ -89,7 +99,8 @@ const typed = (value) => {
 
 // The message/delivery-status text: { message: per-message fields, recipients: [{ finalRecipient,
 // originalRecipient, action, status, diagnosticCode, remoteMta, lastAttemptDate }] }. Blocks are
-// separated by empty lines; the first is the per-message block.
+// separated by empty lines; the first is the per-message block. At most MAX_REPORT_RECIPIENTS
+// recipients are read.
 export function parseDeliveryStatus(text) {
   const blocks = String(text ?? '').replace(/\r\n/g, '\n').split(/\n[ \t]*\n/).map((b) => b.trim()).filter(Boolean);
   const [first, ...rest] = blocks.map(fieldsOf);
@@ -103,7 +114,8 @@ export function parseDeliveryStatus(text) {
       diagnosticCode: typed(f['diagnostic-code']),
       remoteMta: typed(f['remote-mta']),
       lastAttemptDate: f['last-attempt-date'] ?? null,
-    }));
+    }))
+    .slice(0, MAX_REPORT_RECIPIENTS);
   return { message: first ?? {}, recipients };
 }
 
@@ -114,8 +126,10 @@ function addressOf(value) {
 }
 
 // The outcomes a report gives (failed and delayed only), per recipient: [{ recipient, state, at,
-// statusCode, diagnostic, details: { action, remoteMta, reportingMta } }]. at: when the report
-// says it tried last, else when the report was made (the caller's: its Date).
+// statusCode, diagnostic, details: { action, remoteMta, reportingMta, finalRecipient } }]. at: when
+// the report says it tried last, else when the report was made (the caller's: its Date).
+// recipient: the address as the sender wrote it (Original-Recipient, else Final-Recipient), as the
+// log's orig_to, so both sources meet on one row; finalRecipient only when it differs.
 export function reportOutcomes(parsed, { at = null } = {}) {
   const reportingMta = typed(parsed.message?.['reporting-mta']);
   const made = at ? new Date(at) : null;
@@ -123,8 +137,8 @@ export function reportOutcomes(parsed, { at = null } = {}) {
   const out = [];
   for (const r of parsed.recipients) {
     const state = ACTIONS[r.action];
-    // Final-Recipient first: it is the address the log's to= names, so both sources meet on one row.
-    const recipient = addressOf(r.finalRecipient) ?? addressOf(r.originalRecipient);
+    const finalRecipient = addressOf(r.finalRecipient);
+    const recipient = addressOf(r.originalRecipient) ?? finalRecipient;
     if (!state || !recipient) continue;
     const tried = r.lastAttemptDate ? Date.parse(r.lastAttemptDate) : NaN;
     out.push({
@@ -133,7 +147,7 @@ export function reportOutcomes(parsed, { at = null } = {}) {
       at: Number.isFinite(tried) ? new Date(tried).toISOString() : madeAt,
       statusCode: r.status,
       diagnostic: trimDiagnostic(r.diagnosticCode),
-      details: { action: r.action, remoteMta: r.remoteMta, reportingMta },
+      details: { action: r.action, remoteMta: r.remoteMta, reportingMta, finalRecipient: finalRecipient !== recipient ? finalRecipient : null },
     });
   }
   return out;
@@ -151,14 +165,31 @@ export function originalFromStructure({ report, inReplyTo = null, references = n
   return report.returnedMessageId ?? messageIdIn(inReplyTo) ?? messageIdIn(references, { last: true });
 }
 
-// Marks the original letter of the mailbox from one report already read: { original, changed }
-// (original null: the report names no letter; changed: rows written).
+// Marks the original letter of the mailbox from one report already read: { original, changed,
+// ignored } (original null: the report names no letter; changed: rows written; ignored: 'not_sent'
+// when the mailbox did not send that letter, so nothing is marked). Recipients the journal does
+// not know for the letter are dropped.
 export async function recordDeliveryReport({ accountId, report, statusText, headersText = null, inReplyTo = null, references = null, date = null }) {
   const original = originalFromStructure({ report, inReplyTo, references }) ?? messageIdOfHeaders(headersText);
   if (!original) return { original: null, changed: 0 };
-  const outcomes = reportOutcomes(parseDeliveryStatus(statusText), { at: date });
+  const sent = await sentLetterOf(accountId, original);
+  if (!sent.owned) return { original, changed: 0, ignored: 'not_sent' };
+  const outcomes = reportOutcomes(parseDeliveryStatus(statusText), { at: date })
+    .filter((outcome) => !sent.recipients || sent.recipients.has(outcome.recipient) || sent.recipients.has(outcome.details.finalRecipient));
   if (!outcomes.length) return { original, changed: 0 };
   return { original, changed: await recordOutcomes(accountId, original, 'dsn', outcomes) };
+}
+
+// The reports of one sync worth reading: no older than MAX_REPORT_AGE_MS (a first sync of a
+// mailbox stores its whole history as new letters), the newest MAX_REPORTS_PER_SYNC of them, so one
+// background session never runs past its time limit. The rest are never read: no retry in v1.
+export const MAX_REPORTS_PER_SYNC = 50;
+export const MAX_REPORT_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+export function reportsToRead(reports, now = Date.now()) {
+  return reports
+    .filter((item) => item.date && now - new Date(item.date).getTime() <= MAX_REPORT_AGE_MS)
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, MAX_REPORTS_PER_SYNC);
 }
 
 // Reads and records the reports one sync stored, over an IMAP client with their folder selected:
@@ -170,6 +201,7 @@ export async function readDeliveryReports(client, accountId, reports) {
   for (const item of reports) {
     try {
       const { report } = item;
+      if (report.statusSize != null && report.statusSize > MAX_STATUS_BYTES) continue;
       const needHeaders = !originalFromStructure(item) && report.headersPart;
       const parts = needHeaders ? [report.statusPart, report.headersPart] : [report.statusPart];
       const msg = await client.fetchOne(String(item.uid), { uid: true, bodyParts: parts }, { uid: true });

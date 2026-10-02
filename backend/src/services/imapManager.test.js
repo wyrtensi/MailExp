@@ -5600,6 +5600,10 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
   it('reads the delivery reports among the new letters on a background session after the sync (R-17)', async () => {
     const acct = mailbox('node-dsn');
     const mgr = ladderManager();
+    // A report of today (an older one is no longer read, deliveryReport.js reportsToRead).
+    const today = new Date(Math.floor(Date.now() / 1000) * 1000);
+    const parsed = parseMessage.getMockImplementation();
+    parseMessage.mockImplementation(async (msg) => ({ ...(await parsed(msg)), date: today }));
     const client = {
       ...syncClient(2),
       fetch: vi.fn(async function* (range) {
@@ -5617,7 +5621,7 @@ describe('a sync stores the bodies of a node mailbox\'s new letters', () => {
       expect(reports).toEqual([{
         uid: WATERMARK + 2,
         report: expect.objectContaining({ statusPart: '2', returnedMessageId: '<r17-denied-1790933353895@stage.test>' }),
-        inReplyTo: null, references: null, date: new Date('2026-09-26T10:00:00Z'),
+        inReplyTo: null, references: null, date: today,
       }]);
     } finally { evictPool(acct.id); }
   });

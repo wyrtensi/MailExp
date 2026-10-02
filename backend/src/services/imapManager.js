@@ -19,7 +19,7 @@ import { sendPushToActiveUsers } from './pushNotifications.js';
 import { defaultAddressBookId } from './addressBooks.js';
 import { redactEmail } from '../utils/redact.js';
 import { eopCategory } from '../utils/antispamReport.js';
-import { deliveryReportOf, readDeliveryReports } from './deliveryReport.js';
+import { deliveryReportOf, readDeliveryReports, reportsToRead } from './deliveryReport.js';
 import { adjustFolderCounts, resolveSpamFolder } from '../utils/mailUtils.js';
 import { resolveForConnection, createPinnedLookup } from './hostValidation.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
@@ -5197,7 +5197,8 @@ export class ImapManager {
            WHERE account_id = $1 AND path = $2`,
           [account.id, folder]
         );
-        if (deliveryReports.length) this._scheduleDeliveryReports(account, folder, deliveryReports);
+        const reportsDue = reportsToRead(deliveryReports);
+        if (reportsDue.length) this._scheduleDeliveryReports(account, folder, reportsDue);
         await stampLastSync(account.id);
         return { insertedCount, broadcastedNewMessages };
       } finally {
@@ -6703,8 +6704,9 @@ export class ImapManager {
   // Delivery reports a sync of `folder` just stored mark the original letters of the mailbox
   // (R-17, services/deliveryReport.js): right after the sync, on one background pooled session
   // under the per-host background semaphore, each report's status part (a few hundred bytes) is
-  // fetched and recorded. Best effort and never retried: a report that could not be read marks
-  // nothing, and the sync never waits for it.
+  // fetched and recorded. Only the newest reports of the last 30 days, at most 50 a sync
+  // (reportsToRead: a first sync stores a whole history as new). Best effort and never retried: a
+  // report that could not be read marks nothing, and the sync never waits for it.
   _scheduleDeliveryReports(account, folder, reports) {
     setImmediate(async () => {
       const host = (account.imap_host || '').toLowerCase();

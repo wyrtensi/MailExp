@@ -90,6 +90,14 @@ describe('process id, delays and TLS lines (R-17)', () => {
     expect(parsePostfixEntry({ ...STAND_DELIVERY[1], pid: '443' })).toMatchObject({ pid: 443 });
   });
 
+  it('reads the login a submission client used, per queued letter', () => {
+    expect(parsePostfixEntry(STAND_DELIVERY[6])).toMatchObject({ event: 'received', saslUsername: 'r17-delivery@stage.test' });
+    expect(parsePostfixEntry(STAND_DELIVERY[5]).saslUsername).toBeNull();
+    const letters = correlateByQueueId(parsePostfixLog(STAND_DELIVERY).lines);
+    expect(letters.get('0C3BF1A4B81').saslUsername).toBe('r17-delivery@stage.test');
+    expect(letters.get('61EB61A4B57').saslUsername).toBeNull();
+  });
+
   it('reads the delays of a delivery line', () => {
     expect(parsePostfixEntry(STAND_DELIVERY[1]).delays).toEqual([0.09, 0.02, 0.1, 0.05]);
     expect(parsePostfixEntry(STAND_LOG[0]).delays).toBeNull();

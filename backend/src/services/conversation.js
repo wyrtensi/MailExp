@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { deliveryStateColumn } from './deliveryStatus.js';
 import { resolveAllDraftsPaths, resolveAllSentPaths, resolveAllSpamPaths, resolveAllTrashPaths } from '../utils/mailUtils.js';
 
 // "The whole conversation" under an open letter, as Gmail stacks it: every letter of the open
@@ -33,7 +34,7 @@ function addressList(value) {
 }
 
 // { threadKey, total, items: [{ id, folder, subject, snippet, date, from_name, from_email,
-//   to_addresses, cc_addresses, has_attachments, direction: 'in' | 'out' | 'draft' }] },
+//   to_addresses, cc_addresses, has_attachments, delivery_state, direction: 'in' | 'out' | 'draft' }] },
 // oldest first; null when the message does not exist.
 export async function conversation(messageId) {
   const found = await query(`
@@ -61,8 +62,10 @@ export async function conversation(messageId) {
     WITH letters AS (
       SELECT DISTINCT ON (COALESCE(m.message_id, m.id::text))
              m.id, m.folder, m.subject, m.snippet, m.date, m.from_name, m.from_email,
-             m.to_addresses, m.cc_addresses, m.has_attachments
+             m.to_addresses, m.cc_addresses, m.has_attachments,
+             ${deliveryStateColumn('m', 'a')} AS delivery_state
       FROM messages m
+      JOIN email_accounts a ON a.id = m.account_id
       WHERE m.account_id = $1
         AND m.thread_key = $2
         AND m.is_deleted = false
@@ -97,6 +100,7 @@ export async function conversation(messageId) {
       to_addresses: r.to_addresses,
       cc_addresses: r.cc_addresses,
       has_attachments: r.has_attachments,
+      delivery_state: r.delivery_state ?? null,
       direction: letterDirection(r, own, sent, drafts),
     })),
   };

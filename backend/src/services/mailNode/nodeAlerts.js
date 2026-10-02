@@ -271,18 +271,23 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   };
 
   fresh.push(...eopHostSignal(eop.eopHost));
+  // The queue before the log: a letter that leaves the queue after this point has its final line in
+  // the log read below (or in the next run's), so the delivery details never take a letter still on
+  // its way for one that left the queue without a final line.
+  const queueItems = await read('queue', () => listQueue(cfg));
   const log = await read('log', () => readPostfixLog(cfg, { since: now - TERRL_WINDOW_MS }));
   if (log) fresh.push(...logSignals(log.lines, { now, eopHost: eop.eopHost }));
   // The delivery details of sent letters (R-17, services/deliveryStatus.js) from the same read. Not
   // an alert source: its failure is logged and changes neither the alerts nor the ping.
   if (log) {
     try {
-      await captureFromLog({ cfg, log, eopHost: eop.eopHost, now });
+      const queueIds = queueItems ? new Set(queueItems.map((item) => item.queueId)) : null;
+      await captureFromLog({ cfg, log, eopHost: eop.eopHost, now, queueIds });
     } catch (err) {
       console.error(`Mail node delivery details were not captured: ${err?.code || err?.message || 'error'}`);
     }
   }
-  const queue = await read('queue', async () => summarizeQueue(await listQueue(cfg), now));
+  const queue = queueItems ? summarizeQueue(queueItems, now) : null;
   if (queue) fresh.push(...queueSignal(queue, settings));
   const nodeDns = await read('certificate', () => getNodeDnsCheck());
   if (!failed.includes('certificate')) fresh.push(...certificateSignal(nodeDns));

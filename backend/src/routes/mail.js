@@ -291,6 +291,7 @@ router.get('/thread/:threadId', async (req, res) => {
                m.date, m.snippet, m.is_read, m.is_starred,
                m.has_attachments, m.account_id, m.category,
                m.list_unsubscribe, m.list_unsubscribe_post, m.unsubscribed_at, m.delivery_addresses, m.eop_category,
+               ${deliveryStateColumn('m', 'a')} AS delivery_state,
                a.name AS account_name, a.email_address AS account_email, a.color AS account_color
         FROM messages m
         JOIN email_accounts a ON m.account_id = a.id

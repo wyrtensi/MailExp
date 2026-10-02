@@ -1,30 +1,34 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const recorded = vi.hoisted(() => ({ calls: [] }));
+const recorded = vi.hoisted(() => ({ calls: [], sent: { owned: true, sentAt: null, recipients: null } }));
 vi.mock('./deliveryStatus.js', async (importActual) => ({
   ...(await importActual()),
   recordOutcomes: vi.fn(async (accountId, messageId, source, outcomes) => {
     recorded.calls.push({ accountId, messageId, source, outcomes });
     return outcomes.length;
   }),
+  sentLetterOf: vi.fn(async () => recorded.sent),
 }));
 
 import {
   NDR_HEADERS, NDR_STATUS, NDR_STRUCTURE, STAND_DSN_STATUS, STAND_DSN_STRUCTURE,
 } from './deliveryReport.fixtures.js';
 import {
-  deliveryReportOf, messageIdIn, messageIdOfHeaders, parseDeliveryStatus, readDeliveryReports, recordDeliveryReport,
-  reportOutcomes,
+  MAX_REPORTS_PER_SYNC, deliveryReportOf, messageIdIn, messageIdOfHeaders, parseDeliveryStatus, readDeliveryReports,
+  recordDeliveryReport, reportOutcomes, reportsToRead,
 } from './deliveryReport.js';
 
 const ACCOUNT = '50000000-0000-4000-8000-000000000001';
 
-beforeEach(() => { recorded.calls = []; });
+beforeEach(() => {
+  recorded.calls = [];
+  recorded.sent = { owned: true, sentAt: null, recipients: null };
+});
 
 describe('deliveryReportOf', () => {
   it('reads the node\'s report from the structure the sync already has, original id included', () => {
     expect(deliveryReportOf(STAND_DSN_STRUCTURE)).toEqual({
-      statusPart: '2', statusEncoding: '7bit', statusCharset: null, headersPart: null, headersEncoding: null,
+      statusPart: '2', statusEncoding: '7bit', statusCharset: null, statusSize: 678, headersPart: null, headersEncoding: null,
       returnedMessageId: '<r17-denied-1790933353895@stage.test>',
     });
   });
@@ -52,8 +56,8 @@ describe('parseDeliveryStatus and reportOutcomes', () => {
       { finalRecipient: 'second@example.org', originalRecipient: 'second@example.org', action: 'failed', status: '5.4.1', diagnosticCode: '550 5.4.1 Recipient address rejected: Access denied. AS(201806281)', remoteMta: 'eop.test.local', lastAttemptDate: null },
     ]);
     expect(reportOutcomes(parsed, { at: new Date('2026-10-02T09:29:18Z') })).toEqual([
-      { recipient: 'test@example.com', state: 'failed', at: '2026-10-02T09:29:18.000Z', statusCode: '5.4.1', diagnostic: '550 5.4.1 Recipient address rejected: Access denied. AS(201806281)', details: { action: 'failed', remoteMta: 'eop.test.local', reportingMta: 'mail.test.local' } },
-      { recipient: 'second@example.org', state: 'failed', at: '2026-10-02T09:29:18.000Z', statusCode: '5.4.1', diagnostic: '550 5.4.1 Recipient address rejected: Access denied. AS(201806281)', details: { action: 'failed', remoteMta: 'eop.test.local', reportingMta: 'mail.test.local' } },
+      { recipient: 'test@example.com', state: 'failed', at: '2026-10-02T09:29:18.000Z', statusCode: '5.4.1', diagnostic: '550 5.4.1 Recipient address rejected: Access denied. AS(201806281)', details: { action: 'failed', remoteMta: 'eop.test.local', reportingMta: 'mail.test.local', finalRecipient: null } },
+      { recipient: 'second@example.org', state: 'failed', at: '2026-10-02T09:29:18.000Z', statusCode: '5.4.1', diagnostic: '550 5.4.1 Recipient address rejected: Access denied. AS(201806281)', details: { action: 'failed', remoteMta: 'eop.test.local', reportingMta: 'mail.test.local', finalRecipient: null } },
     ]);
   });
 
@@ -97,6 +101,44 @@ describe('the original letter', () => {
     expect((await recordDeliveryReport({ accountId: ACCOUNT, report, statusText: NDR_STATUS, references: '<a@x> <ref@stage.test>' })).original).toBe('<ref@stage.test>');
     expect((await recordDeliveryReport({ accountId: ACCOUNT, report, statusText: NDR_STATUS, headersText: NDR_HEADERS })).original).toBe('<orig-from-headers@stage.test>');
     expect(await recordDeliveryReport({ accountId: ACCOUNT, report, statusText: NDR_STATUS })).toEqual({ original: null, changed: 0 });
+  });
+});
+
+describe('who a report may mark', () => {
+  it('ignores a report about a letter the mailbox did not send (a spoofed or forwarded report)', async () => {
+    recorded.sent = { owned: false, sentAt: null, recipients: null };
+    const result = await recordDeliveryReport({ accountId: ACCOUNT, report: deliveryReportOf(STAND_DSN_STRUCTURE), statusText: STAND_DSN_STATUS });
+    expect(result).toEqual({ original: '<r17-denied-1790933353895@stage.test>', changed: 0, ignored: 'not_sent' });
+    expect(recorded.calls).toEqual([]);
+  });
+
+  it('marks only the recipients the journal knows the letter was sent to', async () => {
+    recorded.sent = { owned: true, sentAt: '2026-10-02T09:29:13.000Z', recipients: new Set(['test@example.com']) };
+    await recordDeliveryReport({ accountId: ACCOUNT, report: deliveryReportOf(STAND_DSN_STRUCTURE), statusText: STAND_DSN_STATUS });
+    expect(recorded.calls[0].outcomes.map((o) => o.recipient)).toEqual(['test@example.com']);
+    recorded.calls = [];
+    recorded.sent = { owned: true, sentAt: '2026-10-02T09:29:13.000Z', recipients: new Set(['ceo@example.com']) };
+    expect((await recordDeliveryReport({ accountId: ACCOUNT, report: deliveryReportOf(STAND_DSN_STRUCTURE), statusText: STAND_DSN_STATUS })).changed).toBe(0);
+    expect(recorded.calls).toEqual([]);
+  });
+
+  it('reads at most 100 recipients, and never a status part over 64 KB', async () => {
+    const many = `Reporting-MTA: dns; x\n\n${Array.from({ length: 150 }, (_, i) => `Final-Recipient: rfc822; r${i}@x.example\nAction: failed\nStatus: 5.1.1\n`).join('\n')}`;
+    expect(parseDeliveryStatus(many).recipients).toHaveLength(100);
+    const imap = { fetchOne: vi.fn() };
+    const report = { ...deliveryReportOf(STAND_DSN_STRUCTURE), statusSize: 70000 };
+    expect(await readDeliveryReports(imap, ACCOUNT, [{ uid: 1, report }])).toBe(0);
+    expect(imap.fetchOne).not.toHaveBeenCalled();
+  });
+
+  it('reads only the newest reports of the last 30 days of one sync', () => {
+    const now = Date.parse('2026-10-02T12:00:00Z');
+    const item = (uid, date) => ({ uid, date: new Date(date) });
+    const due = reportsToRead([item(1, '2026-08-01T00:00:00Z'), item(2, '2026-10-01T00:00:00Z'), item(3, '2026-10-02T00:00:00Z')], now);
+    expect(due.map((r) => r.uid)).toEqual([3, 2]);
+    const flood = Array.from({ length: 80 }, (_, i) => item(i, new Date(now - i * 60000).toISOString()));
+    expect(reportsToRead(flood, now)).toHaveLength(MAX_REPORTS_PER_SYNC);
+    expect(reportsToRead(flood, now)[0].uid).toBe(0);
   });
 });
 

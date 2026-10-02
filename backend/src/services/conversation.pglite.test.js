@@ -21,6 +21,8 @@ beforeAll(async () => {
   await db.exec(`
     CREATE TABLE email_accounts (id uuid PRIMARY KEY, email_address text NOT NULL, folder_mappings jsonb);
     CREATE TABLE account_aliases (account_id uuid NOT NULL, email text NOT NULL);
+    CREATE TABLE message_delivery_status (account_id uuid NOT NULL, message_id text NOT NULL, recipient text NOT NULL,
+                          state text NOT NULL, event_at timestamptz, updated_at timestamptz NOT NULL DEFAULT NOW());
     CREATE TABLE folders (account_id uuid NOT NULL, path text NOT NULL, name text NOT NULL,
                           special_use text, no_select boolean NOT NULL DEFAULT false);
     CREATE TABLE messages (
@@ -119,6 +121,19 @@ describe('conversation', () => {
 
     const insideSent = await conversation(id(11));
     expect(insideSent.items.map((i) => i.direction)).toEqual(['out']);
+  });
+
+  it('carries the delivery mark of a sent letter, never of an Inbox copy (R-17)', async () => {
+    await db.query(`INSERT INTO message_delivery_status (account_id, message_id, recipient, state, event_at) VALUES
+      ($1, '<b@x>', 'maya@c.example', 'bounced', NOW()), ($1, '<self3@x>', 'sales@x.example', 'bounced', NOW())`, [SALES]);
+    try {
+      const thread = await conversation(id(1));
+      expect(thread.items.map((i) => [i.id, i.delivery_state])).toEqual([[id(1), null], [id(3), 'failed'], [id(4), null]]);
+      // The self-sent letter is shown by its Inbox copy: no mark there.
+      expect((await conversation(id(12))).items[0].delivery_state).toBeNull();
+    } finally {
+      await db.query('DELETE FROM message_delivery_status');
+    }
   });
 
   it('dedups a self-sent letter filed in both Inbox and Sent to its Inbox copy, read as received', async () => {

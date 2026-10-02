@@ -26,6 +26,7 @@ import { getPostfixLog } from './mailcow.js';
 //   delay: seconds | null, delays: [before queue, in queue, connection setup, transmission] in
 //     seconds | null, messageId: '<id@host>' | null, size, nrcpt: numbers | null,
 //   notificationQueueId: the queue id of the bounce or delay notice a bounce line names | null,
+//   saslUsername: the login a submission client authenticated as (smtpd client= line), lower case | null,
 //   tls: for "<level> TLS connection established to host[ip]:port: <protocol> with cipher <cipher>
 //     (<bits>)" of the smtp client, { level, host, ip, port, protocol, cipher, bits } | null,
 //   message: the line as logged (folded to one line),
@@ -223,6 +224,7 @@ export function parsePostfixEntry(entry) {
     size: numberOr(field(rest, 'size')),
     nrcpt: numberOr(field(rest, 'nrcpt')),
     notificationQueueId: notice ? notice[1] : null,
+    saslUsername: field(rest, 'sasl_username')?.toLowerCase() || null,
     tls: !queueId && service === 'smtp' ? parseTlsLine(message) : null,
     message,
   };
@@ -244,7 +246,7 @@ export function parsePostfixLog(entries) {
   return { lines, malformed };
 }
 
-// The lines tied together by queue id: a Map of queueId -> { queueId, messageId, from, size, nrcpt,
+// The lines tied together by queue id: a Map of queueId -> { queueId, messageId, from, saslUsername, size, nrcpt,
 // firstAt, lastAt, deliveries (the delivery and expired lines, in order), notifications (queue ids of
 // the notices bounce made for it), removed, lines }. Lines without a queue id are left out.
 export function correlateByQueueId(lines) {
@@ -254,7 +256,7 @@ export function correlateByQueueId(lines) {
     let message = messages.get(line.queueId);
     if (!message) {
       message = {
-        queueId: line.queueId, messageId: null, from: null, size: null, nrcpt: null,
+        queueId: line.queueId, messageId: null, from: null, saslUsername: null, size: null, nrcpt: null,
         firstAt: line.at, lastAt: line.at, deliveries: [], notifications: [], removed: false, lines: [],
       };
       messages.set(line.queueId, message);
@@ -262,6 +264,7 @@ export function correlateByQueueId(lines) {
     message.lines.push(line);
     message.lastAt = line.at ?? message.lastAt;
     if (line.messageId) message.messageId = line.messageId;
+    if (line.saslUsername) message.saslUsername = line.saslUsername;
     if (line.event === 'queued' || line.event === 'received') {
       if (line.from != null) message.from = line.from;
       if (line.size != null) message.size = line.size;
