@@ -12,6 +12,29 @@ const monoStyle = { fontFamily: 'JetBrains Mono, monospace', fontSize: 11 };
 const when = (at) => (at ? new Date(at).toLocaleString() : '');
 const shown = (value) => (value === null || value === undefined || value === '' ? '—' : String(value));
 
+// The forwarding hosts item's detail (R-12): how many EOP ranges of the panel's list are on the node,
+// which are missing, the entries the panel did not add (left alone) and the ranges listed with the
+// spam filter off.
+function ForwardingHosts({ fwdhosts }) {
+  const { t } = useTranslation();
+  const missing = fwdhosts.missing ?? [];
+  const foreign = fwdhosts.foreign ?? [];
+  const keepSpam = fwdhosts.keepSpam ?? [];
+  const lineStyle = { ...noteStyle, ...monoStyle };
+  return (
+    <div data-fwdhosts>
+      <div style={noteStyle}>
+        {t('admin.mailNode.fwdhostsRanges', { version: fwdhosts.version, present: fwdhosts.wanted - missing.length, wanted: fwdhosts.wanted })}
+      </div>
+      {missing.length > 0 && <div data-fwdhosts-missing style={lineStyle}>{t('admin.mailNode.fwdhostsMissing', { list: missing.join(', ') })}</div>}
+      {keepSpam.length > 0 && (
+        <div data-fwdhosts-keep-spam style={{ ...lineStyle, color: 'var(--red)' }}>{t('admin.mailNode.fwdhostsKeepSpam', { list: keepSpam.join(', ') })}</div>
+      )}
+      {foreign.length > 0 && <div data-fwdhosts-foreign style={lineStyle}>{t('admin.mailNode.fwdhostsForeign', { list: foreign.join(', ') })}</div>}
+    </div>
+  );
+}
+
 // The last "apply" of the node settings, item by item (backend services/mailNode/nodeApply.js):
 // what each item is and for what, what the panel found (in place, changed, failed, skipped, or
 // waiting for its own action) and why, with what changed from what. `result`: { at, items }.
@@ -44,6 +67,7 @@ export default function MailNodeApplyResult({ result }) {
             {item.mailboxes?.length > 0 && (
               <div style={{ ...noteStyle, ...monoStyle }}>{t('admin.mailNode.applyFailedMailboxes', { list: item.mailboxes.join(', ') })}</div>
             )}
+            {item.fwdhosts && <ForwardingHosts fwdhosts={item.fwdhosts} />}
           </li>
         ))}
       </ul>

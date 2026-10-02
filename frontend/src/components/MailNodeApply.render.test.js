@@ -90,6 +90,10 @@ const NODE_RESULT = {
     { item: 'relayhost', target: 'contoso-com.mail.protection.outlook.com', status: 'ok', to: 3 },
     { item: 'fail2ban', target: null, status: 'skipped', code: 'panel_ips_missing' },
     { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' },
+    {
+      item: 'forwarding_hosts', target: '2026081400', status: 'skipped', code: 'prefilter_not_applied',
+      fwdhosts: { version: '2026081400', wanted: 2, missing: ['40.92.0.0/15', '40.107.0.0/16'], foreign: ['198.51.100.25'], keepSpam: [] },
+    },
   ],
 };
 const LIMIT = { value: 50, frame: 'h' };
@@ -155,8 +159,15 @@ describe('EopSection — node settings', () => {
   test('shows the node\'s last apply item by item and applies it again on request', async () => {
     const host = await mount(React.createElement(EopSection));
     const block = host.querySelector('[data-node-apply]');
-    assert.deepEqual(items(block), [['tls_policy', 'ok'], ['relayhost', 'ok'], ['fail2ban', 'skipped'], ['prefilter', 'pending']]);
+    assert.deepEqual(items(block), [['tls_policy', 'ok'], ['relayhost', 'ok'], ['fail2ban', 'skipped'], ['prefilter', 'pending'], ['forwarding_hosts', 'skipped']]);
     assert.ok(block.textContent.includes('admin.mailNode.applyCodePanelIpsMissing'), 'a skipped item says why');
+    // The forwarding hosts wait for the rule and show the ranges missing and the entries left alone.
+    const fwd = block.querySelector('[data-apply-item="forwarding_hosts"]');
+    assert.ok(fwd.textContent.includes('admin.mailNode.applyCodePrefilterNotApplied'));
+    assert.ok(fwd.querySelector('[data-fwdhosts]').textContent.includes('admin.mailNode.fwdhostsRanges'));
+    assert.ok(fwd.querySelector('[data-fwdhosts-missing]'));
+    assert.ok(fwd.querySelector('[data-fwdhosts-foreign]'));
+    assert.equal(fwd.querySelector('[data-fwdhosts-keep-spam]'), null);
     answers['POST /api/mail-node/apply'] = { at, node: NODE_RESULT.items, domains: [] };
     await click(buttons(block, 'admin.mailNode.applyButton')[0]);
     assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/apply'));
@@ -171,11 +182,27 @@ describe('EopSection — node settings', () => {
     assert.ok(host.textContent.includes('admin.mailNode.prefilterConfirm'));
     assert.equal(calls.some((c) => c.path === '/api/mail-node/apply/prefilter'), false, 'nothing is written before the confirmation');
     answers['POST /api/mail-node/apply/prefilter'] = { item: 'prefilter', target: null, status: 'changed', at };
-    answers['GET /api/mail-node/apply'] = { node: { at, items: [...NODE_RESULT.items.slice(0, 3), { item: 'prefilter', target: null, status: 'changed' }] } };
+    answers['GET /api/mail-node/apply'] = {
+      node: {
+        at,
+        items: [
+          ...NODE_RESULT.items.slice(0, 3), { item: 'prefilter', target: null, status: 'changed' },
+          {
+            item: 'forwarding_hosts', target: '2026081400', status: 'failed', code: 'fwdhost_keep_spam', from: null, to: '40.107.0.0/16',
+            fwdhosts: { version: '2026081400', wanted: 2, missing: ['40.92.0.0/15'], foreign: ['40.92.0.0/15'], keepSpam: ['40.92.0.0/15'] },
+          },
+        ],
+      },
+    };
     await click(buttons(host, 'admin.mailNode.prefilterApplyConfirm')[0]);
     assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/apply/prefilter'));
     assert.equal(host.querySelector('[data-prefilter-pending]'), null, 'the warning goes once the rule is on the node');
     assert.ok(host.textContent.includes('admin.mailNode.prefilterDone'));
+    // The ranges followed the rule; one listed by someone else with the spam filter off is reported.
+    const fwd = host.querySelector('[data-apply-item="forwarding_hosts"]');
+    assert.equal(fwd.getAttribute('data-apply-status'), 'failed');
+    assert.ok(fwd.textContent.includes('admin.mailNode.applyCodeFwdhostKeepSpam'));
+    assert.ok(fwd.querySelector('[data-fwdhosts-keep-spam]'));
   });
 
   test('keeps the TLS policy with its parameters and refuses a fingerprint without one', async () => {

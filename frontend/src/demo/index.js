@@ -803,6 +803,14 @@ const demoNode = {
   prefilterWritten: false,
   tenantSigns: new Set(['pilot.demo.mailexpert.local']),
   dkimKeys: new Set(),
+  // The EOP ranges the panel added as forwarding hosts, and one entry it did not add.
+  fwdhosts: [],
+  foreignFwdhosts: ['198.51.100.25'],
+};
+// The panel's EOP ranges (backend services/mailNode/eopRanges.js).
+const DEMO_EOP_RANGES = {
+  version: '2026081400',
+  cidrs: ['40.92.0.0/15', '40.107.0.0/16', '52.100.0.0/14', '104.47.0.0/17', '2a01:111:f400::/48', '2a01:111:f403::/48'],
 };
 const demoDkim = (domain) => ({
   selector: 'dkim', name: `dkim._domainkey.${domain}`, length: '2048',
@@ -912,7 +920,29 @@ function demoNodeItems() {
   items.push(demoNode.prefilterWritten
     ? { item: 'prefilter', target: null, status: 'ok' }
     : { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' });
+  items.push(demoForwardingHostsItem());
   return items;
+}
+
+// The EOP ranges as forwarding hosts (R-12): they wait for the spam filing rule; a partner's relay
+// someone added by hand stays as it is.
+function demoForwardingHostsItem() {
+  const { version, cidrs } = DEMO_EOP_RANGES;
+  const summary = () => ({
+    version,
+    wanted: cidrs.length,
+    missing: cidrs.filter(c => !demoNode.fwdhosts.includes(c)),
+    foreign: demoNode.foreignFwdhosts,
+    keepSpam: [],
+  });
+  if (!demoNode.prefilterWritten) {
+    return { item: 'forwarding_hosts', target: version, status: 'skipped', code: 'prefilter_not_applied', fwdhosts: summary() };
+  }
+  const added = cidrs.filter(c => !demoNode.fwdhosts.includes(c));
+  demoNode.fwdhosts = [...demoNode.fwdhosts, ...added];
+  return added.length
+    ? { item: 'forwarding_hosts', target: version, status: 'changed', from: null, to: added.join(', '), fwdhosts: summary() }
+    : { item: 'forwarding_hosts', target: version, status: 'ok', fwdhosts: summary() };
 }
 
 // "Apply settings" for the node and every domain the panel knows.
@@ -2343,7 +2373,14 @@ export async function demoRequest(method, path, body = {}) {
       : { item: 'prefilter', target: null, status: 'changed' };
     demoNode.prefilterWritten = true;
     const at = new Date().toISOString();
-    demoNodeApply = { at: demoNodeApply?.at ?? at, items: [...(demoNodeApply?.items ?? []).filter(i => i.item !== 'prefilter'), { ...item, at }] };
+    // The forwarding hosts waited for the rule and follow it.
+    const fresh = [{ ...item, at }, demoForwardingHostsItem()];
+    const stored = demoNodeApply?.items ?? [];
+    const items = [
+      ...stored.map(i => fresh.find(f => f.item === i.item) ?? i),
+      ...fresh.filter(f => !stored.some(i => i.item === f.item)),
+    ];
+    demoNodeApply = { at: demoNodeApply?.at ?? at, items };
     return clone({ ...item, at });
   }
   if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();

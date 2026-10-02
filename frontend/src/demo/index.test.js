@@ -366,7 +366,13 @@ test('the demo applies the node settings: the node and its domains, and the spam
   const before = await demoRequest('GET', '/mail-node/apply');
   assert.deepEqual(before.node.items.find(i => i.item === 'prefilter'), { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' });
   const result = await demoRequest('POST', '/mail-node/apply');
-  assert.deepEqual(result.node.map(i => i.item), ['tls_policy', 'relayhost', 'fail2ban', 'prefilter']);
+  assert.deepEqual(result.node.map(i => i.item), ['tls_policy', 'relayhost', 'fail2ban', 'prefilter', 'forwarding_hosts']);
+  // The forwarding hosts wait for the spam filing rule.
+  const waiting = result.node.find(i => i.item === 'forwarding_hosts');
+  assert.equal(waiting.status, 'skipped');
+  assert.equal(waiting.code, 'prefilter_not_applied');
+  assert.equal(waiting.fwdhosts.missing.length, waiting.fwdhosts.wanted);
+  assert.deepEqual(waiting.fwdhosts.foreign, ['198.51.100.25']);
   assert.ok(result.domains.length > 0);
   assert.ok(result.domains.every(d => d.items.map(i => i.item).join() === 'domain_relayhost,dkim,mailbox_limits'));
   // Every mailbox has the limit the panel wants after an apply.
@@ -385,6 +391,11 @@ test('the demo applies the node settings: the node and its domains, and the spam
   assert.equal((await demoRequest('POST', '/mail-node/apply/prefilter')).status, 'changed');
   assert.equal((await demoRequest('POST', '/mail-node/apply/prefilter')).status, 'ok');
   assert.equal((await demoRequest('GET', '/mail-node/apply')).node.items.find(i => i.item === 'prefilter').status, 'ok');
+  // Once the rule is on the node the ranges follow it; the next apply finds them in place.
+  const fwd = (await demoRequest('GET', '/mail-node/apply')).node.items.find(i => i.item === 'forwarding_hosts');
+  assert.equal(fwd.status, 'ok');
+  assert.deepEqual(fwd.fwdhosts.missing, []);
+  assert.equal((await demoRequest('POST', '/mail-node/apply')).node.find(i => i.item === 'forwarding_hosts').status, 'ok');
   await assert.rejects(() => demoRequest('POST', '/mail-node/domains/nowhere.example/apply'), err => err.code === 'domain_not_on_node');
 });
 

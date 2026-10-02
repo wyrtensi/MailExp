@@ -127,6 +127,10 @@ const ERROR_KEYS = {
   prefilter_markers_broken: 'admin.mailNode.applyCodePrefilterMarkersBroken',
   prefilter_not_written: 'admin.mailNode.applyCodePrefilterNotWritten',
   relayhost_in_use: 'admin.mailNode.applyCodeRelayhostInUse',
+  prefilter_not_applied: 'admin.mailNode.applyCodePrefilterNotApplied',
+  eop_ranges_invalid: 'admin.mailNode.applyCodeEopRangesInvalid',
+  fwdhost_keep_spam: 'admin.mailNode.applyCodeFwdhostKeepSpam',
+  fwdhost_not_written: 'admin.mailNode.applyCodeFwdhostNotWritten',
   // The node operations (backend routes/mailNode.js): EOP settings of the TERRL budget, the mail
   // queue and the alerts.
   licenses_invalid: 'admin.eop.errorLicenses',
@@ -495,6 +499,7 @@ const APPLY_ITEM_KEYS = {
   relayhost: 'admin.mailNode.applyItemRelayhost',
   fail2ban: 'admin.mailNode.applyItemFail2ban',
   prefilter: 'admin.mailNode.applyItemPrefilter',
+  forwarding_hosts: 'admin.mailNode.applyItemForwardingHosts',
   domain_relayhost: 'admin.mailNode.applyItemDomainRelayhost',
   dkim: 'admin.mailNode.applyItemDkim',
   mailbox_limits: 'admin.mailNode.applyItemMailboxLimits',
