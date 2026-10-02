@@ -473,15 +473,38 @@ describe('forwarding hosts (R-12)', () => {
     expect(later.owned.fwdhosts).toEqual(['2a01:111:f400::/48']);
   });
 
-  it('reports a foreign entry of a range that rspamd does not check, and does not touch it', async () => {
+  it('turns the spam filter on for a foreign entry of a range, and leaves it foreign', async () => {
     withRule();
     mc.node.fwdhosts.push({ host: '40.92.0.0/15', source: '40.92.0.0/15', keepSpam: true });
     const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
     expect(fwdItem(result)).toMatchObject({
-      status: 'failed', code: 'fwdhost_keep_spam', to: '40.107.0.0/16, 2a01:111:f400::/48',
-      fwdhosts: { missing: ['40.92.0.0/15'], foreign: ['40.92.0.0/15'], keepSpam: ['40.92.0.0/15'] },
+      status: 'changed', code: 'fwdhost_filter_turned_on', from: null, to: '40.107.0.0/16, 2a01:111:f400::/48, 40.92.0.0/15',
+      fwdhosts: { missing: [], foreign: ['40.92.0.0/15'], keepSpam: [], filterTurnedOn: ['40.92.0.0/15'] },
     });
-    expect(hosts()).toEqual(['2a01:111:f400::/48', '40.107.0.0/16', '40.92.0.0/15 keep']);
+    expect(fwdWrites().map((w) => w.body)).toContainEqual({ hostname: '40.92.0.0/15', filter_spam: 1 });
+    expect(hosts()).toEqual([...WANTED].sort());
+    // Not the panel's: a range that leaves the list does not take it away.
+    expect(result.owned.fwdhosts).toEqual(['40.107.0.0/16', '2a01:111:f400::/48']);
+    await runApply(CFG, { eop: EOP, ranges: { ...RANGES, ipv4: ['40.107.0.0/16'] }, owned: result.owned });
+    expect(hosts()).toContain('40.92.0.0/15');
+  });
+
+  it('reports any entry rspamd does not check that overlaps a range, wider or narrower', async () => {
+    withRule();
+    mc.node.fwdhosts.push(
+      { host: '40.0.0.0/8', source: 'partner.example.org', keepSpam: true },
+      { host: '2a01:111:f400::25', source: '2a01:111:f400::25', keepSpam: true },
+      { host: '198.51.100.0/24', source: '198.51.100.0/24', keepSpam: true },
+    );
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(result)).toMatchObject({
+      status: 'failed', code: 'fwdhost_keep_spam', to: WANTED.join(', '),
+      fwdhosts: { missing: [], keepSpam: ['40.0.0.0/8', '2a01:111:f400::25'] },
+    });
+    // Neither is touched: they are somebody else's networks, not the ranges.
+    expect(hosts()).toContain('40.0.0.0/8 keep');
+    expect(hosts()).toContain('2a01:111:f400::25 keep');
+    expect(fwdWrites().filter((w) => w.path === 'delete/fwdhost')).toEqual([]);
   });
 
   it('adds its own entry again when someone turned the spam check off on it', async () => {
@@ -523,12 +546,52 @@ describe('forwarding hosts (R-12)', () => {
     expect(result.owned.fwdhosts).toEqual(WANTED);
   });
 
-  it('fails the item when the node does not list what it was asked to add', async () => {
+  it('fails the item when the node refuses an add, saying what was added before', async () => {
     withRule();
     mc.node.refuse['add/fwdhost'] = 'redis_error';
-    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    let result = await runApply(CFG, { eop: EOP, ranges: RANGES });
     expect(fwdItem(result)).toMatchObject({ status: 'failed', code: 'mail_node_refused', detail: 'redis_error' });
+    expect(fwdItem(result).to).toBeUndefined();
     expect(result.owned.fwdhosts).toEqual([]);
+    // The second add refused: the first one is the panel's and in the result.
+    delete mc.node.refuse['add/fwdhost'];
+    const fetch = mc.fetch;
+    let adds = 0;
+    fake.current = {
+      ...mc,
+      fetch: (url, options) => (url.endsWith('add/fwdhost') && ++adds === 2
+        ? Promise.resolve({ status: 200, ok: true, json: async () => [{ type: 'danger', msg: 'redis_error' }] })
+        : fetch(url, options)),
+    };
+    result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(result)).toMatchObject({ status: 'failed', code: 'mail_node_refused', from: null, to: '40.92.0.0/15' });
+    expect(result.owned.fwdhosts).toEqual(['40.92.0.0/15']);
+  });
+
+  it('fails the item when the node does not list what it added or still lists what it deleted', async () => {
+    withRule();
+    const first = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    // A node that answers "deleted" and keeps the entry.
+    const fetch = mc.fetch;
+    fake.current = {
+      ...mc,
+      fetch: (url, options) => (url.endsWith('delete/fwdhost')
+        ? Promise.resolve({ status: 200, ok: true, json: async () => [{ type: 'success', msg: 'forwarding_host_removed' }] })
+        : fetch(url, options)),
+    };
+    const result = await runApply(CFG, { eop: EOP, ranges: { ...RANGES, ipv4: ['40.107.0.0/16'] }, owned: first.owned });
+    expect(fwdItem(result)).toMatchObject({ status: 'failed', code: 'fwdhost_not_deleted' });
+    // Still the panel's, to delete on the next run.
+    expect(result.owned.fwdhosts).toEqual(['40.92.0.0/15', '40.107.0.0/16', '2a01:111:f400::/48']);
+  });
+
+  it('tells a spam filing rule that could not be read from one that is missing', async () => {
+    withRule();
+    mc.node.slow = ['get/global_filters/prefilter'];
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(statuses(result.node).prefilter).toBe('failed');
+    expect(fwdItem(result)).toMatchObject({ status: 'skipped', code: 'prefilter_check_failed' });
+    expect(fwdWrites()).toEqual([]);
   });
 
   it('uses the static EOP ranges by default', async () => {

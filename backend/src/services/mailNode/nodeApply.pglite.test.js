@@ -224,9 +224,25 @@ describe('applyPrefilter', () => {
     expect((await getNodeApplyResult()).owned.fwdhosts).toHaveLength(6);
   });
 
+  it('answers how the forwarding hosts went, and journals ranges added before a refusal', async () => {
+    const fetch = mc.fetch;
+    let adds = 0;
+    fake.current = {
+      ...mc,
+      fetch: (url, options) => (url.endsWith('add/fwdhost') && ++adds === 2
+        ? Promise.resolve({ status: 200, ok: true, json: async () => [{ type: 'danger', msg: 'redis_error' }] })
+        : fetch(url, options)),
+    };
+    const item = await applyPrefilter({ userId: ADMIN, ranges: { version: '2026081400', ipv4: ['40.92.0.0/15', '40.107.0.0/16'], ipv6: [] } });
+    expect(item.forwardingHosts).toEqual({ status: 'failed', code: 'mail_node_refused' });
+    const [entry] = (await audit()).filter((e) => e.details.scope === 'prefilter');
+    expect(entry.details.failed).toEqual([{ item: 'forwarding_hosts', target: '2026081400', code: 'mail_node_refused', from: null, to: '40.92.0.0/15' }]);
+    expect((await getNodeApplyResult()).owned.fwdhosts).toEqual(['40.92.0.0/15']);
+  });
+
   it('adds no forwarding hosts when the rule could not be written', async () => {
     mc.node.refuse['add/global-filter'] = 'sieve_error';
-    expect(await applyPrefilter({ userId: ADMIN })).toMatchObject({ status: 'failed' });
+    expect(await applyPrefilter({ userId: ADMIN })).toMatchObject({ status: 'failed', forwardingHosts: null });
     expect(mc.writes.filter((w) => w.path === 'add/fwdhost')).toEqual([]);
   });
 });

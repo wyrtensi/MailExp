@@ -11,6 +11,7 @@ import {
   eopSettingsError,
   mailNodeErrorDetail,
   mailNodeErrorKey,
+  prefilterDoneKey,
   prefilterPending,
 } from '../utils/mailNode.js';
 
@@ -163,14 +164,15 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     return onDomainsChanged ? onDomainsChanged() : loadDomains();
   }
 
+  // noticeKey: a key, or a function of the action's answer that gives one.
   const runApply = async (action, noticeKey) => {
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      await action();
+      const answer = await action();
       await loadApplied();
-      setNotice(noticeKey);
+      setNotice(typeof noticeKey === 'function' ? noticeKey(answer) : noticeKey);
       domainChanged();
     } catch (err) {
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
@@ -180,7 +182,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     }
   };
   const applyNode = () => runApply(() => api.mailNode.applyNode(), 'admin.mailNode.applyDone');
-  const applyPrefilter = () => runApply(() => api.mailNode.applyPrefilter(), 'admin.mailNode.prefilterDone');
+  const applyPrefilter = () => runApply(() => api.mailNode.applyPrefilter(), prefilterDoneKey);
 
   const pending = (domains ?? []).filter((d) => !MAILBOX_READY_STATES.includes(d.state));
 

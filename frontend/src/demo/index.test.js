@@ -388,7 +388,9 @@ test('the demo applies the node settings: the node and its domains, and the spam
   assert.equal(listed.apply.items.find(i => i.item === 'dkim').status, 'changed');
   const ready = (await demoRequest('GET', '/mail-node/domains')).domains.find(d => d.domain === 'demo.mailexpert.local');
   assert.equal(ready.apply.dkim.name, 'dkim._domainkey.demo.mailexpert.local');
-  assert.equal((await demoRequest('POST', '/mail-node/apply/prefilter')).status, 'changed');
+  const written = await demoRequest('POST', '/mail-node/apply/prefilter');
+  assert.equal(written.status, 'changed');
+  assert.deepEqual(written.forwardingHosts, { status: 'changed' });
   assert.equal((await demoRequest('POST', '/mail-node/apply/prefilter')).status, 'ok');
   assert.equal((await demoRequest('GET', '/mail-node/apply')).node.items.find(i => i.item === 'prefilter').status, 'ok');
   // Once the rule is on the node the ranges follow it; the next apply finds them in place.

@@ -44,18 +44,65 @@ export function isEopAddress(address, ranges = null) {
   return list.check(ip, family === 4 ? 'ipv4' : 'ipv6');
 }
 
-// One CIDR of the given family (4 or 6): an address and a prefix within the family's length.
+// The widest EOP range accepted (Microsoft publishes /14 to /17 and /48): the same floor as the
+// host's timer (scripts/deploy/mail-node/lib.sh).
+const MIN_PREFIX = { 4: 8, 6: 24 };
+
+// One CIDR of the given family (4 or 6): an address and a prefix within the family's length, no
+// wider than the floor.
 function isCidr(value, family) {
   if (typeof value !== 'string') return false;
   const [address, prefix, extra] = value.split('/');
   if (extra !== undefined || !/^\d{1,3}$/.test(prefix ?? '')) return false;
-  return isIP(address) === family && Number(prefix) <= (family === 4 ? 32 : 128);
+  const bits = Number(prefix);
+  return isIP(address) === family && bits <= (family === 4 ? 32 : 128) && bits >= MIN_PREFIX[family];
+}
+
+// An address as a number, or null.
+function addressBits(address) {
+  const family = isIP(address);
+  if (family === 4) return { family, value: address.split('.').reduce((n, part) => (n << 8n) + BigInt(part), 0n) };
+  if (family !== 6) return null;
+  let text = address.toLowerCase();
+  if (text.includes('.')) {
+    // An IPv4 tail (::ffff:1.2.3.4) as two groups.
+    const v4 = text.slice(text.lastIndexOf(':') + 1).split('.').map(Number);
+    text = `${text.slice(0, text.lastIndexOf(':') + 1)}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
+  }
+  const [head, tail = null] = text.split('::');
+  const left = head ? head.split(':') : [];
+  const right = tail ? tail.split(':') : [];
+  const groups = tail === null ? left : [...left, ...Array(8 - left.length - right.length).fill('0'), ...right];
+  return { family, value: groups.reduce((n, g) => (n << 16n) + BigInt(parseInt(g || '0', 16)), 0n) };
+}
+
+// A network of mailcow's forwarding hosts as { family, first, last }, or null. A bare address is a
+// network of one.
+export function networkOf(text) {
+  const [address, prefix, extra] = String(text ?? '').trim().split('/');
+  if (extra !== undefined) return null;
+  const bits = addressBits(address);
+  if (!bits) return null;
+  const size = bits.family === 4 ? 32 : 128;
+  const length = prefix === undefined ? size : Number(prefix);
+  if (!Number.isInteger(length) || length < 0 || length > size || (prefix !== undefined && !/^\d{1,3}$/.test(prefix))) return null;
+  const host = (1n << BigInt(size - length)) - 1n;
+  const first = bits.value & ~host;
+  return { family: bits.family, first, last: first | host };
+}
+
+// Whether two networks share an address: one holds the other, or they are the same.
+export function networksOverlap(a, b) {
+  const x = networkOf(a);
+  const y = networkOf(b);
+  return !!x && !!y && x.family === y.family && x.first <= y.last && y.first <= x.last;
 }
 
 // The ranges as the node's forwarding hosts take them: { version, cidrs } with IPv4 first, IPv6
 // lowercased, no repeats. Null for a list the panel must not apply: no version, no IPv4 range, or
-// any entry that is not a CIDR of its family. The same rules as the host's timer (R-40): an empty or
-// malformed list is never applied, so it never takes away the ranges already in place.
+// any entry that is not a CIDR of its family or is wider than /8 (IPv4) or /24 (IPv6). The same
+// rules as the host's timer (R-40): an empty or malformed list is never applied, so it never takes
+// away the ranges already in place.
 export function eopRangeList(ranges = EOP_RANGES) {
   if (!ranges || typeof ranges !== 'object') return null;
   const version = String(ranges.version ?? '').trim();

@@ -181,15 +181,19 @@ describe('EopSection — node settings', () => {
     await click(buttons(pending, 'admin.mailNode.prefilterApply')[0]);
     assert.ok(host.textContent.includes('admin.mailNode.prefilterConfirm'));
     assert.equal(calls.some((c) => c.path === '/api/mail-node/apply/prefilter'), false, 'nothing is written before the confirmation');
-    answers['POST /api/mail-node/apply/prefilter'] = { item: 'prefilter', target: null, status: 'changed', at };
+    answers['POST /api/mail-node/apply/prefilter'] = {
+      item: 'prefilter', target: null, status: 'changed', at, forwardingHosts: { status: 'failed', code: 'fwdhost_keep_spam' },
+    };
     answers['GET /api/mail-node/apply'] = {
       node: {
         at,
         items: [
           ...NODE_RESULT.items.slice(0, 3), { item: 'prefilter', target: null, status: 'changed' },
           {
-            item: 'forwarding_hosts', target: '2026081400', status: 'failed', code: 'fwdhost_keep_spam', from: null, to: '40.107.0.0/16',
-            fwdhosts: { version: '2026081400', wanted: 2, missing: ['40.92.0.0/15'], foreign: ['40.92.0.0/15'], keepSpam: ['40.92.0.0/15'] },
+            item: 'forwarding_hosts', target: '2026081400', status: 'failed', code: 'fwdhost_keep_spam', from: null, to: '40.107.0.0/16, 40.92.0.0/15',
+            fwdhosts: {
+              version: '2026081400', wanted: 2, missing: [], foreign: ['40.92.0.0/15', '40.0.0.0/8'], keepSpam: ['40.0.0.0/8'], filterTurnedOn: ['40.92.0.0/15'],
+            },
           },
         ],
       },
@@ -197,12 +201,15 @@ describe('EopSection — node settings', () => {
     await click(buttons(host, 'admin.mailNode.prefilterApplyConfirm')[0]);
     assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/apply/prefilter'));
     assert.equal(host.querySelector('[data-prefilter-pending]'), null, 'the warning goes once the rule is on the node');
-    assert.ok(host.textContent.includes('admin.mailNode.prefilterDone'));
+    // The notice says the ranges did not follow, not that they did.
+    assert.ok(host.textContent.includes('admin.mailNode.prefilterDoneRangesNot'));
+    assert.ok(!host.textContent.includes('admin.mailNode.prefilterDoneWithRanges'));
     // The ranges followed the rule; one listed by someone else with the spam filter off is reported.
     const fwd = host.querySelector('[data-apply-item="forwarding_hosts"]');
     assert.equal(fwd.getAttribute('data-apply-status'), 'failed');
     assert.ok(fwd.textContent.includes('admin.mailNode.applyCodeFwdhostKeepSpam'));
     assert.ok(fwd.querySelector('[data-fwdhosts-keep-spam]'));
+    assert.ok(fwd.querySelector('[data-fwdhosts-filter-on]').textContent.includes('admin.mailNode.fwdhostsFilterTurnedOn'));
   });
 
   test('keeps the TLS policy with its parameters and refuses a fingerprint without one', async () => {

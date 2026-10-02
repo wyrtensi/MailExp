@@ -128,6 +128,9 @@ const ERROR_KEYS = {
   prefilter_not_written: 'admin.mailNode.applyCodePrefilterNotWritten',
   relayhost_in_use: 'admin.mailNode.applyCodeRelayhostInUse',
   prefilter_not_applied: 'admin.mailNode.applyCodePrefilterNotApplied',
+  prefilter_check_failed: 'admin.mailNode.applyCodePrefilterCheckFailed',
+  fwdhost_not_deleted: 'admin.mailNode.applyCodeFwdhostNotDeleted',
+  fwdhost_filter_turned_on: 'admin.mailNode.applyCodeFwdhostFilterTurnedOn',
   eop_ranges_invalid: 'admin.mailNode.applyCodeEopRangesInvalid',
   fwdhost_keep_spam: 'admin.mailNode.applyCodeFwdhostKeepSpam',
   fwdhost_not_written: 'admin.mailNode.applyCodeFwdhostNotWritten',
@@ -521,6 +524,15 @@ export function applyItemKey(item) {
 
 export function applyStatusKey(status) {
   return APPLY_STATUS_KEYS[status] ?? APPLY_STATUS_KEYS.failed;
+}
+
+// The notice after the spam filing rule was written by its own action, by how the forwarding hosts
+// that waited for it went (the answer's `forwardingHosts`, backend nodeApply.js applyPrefilter).
+export function prefilterDoneKey(answer) {
+  const status = answer?.forwardingHosts?.status;
+  if (status === 'ok' || status === 'changed') return 'admin.mailNode.prefilterDoneWithRanges';
+  if (status) return 'admin.mailNode.prefilterDoneRangesNot';
+  return 'admin.mailNode.prefilterDone';
 }
 
 // The prefilter item of the node's last result: whether the spam filing rule waits to be written.

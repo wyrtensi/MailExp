@@ -29,7 +29,7 @@ import {
   whitelistFail2ban,
 } from './mailcow.js';
 import { getEopSettings } from './eopSettings.js';
-import { EOP_RANGES, eopRangeList } from './eopRanges.js';
+import { EOP_RANGES, eopRangeList, networksOverlap } from './eopRanges.js';
 
 // "Apply settings": the panel puts its settings on the mail node through the mailcow API
 // (eop-panel-requirements.md, R-07 ... R-11, R-13). Every item is read first and written only when
@@ -182,7 +182,8 @@ function itemList(shared) {
         let detail = null;
         if (err.code === 'mail_node_refused') detail = err.message.replace(/^The mail node refused:\s*/, '');
         else if (err.timeout) detail = 'timeout';
-        items.push({ item, target, status: 'failed', code: err.code, ...(detail ? { detail } : {}) });
+        // err.change: what the item had changed before it failed (from / to).
+        items.push({ item, target, status: 'failed', code: err.code, ...(detail ? { detail } : {}), ...(err.change ?? {}) });
         return null;
       }
     },
@@ -302,60 +303,89 @@ async function prefilterItem(cfg) {
 // rejects the forwarding hosts prevent.
 //
 // The list is the panel's static copy (eopRanges.js), shown by its version; the item applies only a
-// list that has a version, an IPv4 range and nothing malformed. Every add carries filter_spam: 1.
-// Only entries the panel added (owned.fwdhosts) are ever deleted. An entry somebody else made for a
-// range counts as in place, unless rspamd does not check it (keep_spam): that one is reported and left
-// for the administrator. Every other entry is left alone and listed as foreign.
+// list that has a version, an IPv4 range and nothing malformed or too wide. Every add carries
+// filter_spam: 1. Only entries the panel added (owned.fwdhosts) are ever deleted. An entry somebody
+// else made for a range counts as in place; if rspamd does not check it (keep_spam, "Filter spam"
+// off), the panel adds it again with the filter on (add/fwdhost on an existing host clears its
+// KEEP_SPAM, functions.fwdhost.inc.php) and reports that, but it stays somebody else's: the panel
+// never deletes it. Any other entry with keep_spam whose network shares an address with a range is
+// reported as a failure: rspamd looks KEEP_SPAM up for every network around the client address
+// (/8 to /32, rspamd.local.lua), so such an entry turns the check off for that part of the range.
+// Every other entry is left alone and listed as foreign.
 const cidrKey = (host) => host.toLowerCase();
 
-function fwdhostSummary(list, wanted, version, owned) {
+function fwdhostSummary(list, wanted, version, owned, filterTurnedOn = []) {
   const byKey = new Map(list.map((h) => [cidrKey(h.host), h]));
   const mine = new Set(owned.fwdhosts.map(cidrKey));
-  const keepSpam = wanted.filter((c) => byKey.get(c)?.keepSpam && !mine.has(c));
   return {
     version,
     wanted: wanted.length,
     missing: wanted.filter((c) => !byKey.has(c) || byKey.get(c).keepSpam),
     foreign: list.filter((h) => !mine.has(cidrKey(h.host))).map((h) => h.host),
-    keepSpam,
+    keepSpam: list.filter((h) => h.keepSpam && wanted.some((c) => networksOverlap(h.host, c))).map((h) => h.host),
+    ...(filterTurnedOn.length ? { filterTurnedOn } : {}),
   };
 }
 
-async function forwardingHostsItem(cfg, { cidrs: wanted, version }, owned, { ruleInPlace }) {
+// What a failed item had changed before it failed, so the result and the journal still say so.
+const withChange = (err, change) => Object.assign(err, { change });
+const describeChange = (added, removed) => ({
+  ...(removed.length ? { from: removed.join(', ') } : {}),
+  ...(added.length ? { to: added.join(', '), ...(removed.length ? {} : { from: null }) } : {}),
+});
+
+// rule: the status of the spam filing rule's item in this run.
+async function forwardingHostsItem(cfg, { cidrs: wanted, version }, owned, { rule }) {
   const before = await listForwardingHosts(cfg);
-  if (!ruleInPlace) {
+  if (rule !== 'ok') {
     const present = owned.fwdhosts.filter((c) => before.some((h) => cidrKey(h.host) === c));
     return {
-      status: 'skipped', code: 'prefilter_not_applied',
+      status: 'skipped', code: rule === 'failed' ? 'prefilter_check_failed' : 'prefilter_not_applied',
       ...(present.length ? { current: present.join(', ') } : {}),
       fwdhosts: fwdhostSummary(before, wanted, version, owned),
     };
   }
   const byKey = new Map(before.map((h) => [cidrKey(h.host), h]));
   const mine = new Set(owned.fwdhosts);
-  const toAdd = wanted.filter((c) => !byKey.has(c) || (byKey.get(c).keepSpam && mine.has(c)));
+  const toAdd = wanted.filter((c) => !byKey.has(c) || byKey.get(c).keepSpam);
   const toRemove = owned.fwdhosts.filter((c) => !wanted.includes(c) && byKey.has(c));
   const added = [];
-  for (const cidr of toAdd) {
-    await addForwardingHost(cfg, cidr);
-    added.push(cidr);
-    owned.fwdhosts = [...new Set([...owned.fwdhosts, cidr])];
+  const turnedOn = [];
+  const removed = [];
+  try {
+    for (const cidr of toAdd) {
+      await addForwardingHost(cfg, cidr);
+      if (byKey.get(cidr)?.keepSpam && !mine.has(cidr)) {
+        turnedOn.push(cidr);
+      } else {
+        added.push(cidr);
+        owned.fwdhosts = [...new Set([...owned.fwdhosts, cidr])];
+      }
+    }
+    if (toRemove.length) {
+      await deleteForwardingHosts(cfg, toRemove.map((c) => byKey.get(c).host));
+      removed.push(...toRemove);
+    }
+  } catch (err) {
+    throw withChange(err, describeChange([...added, ...turnedOn], removed));
   }
-  if (toRemove.length) await deleteForwardingHosts(cfg, toRemove.map((c) => byKey.get(c).host));
-  owned.fwdhosts = owned.fwdhosts.filter((c) => wanted.includes(c));
   const after = await listForwardingHosts(cfg);
-  const fwdhosts = fwdhostSummary(after, wanted, version, owned);
-  const lost = added.filter((c) => fwdhosts.missing.includes(c));
+  const afterKeys = new Set(after.map((h) => cidrKey(h.host)));
+  // A deletion the node did not do stays the panel's, to try again.
+  const notDeleted = removed.filter((c) => afterKeys.has(c));
+  owned.fwdhosts = owned.fwdhosts.filter((c) => wanted.includes(c) || notDeleted.includes(c));
+  const fwdhosts = fwdhostSummary(after, wanted, version, owned, turnedOn);
+  const change = describeChange([...added, ...turnedOn], removed.filter((c) => !notDeleted.includes(c)));
+  const lost = [...added, ...turnedOn].filter((c) => fwdhosts.missing.includes(c));
   if (lost.length) {
-    throw new MailNodeError('fwdhost_not_written', `The mail node did not list the forwarding hosts it added: ${lost.join(', ')}`);
+    throw withChange(new MailNodeError('fwdhost_not_written', `The mail node did not list the forwarding hosts it added: ${lost.join(', ')}`), change);
   }
-  const change = {
-    ...(toRemove.length ? { from: toRemove.join(', ') } : {}),
-    ...(added.length ? { to: added.join(', '), ...(toRemove.length ? {} : { from: null }) } : {}),
-  };
+  if (notDeleted.length) {
+    throw withChange(new MailNodeError('fwdhost_not_deleted', `The mail node still lists the forwarding hosts it deleted: ${notDeleted.join(', ')}`), change);
+  }
   if (fwdhosts.keepSpam.length) return { status: 'failed', code: 'fwdhost_keep_spam', ...change, fwdhosts };
-  if (!added.length && !toRemove.length) return { status: 'ok', fwdhosts };
-  return { status: 'changed', ...change, fwdhosts };
+  if (!added.length && !turnedOn.length && !removed.length) return { status: 'ok', fwdhosts };
+  return { status: 'changed', ...(turnedOn.length ? { code: 'fwdhost_filter_turned_on' } : {}), ...change, fwdhosts };
 }
 
 // R-08: the domain sends through the relayhost of <EOP_HOST>. Without <EOP_HOST> the item says what
@@ -529,10 +559,10 @@ export async function runApply(cfg, {
     if (!panelIps.length && !owned.fail2ban.length) list.skip('fail2ban', null, 'panel_ips_missing');
     else await list.step('fail2ban', panelIps.join(', ') || null, () => fail2banItem(cfg, panelIps, owned));
     await list.step('prefilter', null, () => prefilterCheck(cfg));
-    const ruleInPlace = list.items.at(-1).status === 'ok';
+    const rule = list.items.at(-1).status;
     const rangeList = eopRangeList(ranges);
     if (!rangeList) list.skip('forwarding_hosts', null, 'eop_ranges_invalid');
-    else await list.step('forwarding_hosts', rangeList.version, () => forwardingHostsItem(cfg, rangeList, owned, { ruleInPlace }));
+    else await list.step('forwarding_hosts', rangeList.version, () => forwardingHostsItem(cfg, rangeList, owned, { rule }));
     nodeItems = list.items;
   }
   const domainResults = [];
@@ -556,7 +586,7 @@ async function runForwardingHostsApply(cfg, owned, ranges) {
   const list = itemList({ down: null });
   const rangeList = eopRangeList(ranges);
   if (!rangeList) list.skip('forwarding_hosts', null, 'eop_ranges_invalid');
-  else await list.step('forwarding_hosts', rangeList.version, () => forwardingHostsItem(cfg, rangeList, owned, { ruleInPlace: true }));
+  else await list.step('forwarding_hosts', rangeList.version, () => forwardingHostsItem(cfg, rangeList, owned, { rule: 'ok' }));
   return list.items[0];
 }
 
@@ -642,7 +672,9 @@ async function saveDomainResult({ domain, items, dkim }, at) {
 function journal({ userId, trigger, scope, domain, items }) {
   const changed = items.filter((i) => i.status === 'changed')
     .map(({ item, target, from, to, counts }) => ({ item, target, ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}), ...(counts ? { counts } : {}) }));
-  const failed = items.filter((i) => i.status === 'failed').map(({ item, target, code }) => ({ item, target, code }));
+  // A failed item that changed something first (forwarding hosts added before a refusal) says what.
+  const failed = items.filter((i) => i.status === 'failed')
+    .map(({ item, target, code, from, to }) => ({ item, target, code, ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }));
   if (!changed.length && !failed.length) return;
   recordAudit({
     actorUserId: userId, action: 'mail_node.applied',
@@ -719,7 +751,8 @@ function replaceItems(stored, fresh) {
 }
 
 // The spam filing rule, by its own action. Once it is in place the forwarding hosts that waited for
-// it follow (R-12). The node's stored result gets the new items. Answers the prefilter item.
+// it follow (R-12). The node's stored result gets the new items. Answers the prefilter item, with
+// the forwarding hosts item's status and code in `forwardingHosts` (null when they did not run).
 export function applyPrefilter({ userId, ranges = EOP_RANGES }) {
   return serialized(async () => {
     const cfg = await getMailNodeConfig();
@@ -733,7 +766,8 @@ export function applyPrefilter({ userId, ranges = EOP_RANGES }) {
     const items = replaceItems(stored?.items ?? [], fresh);
     await saveNodeResult({ at: stored?.at ?? at, items, owned });
     journal({ userId, trigger: 'manual', scope: 'prefilter', items: fresh });
-    return item;
+    const fwd = fresh[1];
+    return { ...item, forwardingHosts: fwd ? { status: fwd.status, ...(fwd.code ? { code: fwd.code } : {}) } : null };
   });
 }
 

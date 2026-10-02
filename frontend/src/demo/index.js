@@ -2435,14 +2435,15 @@ export async function demoRequest(method, path, body = {}) {
     demoNode.prefilterWritten = true;
     const at = new Date().toISOString();
     // The forwarding hosts waited for the rule and follow it.
-    const fresh = [{ ...item, at }, demoForwardingHostsItem()];
+    const fwd = demoForwardingHostsItem();
+    const fresh = [{ ...item, at }, fwd];
     const stored = demoNodeApply?.items ?? [];
     const items = [
       ...stored.map(i => fresh.find(f => f.item === i.item) ?? i),
       ...fresh.filter(f => !stored.some(i => i.item === f.item)),
     ];
     demoNodeApply = { at: demoNodeApply?.at ?? at, items };
-    return clone({ ...item, at });
+    return clone({ ...item, at, forwardingHosts: { status: fwd.status } });
   }
   if (verb === 'GET' && pathname === '/mail-node/eop') return eopSettingsAnswer();
   if (verb === 'PUT' && pathname === '/mail-node/eop') {

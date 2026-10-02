@@ -13,8 +13,8 @@ const when = (at) => (at ? new Date(at).toLocaleString() : '');
 const shown = (value) => (value === null || value === undefined || value === '' ? '—' : String(value));
 
 // The forwarding hosts item's detail (R-12): how many EOP ranges of the panel's list are on the node,
-// which are missing, the entries the panel did not add (left alone) and the ranges listed with the
-// spam filter off.
+// which are missing, entries of others with the spam filter off overlapping a range, the ranges
+// whose filter the panel turned on, and the entries the panel did not add (left alone).
 function ForwardingHosts({ fwdhosts }) {
   const { t } = useTranslation();
   const missing = fwdhosts.missing ?? [];
@@ -29,6 +29,9 @@ function ForwardingHosts({ fwdhosts }) {
       {missing.length > 0 && <div data-fwdhosts-missing style={lineStyle}>{t('admin.mailNode.fwdhostsMissing', { list: missing.join(', ') })}</div>}
       {keepSpam.length > 0 && (
         <div data-fwdhosts-keep-spam style={{ ...lineStyle, color: 'var(--red)' }}>{t('admin.mailNode.fwdhostsKeepSpam', { list: keepSpam.join(', ') })}</div>
+      )}
+      {fwdhosts.filterTurnedOn?.length > 0 && (
+        <div data-fwdhosts-filter-on style={lineStyle}>{t('admin.mailNode.fwdhostsFilterTurnedOn', { list: fwdhosts.filterTurnedOn.join(', ') })}</div>
       )}
       {foreign.length > 0 && <div data-fwdhosts-foreign style={lineStyle}>{t('admin.mailNode.fwdhostsForeign', { list: foreign.join(', ') })}</div>}
     </div>
