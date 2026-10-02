@@ -45,6 +45,7 @@ Implemented: full dependency modernization (Express 5, ImapFlow 2, Nodemailer 10
 - **Conversation threads** — messages grouped into reply chains with inline sent replies
 - **Rich text compose** — WYSIWYG editor with font family, size, color, highlight, tables, emoji, links, attachments, image resize handles, and Excel table paste
 - **Attachments** — send and receive file attachments across all accounts
+- **Undo send and send later** — every sent letter waits five seconds with an Undo that reopens it in the composer; Send later schedules it (later today, tomorrow morning, Monday morning or any date and time) and the Scheduled list lets its author edit, reschedule or cancel it; a letter that fails after you left is kept there and you are told
 - **Multiple layouts** — classic, compact, wide reader, vertical split, and more
 - **Multiple themes** — dark, light, and several color schemes; custom CSS field for per-user style overrides
 - **Two-language UI** — English and Russian

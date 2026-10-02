@@ -75,7 +75,8 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/oidc.js` | Вход пользователей MailExpert через внешний OIDC/SSO; не путать с OAuth почтового аккаунта |
 | `routes/integrations.js` | Глобальные секреты/настройки интеграций; для Google — только общий callback-адрес и `/status` (`google.configured`, `google.available`) |
 | `routes/mail.js` | Чтение, папки, move/delete/archive/snooze и вложения; 2286 строк |
-| `routes/send.js` | Отправка, reply/forward, MIME и Sent APPEND |
+| `routes/send.js` | Проверка и сборка письма (reply/forward, вложения, MIME) и постановка в очередь отправки: 5 секунд на отмену или отложенная отправка ([очередь заданий](job-queue.md)) |
+| `routes/scheduled.js` | `/api/mail/scheduled`: ожидающие и неотправленные письма — отмена с возвратом в редактор, перенос, повторная отправка |
 | `routes/draft.js` | Сохранение и синхронизация черновиков |
 | `routes/search.js` | Поиск по кешу/индексам с account scope |
 | `routes/rules.js` | Правила обработки входящих |
