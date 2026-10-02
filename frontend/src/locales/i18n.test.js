@@ -196,6 +196,9 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'admin.nodeOps.alertDetailRefusals_few', 'admin.nodeOps.alertDetailRefusals_many',
     'admin.nodeOps.alertDetailBypass_few', 'admin.nodeOps.alertDetailBypass_many',
     'admin.accounts.search.count_few', 'admin.accounts.search.count_many',
+    'scheduled.attachments_few', 'scheduled.attachments_many',
+    'scheduled.failedOnStartTitle_few', 'scheduled.failedOnStartTitle_many',
+    'scheduled.navFailed_few', 'scheduled.navFailed_many',
     'messageList.outage.summaryWaiting_few', 'messageList.outage.summaryWaiting_many',
     'messageList.outage.summaryLost_few', 'messageList.outage.summaryLost_many',
     'messageList.outage.summaryDelayed_few', 'messageList.outage.summaryDelayed_many',
@@ -244,11 +247,6 @@ const DYNAMIC_KEYS = new Set([
   // Attachment risk badges (MessagePane): t(`message.attachmentRisk.${risk.level}`),
   // where the level comes from classifyAttachmentRisk.
   'message.attachmentRisk.block', 'message.attachmentRisk.warn', 'message.attachmentRisk.notice',
-  // t(`compose.smtpConnectionReasons.${err.reason}`) — reason comes from the send route's
-  // smtp_connection_failed response (ComposeModal.jsx handleSend).
-  'compose.smtpConnectionReasons.timeout', 'compose.smtpConnectionReasons.refused',
-  'compose.smtpConnectionReasons.not_found', 'compose.smtpConnectionReasons.unreachable',
-  'compose.smtpConnectionReasons.tls', 'compose.smtpConnectionReasons.unknown',
 ]);
 
 // JSX attribute names whose values must never be plain strings — always t().

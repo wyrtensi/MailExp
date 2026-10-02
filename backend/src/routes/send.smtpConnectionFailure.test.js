@@ -2,14 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 
 // Pure-function tests only, but importing send.js pulls in its module graph (including
 // ../index.js, the whole app entry point) — mock every side-effecting dependency the same way
-// send.reliability.test.js does so this stays a lightweight unit test.
+// the other send tests do so this stays a lightweight unit test.
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (_req, _res, next) => next() }));
-vi.mock('../services/redis.js', () => ({ redisClient: { get: vi.fn(), set: vi.fn(), del: vi.fn() } }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
-vi.mock('../services/smtpTransport.js', () => ({ createAccountSmtpTransport: vi.fn() }));
-vi.mock('../utils/mailUtils.js', () => ({ resolveSentFolder: vi.fn() }));
 
 import { smtpConnectionFailure, smtpFailureIsDefinite } from './send.js';
 

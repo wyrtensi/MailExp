@@ -25,6 +25,10 @@ import { resolveInitialFrom } from '../utils/defaultSender.js';
 import { threadCacheKey } from '../utils/threadKey.js';
 import { clampComposePosition, clampComposeSize } from '../utils/composeWindow.js';
 import { SmileIcon } from './UiIcons.jsx';
+import SendLaterMenu from './SendLaterMenu.jsx';
+import { composeContext } from '../utils/scheduledSend.js';
+import { trackSend } from '../utils/sendTracker.js';
+import { formatDateTime } from '../utils/formatDate.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -187,7 +191,7 @@ function parseChips(val) {
 
 export default function ComposeModal() {
   const { t } = useTranslation();
-  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, setSelectedAccount, plaintextEmail, setThreadMessages } = useStore();
+  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, plaintextEmail, setThreadMessages } = useStore();
   const isMobile = useMobile();
   const uiScale = useUiScale();
 
@@ -218,18 +222,22 @@ export default function ComposeModal() {
   const [draftFolder, setDraftFolder] = useState(() => composeData?.draftFolder ?? null);
   const [draftAccountId, setDraftAccountId] = useState(() => composeData?.accountId ?? null);
   const [savingDraft, setSavingDraft] = useState(false);
-  const [attachments, setAttachments] = useState([]);
+  // A letter given back by an undo or an edit (utils/sendTracker.js) brings its attachments along.
+  const [attachments, setAttachments] = useState(() => composeData?.attachments || []);
   const [fwdAttachments, setFwdAttachments] = useState(() => composeData?.forwardedAttachments || []);
 
   // Baseline values captured at open time — updated after each successful keep-open save
   // so isDirty() reflects changes since the last save, not since the modal opened.
-  const initialBodyRef = useRef(composeData?.body || '');
-  const initialSubjectRef = useRef(composeData?.subject || '');
-  const initialToRef = useRef(normalizeTo(composeData?.to || []));
-  const initialCcRef = useRef(normalizeTo(composeData?.cc || []));
-  const initialBccRef = useRef(normalizeTo(composeData?.bcc || []));
+  // A letter given back by an undo or an edit is saved nowhere (its draft went when it was sent),
+  // so it starts dirty: closing it asks to save it, and autosave keeps it.
+  const restored = !!composeData?.restored;
+  const initialBodyRef = useRef(restored ? '' : composeData?.body || '');
+  const initialSubjectRef = useRef(restored ? '' : composeData?.subject || '');
+  const initialToRef = useRef(restored ? '' : normalizeTo(composeData?.to || []));
+  const initialCcRef = useRef(restored ? '' : normalizeTo(composeData?.cc || []));
+  const initialBccRef = useRef(restored ? '' : normalizeTo(composeData?.bcc || []));
   // Start at fwdAttachments.length so pre-loaded forwarded attachments aren't dirty.
-  const savedAttachmentCountRef = useRef((composeData?.forwardedAttachments || []).length);
+  const savedAttachmentCountRef = useRef(restored ? 0 : (composeData?.forwardedAttachments || []).length);
   // True when the compose was opened by clicking an existing draft from the list.
   // Used by handleClose to decide whether to prompt about an unmodified draft.
   const draftWasPreExisting = useRef(composeData?.draftUid != null);
@@ -316,6 +324,18 @@ export default function ComposeModal() {
   // attempt, reused across retries (so a retry after a lost response dedupes rather than
   // double-sending), and cleared on success. Fixes audit finding [1].
   const idempotencyKeyRef = useRef(null);
+  // Send later: the menu's anchor (the button's rect) while it is open, and the time the current
+  // send was asked for, kept across the empty-subject and forgotten-attachment confirmations.
+  const [sendLaterAnchor, setSendLaterAnchor] = useState(null);
+  const sendAtRef = useRef(null);
+  // An edited scheduled letter keeps its time: Send sends it then ("Send at …"); the clock menu
+  // offers another time or sending it now instead.
+  const [scheduledAt] = useState(() => {
+    const at = composeData?.sendAt ? new Date(composeData.sendAt) : null;
+    return at && at.getTime() > Date.now() ? at : null;
+  });
+  const sendDefault = () => handleSend(scheduledAt ? { sendAt: scheduledAt } : {});
+  const sendLabel = scheduledAt ? t('scheduled.sendAt', { time: formatDateTime(scheduledAt, { withYear: false }) }) : t('compose.send');
   const replyTypeRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -372,7 +392,7 @@ export default function ComposeModal() {
     // own source. Baseline on what the editor holds, or merely opening a draft counts as an
     // edit and autosave replaces it, expunging the original along with its attachments.
     onCreate: ({ editor: created }) => {
-      if (!plaintextEmail) initialBodyRef.current = created.isEmpty ? '' : created.getHTML();
+      if (!plaintextEmail && !restored) initialBodyRef.current = created.isEmpty ? '' : created.getHTML();
     },
     // Records edit time in a ref only. Deliberately does not touch state: this fires on every
     // transaction, and re-rendering the composer per keystroke would be a real regression.
@@ -742,7 +762,7 @@ export default function ComposeModal() {
   const handleKeyDown = (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      handleSend();
+      sendDefault();
     }
   };
 
@@ -807,8 +827,13 @@ export default function ComposeModal() {
     toInput.trim(), ccInput.trim(), bccInput.trim(),
   ].some(Boolean);
 
-  const handleSend = async ({ skipSubjectWarn = false, skipAttachWarn = false } = {}) => {
+  // sendAt: a Date for send later; absent for Send (the five-second undo window). A confirmation
+  // re-calls this with only its skip flag, so the time asked for first is kept.
+  const handleSend = async ({ skipSubjectWarn = false, skipAttachWarn = false, sendAt } = {}) => {
     if (sending) return; // guard against a rapid double-submit (e.g. double Ctrl/Cmd+Enter)
+    if (sendAt instanceof Date) sendAtRef.current = sendAt;
+    else if (!skipSubjectWarn && !skipAttachWarn) sendAtRef.current = null;
+    const scheduledAt = sendAtRef.current;
     const { accountId, aliasId } = resolveFrom(fromValue);
     const toFinal = [...toChips, ...(toInput.trim() ? [toInput.trim()] : [])];
     if (!hasRecipients || !accountId) return;
@@ -871,66 +896,66 @@ export default function ComposeModal() {
         ...(fwdAttachments.length ? {
           forwardedAttachments: fwdAttachments.map(a => ({ messageId: a.messageId, part: a.part })),
         } : {}),
+        ...(scheduledAt ? { sendAt: scheduledAt.toISOString() } : {}),
+        context: composeContext(composeData, fwdAttachments),
       }, { 'X-Idempotency-Key': idempotencyKeyRef.current });
-      // Send confirmed — clear the key so a subsequent send from a reused modal gets a fresh one.
+      // Taken by the server — clear the key so a subsequent send from a reused modal gets a fresh one.
       idempotencyKeyRef.current = null;
       const replyThreadId = isReply ? composeData?.threadId : null;
       const replyAccountId = composeData?.accountId ?? null;
       closeCompose();
+      // The letter is on the server now (an undo or an edit gives it back from there).
       if (draftUid != null && draftFolder != null && draftAccountId) {
         api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
       }
-      // Prefer the Sent folder the backend actually resolved to; fall back to the account's
-      // mapping only if the response didn't carry one. Avoids navigating "View" to a stale
-      // mapping (e.g. a non-selectable "[Gmail]" parent) that the send path bypassed (#386).
-      const sentFolder = sendResult?.sentFolder
-        || accounts.find(a => a.id === accountId)?.folder_mappings?.sent
-        || 'Sent';
-      // The message was delivered; sentCopySaved:false means it couldn't be saved to the
-      // account's Sent folder — tell the user so they know their record is incomplete.
-      const sentCopyFailed = sendResult?.sentCopySaved === false;
-      addNotification({
-        title: sentCopyFailed ? t('compose.sent.noCopy') : t('compose.sent.title'),
-        body: subject || t('common.noSubject'),
-        // When the Sent copy wasn't saved, omit the "View" action — it would navigate to a
-        // Sent folder that doesn't contain the message.
-        ...(sentCopyFailed ? {} : {
-          onAction: () => setSelectedAccount(accountId, sentFolder),
-          actionLabel: t('compose.sent.action'),
-        }),
-      });
-      if (replyThreadId) {
-        const refreshThread = async () => {
-          try {
-            const data = await api.getThread(replyThreadId, undefined, false, replyAccountId);
-            if (data.messages?.length) {
-              setThreadMessages(threadCacheKey({ account_id: replyAccountId, thread_id: replyThreadId }), data.messages);
-            }
-          } catch { /* best-effort refresh */ }
-        };
-        setTimeout(refreshThread, 3000);
-        setTimeout(refreshThread, 10000);
+      const shownSubject = subject || t('common.noSubject');
+      if (sendResult.scheduled) {
+        addNotification({
+          title: t('scheduled.scheduledTitle', { time: formatDateTime(sendResult.sendAt, { withYear: false }) }),
+          body: shownSubject,
+          onAction: () => useStore.getState().setShowScheduled(true),
+          actionLabel: t('scheduled.view'),
+        });
+        window.dispatchEvent(new CustomEvent('mailexpert:scheduled_changed'));
+        return;
       }
+      // Five seconds to undo, counted on this tab's clock from the answer (the server says how long
+      // until it is due); then the server sends it and the tracker says how it went.
+      const dueAt = Date.now() + (Number.isFinite(sendResult.dueInMs) ? sendResult.dueInMs : 5000);
+      addNotification({ sendUndo: { jobId: sendResult.jobId, dueAt }, title: t('scheduled.sending'), body: shownSubject });
+      const refreshThread = replyThreadId ? async () => {
+        try {
+          const data = await api.getThread(replyThreadId, undefined, false, replyAccountId);
+          if (data.messages?.length) {
+            setThreadMessages(threadCacheKey({ account_id: replyAccountId, thread_id: replyThreadId }), data.messages);
+          }
+        } catch { /* best-effort refresh */ }
+      } : null;
+      trackSend({
+        jobId: sendResult.jobId,
+        dueAt,
+        subject: subject || '',
+        accountId,
+        onSent: refreshThread ? () => {
+          setTimeout(refreshThread, 3000);
+          setTimeout(refreshThread, 10000);
+        } : null,
+      });
     } catch (err) {
-      const GMAIL_API_ERROR_KEYS = {
-        gmail_quota_exceeded: 'compose.gmailQuotaExceeded',
-        gmail_message_too_large: 'compose.gmailMessageTooLarge',
-        gmail_invalid_recipient: 'compose.gmailInvalidRecipient',
-        gmail_access_refused: 'compose.gmailAccessRefused',
-        gmail_api_auth_failed: 'compose.gmailApiAuthFailed',
+      // Delivery happens later, in the queue, so only refusals of the letter itself arrive here; how
+      // a send ended is told by utils/sendTracker.js.
+      const SEND_ERROR_KEYS = {
+        oauth_reconnect_required: 'scheduled.failure.reconnect',
+        send_at_past: 'scheduled.timeProblem.past',
+        send_at_too_far: 'scheduled.timeProblem.tooFar',
+        send_at_invalid: 'scheduled.timeProblem.invalid',
+        idempotency_conflict: 'scheduled.conflict',
+        send_cancelled: 'scheduled.conflict',
       };
-      if (err.code === 'send_uncertain') {
-        setError(t('compose.sendUncertain'));
-      } else if (err.code === 'smtp_connection_failed') {
-        const target = err.host
-          ? (err.port ? `${err.host}:${err.port}` : err.host)
-          : t('compose.smtpConnectionUnknownHost');
-        setError(t('compose.smtpConnectionFailed', {
-          target,
-          reason: t(`compose.smtpConnectionReasons.${err.reason}`, t('compose.smtpConnectionReasons.unknown')),
-        }));
-      } else if (Object.hasOwn(GMAIL_API_ERROR_KEYS, err.code)) {
-        setError(t(GMAIL_API_ERROR_KEYS[err.code]));
+      if (Object.hasOwn(SEND_ERROR_KEYS, err.code)) {
+        // A conflict means this key is spent: the next attempt is a new send.
+        if (err.code === 'idempotency_conflict' || err.code === 'send_cancelled') idempotencyKeyRef.current = null;
+        setError(t(SEND_ERROR_KEYS[err.code]));
       } else {
         setError(err.message);
       }
@@ -1190,6 +1215,21 @@ export default function ComposeModal() {
       <polygon points="22 2 15 22 11 13 2 9 22 2"/>
     </svg>
   );
+  const clockIcon = (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"/>
+      <polyline points="12 7 12 12 15.5 14"/>
+    </svg>
+  );
+  const sendLaterMenu = sendLaterAnchor && (
+    <SendLaterMenu
+      anchorRect={sendLaterAnchor}
+      isMobile={isMobile}
+      onClose={() => setSendLaterAnchor(null)}
+      onPick={(at) => { setSendLaterAnchor(null); handleSend({ sendAt: at }); }}
+      onSendNow={scheduledAt ? () => { setSendLaterAnchor(null); handleSend({}); } : null}
+    />
+  );
 
   // ── Mobile full-screen compose ──────────────────────────────────────────────
   if (isMobile) {
@@ -1291,7 +1331,24 @@ export default function ComposeModal() {
               </svg>
             </button>
             <button
-              onClick={handleSend}
+              type="button"
+              aria-label={t('scheduled.sendLater')}
+              title={t('scheduled.sendLater')}
+              aria-haspopup="dialog"
+              data-send-later-button
+              disabled={sending || !hasRecipients}
+              onClick={(e) => setSendLaterAnchor(e.currentTarget.getBoundingClientRect())}
+              style={{
+                background: 'none', border: 'none', padding: '4px 8px',
+                cursor: sending || !hasRecipients ? 'default' : 'pointer', display: 'flex', alignItems: 'center',
+                color: sending || !hasRecipients ? 'var(--text-tertiary)' : 'var(--text-secondary)',
+                WebkitTapHighlightColor: 'transparent',
+              }}
+            >
+              {clockIcon}
+            </button>
+            <button
+              onClick={sendDefault}
               disabled={sending || !hasRecipients}
               style={{
                 background: 'none', border: 'none',
@@ -1303,7 +1360,7 @@ export default function ComposeModal() {
                 transition: 'color 0.15s',
               }}
             >
-              {sending ? sendSpinner : t('compose.send')}
+              {sending ? sendSpinner : sendLabel}
             </button>
           </div>
         </div>
@@ -1703,6 +1760,8 @@ export default function ComposeModal() {
           </div>
         </>
       )}
+
+      {sendLaterMenu}
 
       {/* Empty subject warning sheet */}
       {showEmptySubjectWarn && (
@@ -2233,7 +2292,7 @@ export default function ComposeModal() {
         display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
         <button
-          onClick={handleSend}
+          onClick={sendDefault}
           disabled={sending || !hasRecipients}
           title={sending ? undefined : t('compose.sendTooltip')}
           style={{
@@ -2247,7 +2306,23 @@ export default function ComposeModal() {
           }}
         >
           {sending ? sendSpinner : sendIcon}
-          {sending ? t('compose.sending') : t('compose.send')}
+          {sending ? t('compose.sending') : sendLabel}
+        </button>
+        <button
+          type="button"
+          aria-label={t('scheduled.sendLater')}
+          title={t('scheduled.sendLater')}
+          aria-haspopup="dialog"
+          data-send-later-button
+          disabled={sending || !hasRecipients}
+          onClick={(e) => setSendLaterAnchor(e.currentTarget.getBoundingClientRect())}
+          style={{
+            height: 34, padding: '0 10px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)',
+            borderRadius: 7, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center',
+            cursor: sending || !hasRecipients ? 'not-allowed' : 'pointer', opacity: sending || !hasRecipients ? 0.6 : 1,
+          }}
+        >
+          {clockIcon}
         </button>
 
         {plaintextEmail && (
@@ -2312,6 +2387,8 @@ export default function ComposeModal() {
         </div>
       )}
     </div>
+
+    {sendLaterMenu}
 
     {/* Empty subject warning dialog */}
     {showEmptySubjectWarn && (

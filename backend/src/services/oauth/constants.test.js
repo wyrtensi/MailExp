@@ -12,6 +12,7 @@ const CONSUMERS = [
   'services/imapManager.js',
   'services/smtpTransport.js',
   'routes/send.js',
+  'services/sendDelivery.js',
 ];
 
 describe('shared OAuth constants', () => {

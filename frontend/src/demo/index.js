@@ -731,7 +731,8 @@ function createDraft(body) {
   return { uid, folder: 'Drafts' };
 }
 
-function sendMessage(body) {
+// A letter that went out: its copy lands in Sent, as the server's Sent copy would.
+function deliverDemoLetter(body) {
   const account = accountFor(body.accountId) || ACCOUNT_FIXTURES[0];
   const sequence = nextMessageSequence++;
   const id = `demo-${String(sequence).padStart(3, '0')}`;
@@ -749,7 +750,127 @@ function sendMessage(body) {
     attachments: Array.isArray(body.attachments) && body.attachments.length > 0,
     toAddresses: body.to || [],
   }));
-  return { ok: true, messageId: id, sentFolder: 'Sent', sentCopySaved: true };
+}
+
+// Undo send and send later, as the server's job queue does it (backend services/sendQueue.js): a
+// sent letter waits five seconds (the undo window) or until its chosen time, then goes to Sent.
+// The demo has no worker; a due letter goes out the next time anyone asks about the letters.
+const DEMO_UNDO_WINDOW_MS = 5000;
+let nextDemoJob = 1;
+const demoViewer = () => (demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER);
+const demoMorning = (days) => {
+  const at = new Date();
+  at.setDate(at.getDate() + days);
+  at.setHours(8, 0, 0, 0);
+  return at.toISOString();
+};
+const demoJob = ({ accountId, author, sendAt, scheduled = true, compose }) => ({
+  id: `demo-job-${nextDemoJob++}`, accountId, author, sendAt, scheduled, status: 'queued',
+  errorCode: null, error: null, attempts: 0, createdAt: new Date().toISOString(), compose,
+});
+let scheduledJobs = [
+  demoJob({
+    accountId: 'demo-sales', author: { id: DEMO_USER.id, email: DEMO_USER.email }, sendAt: demoMorning(1),
+    compose: {
+      accountId: 'demo-sales', to: ['maya@aster.example'], cc: [], bcc: [], subject: 'Renewal terms for next year',
+      body: '<p>Hi Maya,</p><p>As promised, here are the renewal terms for next year.</p>', bodyIsHtml: true,
+      priority: 'normal', attachments: [], forwardedAttachments: [], context: {},
+    },
+  }),
+  demoJob({
+    accountId: 'demo-ops', author: { id: DEMO_PLAIN_USER.id, email: DEMO_PLAIN_USER.email },
+    sendAt: demoMorning(((8 - new Date().getDay()) % 7) || 7),
+    compose: {
+      accountId: 'demo-ops', to: ['team@demo.mailexpert.local'], cc: [], bcc: [], subject: 'Weekly operations status',
+      body: '<p>Good morning team,</p><p>The weekly status is below.</p>', bodyIsHtml: true,
+      priority: 'normal', attachments: [], forwardedAttachments: [], context: {},
+    },
+  }),
+];
+
+function processDueDemoJobs() {
+  const now = Date.now();
+  for (const job of scheduledJobs) {
+    if (job.status !== 'queued' || Date.parse(job.sendAt) > now) continue;
+    deliverDemoLetter(job.compose);
+    job.status = 'done';
+  }
+}
+
+function demoJobSummary(job) {
+  const viewer = demoViewer();
+  const canManage = viewer.isAdmin || job.author?.id === viewer.id;
+  const { compose } = job;
+  return {
+    id: job.id, accountId: job.accountId, status: job.status, sendAt: job.sendAt, scheduled: job.scheduled,
+    subject: compose.subject || '', to: compose.to || [], cc: compose.cc || [], ...(canManage ? { bcc: compose.bcc || [] } : {}),
+    attachmentCount: (compose.attachments || []).length + (compose.forwardedAttachments || []).length,
+    author: job.author, canManage, errorCode: job.errorCode, error: job.error, attempts: job.attempts, createdAt: job.createdAt,
+  };
+}
+
+function sendMessage(body) {
+  const sendAt = body.sendAt ? Date.parse(body.sendAt) : null;
+  if (body.sendAt && !(sendAt > Date.now())) throw demoError('The scheduled time has already passed.', 'send_at_past');
+  const viewer = demoViewer();
+  const account = accountFor(body.accountId) || ACCOUNT_FIXTURES[0];
+  const job = demoJob({
+    accountId: account.id,
+    author: { id: viewer.id, email: viewer.email },
+    sendAt: new Date(sendAt || Date.now() + DEMO_UNDO_WINDOW_MS).toISOString(),
+    scheduled: !!sendAt,
+    compose: {
+      accountId: account.id, aliasId: body.aliasId || null, to: body.to || [], cc: body.cc || [], bcc: body.bcc || [],
+      subject: body.subject || '', body: body.body || '', bodyIsHtml: !!body.bodyIsHtml,
+      quotedBody: body.quotedBody || null, quotedBodyHtml: body.quotedBodyHtml || null,
+      ...(body.editedSignature !== undefined ? { editedSignature: body.editedSignature || null } : {}),
+      inReplyTo: body.inReplyTo || null, references: body.references || null, priority: body.priority || 'normal',
+      attachments: (body.attachments || []).map(a => ({
+        filename: a.filename, contentType: a.contentType || 'application/octet-stream',
+        size: Math.floor(String(a.content || '').length * 0.75), content: a.content,
+      })),
+      forwardedAttachments: body.forwardedAttachments || [], context: body.context || {},
+    },
+  });
+  scheduledJobs.push(job);
+  return {
+    ok: true, jobId: job.id, status: job.status, sendAt: job.sendAt, scheduled: job.scheduled,
+    dueInMs: Math.max(0, Date.parse(job.sendAt) - Date.now()),
+  };
+}
+
+function managedDemoJob(id) {
+  const job = scheduledJobs.find(item => item.id === id);
+  if (!job) throw demoError('Scheduled letter not found', 'not_found');
+  if (!demoJobSummary(job).canManage) throw demoError('Only the author of this letter or an administrator can change it.', 'not_author');
+  return job;
+}
+
+function cancelDemoJob(id, reason) {
+  processDueDemoJobs();
+  const job = managedDemoJob(id);
+  if (job.status === 'done') throw demoError('The letter has been sent already.', 'already_sent');
+  if (!['queued', 'failed', 'needs_attention'].includes(job.status)) throw demoError('The letter is no longer waiting to be sent.', 'not_cancellable');
+  const keepsTime = job.status === 'queued' && job.scheduled && Date.parse(job.sendAt) > Date.now();
+  job.status = 'cancelled';
+  if (reason !== 'undo' && reason !== 'edit') return { ok: true };
+  return { ok: true, compose: clone(job.compose), ...(keepsTime ? { sendAt: job.sendAt, scheduled: true } : {}) };
+}
+
+function rescheduleDemoJob(id, body) {
+  processDueDemoJobs();
+  const job = managedDemoJob(id);
+  if (body?.resend) {
+    if (!['queued', 'failed', 'needs_attention'].includes(job.status)) throw demoError('The letter is no longer waiting to be sent.', 'not_cancellable');
+    Object.assign(job, { status: 'queued', sendAt: new Date().toISOString(), errorCode: null, error: null, attempts: 0 });
+    return { letter: demoJobSummary(job) };
+  }
+  const at = Date.parse(body?.sendAt);
+  if (!(at > Date.now())) throw demoError('The scheduled time has already passed.', 'send_at_past');
+  if (job.status !== 'queued') throw demoError('The letter was not sent. Confirm sending it again.', 'resend_required');
+  job.sendAt = new Date(at).toISOString();
+  job.scheduled = true;
+  return { letter: demoJobSummary(job) };
 }
 
 function listContacts(url) {
@@ -2215,6 +2336,26 @@ export async function demoRequest(method, path, body = {}) {
     return { ok: true };
   }
   if (verb === 'POST' && pathname === '/mail/send') return sendMessage(body);
+  if (verb === 'GET' && pathname === '/mail/scheduled') {
+    processDueDemoJobs();
+    const accountId = url.searchParams.get('accountId');
+    return {
+      letters: scheduledJobs
+        .filter(job => ['queued', 'running', 'failed', 'needs_attention'].includes(job.status) && (!accountId || job.accountId === accountId))
+        .sort((a, b) => Date.parse(a.sendAt) - Date.parse(b.sendAt))
+        .map(demoJobSummary),
+    };
+  }
+  const scheduledMatch = pathname.match(/^\/mail\/scheduled\/([^/]+)$/);
+  if (verb === 'GET' && scheduledMatch) {
+    processDueDemoJobs();
+    const job = scheduledJobs.find(item => item.id === decodeURIComponent(scheduledMatch[1]));
+    if (!job) throw demoError('Scheduled letter not found', 'not_found');
+    return { letter: demoJobSummary(job) };
+  }
+  if (verb === 'PATCH' && scheduledMatch) return rescheduleDemoJob(decodeURIComponent(scheduledMatch[1]), body);
+  const scheduledCancelMatch = pathname.match(/^\/mail\/scheduled\/([^/]+)\/cancel$/);
+  if (verb === 'POST' && scheduledCancelMatch) return cancelDemoJob(decodeURIComponent(scheduledCancelMatch[1]), body?.reason);
 
   if (verb === 'GET' && pathname === '/contacts') return clone(listContacts(url));
   if (verb === 'POST' && pathname === '/contacts') {

@@ -3,6 +3,7 @@ import { insertAuditEntries, recordAudit } from '../auditLog.js';
 import { redactEmail } from '../../utils/redact.js';
 import { MailNodeError, deleteMailbox, getDeleteAfterDays, getMailbox, getMailNodeConfig } from './mailcow.js';
 import { SYSTEM_ACTOR } from './domains.js';
+import { failJobsOfDeletedAccount } from '../jobQueue.js';
 
 // Deleting a mail node mailbox (owner decision 2026-10-01, R-33): anyone signed in may ask for it
 // with the mailbox's address typed out and a reason; the mailbox keeps working for the days an
@@ -160,6 +161,8 @@ async function deleteDue(id, cfg, disconnect) {
     ...(node.alreadyAbsent ? { alreadyAbsent: true } : {}),
     ...(node.warnings.length ? { nodeWarnings: node.warnings } : {}),
   };
+  // Letters waiting to be sent from it fail first, so their authors hear of them (jobQueue.js).
+  await failJobsOfDeletedAccount(row.id);
   // The row goes only under this run's claim, and its journal entry with it, in one transaction.
   const removed = await withTransaction(async (client) => {
     const { rowCount } = await client.query(

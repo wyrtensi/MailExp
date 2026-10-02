@@ -11,6 +11,9 @@ import { buildSessionOptions } from './utils/sessionConfig.js';
 
 import sendRoutes from './routes/send.js';
 import draftRoutes from './routes/draft.js';
+import scheduledRoutes from './routes/scheduled.js';
+import { startJobWorker, stopJobWorker } from './services/jobQueue.js';
+import { registerSendJobKind } from './services/sendQueue.js';
 import oauthRoutes from './routes/oauth.js';
 import authGoogleRoutes from './routes/authGoogle.js';
 import integrationsRoutes, { loadIntegrationConfigs } from './routes/integrations.js';
@@ -209,6 +212,7 @@ app.use('/api/mail', mailRoutes);
 app.use('/api/mail', deliveryRoutes);
 app.use('/api/mail', sendRoutes);
 app.use('/api/mail', draftRoutes);
+app.use('/api/mail', scheduledRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/totp', totpRoutes);
@@ -265,6 +269,12 @@ if (adoptedDomains.length) console.log(`Mail node: took in ${adoptedDomains.leng
 // are rebuilt here from the queue.
 const resumedMoves = await imapManager.moveQueue.resume();
 if (resumedMoves) console.log(`Move queue: resumed ${resumedMoves} pending move(s)`);
+
+// The durable job queue (services/jobQueue.js): letters in their undo window or scheduled for later
+// (services/sendQueue.js). Its jobs live in the database, so the ones queued before a restart run
+// now; a send whose worker died mid-delivery is left for its author, never sent again by itself.
+registerSendJobKind({ imapManager });
+startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.
 providerThreadIndexState(query)
@@ -348,7 +358,11 @@ httpServer.listen(PORT, () => {
 
 process.on('SIGTERM', () => {
   console.log('SIGTERM received — shutting down gracefully');
+  // The job queue stops claiming at once, before anything else (a tick in progress included), and
+  // its running jobs get up to 8 s: a send in progress finishes rather than being cut mid-DATA.
+  const workerStopped = stopJobWorker({ waitMs: 8000 }).catch(() => false);
   httpServer.close(async () => {
+    await workerStopped;
     // close() lets pending commands finish before the connection is shut down.
     try { await redisClient.close(); } catch { /* ignore */ }
     process.exit(0);

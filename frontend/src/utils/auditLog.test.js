@@ -8,7 +8,8 @@ describe('AUDIT_ACTIONS', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed',
       'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'message.sent', 'message.deleted',
-      'message.move_reverted', 'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
+      'message.move_reverted', 'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
+      'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
@@ -91,6 +92,19 @@ describe('auditDetail', () => {
       auditDetail({ action: 'message.sent', details: { messageId: '<m@x>', to: ['a@example.com'], cc: ['b@example.com'], bcc: ['c@example.com'] } }),
       { key: 'admin.audit.detailRecipients', values: { recipients: 'a@example.com, b@example.com, c@example.com' } },
     );
+  });
+
+  it('describes a queued, cancelled, moved and failed letter without its content', () => {
+    assert.equal(auditDetail({ action: 'message.send_queued', details: { jobId: '1', scheduled: false } }), null);
+    const scheduled = auditDetail({ action: 'message.send_queued', details: { jobId: '1', scheduled: true, sendAt: '2026-10-05T08:00:00.000Z' } });
+    assert.equal(scheduled.key, 'admin.audit.detailSendScheduled');
+    assert.ok(scheduled.values.time);
+    assert.deepEqual(auditDetail({ action: 'message.send_cancelled', details: { reason: 'undo' } }), { key: 'admin.audit.detailSendCancelledUndo', values: {} });
+    assert.deepEqual(auditDetail({ action: 'message.send_cancelled', details: { reason: 'edit' } }), { key: 'admin.audit.detailSendCancelledEdit', values: {} });
+    assert.deepEqual(auditDetail({ action: 'message.send_cancelled', details: {} }), { key: 'admin.audit.detailSendCancelledDiscard', values: {} });
+    assert.deepEqual(auditDetail({ action: 'message.send_rescheduled', details: { resend: true } }), { key: 'admin.audit.detailSendResent', values: {} });
+    assert.deepEqual(auditDetail({ action: 'message.send_failed', details: { status: 'needs_attention' } }), { key: 'admin.audit.detailSendUncertain', values: {} });
+    assert.deepEqual(auditDetail({ action: 'message.send_failed', details: { status: 'failed', code: 'smtp_rejected' } }), { key: 'admin.audit.detailSendFailed', values: { code: 'smtp_rejected' } });
   });
 
   it('tells a move to Trash from a permanent delete', () => {

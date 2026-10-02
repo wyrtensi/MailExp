@@ -100,6 +100,12 @@ const ICONS = {
       <path d="M16 3.13a4 4 0 010 7.75"/>
     </svg>
   ),
+  scheduled: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <circle cx="12" cy="12" r="9"/>
+      <polyline points="12 7 12 12 15.5 14"/>
+    </svg>
+  ),
 };
 
 function folderIcon(path, specialUse, folderMappings) {
@@ -361,6 +367,9 @@ export default function Sidebar() {
   } = useStore();
 
   const isMobile = useMobile();
+  // Letters waiting to be sent in any mailbox (components/ScheduledLetters.jsx keeps the count).
+  const scheduledSummary = useStore(s => s.scheduledSummary);
+  const setShowScheduled = useStore(s => s.setShowScheduled);
   // On mobile the sidebar is always expanded (shown as an overlay drawer)
   const sidebarCollapsed = isMobile ? false : sidebarCollapsedPref;
 
@@ -1115,6 +1124,16 @@ export default function Sidebar() {
           collapsed={sidebarCollapsed}
           onClick={() => { setShowContacts(!showContacts); if (isMobile) setMobileSidebarOpen(false); }}
         />
+        {scheduledSummary.count > 0 && (
+          <NavItem
+            icon={ICONS.scheduled}
+            label={scheduledSummary.failed ? t('scheduled.navFailed', { count: scheduledSummary.failed }) : t('scheduled.title')}
+            active={false}
+            collapsed={sidebarCollapsed}
+            badge={scheduledSummary.count}
+            onClick={() => { setShowScheduled(true); if (isMobile) setMobileSidebarOpen(false); }}
+          />
+        )}
       </div>
 
       {/* Nav */}

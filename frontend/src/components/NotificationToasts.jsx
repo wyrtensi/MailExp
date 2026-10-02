@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { UNDO_WINDOW_MS } from '../utils/undoableAction.js';
+import { undoSend } from '../utils/sendTracker.js';
 
 export default function NotificationToasts() {
   const { notifications, removeNotification } = useStore();
@@ -10,10 +11,15 @@ export default function NotificationToasts() {
 
   const undoable = notifications.filter(n => n.onUndo);
   const regular  = notifications.filter(n => !n.onUndo);
+  // A sent letter's "Sending… Undo" shows in this stack on every layout: the list's action bar
+  // (where other undos go on desktop) may not be on screen when the composer closes.
+  const toast = (n, isMobile) => (n.sendUndo
+    ? <SendUndoToast key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile={isMobile} />
+    : <Toast key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile={isMobile} />);
 
   if (isMobile) {
     return (
-      <div style={{
+      <div aria-live="polite" aria-relevant="additions" style={{
         position: 'fixed',
         bottom: 'calc(var(--sab) + 20px)',
         left: 16,
@@ -25,24 +31,20 @@ export default function NotificationToasts() {
         {undoable.map(n => (
           <ActionBar key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile />
         ))}
-        {regular.map(n => (
-          <Toast key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile />
-        ))}
+        {regular.map(n => toast(n, true))}
       </div>
     );
   }
 
   return (
-    <div style={{
+    <div aria-live="polite" aria-relevant="additions" style={{
       position: 'fixed',
       bottom: 24, right: 24,
       display: 'flex', flexDirection: 'column-reverse', gap: 8,
       zIndex: 3000, pointerEvents: 'none',
       alignItems: 'flex-end',
     }}>
-      {regular.map(n => (
-        <Toast key={n.id} notification={n} onDismiss={() => removeNotification(n.id)} isMobile={false} />
-      ))}
+      {regular.map(n => toast(n, false))}
     </div>
   );
 }
@@ -251,6 +253,92 @@ function Toast({ notification, onDismiss, isMobile }) {
         }}
         onMouseEnter={e => { e.currentTarget.style.color = 'var(--text-primary)'; }}
         onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-tertiary)'; }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+// "Sending… Undo" for a letter in its undo window (utils/sendTracker.js). It lasts until the letter
+// is due; Undo cancels it on the server and reopens the composer. The composer that had focus is
+// gone, so the Undo button takes the focus unless the writer already moved it somewhere.
+function SendUndoToast({ notification, onDismiss, isMobile }) {
+  const { t } = useTranslation();
+  const { jobId, dueAt } = notification.sendUndo;
+  const [remaining] = useState(() => Math.max(0, dueAt - Date.now()));
+  const [busy, setBusy] = useState(false);
+  const [exiting, setExiting] = useState(false);
+  const undoRef = useRef(null);
+
+  const dismiss = () => {
+    setExiting(true);
+    setTimeout(onDismiss, 190);
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(dismiss, remaining);
+    return () => clearTimeout(timer);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const active = document.activeElement;
+    if (!active || active === document.body) undoRef.current?.focus();
+  }, []);
+
+  const handleUndo = async () => {
+    if (busy) return;
+    setBusy(true);
+    await undoSend(jobId);
+    dismiss();
+  };
+
+  return (
+    <div
+      role="status"
+      data-send-undo
+      className={exiting ? (isMobile ? 'toast-exit-mobile' : 'toast-exit') : (isMobile ? 'toast-enter-mobile' : 'toast-enter')}
+      style={{
+        position: 'relative', overflow: 'hidden',
+        background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+        borderRadius: 10, padding: '10px 8px 10px 16px',
+        display: 'flex', alignItems: 'center', gap: 10,
+        width: isMobile ? '100%' : undefined, maxWidth: isMobile ? undefined : 360,
+        boxShadow: 'var(--shadow-popover)', pointerEvents: 'all',
+      }}
+    >
+      <div aria-hidden="true" style={{
+        position: 'absolute', bottom: 0, left: 0, height: 2, background: 'var(--accent)',
+        animation: `action-bar-progress ${remaining}ms linear forwards`,
+      }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>{t('scheduled.sending')}</div>
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {notification.body}
+        </div>
+      </div>
+      <button
+        ref={undoRef}
+        onClick={handleUndo}
+        disabled={busy}
+        aria-label={t('scheduled.undoSend')}
+        style={{
+          background: 'var(--accent-dim)', border: '1px solid rgba(124,106,247,0.3)', borderRadius: 6,
+          color: 'var(--accent)', fontSize: 12, fontWeight: 600, padding: '4px 12px',
+          cursor: busy ? 'default' : 'pointer', flexShrink: 0, opacity: busy ? 0.6 : 1,
+        }}
+      >
+        {t('common.undo')}
+      </button>
+      <button
+        onClick={dismiss}
+        aria-label={t('common.dismiss')}
+        style={{
+          background: 'none', border: 'none', color: 'var(--text-tertiary)',
+          cursor: 'pointer', padding: '4px 6px', display: 'flex', flexShrink: 0,
+        }}
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
           <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
