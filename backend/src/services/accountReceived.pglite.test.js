@@ -6,10 +6,9 @@ import { readFileSync } from 'node:fs';
 
 const dbState = vi.hoisted(() => ({ db: null }));
 vi.mock('./db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
-vi.mock('imapflow', () => ({ ImapFlow: vi.fn() }));
 
 const { createRealSchemaDb } = await import('./testing/realSchema.js');
-const { noteInboxArrival } = await import('./accountReceived.js');
+const { noteInboxArrival, recordInboxArrival } = await import('./accountReceived.js');
 
 const SALES = '60000000-0000-4000-8000-000000000001';
 const OPS = '60000000-0000-4000-8000-000000000002';
@@ -78,13 +77,11 @@ describe('noteInboxArrival', () => {
   });
 });
 
-describe('ImapManager._recordInboxArrival', () => {
+describe('recordInboxArrival', () => {
   const run = async (accountId, at) => {
-    const { ImapManager } = await import('./imapManager.js');
-    const mgr = Object.create(ImapManager.prototype);
-    mgr.broadcast = vi.fn();
-    await ImapManager.prototype._recordInboxArrival.call(mgr, { id: accountId, email_address: 'x@lr.test' }, at);
-    return mgr.broadcast;
+    const broadcast = vi.fn();
+    await recordInboxArrival({ id: accountId, email_address: 'x@lr.test' }, at, broadcast);
+    return broadcast;
   };
 
   it('tells the clients the new date, which is what a letter that arrived already read needs (new_messages carries unread ones only)', async () => {
@@ -103,19 +100,17 @@ describe('ImapManager._recordInboxArrival', () => {
   });
 
   it('does not throw when the database fails: the sync batch goes on', async () => {
-    const { ImapManager } = await import('./imapManager.js');
-    const mgr = Object.create(ImapManager.prototype);
-    mgr.broadcast = vi.fn();
+    const broadcast = vi.fn();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const real = dbState.db;
     dbState.db = { query: async () => { throw new Error('db down'); } };
     try {
-      await ImapManager.prototype._recordInboxArrival.call(mgr, { id: SALES, email_address: 'x@lr.test' }, ago(1));
+      await recordInboxArrival({ id: SALES }, ago(1), broadcast);
     } finally {
       dbState.db = real;
       warn.mockRestore();
     }
-    expect(mgr.broadcast).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
   });
 });
 

@@ -36,7 +36,7 @@ import { loadRecompute, recomputeState, recordRecomputeError } from './threading
 import { restoreNodeMailboxPassword } from './mailNode/passwordRestore.js';
 import { currentAuthPass, noteRestoredPassword } from './mailNode/currentPassword.js';
 import { recordAudit } from './auditLog.js';
-import { noteInboxArrival } from './accountReceived.js';
+import { recordInboxArrival } from './accountReceived.js';
 import { MoveQueue } from './moveQueue.js';
 import { randomUUID } from 'crypto';
 
@@ -5181,7 +5181,9 @@ export class ImapManager {
         // The mailbox received mail: record it and tell the clients, also when every arrival was
         // already read (new_messages above carries only the unread ones). A failure here must not
         // fail the sync batch: the next arrival moves the date on.
-        if (inboxArrivalAt !== null) await this._recordInboxArrival(account, inboxArrivalAt);
+        if (inboxArrivalAt !== null) {
+          await recordInboxArrival(account, inboxArrivalAt, (event) => this.broadcast(event), logAccount);
+        }
 
         // Inbox-ingest: hand the newly-arrived INBOX rows to any active ingest plugin so it can
         // re-evaluate the affected threads, independent of the unread notification path above —
@@ -8409,19 +8411,6 @@ export class ImapManager {
             AND m.is_deleted = false
         )
     `);
-  }
-
-  // The mailbox received mail at `arrivedAtMs` (an INBOX letter stored for the first time): move its
-  // last_received_at forward and tell the open clients so the sidebar order follows. Sent when the
-  // date really moved, whether or not the arrivals were unread (new_messages carries only those).
-  // Never fails the sync batch that called it: the next arrival moves the date on.
-  async _recordInboxArrival(account, arrivedAtMs) {
-    try {
-      const lastReceivedAt = await noteInboxArrival(account.id, arrivedAtMs);
-      if (lastReceivedAt) this.broadcast({ type: 'account_received', accountId: account.id, lastReceivedAt });
-    } catch (err) {
-      console.warn(`Could not record the last received mail of ${logAccount(account)}: ${err.message}`);
-    }
   }
 
   broadcast(data, userId = null) {
