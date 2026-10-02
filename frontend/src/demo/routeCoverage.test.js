@@ -94,6 +94,8 @@ const CONCRETE_PATH = {
   '/mail/messages/:param/headers': '/mail/messages/demo-001/headers',
   '/mail/messages/:param/delivery': '/mail/messages/demo-005/delivery',
   '/mail/messages/:param/bcc': '/mail/messages/demo-001/bcc',
+  '/mail/scheduled': '/mail/scheduled?accountId=demo-sales',
+  '/mail/scheduled/:param': '/mail/scheduled/demo-job-1',
   '/integrations': '/integrations',
   '/integrations/status': '/integrations/status',
   '/oauth/google/known-emails': '/oauth/google/known-emails?q=archive',
@@ -359,6 +361,18 @@ test('mailbox and message-list actions answer with real ids', async () => {
 });
 
 test('drafts, sync and folder management answer', async () => {
+  // Undo send and send later: a sent letter waits as a job; undo gives it back, a scheduled one moves.
+  const queued = await demoRequest('POST', '/mail/send', { accountId: 'demo-sales', to: ['x@example.com'], subject: 'Coverage', body: 'Hi' });
+  assert.equal(queued.scheduled, false);
+  const undone = await answer('/mail/scheduled/:param/cancel', 'POST', `/mail/scheduled/${queued.jobId}/cancel`, { reason: 'undo' });
+  assert.equal(undone.compose.subject, 'Coverage');
+  const later = await demoRequest('POST', '/mail/send', {
+    accountId: 'demo-sales', to: ['x@example.com'], subject: 'Later', body: 'Hi', sendAt: new Date(Date.now() + 3600e3).toISOString(),
+  });
+  assert.equal(later.scheduled, true);
+  const moved = await answer('/mail/scheduled/:param', 'PATCH', `/mail/scheduled/${later.jobId}`, { sendAt: new Date(Date.now() + 7200e3).toISOString() });
+  assert.equal(moved.letter.id, later.jobId);
+  await reject('/mail/scheduled/:param', 'PATCH', `/mail/scheduled/${later.jobId}`, { sendAt: new Date(Date.now() - 1000).toISOString() }, /already passed/);
   const draft = await answer('/mail/draft', 'POST', '/mail/draft', { accountId: 'demo-sales', subject: 'Draft for coverage', body: 'Hello' });
   await answer('/mail/draft/:param', 'DELETE', `/mail/draft/${draft.uid}?accountId=demo-sales&folder=Drafts`);
   await answer('/mail/sync', 'POST', '/mail/sync', { accountId: 'demo-sales' });

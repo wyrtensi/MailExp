@@ -196,6 +196,7 @@ export const useStore = create((set, get) => ({
         // person to sign in on this tab must not inherit the previous user's mail or draft.
         ...privateMailState(),
         composing: false, composeData: null, messageWindows: [], lastViewedMessageId: null,
+        queuedCompose: null, showScheduled: false, scheduledSummary: { count: 0, failed: 0 },
         unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
         senderFaviconsLoaded: false,
         senderFavicons: false,
@@ -624,6 +625,16 @@ export const useStore = create((set, get) => ({
   accountSettingsRequested: null,
   openAccountSettings: (accountId) => set({ showAdmin: true, adminTab: 'accounts', accountSettingsRequested: accountId || null }),
   clearAccountSettingsRequest: () => set({ accountSettingsRequested: null }),
+
+  // Letters waiting to be sent (undo window, send later, kept after a failure): the Scheduled
+  // dialog, the sidebar's count of them (failed: this user's letters that were not sent), and a
+  // letter given back by an undo or edit while another composer was open, opened once it closes.
+  showScheduled: false,
+  setShowScheduled: (v) => set({ showScheduled: v }),
+  scheduledSummary: { count: 0, failed: 0 },
+  setScheduledSummary: (summary) => set({ scheduledSummary: summary }),
+  queuedCompose: null,
+  setQueuedCompose: (data) => set({ queuedCompose: data }),
 
   // Contacts view
   showContacts: false,

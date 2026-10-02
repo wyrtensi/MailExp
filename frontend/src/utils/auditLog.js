@@ -1,5 +1,5 @@
 import { alertTitleKey, applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, queueActionKey, rateFrameKey } from './mailNode.js';
-import { formatDay } from './formatDate.js';
+import { formatDateTime, formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
 // backend/src/services/auditLog.js and the entries GET /api/admin/audit returns.
@@ -19,6 +19,10 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
+  'message.send_queued': 'admin.audit.actionMessageSendQueued',
+  'message.send_cancelled': 'admin.audit.actionMessageSendCancelled',
+  'message.send_rescheduled': 'admin.audit.actionMessageSendRescheduled',
+  'message.send_failed': 'admin.audit.actionMessageSendFailed',
   'user.added': 'admin.audit.actionUserAdded',
   'user.deleted': 'admin.audit.actionUserDeleted',
   'user.enabled': 'admin.audit.actionUserEnabled',
@@ -49,6 +53,14 @@ const MOVE_REVERTED_DETAIL_KEYS = Object.freeze({
   gone: 'admin.audit.detailMoveRevertedGone',
   destination_gone: 'admin.audit.detailMoveRevertedDestinationGone',
   gave_up: 'admin.audit.detailMoveRevertedGaveUp',
+});
+
+// Why a waiting letter was cancelled: its writer undid the send, took it back to edit, or
+// discarded it.
+const SEND_CANCEL_DETAIL_KEYS = Object.freeze({
+  undo: 'admin.audit.detailSendCancelledUndo',
+  edit: 'admin.audit.detailSendCancelledEdit',
+  discard: 'admin.audit.detailSendCancelledDiscard',
 });
 
 // How a mail_node.domain_state_changed entry moved the domain: "Done", "Mark ready" or "Restart
@@ -292,6 +304,22 @@ export function auditDetail(entry) {
         values: { from: details.from, folder },
       };
     }
+    // Undo send and send later (backend services/sendQueue.js): a letter queued (for a chosen time,
+    // or with the undo window), cancelled (undo, edit or discard), moved or sent again, or not sent.
+    case 'message.send_queued':
+      return details.scheduled
+        ? { key: 'admin.audit.detailSendScheduled', values: { time: formatDateTime(details.sendAt) } }
+        : null;
+    case 'message.send_cancelled':
+      return { key: SEND_CANCEL_DETAIL_KEYS[details.reason] ?? SEND_CANCEL_DETAIL_KEYS.discard, values: {} };
+    case 'message.send_rescheduled':
+      return details.resend
+        ? { key: 'admin.audit.detailSendResent', values: {} }
+        : { key: 'admin.audit.detailSendRescheduled', values: { time: formatDateTime(details.sendAt) } };
+    case 'message.send_failed':
+      return details.status === 'needs_attention'
+        ? { key: 'admin.audit.detailSendUncertain', values: {} }
+        : { key: 'admin.audit.detailSendFailed', values: { code: details.code ?? '' } };
     case 'message.move_reverted':
       // A queued move the mail server could not do: the letter went back (services/moveQueue.js).
       return {

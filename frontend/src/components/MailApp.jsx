@@ -16,6 +16,7 @@ import Sidebar from './Sidebar.jsx';
 import MessageList from './MessageList.jsx';
 import MessagePane from './MessagePane.jsx';
 import NotificationToasts from './NotificationToasts.jsx';
+import ScheduledLetters from './ScheduledLetters.jsx';
 import CommandPalette from './CommandPalette.jsx';
 import DemoBadge from './DemoBadge.jsx';
 import { demoRole, switchDemoRole } from '../utils/demoRole.js';
@@ -940,6 +941,7 @@ export default function MailApp() {
       {!isMobile && <Suspense fallback={null}><WindowLayer /></Suspense>}
       <Suspense fallback={null}>{hasNativeBridge && <ElectronNotificationBridge />}</Suspense>
       <NotificationToasts />
+      <ScheduledLetters />
       <PluginRuntime />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       {isDemoMode && (

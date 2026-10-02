@@ -585,6 +585,18 @@ export const api = {
   reorderRules:(ids)      => request('PATCH',  '/rules/reorder', { ids }),
   runRules:    (accountId) => request('POST',  '/rules/run', accountId ? { accountId } : {}),
 
+  // Letters waiting to be sent: undo send and send later (backend routes/scheduled.js)
+  scheduled: {
+    // No accountId: every mailbox.
+    list: (accountId) => request('GET', `/mail/scheduled?accountId=${encodeURIComponent(accountId || '')}`),
+    get: (id) => request('GET', `/mail/scheduled/${encodeURIComponent(id)}`),
+    // reason: 'undo' or 'edit' answer { compose } to reopen the composer with; 'discard' answers { ok }.
+    cancel: (id, reason = 'discard') => request('POST', `/mail/scheduled/${encodeURIComponent(id)}/cancel`, { reason }),
+    reschedule: (id, sendAt) => request('PATCH', `/mail/scheduled/${encodeURIComponent(id)}`, { sendAt }),
+    // Sends again, now, a letter that failed or needs attention.
+    resend: (id) => request('PATCH', `/mail/scheduled/${encodeURIComponent(id)}`, { resend: true }),
+  },
+
   // Drafts
   saveDraft:   (data)              => request('POST',   '/mail/draft', data),
   deleteDraft: (accountId, uid, folder) =>

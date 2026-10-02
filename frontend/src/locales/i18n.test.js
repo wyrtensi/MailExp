@@ -196,6 +196,9 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'admin.nodeOps.alertDetailRefusals_few', 'admin.nodeOps.alertDetailRefusals_many',
     'admin.nodeOps.alertDetailBypass_few', 'admin.nodeOps.alertDetailBypass_many',
     'admin.accounts.search.count_few', 'admin.accounts.search.count_many',
+    'scheduled.attachments_few', 'scheduled.attachments_many',
+    'scheduled.failedOnStartTitle_few', 'scheduled.failedOnStartTitle_many',
+    'scheduled.navFailed_few', 'scheduled.navFailed_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

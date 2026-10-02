@@ -9,6 +9,7 @@ import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
 import { accountEventPatch } from '../utils/accountHealth.js';
 import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/events.js';
 import { recordDiagEvent } from '../utils/diagEvents.js';
+import { notifySendFailed, settleSend } from '../utils/sendTracker.js';
 
 function _applyServerCounts(counts) {
   useStore.getState().setUnreadCounts(counts);
@@ -284,6 +285,25 @@ export function useWebSocket(enabled = true) {
           window.dispatchEvent(new CustomEvent('mailexpert:sync_done'));
         }
         api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+        break;
+      }
+
+      // Undo send and send later (utils/sendTracker.js): a letter's job changed in some mailbox
+      // (every tab refreshes its Scheduled count), or one of this user's letters went out or
+      // failed. A failure of a letter this tab is not following (sent later, from another tab)
+      // is told here; the tab following it tells it itself.
+      case 'scheduled_changed': {
+        window.dispatchEvent(new CustomEvent('mailexpert:scheduled_changed'));
+        break;
+      }
+      case 'send_done': {
+        settleSend(data.jobId, { status: 'done', sentFolder: data.sentFolder, sentCopySaved: data.sentCopySaved });
+        break;
+      }
+      case 'send_failed': {
+        if (!settleSend(data.jobId, { status: data.status, errorCode: data.code, error: data.error })) {
+          notifySendFailed({ subject: data.subject, code: data.code, error: data.error });
+        }
         break;
       }
 
