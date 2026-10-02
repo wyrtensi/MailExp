@@ -108,6 +108,7 @@ export async function undoSend(jobId) {
   try {
     const { compose } = await api.scheduled.cancel(id, 'undo');
     untrack(id);
+    window.dispatchEvent(new CustomEvent('mailexpert:scheduled_changed'));
     if (compose) restoreCompose(compose);
     return true;
   } catch (err) {

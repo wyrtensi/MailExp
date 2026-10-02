@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
@@ -21,13 +21,17 @@ export default function ScheduledLetters() {
   const showScheduled = useStore(s => s.showScheduled);
   const composing = useStore(s => s.composing);
   const queuedCompose = useStore(s => s.queuedCompose);
+  // The letters not sent while the user was away are announced once per page load.
+  const announcedRef = useRef(false);
 
   useEffect(() => {
     let timer = null;
-    let first = true;
     const run = async () => {
       const result = await refreshScheduledSummary();
-      if (first && result?.failed) {
+      if (!result) return;
+      const first = !announcedRef.current;
+      announcedRef.current = true;
+      if (first && result.failed) {
         const { addNotification, setShowScheduled } = useStore.getState();
         addNotification({
           type: 'error',
@@ -39,7 +43,6 @@ export default function ScheduledLetters() {
           actionLabel: t('scheduled.view'),
         });
       }
-      first = false;
     };
     run();
     const onChange = () => {
