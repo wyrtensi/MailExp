@@ -19,9 +19,10 @@ EOP → узел, Inbound connector — узел → EOP.
 - создаёт домены и ящики через API mailcow и сразу подключает ящики по IMAP/SMTP;
 - ставит на узел свои настройки через API mailcow («Применить настройки», подробно — раздел 6, «Что
   делает панель»): запись TLS Policy Map и relayhost для `<EOP_HOST>`, relayhost каждого домена, ключ
-  DKIM по режиму DKIM, лимит отправки каждого ящика, адреса панели в whitelist fail2ban и, отдельной
-  кнопкой, правило раскладки спама EOP в глобальный prefilter. Каждый пункт сначала читается и
-  меняется, только если на узле не то, поэтому повторное применение ничего не ломает;
+  DKIM по режиму DKIM, лимит отправки каждого ящика, адреса панели в whitelist fail2ban, отдельной
+  кнопкой — правило раскладки спама EOP в глобальный prefilter, а когда оно на месте — диапазоны EOP
+  как forwarding hosts mailcow. Каждый пункт сначала читается и меняется, только если на узле не то,
+  поэтому повторное применение ничего не ломает;
 - генерирует пароль ящика и хранит его зашифрованным; пароль никто не видит;
 - удаляет ящик узла не сразу (решение владельца 2026-10-01). Удаление может запросить любой вошедший:
   подтверждение требует ввести адрес ящика целиком и указать причину (обязательно, до 500 символов),
@@ -107,8 +108,12 @@ EOP → узел, Inbound connector — узел → EOP.
 Если узел не ответил на создание ящика (таймаут 15 секунд), ящик мог остаться созданным в mailcow
 с паролем, которого никто не знает. Достаточно создать тот же адрес ещё раз: MailExpert заберёт его.
 
-**Руками (этот документ):** установка mailcow, файрвол, общий relayhost в `extra.cf`, DNS (в том
-числе публикация записи DKIM, которую показывает панель), Microsoft EOP, бэкап узла.
+**Скриптом на хосте узла** ([`scripts/deploy/mail-node/setup.sh`](../../scripts/deploy/mail-node/README.md),
+раздел 3, шаг 3): настройки `mailcow.conf`, общий relayhost в `extra.cf`, настройки Dovecot, файрвол и
+таймер, который держит диапазоны EOP в файрволе актуальными.
+
+**Руками (этот документ):** установка mailcow, запуск скрипта, DNS (в том числе публикация записи
+DKIM, которую показывает панель), Microsoft EOP, бэкап узла.
 
 ## 2. Раскладка
 
@@ -133,16 +138,35 @@ Caddy панели, а скрипты развёртывания не умеют
    cd /opt && git clone https://github.com/mailcow/mailcow-dockerized && cd mailcow-dockerized
    ./generate_config.sh   # на вопрос об имени — <MAIL_HOST>
    ```
-3. В `mailcow.conf`:
+3. Настройки хоста — скриптом
+   [`scripts/deploy/mail-node/setup.sh`](../../scripts/deploy/mail-node/README.md) из копии репозитория
+   MailExpert на узле, до первого `docker compose up` (тогда смена `mailcow.conf` не требует
+   пересоздания контейнеров). `<EOP_HOST>` на этом шаге ещё нет: скрипт запускается без `--eop-host`
+   и ещё раз с ним, когда MX первого домена известен (раздел 6, «Один раз на узел и тенант»).
+   ```bash
+   git clone https://github.com/wyrtensi/MailExpert.git /opt/mailexpert-node-src
+   sudo /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-ip <PANEL_IP> \
+     --ping-url <ссылка проверки Healthchecks для диапазонов EOP> --dry-run
+   sudo /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-ip <PANEL_IP> \
+     --ping-url <ссылка проверки Healthchecks для диапазонов EOP>
+   ```
+   `--dry-run` печатает изменения файлов (diff) и правила файрвола и ничего не меняет. Повторный
+   запуск без изменений ничего не трогает и ничего не перезапускает; заданные один раз параметры
+   скрипт хранит в `/etc/mailexpert-node/node.env` (0600) и берёт оттуда. Что он ставит в
+   `mailcow.conf` (остальные строки и права файла не трогаются):
    - `SKIP_CLAMD=y` — антивирус делает EOP, экономия 1.5-3 ГБ памяти;
    - `SKIP_OLEFY=y` — макросы в офисных вложениях тоже проверяет EOP;
    - `SKIP_FTS=y` — MailExpert ищет по своей базе;
-   - `ENABLE_IPV6=false` — `generate_config.sh` сам ставит `true`, если у хоста работает IPv6, а
-     файрвол раздела 4 фильтрует только IPv4; после
-     смены нужен полный `docker compose down && docker compose up -d`, перезапуска недостаточно.
-     Подробности и вариант «оставить IPv6» — [ревизия EOP](../architecture/mail-node-research/eop-review.md),
-     находка 4;
+   - `ENABLE_IPV6=false` (решение D-13) — `generate_config.sh` сам ставит `true`, если у хоста работает
+     IPv6, а файрвол раздела 4 по умолчанию фильтрует только IPv4; после смены на уже запущенном
+     mailcow нужен полный `docker compose down && docker compose up -d`, перезапуска недостаточно
+     (скрипт это пишет, но сам не делает). Подробности и вариант «оставить IPv6» —
+     [ревизия EOP](../architecture/mail-node-research/eop-review.md), находка 4;
    - SOGo не отключать: отключение не поддерживается, а без пользователей он занимает около 240 МБ.
+
+   Кроме этого скрипт ставит настройки Dovecot (шаг 4), с `--eop-host` — общий relayhost (раздел 6),
+   файрвол и таймер диапазонов EOP (раздел 4). Руками, если скрипт не годится: те же четыре строки в
+   `mailcow.conf`.
 
    DKIM: ключом домена управляет панель по режиму DKIM в настройках EOP (решение владельца D-1):
    режим «mailcow» — домен создаётся с ключом 2048 бит, селектор `dkim`, и панель показывает запись
@@ -150,10 +174,14 @@ Caddy панели, а скрипты развёртывания не умеют
    только после подтверждения администратора. Подпись включается сама, отдельного шага «включить DKIM»
    нет. Когда публиковать DNS-запись — раздел 6, шаг «DNS домена», и
    [ревизия EOP](../architecture/mail-node-research/eop-review.md), находка 3.
-4. Настройки Dovecot: дописать
+4. Настройки Dovecot ставит `setup.sh` (шаг 3): содержимое
    [`scripts/deploy/mail-node/dovecot-extra.conf`](../../scripts/deploy/mail-node/dovecot-extra.conf)
-   в конец `data/conf/dovecot/extra.conf`. Если там уже есть какие-то из этих настроек (например,
-   `process_limit` по прежней версии этого документа), их убрать. В файле:
+   одним блоком между метками `# BEGIN MailExpert` / `# END MailExpert` в конце
+   `data/conf/dovecot/extra.conf`, остальное в файле остаётся; `dovecot-mailcow` перезапускается только
+   при изменении блока. Копия файла, дописанная руками по прежней версии этого документа, становится
+   блоком. Если те же настройки стоят в файле вне блока (например, `process_limit`), скрипт ничего не
+   пишет и перечисляет строки, которые надо убрать. Руками: дописать файл в конец `extra.conf` и убрать
+   повторяющиеся настройки. В файле:
    - несколько общих процессов входа вместо процесса-посредника TLS на каждое соединение;
    - лимит 2048 IMAP-процессов вместо 1024;
    - гибернация сессий, которые дольше 10 секунд простаивают в IDLE.
@@ -199,27 +227,51 @@ Docker публикует порты в обход `ufw`, поэтому пра�
 | 587, 993 | только `<PANEL_IP>` |
 | прочие почтовые порты (110, 143, 465, 995, 4190) | никому |
 
-Правила — только для IPv4 (`iptables`): IPv6 в mailcow выключен (раздел 3, шаг 3). Если решено
-оставить IPv6 включённым, эти правила не защищают: нужен отдельный `ip6tables`-эквивалент и проверка,
-что Docker вообще управляет IPv6-цепочкой `DOCKER-USER` на хосте — подробности
-[в ревизии EOP](../architecture/mail-node-research/eop-review.md), находка 4.
+Правила ставит `setup.sh` (раздел 3, шаг 3), держит актуальными `eop-ranges.sh` по таймеру; подробно —
+[README скриптов](../../scripts/deploy/mail-node/README.md):
+- `DOCKER-USER` переходит в цепочку `MAILEXPERT-NODE`; в ней правила только для пакетов, пришедших на
+  внешний интерфейс (интерфейс маршрута по умолчанию или `--ext-if`): `DOCKER-USER` видит и исходящую
+  почту mailcow в EOP на порт 25, её трогать нельзя. Порты — порты контейнеров (Docker уже сделал
+  DNAT), поэтому перенос порта хоста в `mailcow.conf` правила не обходит;
+- порт 25 — адресам из ipset `mailexpert-eop4`, остальным `DROP`; 587 и 993 — только адресам панели;
+  110, 143, 465, 995, 4190 — никому;
+- изменение правил — новая цепочка, на которую `DOCKER-USER` переключается раньше, чем уходит старая;
+  без изменений ничего не трогается. Правила порта 25 не ставятся, пока набор диапазонов пуст;
+- ни ipset, ни правила не переживают перезагрузку: после старта Docker `mailexpert-node-firewall.service`
+  восстанавливает их из последнего хорошего списка (`eop-ranges.sh --restore`, без запроса к Microsoft).
 
-Диапазоны EOP берутся из веб-сервиса Microsoft: `https://endpoints.office.com/endpoints/worldwide?clientrequestid=<любой-uuid>`,
-записи с `serviceArea: "Exchange"` и портом 25. Список меняется: сверять раз в месяц. Автоматическая
-сверка таймером (опрос `version`, полный список только при смене версии) — задача в ROADMAP, детали API —
-[в ревизии EOP](../architecture/mail-node-research/eop-review.md), находка 11.
+Только IPv4 (`iptables`), пока IPv6 в mailcow выключен (раздел 3, шаг 3). Если в `mailcow.conf`
+`ENABLE_IPV6=true`, скрипты ставят то же через `ip6tables` и набор `mailexpert-eop6`; управляет ли Docker
+IPv6-цепочкой `DOCKER-USER` на конкретном хосте, проверить отдельно —
+[ревизия EOP](../architecture/mail-node-research/eop-review.md), находка 4.
 
-Пример через `iptables` (сохранить через `netfilter-persistent`):
+**Диапазоны EOP.** Таймер `mailexpert-eop-ranges.timer` раз в час спрашивает у веб-сервиса Microsoft
+`version` с постоянным `ClientRequestId` установки (`EOP_CLIENT_REQUEST_ID` в `node.env`); при новой
+версии берёт `endpoints` (`serviceArea: "Exchange"` с портом 25) и подменяет набор целиком (`ipset swap`).
+Пустой или испорченный список, ответы 400 и 429, любая ошибка или отсутствие ответа ничего не меняют:
+остаётся последний хороший список, на `<ссылка>/fail` уходит причина. Ссылка — отдельная проверка
+Healthchecks (`--ping-url` у `setup.sh`), период 1 час, grace 2 часа. Текущий список — файл
+`/var/lib/mailexpert-node/eop-ranges.txt`, по CIDR на строку; тот же список панель ставит как
+forwarding hosts (раздел 6), у неё своя копия с версией в пункте «Forwarding hosts» итога применения:
+если версия в `/var/lib/mailexpert-node/eop-version` новее, копию панели обновляет следующий выпуск
+MailExpert (`scripts/update-eop-ranges.mjs`). Детали API — [ревизия EOP](../architecture/mail-node-research/eop-review.md),
+находка 11.
+
+Руками, если скрипт не годится (сохранить через `netfilter-persistent`; `<EXT_IF>` — внешний
+интерфейс, без `-i` правило порта 25 рвёт и исходящую почту mailcow):
 
 ```bash
 # 587 и 993 — только панель
-iptables -I DOCKER-USER -p tcp -m multiport --dports 587,993 ! -s <PANEL_IP> -j DROP
+iptables -I DOCKER-USER -i <EXT_IF> -p tcp -m multiport --dports 587,993 ! -s <PANEL_IP> -j DROP
 # 25 — только EOP: сначала разрешения на каждый диапазон, затем запрет остальным
-iptables -I DOCKER-USER -p tcp --dport 25 -j DROP
-iptables -I DOCKER-USER -p tcp --dport 25 -s <EOP_RANGE> -j ACCEPT   # повторить на каждый диапазон
+iptables -I DOCKER-USER -i <EXT_IF> -p tcp --dport 25 -j DROP
+iptables -I DOCKER-USER -i <EXT_IF> -p tcp --dport 25 -s <EOP_RANGE> -j ACCEPT   # повторить на каждый диапазон
 # остальные почтовые порты закрыть
-iptables -I DOCKER-USER -p tcp -m multiport --dports 110,143,465,995,4190 -j DROP
+iptables -I DOCKER-USER -i <EXT_IF> -p tcp -m multiport --dports 110,143,465,995,4190 -j DROP
 ```
+
+Диапазоны руками: `https://endpoints.office.com/endpoints/worldwide?ServiceAreas=Exchange&clientrequestid=<GUID установки>`,
+записи с `serviceArea: "Exchange"` и портом 25 в `tcpPorts`; сверять раз в месяц.
 
 ## 5. Подключение к MailExpert
 
@@ -268,6 +320,7 @@ mailcow, пропущено (не задана настройка или ждё�
 | Лимиты отправки | каждому ящику панели на домене — свой лимит администратора или по умолчанию (лимит домена, иначе из настроек EOP, 50 писем в час, D-10); новый ящик получает его при создании | `add/mailbox {rl_value, rl_frame}`, `edit/rl-mbox` |
 | fail2ban | адреса панели в whitelist, только недостающие; остальные поля fail2ban не трогаются. Адрес, который добавила панель и который убрали из настройки, убирается (единственный способ в API — записать все поля fail2ban обратно без него); адреса, вписанные администратором, панель не убирает | `get/fail2ban`, `edit/fail2ban {action: "whitelist"}`, `edit/fail2ban` со всеми полями |
 | Правило раскладки спама | отдельная кнопка с предупреждением: запись перезапускает Dovecot, IMAP-сессии рвутся; одинаковое правило повторно не пишется | `get/global_filters/prefilter`, `add/global-filter` |
+| Forwarding hosts | диапазоны EOP (копия панели, её версия — в пункте) как forwarding hosts mailcow, каждый с `filter_spam: 1`; только когда правило раскладки спама на месте, иначе «пропущено: ждёт правила» (и ничего не убирается); после записи правила кнопкой добавляются сразу. Убирает только записи, которые добавила сама панель; чужие записи показывает как «не трогаются». Чужая запись диапазона с выключенным спам-фильтром (`keep_spam`) — ошибка пункта: rspamd такую почту не проверяет вовсе, запись удаляют в mailcow, панель добавит её заново с фильтром | `get/fwdhost/all`, `add/fwdhost`, `delete/fwdhost` |
 
 Лимит mailcow считает **письма** на SASL-логин и только для отправок с аутентификацией; отказ —
 `451 4.7.1 Ratelimit "mailcow" exceeded`. Пересылка правилами панели тоже идёт с логином ящика и
@@ -290,8 +343,14 @@ mailcow, пропущено (не задана настройка или ждё�
 `postfilter` до него не доходит. Пока Dovecot перезапускается после записи правила, Postfix откладывает
 входящие письма и доставляет их через несколько минут (или сразу по `postqueue -f`).
 
-Не делает панель: общий relayhost в `extra.cf` (ниже), записи DNS (панель их только проверяет, см.
-«Проверка DNS»), тенант, forwarding hosts (этап 5, решение D-3 — только вместе с правилом спама).
+Forwarding hosts (решение D-3): rspamd перестаёт оценивать SPF отправителя по адресу EOP, снимает с
+таких писем положительные веса групп `rbl`, `policies`, `hfilter` и понижает `reject` до `add header`;
+цена — rspamd больше не учитывает вердикт EOP (`MICROSOFT_SPAM`) и подделку своего домена
+(`SPOOFED_UNAUTH`) для этих адресов, поэтому вердикт EOP доходит до «Спама» только правилом раскладки,
+и пункт без него не выполняется ([требования, раздел 2.5](../architecture/mail-node-research/eop-panel-requirements.md)).
+
+Не делает панель: общий relayhost в `extra.cf` (ниже, скриптом `setup.sh`), записи DNS (панель их
+только проверяет, см. «Проверка DNS»), тенант.
 
 ### Проверка DNS
 
@@ -363,8 +422,11 @@ DNS помечается в списке доменов «Ошибки DNS», р
   organization's email server to Office 365»). После создания сохранить вывод
   `Get-InboundConnector | Format-List` и `Get-OutboundConnector | Format-List`: точный набор свойств
   мастера Microsoft не документирует, это эталон для будущей проверки из панели.
-- **Общий relayhost** (после шага 2 первого домена) в `data/conf/postfix/extra.cf`:
-  `relayhost = <EOP_HOST>`, затем `docker compose restart postfix-mailcow`. Relayhost домена (шаг 3 ниже)
+- **Общий relayhost** (после шага 2 первого домена) в `data/conf/postfix/extra.cf` — **скриптом**:
+  `sudo .../scripts/deploy/mail-node/setup.sh --eop-host <EOP_HOST>` (раздел 3, шаг 3; остальные
+  параметры он берёт из прошлого запуска) ставит `relayhost = <EOP_HOST>`, не трогая другие строки, и
+  перезапускает `postfix-mailcow`, только если строка изменилась. Руками: та же строка в `extra.cf`,
+  затем `docker compose restart postfix-mailcow`. Relayhost домена (шаг 3 ниже)
   покрывает только письма с отправителем на ваших доменах; без общего relayhost отбивки, DSN и часть
   пересылки уходят в интернет напрямую, минуя EOP. Заменять его транспортом `*` (`add/transport`) нельзя:
   транспорт перехватит и почту на собственные домены узла и отправит её в EOP (ревизия EOP, находка 2).
@@ -387,11 +449,13 @@ DNS помечается в списке доменов «Ошибки DNS», р
   перезаписывает файл и стирает штатные правила: `X-Spam-Flag` → Junk, плюс-адресация, дубликаты).
   Каждая запись перезапускает `dovecot-mailcow`, и IMAP-сессии панели рвутся — делать вне рабочего
   времени. Разбор значений `SFV`/`CAT` — ревизия EOP, находка 5.
-- **Forwarding hosts для диапазонов EOP** — по решению владельца
-  ([требования](../architecture/mail-node-research/eop-panel-requirements.md), D-3, рекомендовано):
-  forwarding hosts в админке mailcow или API `add/fwdhost`, каждый диапазон EOP с **`filter_spam: 1`**
-  (по умолчанию 0 — тогда rspamd такую почту не проверяет вовсе). Без этого rspamd оценивает SPF
-  отправителя по адресу EOP (ревизия EOP, находка 13).
+- **Forwarding hosts для диапазонов EOP** — **делает панель** (решение владельца D-3, «Что делает
+  панель»): после правила раскладки спама, само. Руками (если записи ставились руками раньше, панель
+  считает их на месте и не трогает): блок Forwarding Hosts в админке mailcow или API
+  `add/fwdhost`, каждый диапазон EOP с **`filter_spam: 1`** — в админке это включённый «Filter spam»
+  (по умолчанию выключен, и тогда rspamd такую почту не проверяет вовсе). Без forwarding hosts rspamd
+  оценивает SPF отправителя по адресу EOP (ревизия EOP, находка 13): письмо от домена с `-all` и
+  DMARC `p=reject` получает отказ на SMTP.
 - **Явный фишинг (high confidence phish):** по умолчанию EOP кладёт такую почту в карантин, доступный
   только администратору, — заголовков на узел не приходит. `HighConfidencePhishAction` принимает только
   `Quarantine` и `Redirect`, переключить его на `MoveToJmf` нельзя. Решение (карантин администратору или
@@ -742,11 +806,12 @@ Healthchecks пишет сам по истечении grace. Там же — п
 
 Диапазоны EOP — статический список в `backend/src/services/mailNode/eopRanges.js` (веб-сервис
 Microsoft 365 endpoints, запись Exchange с TCP 25, версия и дата в файле); проверка обхода их не
-использует, они для forwarding hosts и файрвола (этап 5). Обновить:
+использует, из него панель ставит forwarding hosts (раздел 6). Обновить:
 `EOP_CLIENT_REQUEST_ID=<GUID установки> node scripts/update-eop-ranges.mjs` в `backend/` печатает новый
 блок для вставки. Веб-сервис просит один постоянный GUID на установку: сгенерировать один раз
-(`node -e "console.log(crypto.randomUUID())"`) и хранить в заметках установки. Автоматическое обновление —
-этап 5 (R-40).
+(`node -e "console.log(crypto.randomUUID())"`) и хранить в заметках установки (на узле `setup.sh` хранит
+свой в `/etc/mailexpert-node/node.env`). Файрвол узла держит актуальным таймер на хосте (раздел 4), не
+этот список.
 
 ### Бюджет TERRL
 
@@ -948,6 +1013,15 @@ MSYS_NO_PATHCONV=1 scripts/deploy/test/e2e-mailcow.sh --image ghcr.io/wyrtensi/m
 4. Белый список fail2ban для `<PANEL_IP>` (раздел 3, шаг 7): после «Применить настройки» в
    «Fail2ban parameters» в whitelist есть `<PANEL_IP>`, остальные параметры прежние. Какой адрес видит
    узел, показывает журнал nginx mailcow для запросов `/api/v1/` панели.
+5. Файрвол `setup.sh` (раздел 4) на настоящем хосте: `iptables -S DOCKER-USER` начинается с
+   `-j MAILEXPERT-NODE`, `ipset list mailexpert-eop4` — 4 диапазона; с адреса не из EOP порт 25 узла не
+   отвечает, панель по 587 и 993 работает, письмо из MailExpert наружу уходит (исходящий порт 25 правила
+   не задевают); после перезагрузки правила и набор на месте (`mailexpert-node-firewall.service`);
+   проверка Healthchecks таймера диапазонов получает пинги раз в час. Скрипты проверены bats-тестами с
+   заглушками и в одноразовом контейнере с настоящими `iptables`/`ipset` (ubuntu 24.04), а не на хосте с
+   Docker и mailcow.
+6. Forwarding hosts на настоящем трафике EOP (эксперимент 12 требований): у письма от домена с `-all`
+   в истории rspamd есть `WHITELISTED_FWD_HOST`, нет `R_SPF_FAIL`, письмо не отклонено.
 
 Эксперименты на тенанте Microsoft (коннекторы, отбивки, DKIM EOP, DBEB, заголовки, лимиты) с тем, как
 проверить каждый, — [требования, раздел 6](../architecture/mail-node-research/eop-panel-requirements.md).
