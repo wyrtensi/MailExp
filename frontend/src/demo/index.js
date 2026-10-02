@@ -223,6 +223,21 @@ const MESSAGE_FIXTURES = [
     snippet: 'Your invitation for the summer conference.', bodyText: 'Your invitation for the summer conference is enclosed.', read: true,
   }),
   ...fleetLetters(FLEET_ACCOUNTS).map(message),
+  // Mail that just arrived, dated from now (like the pending deletion above), in mailboxes spread
+  // down the fleet: the sidebar lists the mailbox that received mail last first, so these rise
+  // above the older ones and the order is visible the moment the demo opens.
+  ...[
+    ['demo-fx-19', 4, 'Pickup moved to 14:00', 'Dmitry from the carrier'],
+    ['demo-fx-41', 38, 'Re: Contract redlines', 'Sofia Garcia'],
+    ['demo-fx-07', 125, 'Updated price list', 'Priya Nair'],
+    ['demo-fx-30', 410, 'Weekly digest', 'Aster Product News'],
+    ['demo-fx-12', 1130, 'Invoice 2041 is ready', 'Billing robot'],
+  ].map(([accountId, minutesAgo, subject, fromName], i) => message({
+    id: `demo-arrival-${i + 1}`, accountId, subject, fromName,
+    fromEmail: `${fromName.toLowerCase().replace(/[^a-z]+/g, '.')}@partner.example`,
+    date: new Date(Date.now() - minutesAgo * 60000).toISOString(),
+    snippet: `${subject} - just in.`, bodyText: `${subject}. This letter arrived a moment ago.`,
+  })),
 ];
 
 const CONTACT_FIXTURES = [
@@ -361,6 +376,10 @@ const DEFAULT_PREFERENCES = {
   categorizationEnabled: true,
   blockRemoteImages: false,
   aiActions: [],
+  // Sidebar account order (backend routes/auth.js): two mailboxes pinned to the top, the rest by
+  // latest received mail.
+  pinnedAccounts: ['demo-fx-24', 'demo-fx-09'],
+  sortAccountsByLatest: true,
 };
 
 // User admin list (GET /admin/users), same shape as publicUser() in backend/src/routes/admin.js —
@@ -507,6 +526,17 @@ function parsePath(path) {
 
 function accountFor(id) {
   return ACCOUNT_FIXTURES.find(account => account.id === id);
+}
+
+// The accounts as GET /api/accounts lists them: each with the date of its newest inbox letter
+// (last_received_at, null when it has none), which is what orders the sidebar.
+function withLastReceived(accounts) {
+  const newest = {};
+  for (const item of messages) {
+    if (item.folder !== 'INBOX' || !item.date) continue;
+    if (!newest[item.account_id] || item.date > newest[item.account_id]) newest[item.account_id] = item.date;
+  }
+  return accounts.map(account => ({ ...account, last_received_at: newest[account.id] ?? null }));
 }
 
 function visibleMessages() {
@@ -1710,12 +1740,25 @@ export async function demoRequest(method, path, body = {}) {
     const base = demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER;
     return { user: { ...clone(base), totpEnabled: demoTotpEnabled, ...clone(profileOverrides) } };
   }
-  if (verb === 'GET' && pathname === '/auth/preferences') return clone(preferences);
+  if (verb === 'GET' && pathname === '/auth/preferences') {
+    // Pins of mailboxes that do not exist are dropped on read, as the server does.
+    return clone({ ...preferences, pinnedAccounts: (preferences.pinnedAccounts || []).filter(id => accountFor(id)) });
+  }
   if (verb === 'PATCH' && pathname === '/auth/preferences') {
-    preferences = { ...preferences, ...clone(body) };
+    const { pinnedAccounts, sortAccountsByLatest, ...rest } = clone(body);
+    // The same rules as the server: a list of ids, once each; a boolean or nothing (400).
+    if ('sortAccountsByLatest' in body && typeof sortAccountsByLatest !== 'boolean') {
+      throw demoError('sortAccountsByLatest must be a boolean', 'invalid_preference');
+    }
+    preferences = {
+      ...preferences,
+      ...rest,
+      ...(Array.isArray(pinnedAccounts) ? { pinnedAccounts: [...new Set(pinnedAccounts.filter(id => typeof id === 'string'))] } : {}),
+      ...('sortAccountsByLatest' in body ? { sortAccountsByLatest } : {}),
+    };
     return { ok: true };
   }
-  if (verb === 'GET' && pathname === '/accounts') return clone(ACCOUNT_FIXTURES);
+  if (verb === 'GET' && pathname === '/accounts') return clone(withLastReceived(ACCOUNT_FIXTURES));
   // "Mailbox on our domain": the demo adds it to the account list for this page session.
   if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') return clone(createDomainMailbox(body));
   if (verb === 'POST' && pathname === '/oauth/google/start') return connectGmail(body);

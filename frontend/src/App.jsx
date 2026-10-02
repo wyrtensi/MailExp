@@ -77,6 +77,14 @@ export default function App() {
       setLocked(false);
       // Theme, font, and layout were applied above from localStorage. Do not use
       // loadPreferences here: demo mode must not call an API before the adapter is ready.
+      // The one thing read from the demo's preferences is which mailboxes are pinned, the first
+      // time this browser opens the demo, so the sidebar shows pins at once; from then on the
+      // browser's own choice (localStorage, kept by the store) is all there is.
+      if (localStorage.getItem('mailexpert_pinned_accounts') === null) {
+        api.getPreferences()
+          .then((prefs) => { if (Array.isArray(prefs?.pinnedAccounts)) useStore.getState().setPinnedAccounts(prefs.pinnedAccounts); })
+          .catch(() => {});
+      }
       setChecking(false);
       return;
     }
