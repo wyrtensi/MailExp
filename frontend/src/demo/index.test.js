@@ -19,6 +19,23 @@ test('marking an unread demo message as read lowers the unread total by one', as
   assert.equal(after.total, before.total - 1);
 });
 
+test('sent letters carry delivery marks and details like the server answers them (R-17)', async () => {
+  const sent = [];
+  for (let page = 0; page < 40; page += 1) {
+    const { messages } = await demoRequest('GET', `/mail/messages?folder=Sent&limit=50&offset=${page * 50}`);
+    if (!messages.length) break;
+    sent.push(...messages);
+  }
+  const marked = sent.filter((m) => m.delivery_state);
+  assert.deepEqual([...new Set(marked.map((m) => m.delivery_state))].sort(), ['delayed', 'failed']);
+  const failed = await demoRequest('GET', `/mail/messages/${marked.find((m) => m.delivery_state === 'failed').id}/delivery`);
+  assert.ok(failed.recipients.length > 0);
+  assert.ok(failed.recipients.every((r) => ['bounced', 'failed'].includes(r.state) && r.explanation?.key));
+  assert.deepEqual(await demoRequest('GET', '/mail/messages/demo-005/delivery'), {
+    messageId: (await demoRequest('GET', '/mail/messages/demo-005')).message_id, node: false, log: null, recipients: [],
+  });
+});
+
 test('advertised demo attachments expose pane fields and resolve to local content', async () => {
   const body = await demoRequest('GET', '/mail/messages/demo-001/body');
 

@@ -451,6 +451,8 @@ export const api = {
   getSenderHistory: (id, limit) => request('GET', `/mail/messages/${id}/sender-history?limit=${limit}`),
   getConversation: (id) => request('GET', `/mail/messages/${id}/conversation`),
   getMessageThreading: (id) => request('GET', `/mail/messages/${id}/threading`),
+  // What became of a sent letter, per recipient (R-17): the node's log and delivery reports.
+  messageDelivery: (id) => request('GET', `/mail/messages/${encodeURIComponent(id)}/delivery`),
   // Resolve a deep-link reference (stable Message-ID header, or a legacy UUID) to the
   // current message row — durable across folder moves (#270).
   resolveMessage: (ref, accountId) => {
