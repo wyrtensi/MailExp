@@ -36,7 +36,9 @@ const statuses = (items) => Object.fromEntries(items.map((i) => [i.item, i.statu
 describe('runApply', () => {
   it('puts every setting on a fresh node, then finds it all in place', async () => {
     const first = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.10'], domains: [domainInput()] });
-    expect(statuses(first.node)).toEqual({ tls_policy: 'changed', relayhost: 'changed', fail2ban: 'changed', prefilter: 'pending' });
+    expect(statuses(first.node)).toEqual({
+      tls_policy: 'changed', relayhost: 'changed', fail2ban: 'changed', prefilter: 'pending', forwarding_hosts: 'skipped',
+    });
     expect(first.node.find((i) => i.item === 'prefilter')).toMatchObject({ code: 'prefilter_differs' });
     const [domain] = first.domains;
     expect(statuses(domain.items)).toEqual({ domain_relayhost: 'changed', dkim: 'ok', mailbox_limits: 'changed' });
@@ -53,7 +55,7 @@ describe('runApply', () => {
 
     mc.writes.length = 0;
     const again = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.10'], domains: [domainInput()] });
-    expect(statuses(again.node)).toEqual({ tls_policy: 'ok', relayhost: 'ok', fail2ban: 'ok', prefilter: 'pending' });
+    expect(statuses(again.node)).toEqual({ tls_policy: 'ok', relayhost: 'ok', fail2ban: 'ok', prefilter: 'pending', forwarding_hosts: 'skipped' });
     expect(statuses(again.domains[0].items)).toEqual({ domain_relayhost: 'ok', dkim: 'ok', mailbox_limits: 'ok' });
     expect(mc.writes).toEqual([]);
   });
@@ -91,6 +93,7 @@ describe('runApply', () => {
       { item: 'tls_policy', target: null, status: 'skipped', code: 'eop_host_missing' },
       { item: 'relayhost', target: null, status: 'skipped', code: 'eop_host_missing' },
       { item: 'fail2ban', target: null, status: 'skipped', code: 'panel_ips_missing' },
+      expect.objectContaining({ item: 'forwarding_hosts', status: 'skipped', code: 'prefilter_not_applied' }),
     ]);
     expect(result.domains[0].items[0]).toEqual({ item: 'domain_relayhost', target: 'a.example', status: 'skipped', code: 'eop_host_missing', current: 'none' });
     expect(mc.node.relayhosts).toEqual([]);
@@ -112,7 +115,7 @@ describe('runApply', () => {
   it('removes what it made for the previous EOP host: the TLS entry, and the relayhost once nothing uses it', async () => {
     mc.node.domains['hand.example'] = { relayhost: 0 };
     const first = await runApply(CFG, { eop: EOP, domains: [domainInput()] });
-    expect(first.owned).toEqual({ tls: [{ id: 1, dest: 'eop.example.net' }], relayhosts: [{ id: 2, hostname: 'eop.example.net' }], fail2ban: [] });
+    expect(first.owned).toEqual({ tls: [{ id: 1, dest: 'eop.example.net' }], relayhosts: [{ id: 2, hostname: 'eop.example.net' }], fail2ban: [], fwdhosts: [] });
     // A domain the panel does not know sends through the panel's relayhost too.
     mc.node.domains['hand.example'].relayhost = 2;
     const moved = await runApply(CFG, { eop: { ...EOP, eopHost: 'new.example.net' }, domains: [domainInput()], owned: first.owned });
@@ -129,7 +132,7 @@ describe('runApply', () => {
     const later = await runApply(CFG, { eop: { ...EOP, eopHost: 'new.example.net' }, domains: [domainInput()], owned: moved.owned });
     expect(later.node.at(-1)).toEqual({ item: 'previous_relayhost', target: 'eop.example.net', status: 'changed', from: 'eop.example.net (2)', to: null });
     expect(mc.node.relayhosts.map((r) => r.hostname)).toEqual(['new.example.net']);
-    expect(later.owned).toEqual({ tls: [{ id: 3, dest: 'new.example.net' }], relayhosts: [{ id: 4, hostname: 'new.example.net' }], fail2ban: [] });
+    expect(later.owned).toEqual({ tls: [{ id: 3, dest: 'new.example.net' }], relayhosts: [{ id: 4, hostname: 'new.example.net' }], fail2ban: [], fwdhosts: [] });
   });
 
   it('never removes a TLS entry or relayhost it did not make', async () => {
@@ -250,7 +253,7 @@ describe('runApply', () => {
       result = await runApply(CFG, { eop: EOP, panelIps: ['203.0.113.10'], domains: [domainInput()] });
       expect(result.node.map((i) => [i.item, i.status, i.detail ?? null])).toEqual([
         ['tls_policy', 'failed', 'timeout'], ['relayhost', 'failed', 'timeout'],
-        ['fail2ban', 'failed', null], ['prefilter', 'failed', null],
+        ['fail2ban', 'failed', null], ['prefilter', 'failed', null], ['forwarding_hosts', 'failed', null],
       ]);
     });
 
@@ -269,6 +272,7 @@ describe('runApply', () => {
       ['relayhost', 'failed', 'mail_node_unreachable'],
       ['fail2ban', 'failed', 'mail_node_unreachable'],
       ['prefilter', 'failed', 'mail_node_unreachable'],
+      ['forwarding_hosts', 'failed', 'mail_node_unreachable'],
       ['domain_relayhost', 'failed', 'mail_node_unreachable'],
       ['dkim', 'failed', 'mail_node_unreachable'],
       ['mailbox_limits', 'failed', 'mail_node_unreachable'],
@@ -404,5 +408,133 @@ describe('the spam filing rule', () => {
     mc.node.prefilter = 'garbage';
     mc.node.refuse['add/global-filter'] = 'sieve_error';
     expect(await runPrefilterApply(CFG)).toEqual({ item: 'prefilter', target: null, status: 'failed', code: 'mail_node_refused', detail: 'sieve_error' });
+  });
+});
+
+describe('forwarding hosts (R-12)', () => {
+  const RANGES = { version: '2026081400', ipv4: ['40.92.0.0/15', '40.107.0.0/16'], ipv6: ['2a01:111:f400::/48'] };
+  const WANTED = ['40.92.0.0/15', '40.107.0.0/16', '2a01:111:f400::/48'];
+  const fwdItem = (result) => result.node.find((i) => i.item === 'forwarding_hosts');
+  const fwdWrites = () => mc.writes.filter((w) => w.path.endsWith('/fwdhost'));
+  const hosts = () => mc.node.fwdhosts.map((h) => `${h.host}${h.keepSpam ? ' keep' : ''}`).sort();
+  const withRule = () => { mc.node.prefilter = buildPrefilter(mc.STOCK_PREFILTER); };
+
+  it('waits for the spam filing rule: without it nothing is added', async () => {
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(result)).toEqual({
+      item: 'forwarding_hosts', target: '2026081400', status: 'skipped', code: 'prefilter_not_applied',
+      fwdhosts: { version: '2026081400', wanted: 3, missing: WANTED, foreign: [], keepSpam: [] },
+    });
+    expect(fwdWrites()).toEqual([]);
+    expect(result.owned.fwdhosts).toEqual([]);
+  });
+
+  it('adds every range with filter_spam 1 once the rule is in place, then finds them in place', async () => {
+    withRule();
+    const first = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(first)).toEqual({
+      item: 'forwarding_hosts', target: '2026081400', status: 'changed', from: null, to: WANTED.join(', '),
+      fwdhosts: { version: '2026081400', wanted: 3, missing: [], foreign: [], keepSpam: [] },
+    });
+    expect(fwdWrites().map((w) => w.body)).toEqual(WANTED.map((hostname) => ({ hostname, filter_spam: 1 })));
+    expect(hosts()).toEqual([...WANTED].sort());
+    expect(first.owned.fwdhosts).toEqual(WANTED);
+
+    mc.writes.length = 0;
+    const again = await runApply(CFG, { eop: EOP, ranges: RANGES, owned: first.owned });
+    expect(fwdItem(again)).toMatchObject({ status: 'ok', fwdhosts: { missing: [], foreign: [] } });
+    expect(mc.writes).toEqual([]);
+  });
+
+  it('runs without <EOP_HOST>: the forwarding hosts do not depend on it', async () => {
+    withRule();
+    const result = await runApply(CFG, { eop: { ...EOP, eopHost: null }, ranges: RANGES });
+    expect(fwdItem(result)).toMatchObject({ status: 'changed' });
+  });
+
+  it('leaves entries it did not add alone, and counts a foreign entry of a range as in place', async () => {
+    withRule();
+    mc.node.fwdhosts.push(
+      { host: '198.51.100.7', source: 'relay.example.org', keepSpam: false },
+      { host: '40.107.0.0/16', source: '40.107.0.0/16', keepSpam: false },
+    );
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(result)).toMatchObject({
+      status: 'changed', from: null, to: '40.92.0.0/15, 2a01:111:f400::/48',
+      fwdhosts: { missing: [], foreign: ['198.51.100.7', '40.107.0.0/16'], keepSpam: [] },
+    });
+    expect(result.owned.fwdhosts).toEqual(['40.92.0.0/15', '2a01:111:f400::/48']);
+    // The range leaves the list: only what the panel added goes; the foreign entries stay.
+    const later = await runApply(CFG, { eop: EOP, ranges: { ...RANGES, ipv4: ['40.107.0.0/16'] }, owned: result.owned });
+    expect(fwdItem(later)).toMatchObject({ status: 'changed', from: '40.92.0.0/15', fwdhosts: { missing: [] } });
+    expect(fwdItem(later).to).toBeUndefined();
+    expect(fwdWrites().filter((w) => w.path === 'delete/fwdhost').map((w) => w.body)).toEqual([['40.92.0.0/15']]);
+    expect(hosts()).toEqual(['198.51.100.7', '2a01:111:f400::/48', '40.107.0.0/16']);
+    expect(later.owned.fwdhosts).toEqual(['2a01:111:f400::/48']);
+  });
+
+  it('reports a foreign entry of a range that rspamd does not check, and does not touch it', async () => {
+    withRule();
+    mc.node.fwdhosts.push({ host: '40.92.0.0/15', source: '40.92.0.0/15', keepSpam: true });
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(result)).toMatchObject({
+      status: 'failed', code: 'fwdhost_keep_spam', to: '40.107.0.0/16, 2a01:111:f400::/48',
+      fwdhosts: { missing: ['40.92.0.0/15'], foreign: ['40.92.0.0/15'], keepSpam: ['40.92.0.0/15'] },
+    });
+    expect(hosts()).toEqual(['2a01:111:f400::/48', '40.107.0.0/16', '40.92.0.0/15 keep']);
+  });
+
+  it('adds its own entry again when someone turned the spam check off on it', async () => {
+    withRule();
+    const first = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    mc.node.fwdhosts.find((h) => h.host === '40.107.0.0/16').keepSpam = true;
+    mc.writes.length = 0;
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES, owned: first.owned });
+    expect(fwdItem(result)).toMatchObject({ status: 'changed', from: null, to: '40.107.0.0/16' });
+    expect(fwdWrites().map((w) => w.body)).toEqual([{ hostname: '40.107.0.0/16', filter_spam: 1 }]);
+    expect(hosts()).toEqual([...WANTED].sort());
+  });
+
+  it('never applies a malformed or empty list, and keeps what it added', async () => {
+    withRule();
+    const first = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    mc.writes.length = 0;
+    for (const ranges of [{ ...RANGES, ipv4: [] }, { ...RANGES, ipv4: ['40.92.0.0/15', 'nonsense'] }, null]) {
+      const result = await runApply(CFG, { eop: EOP, ranges, owned: first.owned });
+      expect(fwdItem(result)).toEqual({ item: 'forwarding_hosts', target: null, status: 'skipped', code: 'eop_ranges_invalid' });
+      expect(result.owned.fwdhosts).toEqual(WANTED);
+    }
+    expect(mc.writes).toEqual([]);
+    expect(hosts()).toEqual([...WANTED].sort());
+  });
+
+  it('keeps its entries when the spam filing rule stops matching, and shows them', async () => {
+    withRule();
+    const first = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    mc.node.prefilter = mc.STOCK_PREFILTER;
+    mc.writes.length = 0;
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES, owned: first.owned });
+    expect(fwdItem(result)).toEqual({
+      item: 'forwarding_hosts', target: '2026081400', status: 'skipped', code: 'prefilter_not_applied',
+      current: WANTED.join(', '),
+      fwdhosts: { version: '2026081400', wanted: 3, missing: [], foreign: [], keepSpam: [] },
+    });
+    expect(mc.writes).toEqual([]);
+    expect(result.owned.fwdhosts).toEqual(WANTED);
+  });
+
+  it('fails the item when the node does not list what it was asked to add', async () => {
+    withRule();
+    mc.node.refuse['add/fwdhost'] = 'redis_error';
+    const result = await runApply(CFG, { eop: EOP, ranges: RANGES });
+    expect(fwdItem(result)).toMatchObject({ status: 'failed', code: 'mail_node_refused', detail: 'redis_error' });
+    expect(result.owned.fwdhosts).toEqual([]);
+  });
+
+  it('uses the static EOP ranges by default', async () => {
+    withRule();
+    const result = await runApply(CFG, { eop: EOP });
+    expect(fwdItem(result)).toMatchObject({ status: 'changed', fwdhosts: { wanted: 6, missing: [] } });
+    expect(fwdWrites().every((w) => w.body.filter_spam === 1)).toBe(true);
   });
 });

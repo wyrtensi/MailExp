@@ -76,6 +76,7 @@ describe('applyNode', () => {
     const result = await applyNode({ userId: ADMIN });
     expect(result.node.map((i) => [i.item, i.status])).toEqual([
       ['tls_policy', 'changed'], ['relayhost', 'changed'], ['fail2ban', 'changed'], ['prefilter', 'pending'],
+      ['forwarding_hosts', 'skipped'],
     ]);
     // gone.example is not on the node; hand.example has no row: neither is touched.
     expect(result.domains.map((d) => d.domain)).toEqual(['a.example', 'b.example']);
@@ -95,7 +96,7 @@ describe('applyNode', () => {
     // With what the panel itself made on the node, to take it away when the EOP host changes.
     expect(await getNodeApplyResult()).toEqual({
       at: result.at, items: result.node,
-      owned: { tls: [{ id: 1, dest: 'eop.example.net' }], relayhosts: [{ id: 2, hostname: 'eop.example.net' }], fail2ban: ['203.0.113.10'] },
+      owned: { tls: [{ id: 1, dest: 'eop.example.net' }], relayhosts: [{ id: 2, hostname: 'eop.example.net' }], fail2ban: ['203.0.113.10'], fwdhosts: [] },
     });
     const a = await domainRow('a.example');
     expect(a.relayhost_id).toBe(mc.node.relayhosts[0].id);
@@ -119,7 +120,7 @@ describe('applyNode', () => {
     // Again: nothing to change, nothing journaled.
     mc.writes.length = 0;
     const again = await applyNode({ userId: ADMIN, trigger: 'eop_settings' });
-    expect(again.node.map((i) => i.status)).toEqual(['ok', 'ok', 'ok', 'pending']);
+    expect(again.node.map((i) => i.status)).toEqual(['ok', 'ok', 'ok', 'pending', 'skipped']);
     expect(mc.writes).toEqual([]);
     expect(await audit()).toHaveLength(1);
   });
@@ -132,7 +133,7 @@ describe('applyNode', () => {
     expect(result.domains).toEqual([]);
     const [entry] = await audit();
     expect(entry.details).toMatchObject({ scope: 'node', trigger: 'eop_settings', changed: [] });
-    expect(entry.details.failed).toHaveLength(4);
+    expect(entry.details.failed).toHaveLength(5);
   });
 
   it('refuses before the node is set up; a run started by itself never fails what started it', async () => {
@@ -196,19 +197,37 @@ describe('applyDomain', () => {
 });
 
 describe('applyPrefilter', () => {
-  it('writes the rule, keeps it with the node result and journals it', async () => {
+  it('writes the rule, then the forwarding hosts that waited for it, keeps both with the node result and journals them', async () => {
     await applyNode({ userId: ADMIN });
-    const item = await applyPrefilter({ userId: ADMIN });
+    const ranges = { version: '2026081400', ipv4: ['40.92.0.0/15'], ipv6: [] };
+    const item = await applyPrefilter({ userId: ADMIN, ranges });
     expect(item).toMatchObject({ item: 'prefilter', status: 'changed' });
     const stored = await getNodeApplyResult();
     expect(stored.items.map((i) => [i.item, i.status])).toEqual([
       ['tls_policy', 'changed'], ['relayhost', 'changed'], ['fail2ban', 'changed'], ['prefilter', 'changed'],
+      ['forwarding_hosts', 'changed'],
     ]);
-    expect((await applyPrefilter({ userId: ADMIN })).status).toBe('ok');
+    expect(stored.owned.fwdhosts).toEqual(['40.92.0.0/15']);
+    expect(mc.node.fwdhosts).toEqual([{ host: '40.92.0.0/15', source: '40.92.0.0/15', keepSpam: false }]);
+    expect((await applyPrefilter({ userId: ADMIN, ranges })).status).toBe('ok');
     expect(mc.writes.filter((w) => w.path === 'add/global-filter')).toHaveLength(1);
+    expect(mc.writes.filter((w) => w.path === 'add/fwdhost')).toHaveLength(1);
     const entries = (await audit()).filter((e) => e.details.scope === 'prefilter');
     expect(entries).toHaveLength(1);
-    expect(entries[0].details.changed).toEqual([{ item: 'prefilter', target: null }]);
+    expect(entries[0].details.changed).toEqual([
+      { item: 'prefilter', target: null },
+      { item: 'forwarding_hosts', target: '2026081400', from: null, to: '40.92.0.0/15' },
+    ]);
+    // The next run of everything takes the static list: it adds the other ranges and keeps this one.
+    const again = await applyNode({ userId: ADMIN });
+    expect(again.node.find((i) => i.item === 'forwarding_hosts')).toMatchObject({ status: 'changed', fwdhosts: { wanted: 6, missing: [] } });
+    expect((await getNodeApplyResult()).owned.fwdhosts).toHaveLength(6);
+  });
+
+  it('adds no forwarding hosts when the rule could not be written', async () => {
+    mc.node.refuse['add/global-filter'] = 'sieve_error';
+    expect(await applyPrefilter({ userId: ADMIN })).toMatchObject({ status: 'failed' });
+    expect(mc.writes.filter((w) => w.path === 'add/fwdhost')).toEqual([]);
   });
 });
 

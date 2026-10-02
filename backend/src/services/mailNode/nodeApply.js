@@ -3,9 +3,11 @@ import { recordAudit } from '../auditLog.js';
 import {
   MailNodeError,
   addDkim,
+  addForwardingHost,
   addRelayhost,
   addTlsPolicy,
   deleteDkim,
+  deleteForwardingHosts,
   deleteRelayhost,
   deleteTlsPolicy,
   editTlsPolicy,
@@ -16,6 +18,7 @@ import {
   getMailNodeConfig,
   getPrefilter,
   listDomains,
+  listForwardingHosts,
   listMailboxes,
   listRelayhosts,
   listTlsPolicies,
@@ -26,6 +29,7 @@ import {
   whitelistFail2ban,
 } from './mailcow.js';
 import { getEopSettings } from './eopSettings.js';
+import { EOP_RANGES, eopRangeList } from './eopRanges.js';
 
 // "Apply settings": the panel puts its settings on the mail node through the mailcow API
 // (eop-panel-requirements.md, R-07 ... R-11, R-13). Every item is read first and written only when
@@ -39,9 +43,10 @@ import { getEopSettings } from './eopSettings.js';
 //   restarts Dovecot and drops every IMAP session.
 //
 // The node items: the TLS Policy Map entry and the relayhost for <EOP_HOST>, the fail2ban whitelist
-// for the panel's addresses and the check of the spam filing rule; after <EOP_HOST> changed, the TLS
-// entry and the relayhost the panel made for the previous host are removed (the relayhost only once
-// nothing sends through it). The items of each domain: the domain's relayhost, its DKIM key as the
+// for the panel's addresses, the check of the spam filing rule and, once that rule is in place, the
+// EOP ranges as forwarding hosts (R-12); after <EOP_HOST> changed, the TLS entry and the relayhost
+// the panel made for the previous host are removed (the relayhost only once nothing sends through
+// it). The items of each domain: the domain's relayhost, its DKIM key as the
 // DKIM mode wants it and the send limit of each of its mailboxes the panel knows. The global
 // relayhost in extra.cf is the host's (runbook): the panel sets and reports only the domain's.
 //
@@ -188,8 +193,9 @@ const describePolicy = (policy, parameters) => [policy, parameters].filter(Boole
 const describeRelayhost = (r) => `${r.hostname} (${r.id})`;
 
 // What the panel made on the node, so it can take it away again: TLS entries (owned.tls, { id, dest }),
-// relayhosts (owned.relayhosts, { id, hostname }) and fail2ban addresses (owned.fail2ban).
-const EMPTY_OWNED = Object.freeze({ tls: [], relayhosts: [], fail2ban: [] });
+// relayhosts (owned.relayhosts, { id, hostname }), fail2ban addresses (owned.fail2ban) and forwarding
+// hosts (owned.fwdhosts, the CIDRs as the panel added them).
+const EMPTY_OWNED = Object.freeze({ tls: [], relayhosts: [], fail2ban: [], fwdhosts: [] });
 const remember = (list, entry) => [...list.filter((e) => e.id !== entry.id), entry];
 
 // R-07: the entry for <EOP_HOST>, the bare next hop exactly as the relayhost names it. An entry the
@@ -285,6 +291,71 @@ async function prefilterItem(cfg) {
     throw new MailNodeError('prefilter_not_written', 'The mail node reported the rule written but does not hold it');
   }
   return { status: 'changed', ...(restarted ? {} : { code: 'dovecot_restart_failed' }) };
+}
+
+// R-12 by the owner's decision D-3: the EOP ranges as mailcow forwarding hosts, so rspamd stops
+// judging the sender's SPF by EOP's address (eop-panel-requirements.md, section 2.5). The price: for
+// these addresses rspamd also drops MICROSOFT_SPAM (EOP's verdict) and SPOOFED_UNAUTH, so EOP's
+// verdict reaches Junk only through the spam filing rule (R-11). Hence the gate: nothing is added
+// until the rule is in place, and a rule that stops matching later (a new panel version wants a new
+// one) adds nothing more but takes nothing away either: removing the ranges would bring back the SPF
+// rejects the forwarding hosts prevent.
+//
+// The list is the panel's static copy (eopRanges.js), shown by its version; the item applies only a
+// list that has a version, an IPv4 range and nothing malformed. Every add carries filter_spam: 1.
+// Only entries the panel added (owned.fwdhosts) are ever deleted. An entry somebody else made for a
+// range counts as in place, unless rspamd does not check it (keep_spam): that one is reported and left
+// for the administrator. Every other entry is left alone and listed as foreign.
+const cidrKey = (host) => host.toLowerCase();
+
+function fwdhostSummary(list, wanted, version, owned) {
+  const byKey = new Map(list.map((h) => [cidrKey(h.host), h]));
+  const mine = new Set(owned.fwdhosts.map(cidrKey));
+  const keepSpam = wanted.filter((c) => byKey.get(c)?.keepSpam && !mine.has(c));
+  return {
+    version,
+    wanted: wanted.length,
+    missing: wanted.filter((c) => !byKey.has(c) || byKey.get(c).keepSpam),
+    foreign: list.filter((h) => !mine.has(cidrKey(h.host))).map((h) => h.host),
+    keepSpam,
+  };
+}
+
+async function forwardingHostsItem(cfg, { cidrs: wanted, version }, owned, { ruleInPlace }) {
+  const before = await listForwardingHosts(cfg);
+  if (!ruleInPlace) {
+    const present = owned.fwdhosts.filter((c) => before.some((h) => cidrKey(h.host) === c));
+    return {
+      status: 'skipped', code: 'prefilter_not_applied',
+      ...(present.length ? { current: present.join(', ') } : {}),
+      fwdhosts: fwdhostSummary(before, wanted, version, owned),
+    };
+  }
+  const byKey = new Map(before.map((h) => [cidrKey(h.host), h]));
+  const mine = new Set(owned.fwdhosts);
+  const toAdd = wanted.filter((c) => !byKey.has(c) || (byKey.get(c).keepSpam && mine.has(c)));
+  const toRemove = owned.fwdhosts.filter((c) => !wanted.includes(c) && byKey.has(c));
+  const added = [];
+  for (const cidr of toAdd) {
+    await addForwardingHost(cfg, cidr);
+    added.push(cidr);
+    owned.fwdhosts = [...new Set([...owned.fwdhosts, cidr])];
+  }
+  if (toRemove.length) await deleteForwardingHosts(cfg, toRemove.map((c) => byKey.get(c).host));
+  owned.fwdhosts = owned.fwdhosts.filter((c) => wanted.includes(c));
+  const after = await listForwardingHosts(cfg);
+  const fwdhosts = fwdhostSummary(after, wanted, version, owned);
+  const lost = added.filter((c) => fwdhosts.missing.includes(c));
+  if (lost.length) {
+    throw new MailNodeError('fwdhost_not_written', `The mail node did not list the forwarding hosts it added: ${lost.join(', ')}`);
+  }
+  const change = {
+    ...(toRemove.length ? { from: toRemove.join(', ') } : {}),
+    ...(added.length ? { to: added.join(', '), ...(toRemove.length ? {} : { from: null }) } : {}),
+  };
+  if (fwdhosts.keepSpam.length) return { status: 'failed', code: 'fwdhost_keep_spam', ...change, fwdhosts };
+  if (!added.length && !toRemove.length) return { status: 'ok', fwdhosts };
+  return { status: 'changed', ...change, fwdhosts };
 }
 
 // R-08: the domain sends through the relayhost of <EOP_HOST>. Without <EOP_HOST> the item says what
@@ -431,10 +502,11 @@ function memo(fn) {
 
 // One run over the node, the given domains, or both. input: { eop, panelIps, domains, node: whether
 // to run the node items, confirmDkimDelete, owned: what the panel made on the node before (TLS
-// entry, relayhost, fail2ban addresses) }. Answers the items and the updated `owned` to keep. Never
-// touches the panel's database: the stand runs it against a mailcow without a panel.
+// entry, relayhost, fail2ban addresses, forwarding hosts), ranges: the EOP ranges for the forwarding
+// hosts (the static list unless a test gives others) }. Answers the items and the updated `owned` to
+// keep. Never touches the panel's database: the stand runs it against a mailcow without a panel.
 export async function runApply(cfg, {
-  eop, panelIps = [], domains = [], node = true, confirmDkimDelete = false, owned: ownedBefore = {},
+  eop, panelIps = [], domains = [], node = true, confirmDkimDelete = false, owned: ownedBefore = {}, ranges = EOP_RANGES,
 }) {
   const owned = { ...EMPTY_OWNED, ...ownedBefore };
   const shared = { down: null, timeouts: 0 };
@@ -457,6 +529,10 @@ export async function runApply(cfg, {
     if (!panelIps.length && !owned.fail2ban.length) list.skip('fail2ban', null, 'panel_ips_missing');
     else await list.step('fail2ban', panelIps.join(', ') || null, () => fail2banItem(cfg, panelIps, owned));
     await list.step('prefilter', null, () => prefilterCheck(cfg));
+    const ruleInPlace = list.items.at(-1).status === 'ok';
+    const rangeList = eopRangeList(ranges);
+    if (!rangeList) list.skip('forwarding_hosts', null, 'eop_ranges_invalid');
+    else await list.step('forwarding_hosts', rangeList.version, () => forwardingHostsItem(cfg, rangeList, owned, { ruleInPlace }));
     nodeItems = list.items;
   }
   const domainResults = [];
@@ -471,6 +547,16 @@ export async function runApply(cfg, {
 export async function runPrefilterApply(cfg) {
   const list = itemList({ down: null });
   await list.step('prefilter', null, () => prefilterItem(cfg));
+  return list.items[0];
+}
+
+// The forwarding hosts alone, right after the spam filing rule was put in place by its own action:
+// they waited for it. `owned` is updated in place.
+async function runForwardingHostsApply(cfg, owned, ranges) {
+  const list = itemList({ down: null });
+  const rangeList = eopRangeList(ranges);
+  if (!rangeList) list.skip('forwarding_hosts', null, 'eop_ranges_invalid');
+  else await list.step('forwarding_hosts', rangeList.version, () => forwardingHostsItem(cfg, rangeList, owned, { ruleInPlace: true }));
   return list.items[0];
 }
 
@@ -624,16 +710,29 @@ export function applyDomain({ domain, userId, trigger = 'manual', confirmDkimDel
   });
 }
 
-// The spam filing rule, by its own action. The node's stored result gets the new prefilter item.
-export function applyPrefilter({ userId }) {
+// The node's stored items with the fresh ones in place of the same items (in their places), the
+// others kept.
+function replaceItems(stored, fresh) {
+  const names = new Set(fresh.map((i) => i.item));
+  const kept = stored.map((i) => (names.has(i.item) ? fresh.find((f) => f.item === i.item) : i));
+  return [...kept, ...fresh.filter((f) => !stored.some((i) => i.item === f.item))];
+}
+
+// The spam filing rule, by its own action. Once it is in place the forwarding hosts that waited for
+// it follow (R-12). The node's stored result gets the new items. Answers the prefilter item.
+export function applyPrefilter({ userId, ranges = EOP_RANGES }) {
   return serialized(async () => {
     const cfg = await getMailNodeConfig();
     if (!cfg) throw notConfigured();
-    const item = { ...(await runPrefilterApply(cfg)), at: new Date().toISOString() };
+    const at = new Date().toISOString();
+    const item = { ...(await runPrefilterApply(cfg)), at };
     const stored = await getNodeApplyResult();
-    const items = [...(stored?.items ?? []).filter((i) => i.item !== 'prefilter'), item];
-    await saveNodeResult({ at: stored?.at ?? new Date().toISOString(), items });
-    journal({ userId, trigger: 'manual', scope: 'prefilter', items: [item] });
+    const owned = { ...EMPTY_OWNED, ...(stored?.owned ?? {}) };
+    const fresh = [item];
+    if (item.status === 'ok' || item.status === 'changed') fresh.push(await runForwardingHostsApply(cfg, owned, ranges));
+    const items = replaceItems(stored?.items ?? [], fresh);
+    await saveNodeResult({ at: stored?.at ?? at, items, owned });
+    journal({ userId, trigger: 'manual', scope: 'prefilter', items: fresh });
     return item;
   });
 }

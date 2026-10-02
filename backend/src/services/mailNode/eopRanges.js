@@ -10,7 +10,9 @@ import { BlockList, isIP } from 'node:net';
 // `EOP_CLIENT_REQUEST_ID=<the installation's GUID> node scripts/update-eop-ranges.mjs` in backend/
 // (it asks endpoints.office.com, filters the entries
 // with rangesFromEndpoints below and prints the new EOP_RANGES block to paste here) and bump
-// `version` and `retrieved`. A later stage (R-40) keeps the list current by itself.
+// `version` and `retrieved`. On the node host the timer of scripts/deploy/mail-node/eop-ranges.sh
+// (R-40) keeps the firewall's copy current by itself, with the same filter; the panel's copy is the
+// source of the forwarding hosts (R-12, services/mailNode/nodeApply.js), which show its version.
 export const EOP_RANGES = Object.freeze({
   source: 'https://endpoints.office.com/endpoints/worldwide?ServiceAreas=Exchange (serviceArea Exchange, tcpPorts 25)',
   version: '2026081400',
@@ -40,6 +42,28 @@ export function isEopAddress(address, ranges = null) {
   if (!family) return false;
   const list = ranges ? blockListOf(ranges) : defaultList;
   return list.check(ip, family === 4 ? 'ipv4' : 'ipv6');
+}
+
+// One CIDR of the given family (4 or 6): an address and a prefix within the family's length.
+function isCidr(value, family) {
+  if (typeof value !== 'string') return false;
+  const [address, prefix, extra] = value.split('/');
+  if (extra !== undefined || !/^\d{1,3}$/.test(prefix ?? '')) return false;
+  return isIP(address) === family && Number(prefix) <= (family === 4 ? 32 : 128);
+}
+
+// The ranges as the node's forwarding hosts take them: { version, cidrs } with IPv4 first, IPv6
+// lowercased, no repeats. Null for a list the panel must not apply: no version, no IPv4 range, or
+// any entry that is not a CIDR of its family. The same rules as the host's timer (R-40): an empty or
+// malformed list is never applied, so it never takes away the ranges already in place.
+export function eopRangeList(ranges = EOP_RANGES) {
+  if (!ranges || typeof ranges !== 'object') return null;
+  const version = String(ranges.version ?? '').trim();
+  const ipv4 = Array.isArray(ranges.ipv4) ? ranges.ipv4 : [];
+  const ipv6 = (Array.isArray(ranges.ipv6) ? ranges.ipv6 : []).map((c) => (typeof c === 'string' ? c.toLowerCase() : c));
+  if (!version || !ipv4.length) return null;
+  if (!ipv4.every((c) => isCidr(c, 4)) || !ipv6.every((c) => isCidr(c, 6))) return null;
+  return { version, cidrs: [...new Set([...ipv4, ...ipv6])] };
 }
 
 // The ranges of an `endpoints` answer of the web service: the entries of the Exchange service area
