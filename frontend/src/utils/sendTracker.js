@@ -37,11 +37,12 @@ async function poll(jobId) {
   }
 }
 
-// Starts following a letter the server took (POST /mail/send's answer). onSent runs once it is
-// sent (a reply refreshes its thread).
-export function trackSend({ jobId, sendAt, subject, accountId, onSent = null }) {
+// Starts following a letter the server took (POST /mail/send's answer). dueAt: when it is due by
+// this tab's clock (the answer's dueInMs counted from its arrival). onSent runs once it is sent (a
+// reply refreshes its thread).
+export function trackSend({ jobId, dueAt, subject, accountId, onSent = null }) {
   untrack(jobId);
-  const due = Math.max(0, Date.parse(sendAt) - Date.now());
+  const due = Math.max(0, dueAt - Date.now());
   const entry = { subject, accountId, onSent, timers: [] };
   entry.timers = POLL_AFTER_DUE_MS.map(delay => setTimeout(() => poll(jobId), due + delay));
   tracked.set(jobId, entry);
@@ -90,9 +91,9 @@ export function settleSend(jobId, { status, errorCode = null, error = null, sent
 
 // Opens the composer with a letter the server gave back. Another composer may be open: then the
 // letter waits and opens once that one closes (ScheduledLetters), so nothing is lost.
-export function restoreCompose(compose) {
+export function restoreCompose(compose, { sendAt = null } = {}) {
   const { composing, openCompose, setQueuedCompose, addNotification } = useStore.getState();
-  const data = composeDataFromScheduled(compose);
+  const data = composeDataFromScheduled(compose, { sendAt });
   if (!composing) {
     openCompose(data);
     return;

@@ -8,8 +8,10 @@ import {
 // "Send later" in the composer: preset times (later today, tomorrow morning, Monday morning) and a
 // date and time of the writer's choosing, in their local time. onPick(date) schedules the letter;
 // it is also used to move a scheduled letter to another time (ScheduledLetters), where `title`
-// names the action. A popover above the button on desktop, a sheet on a phone. Escape closes it.
-export default function SendLaterMenu({ anchorRect = null, isMobile = false, onPick, onClose, title = null, initial = null }) {
+// names the action. onSendNow (a letter that already has a time) adds "Send now instead". A
+// popover above the button on desktop, a sheet on a phone. Escape closes it, and the focus goes back
+// to the button that opened it.
+export default function SendLaterMenu({ anchorRect = null, isMobile = false, onPick, onClose, title = null, initial = null, onSendNow = null }) {
   const { t } = useTranslation();
   const titleId = useId();
   const inputId = useId();
@@ -18,6 +20,12 @@ export default function SendLaterMenu({ anchorRect = null, isMobile = false, onP
   const [value, setValue] = useState(() => toLocalInputValue(initial || presets.find(p => p.key === 'tomorrowMorning')?.at || new Date(Date.now() + 3600e3)));
   const [problem, setProblem] = useState(null);
   const firstRef = useRef(null);
+  const openerRef = useRef(typeof document !== 'undefined' ? document.activeElement : null);
+
+  useEffect(() => {
+    const opener = openerRef.current;
+    return () => { if (opener?.isConnected) opener.focus?.(); };
+  }, []);
 
   useEffect(() => {
     firstRef.current?.focus();
@@ -65,6 +73,18 @@ export default function SendLaterMenu({ anchorRect = null, isMobile = false, onP
         <div id={titleId} style={{ padding: isMobile ? '16px 20px 8px' : '6px 12px 4px', fontSize: isMobile ? 15 : 12, fontWeight: 600, color: isMobile ? 'var(--text-primary)' : 'var(--text-tertiary)' }}>
           {title || t('scheduled.sendLater')}
         </div>
+        {onSendNow && (
+          <button
+            type="button"
+            data-preset="now"
+            onClick={onSendNow}
+            style={itemStyle}
+            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'none'; }}
+          >
+            <span>{t('scheduled.sendNow')}</span>
+          </button>
+        )}
         {presets.map((preset, index) => (
           <button
             key={preset.key}

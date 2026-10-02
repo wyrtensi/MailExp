@@ -241,11 +241,6 @@ const DYNAMIC_KEYS = new Set([
   // Attachment risk badges (MessagePane): t(`message.attachmentRisk.${risk.level}`),
   // where the level comes from classifyAttachmentRisk.
   'message.attachmentRisk.block', 'message.attachmentRisk.warn', 'message.attachmentRisk.notice',
-  // t(`compose.smtpConnectionReasons.${err.reason}`) — reason comes from the send route's
-  // smtp_connection_failed response (ComposeModal.jsx handleSend).
-  'compose.smtpConnectionReasons.timeout', 'compose.smtpConnectionReasons.refused',
-  'compose.smtpConnectionReasons.not_found', 'compose.smtpConnectionReasons.unreachable',
-  'compose.smtpConnectionReasons.tls', 'compose.smtpConnectionReasons.unknown',
 ]);
 
 // JSX attribute names whose values must never be plain strings — always t().

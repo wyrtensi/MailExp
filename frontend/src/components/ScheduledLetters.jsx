@@ -47,7 +47,8 @@ export default function ScheduledLetters() {
     run();
     const onChange = () => {
       clearTimeout(timer);
-      timer = setTimeout(run, 300);
+      // Many tabs hear the same change: spread their refreshes.
+      timer = setTimeout(run, 1500 + Math.random() * 1500);
     };
     window.addEventListener('mailexpert:scheduled_changed', onChange);
     return () => {
@@ -131,10 +132,10 @@ function ScheduledDialog() {
   };
 
   const edit = (letter) => run(letter, async () => {
-    const { compose } = await api.scheduled.cancel(letter.id, 'edit');
+    const { compose, sendAt } = await api.scheduled.cancel(letter.id, 'edit');
     close();
     window.dispatchEvent(new CustomEvent('mailexpert:scheduled_changed'));
-    if (compose) restoreCompose(compose);
+    if (compose) restoreCompose(compose, { sendAt });
   });
 
   const discard = (letter) => setConfirm({
@@ -288,6 +289,11 @@ function ScheduledDialog() {
                     {(statusKey === 'failed' || statusKey === 'needsAttention' || statusKey === 'retrying') && (
                       <div style={{ fontSize: 12, color: statusKey === 'retrying' ? 'var(--text-secondary)' : 'var(--red)', marginTop: 6, lineHeight: 1.4 }}>
                         {statusKey === 'needsAttention' ? t('scheduled.needsAttentionHint') : sendFailureText(letter.errorCode, letter.error)}
+                      </div>
+                    )}
+                    {letter.keptUntil && (
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                        {t('scheduled.keptUntil', { date: formatDateTime(letter.keptUntil) })}
                       </div>
                     )}
                     {actions.length > 0 && (

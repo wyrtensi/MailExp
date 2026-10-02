@@ -267,8 +267,8 @@ function Toast({ notification, onDismiss, isMobile }) {
 // gone, so the Undo button takes the focus unless the writer already moved it somewhere.
 function SendUndoToast({ notification, onDismiss, isMobile }) {
   const { t } = useTranslation();
-  const { jobId, sendAt } = notification.sendUndo;
-  const [remaining] = useState(() => Math.max(0, Date.parse(sendAt) - Date.now()));
+  const { jobId, dueAt } = notification.sendUndo;
+  const [remaining] = useState(() => Math.max(0, dueAt - Date.now()));
   const [busy, setBusy] = useState(false);
   const [exiting, setExiting] = useState(false);
   const undoRef = useRef(null);

@@ -328,6 +328,14 @@ export default function ComposeModal() {
   // send was asked for, kept across the empty-subject and forgotten-attachment confirmations.
   const [sendLaterAnchor, setSendLaterAnchor] = useState(null);
   const sendAtRef = useRef(null);
+  // An edited scheduled letter keeps its time: Send sends it then ("Send at …"); the clock menu
+  // offers another time or sending it now instead.
+  const [scheduledAt] = useState(() => {
+    const at = composeData?.sendAt ? new Date(composeData.sendAt) : null;
+    return at && at.getTime() > Date.now() ? at : null;
+  });
+  const sendDefault = () => handleSend(scheduledAt ? { sendAt: scheduledAt } : {});
+  const sendLabel = scheduledAt ? t('scheduled.sendAt', { time: formatDateTime(scheduledAt, { withYear: false }) }) : t('compose.send');
   const replyTypeRef = useRef(null);
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -754,7 +762,7 @@ export default function ComposeModal() {
   const handleKeyDown = (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      handleSend();
+      sendDefault();
     }
   };
 
@@ -911,8 +919,10 @@ export default function ComposeModal() {
         window.dispatchEvent(new CustomEvent('mailexpert:scheduled_changed'));
         return;
       }
-      // Five seconds to undo; then the server sends it and the tracker says how it went.
-      addNotification({ sendUndo: { jobId: sendResult.jobId, sendAt: sendResult.sendAt }, title: t('scheduled.sending'), body: shownSubject });
+      // Five seconds to undo, counted on this tab's clock from the answer (the server says how long
+      // until it is due); then the server sends it and the tracker says how it went.
+      const dueAt = Date.now() + (Number.isFinite(sendResult.dueInMs) ? sendResult.dueInMs : 5000);
+      addNotification({ sendUndo: { jobId: sendResult.jobId, dueAt }, title: t('scheduled.sending'), body: shownSubject });
       const refreshThread = replyThreadId ? async () => {
         try {
           const data = await api.getThread(replyThreadId, undefined, false, replyAccountId);
@@ -923,7 +933,7 @@ export default function ComposeModal() {
       } : null;
       trackSend({
         jobId: sendResult.jobId,
-        sendAt: sendResult.sendAt,
+        dueAt,
         subject: subject || '',
         accountId,
         onSent: refreshThread ? () => {
@@ -932,27 +942,20 @@ export default function ComposeModal() {
         } : null,
       });
     } catch (err) {
-      const GMAIL_API_ERROR_KEYS = {
-        gmail_quota_exceeded: 'compose.gmailQuotaExceeded',
-        gmail_message_too_large: 'compose.gmailMessageTooLarge',
-        gmail_invalid_recipient: 'compose.gmailInvalidRecipient',
-        gmail_access_refused: 'compose.gmailAccessRefused',
-        gmail_api_auth_failed: 'compose.gmailApiAuthFailed',
+      // Delivery happens later, in the queue, so only refusals of the letter itself arrive here; how
+      // a send ended is told by utils/sendTracker.js.
+      const SEND_ERROR_KEYS = {
+        oauth_reconnect_required: 'scheduled.failure.reconnect',
+        send_at_past: 'scheduled.timeProblem.past',
+        send_at_too_far: 'scheduled.timeProblem.tooFar',
+        send_at_invalid: 'scheduled.timeProblem.invalid',
+        idempotency_conflict: 'scheduled.conflict',
+        send_cancelled: 'scheduled.conflict',
       };
-      if (err.code === 'send_uncertain') {
-        setError(t('compose.sendUncertain'));
-      } else if (err.code === 'send_at_past' || err.code === 'send_at_too_far') {
-        setError(t(err.code === 'send_at_past' ? 'scheduled.timeProblem.past' : 'scheduled.timeProblem.tooFar'));
-      } else if (err.code === 'smtp_connection_failed') {
-        const target = err.host
-          ? (err.port ? `${err.host}:${err.port}` : err.host)
-          : t('compose.smtpConnectionUnknownHost');
-        setError(t('compose.smtpConnectionFailed', {
-          target,
-          reason: t(`compose.smtpConnectionReasons.${err.reason}`, t('compose.smtpConnectionReasons.unknown')),
-        }));
-      } else if (Object.hasOwn(GMAIL_API_ERROR_KEYS, err.code)) {
-        setError(t(GMAIL_API_ERROR_KEYS[err.code]));
+      if (Object.hasOwn(SEND_ERROR_KEYS, err.code)) {
+        // A conflict means this key is spent: the next attempt is a new send.
+        if (err.code === 'idempotency_conflict' || err.code === 'send_cancelled') idempotencyKeyRef.current = null;
+        setError(t(SEND_ERROR_KEYS[err.code]));
       } else {
         setError(err.message);
       }
@@ -1224,6 +1227,7 @@ export default function ComposeModal() {
       isMobile={isMobile}
       onClose={() => setSendLaterAnchor(null)}
       onPick={(at) => { setSendLaterAnchor(null); handleSend({ sendAt: at }); }}
+      onSendNow={scheduledAt ? () => { setSendLaterAnchor(null); handleSend({}); } : null}
     />
   );
 
@@ -1344,7 +1348,7 @@ export default function ComposeModal() {
               {clockIcon}
             </button>
             <button
-              onClick={handleSend}
+              onClick={sendDefault}
               disabled={sending || !hasRecipients}
               style={{
                 background: 'none', border: 'none',
@@ -1356,7 +1360,7 @@ export default function ComposeModal() {
                 transition: 'color 0.15s',
               }}
             >
-              {sending ? sendSpinner : t('compose.send')}
+              {sending ? sendSpinner : sendLabel}
             </button>
           </div>
         </div>
@@ -2288,7 +2292,7 @@ export default function ComposeModal() {
         display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
       }}>
         <button
-          onClick={handleSend}
+          onClick={sendDefault}
           disabled={sending || !hasRecipients}
           title={sending ? undefined : t('compose.sendTooltip')}
           style={{
@@ -2302,7 +2306,7 @@ export default function ComposeModal() {
           }}
         >
           {sending ? sendSpinner : sendIcon}
-          {sending ? t('compose.sending') : t('compose.send')}
+          {sending ? t('compose.sending') : sendLabel}
         </button>
         <button
           type="button"

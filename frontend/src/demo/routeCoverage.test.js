@@ -372,7 +372,9 @@ test('drafts, sync and folder management answer', async () => {
   assert.equal(later.scheduled, true);
   const moved = await answer('/mail/scheduled/:param', 'PATCH', `/mail/scheduled/${later.jobId}`, { sendAt: new Date(Date.now() + 7200e3).toISOString() });
   assert.equal(moved.letter.id, later.jobId);
-  await reject('/mail/scheduled/:param', 'PATCH', `/mail/scheduled/${later.jobId}`, { sendAt: new Date(Date.now() - 1000).toISOString() }, /already passed/);
+  const edited = await answer('/mail/scheduled/:param/cancel', 'POST', `/mail/scheduled/${later.jobId}/cancel`, { reason: 'edit' });
+  assert.equal(edited.scheduled, true);
+  await reject('/mail/scheduled/:param', 'PATCH', `/mail/scheduled/${queued.jobId}`, { sendAt: new Date(Date.now() - 1000).toISOString() }, /already passed/);
   const draft = await answer('/mail/draft', 'POST', '/mail/draft', { accountId: 'demo-sales', subject: 'Draft for coverage', body: 'Hello' });
   await answer('/mail/draft/:param', 'DELETE', `/mail/draft/${draft.uid}?accountId=demo-sales&folder=Drafts`);
   await answer('/mail/sync', 'POST', '/mail/sync', { accountId: 'demo-sales' });

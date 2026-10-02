@@ -28,10 +28,10 @@ test('a letter given back reopens the composer as it was', () => {
     priority: 'high', editedSignature: '<b>Sig</b>',
     attachments: [{ filename: 'n.txt', contentType: 'text/plain', size: 3, content: 'YWJj' }],
     forwardedAttachments: [{ messageId: 'm1', part: '2' }],
-    context: { isReply: true, threadId: 't1', forwardedAttachments: [{ messageId: 'm1', part: '2', filename: 'a.pdf', size: 10 }] },
-  });
+    context: { isReply: true, threadId: 't1', draftUid: 9, forwardedAttachments: [{ messageId: 'm1', part: '2', filename: 'a.pdf', size: 10 }] },
+  }, { sendAt: '2026-10-05T08:00:00.000Z' });
   assert.deepEqual(data, {
-    isReply: true, threadId: 't1', restored: true, accountId: 'a1', aliasId: 'al1',
+    isReply: true, threadId: 't1', restored: true, sendAt: '2026-10-05T08:00:00.000Z', accountId: 'a1', aliasId: 'al1',
     to: ['you@example.com'], cc: [], bcc: ['b@example.com'], subject: 'Hi', body: '<p>Body</p>',
     quotedBody: '> old', inReplyTo: '<o@x>', references: '<o@x>', priority: 'high',
     forwardedAttachments: [{ messageId: 'm1', part: '2', filename: 'a.pdf', size: 10 }],
@@ -47,9 +47,17 @@ test('a listed letter is labelled by its status, and only its author or an admin
   assert.equal(scheduledStatusKey({ status: 'running' }), 'sending');
   assert.equal(scheduledStatusKey({ status: 'needs_attention' }), 'needsAttention');
   assert.deepEqual(scheduledActions({ status: 'queued', canManage: true }), ['edit', 'reschedule', 'cancel']);
-  assert.deepEqual(scheduledActions({ status: 'failed', canManage: true }), ['resend', 'edit', 'discard']);
+  assert.deepEqual(scheduledActions({ status: 'failed', canManage: true, author: { id: 'u' } }), ['resend', 'edit', 'discard']);
   assert.deepEqual(scheduledActions({ status: 'running', canManage: true }), []);
   assert.deepEqual(scheduledActions({ status: 'queued', canManage: false }), []);
+});
+
+test('a removed signature stays removed, and a letter without an author cannot be sent again', () => {
+  const data = composeDataFromScheduled({ accountId: 'a1', to: [], subject: '', body: '', editedSignature: null });
+  assert.equal(data.draftSignature, '');
+  assert.equal(composeDataFromScheduled({ accountId: 'a1' }).draftSignature, undefined);
+  assert.deepEqual(scheduledActions({ status: 'failed', canManage: true, errorCode: 'author_disabled', author: { id: 'u' } }), ['edit', 'discard']);
+  assert.deepEqual(scheduledActions({ status: 'needs_attention', canManage: true, author: null }), ['edit', 'discard']);
 });
 
 test('failure codes map to their messages and statuses to outcomes', () => {

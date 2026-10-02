@@ -155,17 +155,6 @@
       "noCopy": "Sent, but not saved to your Sent folder",
       "action": "View"
     },
-    "sendUncertain": "The connection to the mail server broke while sending. The message may have been delivered: check Sent before sending it again.",
-    "smtpConnectionFailed": "Could not connect to {{target}} ({{reason}}). The server's network may block outgoing mail ports.",
-    "smtpConnectionUnknownHost": "the mail server",
-    "smtpConnectionReasons": {
-      "timeout": "timed out",
-      "refused": "connection refused",
-      "not_found": "host not found",
-      "unreachable": "host unreachable",
-      "tls": "TLS handshake failed",
-      "unknown": "could not connect"
-    },
     "gmailQuotaExceeded": "Gmail's daily sending limit for this account has been reached. Try again tomorrow, or send fewer or smaller messages.",
     "gmailMessageTooLarge": "This message is too large for Gmail to send. Remove or shrink an attachment and try again.",
     "gmailInvalidRecipient": "Gmail rejected one of the recipient addresses. Check it and try again.",
@@ -2827,6 +2816,10 @@
     "discardTitle": "Discard this letter?",
     "discardBody": "The letter that was not sent is deleted. To change it instead, use Edit.",
     "resendTitle": "Send it again?",
-    "resendUncertainBody": "It may have been delivered already. Send it again only if you checked Sent and it is not there."
+    "resendUncertainBody": "It may have been delivered already. Send it again only if you checked Sent and it is not there.",
+    "sendAt": "Send at {{time}}",
+    "sendNow": "Send now instead",
+    "keptUntil": "Kept until {{date}}, then deleted.",
+    "conflict": "This letter was already sent with another time, or cancelled. Reopen it and send it again."
   }
 }

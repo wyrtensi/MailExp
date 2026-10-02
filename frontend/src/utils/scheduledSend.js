@@ -29,14 +29,20 @@ export function composeContext(composeData, forwardedAttachments = []) {
 
 // The composer's composeData for a letter the server gave back (POST /mail/scheduled/:id/cancel
 // with reason undo or edit). restored: it is saved nowhere now, so the composer treats it as unsaved.
-export function composeDataFromScheduled(compose) {
-  const context = compose?.context || {};
-  const forwarded = context.forwardedAttachments?.length
-    ? context.forwardedAttachments
+// sendAt: the time an edited scheduled letter was due, kept by the composer. Only the known context
+// keys are taken, whatever else the stored object holds.
+export function composeDataFromScheduled(compose, { sendAt = null } = {}) {
+  const context = {};
+  for (const key of CONTEXT_KEYS) {
+    if (compose?.context?.[key] !== undefined && compose.context[key] !== null) context[key] = compose.context[key];
+  }
+  const forwarded = compose?.context?.forwardedAttachments?.length
+    ? compose.context.forwardedAttachments
     : (compose?.forwardedAttachments || []);
   const data = {
     ...context,
     restored: true,
+    ...(sendAt ? { sendAt } : {}),
     accountId: compose.accountId,
     ...(compose.aliasId ? { aliasId: compose.aliasId } : {}),
     to: compose.to || [],
@@ -54,8 +60,10 @@ export function composeDataFromScheduled(compose) {
       name: a.filename, size: a.size, type: a.contentType || 'application/octet-stream', data: a.content,
     })),
   };
-  // The signature the writer had edited stays the composer's signature until From changes.
+  // The signature the writer had edited stays the composer's signature until From changes; one they
+  // removed (null) stays removed.
   if (typeof compose.editedSignature === 'string' && compose.editedSignature) data.draftSignature = compose.editedSignature;
+  else if (Object.hasOwn(compose, 'editedSignature')) data.draftSignature = '';
   return data;
 }
 
@@ -127,7 +135,9 @@ export function scheduledActions(letter) {
   switch (letter.status) {
     case 'queued': return ['edit', 'reschedule', 'cancel'];
     case 'failed':
-    case 'needs_attention': return ['resend', 'edit', 'discard'];
+    case 'needs_attention':
+      // Sending again goes out as its author, which cannot work without one (Edit sends it as you).
+      return letter.errorCode === 'author_disabled' || !letter.author ? ['edit', 'discard'] : ['resend', 'edit', 'discard'];
     default: return [];
   }
 }

@@ -832,7 +832,10 @@ function sendMessage(body) {
     },
   });
   scheduledJobs.push(job);
-  return { ok: true, jobId: job.id, status: job.status, sendAt: job.sendAt, scheduled: job.scheduled };
+  return {
+    ok: true, jobId: job.id, status: job.status, sendAt: job.sendAt, scheduled: job.scheduled,
+    dueInMs: Math.max(0, Date.parse(job.sendAt) - Date.now()),
+  };
 }
 
 function managedDemoJob(id) {
@@ -847,8 +850,10 @@ function cancelDemoJob(id, reason) {
   const job = managedDemoJob(id);
   if (job.status === 'done') throw demoError('The letter has been sent already.', 'already_sent');
   if (!['queued', 'failed', 'needs_attention'].includes(job.status)) throw demoError('The letter is no longer waiting to be sent.', 'not_cancellable');
+  const keepsTime = job.status === 'queued' && job.scheduled && Date.parse(job.sendAt) > Date.now();
   job.status = 'cancelled';
-  return reason === 'undo' || reason === 'edit' ? { ok: true, compose: clone(job.compose) } : { ok: true };
+  if (reason !== 'undo' && reason !== 'edit') return { ok: true };
+  return { ok: true, compose: clone(job.compose), ...(keepsTime ? { sendAt: job.sendAt, scheduled: true } : {}) };
 }
 
 function rescheduleDemoJob(id, body) {
@@ -863,6 +868,7 @@ function rescheduleDemoJob(id, body) {
   if (!(at > Date.now())) throw demoError('The scheduled time has already passed.', 'send_at_past');
   if (job.status !== 'queued') throw demoError('The letter was not sent. Confirm sending it again.', 'resend_required');
   job.sendAt = new Date(at).toISOString();
+  job.scheduled = true;
   return { letter: demoJobSummary(job) };
 }
 
