@@ -43,9 +43,28 @@ vi.mock('./terrl.js', async (importActual) => ({
 }));
 const capture = vi.hoisted(() => ({ result: { letters: 0, changed: 0 } }));
 vi.mock('../deliveryStatus.js', () => ({ captureFromLog: vi.fn(async () => fail(capture.result)) }));
+// R-43: the windows and the trace have their own tests (outages.pglite.test.js); here only what
+// the run hands them and what comes back.
+const outage = vi.hoisted(() => ({ record: null, trace: { connected: true, windows: [] }, waiting: { waiting: 0, soonestExpiresAt: null }, source: null }));
+vi.mock('./outages.js', async (importActual) => ({
+  ...(await importActual()),
+  recordCheck: vi.fn(async () => fail(outage.record ?? { opened: null, closed: null })),
+  updateEvidence: vi.fn(async () => {}),
+}));
+vi.mock('./outageTrace.js', async (importActual) => ({
+  ...(await importActual()),
+  runOutageTrace: vi.fn(async () => fail(outage.trace)),
+  waitingSummary: vi.fn(async () => fail(outage.waiting)),
+}));
+vi.mock('./traceSource.js', async (importActual) => ({
+  ...(await importActual()),
+  getTraceSource: vi.fn(() => outage.source),
+}));
 
 import { recordAudit } from '../auditLog.js';
 import { captureFromLog } from '../deliveryStatus.js';
+import { recordCheck, updateEvidence } from './outages.js';
+import { runOutageTrace } from './outageTrace.js';
 import { safeFetch } from '../safeFetch.js';
 import { MailNodeError, getMailNodeConfig } from './mailcow.js';
 import { clearPostfixLogCache, parsePostfixLog } from './postfixLog.js';
@@ -79,6 +98,13 @@ beforeEach(() => {
   node.eop = { eopHost: 'eop.test.local' };
   recordAudit.mockClear();
   safeFetch.mockClear();
+  outage.record = null;
+  outage.trace = { connected: true, windows: [] };
+  outage.waiting = { waiting: 0, soonestExpiresAt: null };
+  outage.source = null;
+  recordCheck.mockClear();
+  updateEvidence.mockClear();
+  runOutageTrace.mockClear();
 });
 
 describe('logSignals', () => {
@@ -328,6 +354,55 @@ describe('runAlertCheck', () => {
     expect(computeTerrlBudget).not.toHaveBeenCalled();
     expect(journaled()).toEqual([]);
     expect(safeFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAlertCheck and the outage windows (R-43)', () => {
+  it("hands the containers' answer as a check, the log as evidence, then runs the trace", async () => {
+    node.containers = [{ name: 'postfix-mailcow', state: 'exited' }, { name: 'dovecot-mailcow', state: 'running' }];
+    await runAlertCheck({ now: NOW, userId: 'admin-1' });
+    expect(recordCheck).toHaveBeenCalledWith({
+      check: { result: 'failed', signals: ['containers'], down: [{ name: 'postfix-mailcow', state: 'exited' }] }, now: NOW, userId: 'admin-1',
+    });
+    expect(updateEvidence).toHaveBeenCalledTimes(1);
+    expect(runOutageTrace.mock.calls[0][0]).toMatchObject({ now: NOW, source: null });
+  });
+
+  it('counts an API that does not answer as a failed check', async () => {
+    node.containers = new MailNodeError('mail_node_unreachable', 'unreachable');
+    node.log = new MailNodeError('mail_node_unreachable', 'unreachable');
+    node.queue = new MailNodeError('mail_node_unreachable', 'unreachable');
+    await runAlertCheck({ now: NOW });
+    expect(recordCheck.mock.calls[0][0].check).toEqual({ result: 'failed', signals: ['api_unreachable'], down: [] });
+    expect(updateEvidence).not.toHaveBeenCalled();
+  });
+
+  it("warns while letters wait in EOP's queue, named in the ping without /fail", async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    outage.source = { kind: 'fixture' };
+    outage.waiting = { waiting: 3, soonestExpiresAt: '2026-10-02T10:00:00.000Z' };
+    const state = await runAlertCheck({ now: NOW });
+    expect(state.alerts.find((a) => a.key === 'outage_letters_waiting')).toMatchObject({
+      severity: 'warning', details: { waiting: 3, soonestExpiresAt: '2026-10-02T10:00:00.000Z' },
+    });
+    expect(safeFetch.mock.calls[0]).toEqual([PING, expect.objectContaining({ body: 'mail node alerts: outage_letters_waiting (warning)' })]);
+    expect(recordAudit.mock.calls.flatMap(([e]) => e).find((e) => e.details.alert === 'outage_letters_waiting').details)
+      .toMatchObject({ waiting: 3, soonestExpiresAt: '2026-10-02T10:00:00.000Z' });
+  });
+
+  it('keeps the trace alert and the ping when the outage step fails', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    outage.source = { kind: 'fixture' };
+    outage.waiting = { waiting: 1, soonestExpiresAt: '2026-10-02T10:00:00.000Z' };
+    await runAlertCheck({ now: NOW });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    outage.record = new Error('database gone');
+    outage.trace = new Error('database gone');
+    const state = await runAlertCheck({ now: NOW + 60000 });
+    errorLog.mockRestore();
+    expect(keys(state.alerts)).toEqual(['outage_letters_waiting']);
+    expect(state.errors).toEqual([]);
+    expect(safeFetch).toHaveBeenCalledTimes(2);
   });
 });
 

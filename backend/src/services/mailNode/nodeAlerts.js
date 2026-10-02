@@ -10,6 +10,9 @@ import { captureFromLog } from '../deliveryStatus.js';
 import { matchDeliveryCodes } from './deliveryCodes.js';
 import { readPostfixLog, relayKind } from './postfixLog.js';
 import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from './terrl.js';
+import { classifyCheck, recordCheck, updateEvidence } from './outages.js';
+import { runOutageTrace, waitingSignal, waitingSummary } from './outageTrace.js';
+import { getTraceSource } from './traceSource.js';
 
 // The mail node's alerts (R-18): what an administrator must hear about before the employees notice,
 // checked every five minutes and shown in the panel, and pinged to a Healthchecks-style check URL
@@ -29,7 +32,14 @@ import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from './terrl.js'
 // - containers: a mailcow container that is not running, or reported unhealthy;
 // - terrl: the tenant's external recipients of the last 24 hours at 80 percent of the limit or more
 //   (services/mailNode/terrl.js). It counts the log too, so when the log could not be read the
-//   budget keeps its previous alert instead of falling back to the journal and flapping.
+//   budget keeps its previous alert instead of falling back to the journal and flapping;
+// - trace: letters to the node's domains still waiting in EOP's queue after an outage of the node
+//   (R-43, services/mailNode/outageTrace.js), a warning with the time EOP gives up on the first.
+//
+// The same run keeps the outage windows of R-43 (services/mailNode/outages.js): the containers'
+// answer (or the API not answering at all) is one check, the log read is the windows' evidence,
+// and a pass of the message trace follows. A failure there is logged and kept with the windows; it
+// never stops the run or its ping (the trace alert then stays as it was).
 //
 // What it keeps: the settings in integration_config 'mail_node_alerts' (ping URL, thresholds), the
 // last run in 'mail_node_alert_state' ({ at, alerts, errors, log }). An alert keeps the time it was
@@ -61,6 +71,7 @@ export const ALERTS = Object.freeze({
   certificate: ['certificate', 'warning'],
   containers: ['containers', 'error'],
   terrl_budget: ['terrl', 'warning'],
+  outage_letters_waiting: ['trace', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -293,6 +304,10 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   if (!failed.includes('certificate')) fresh.push(...certificateSignal(nodeDns));
   const containers = await read('containers', () => getContainers(cfg));
   if (containers) fresh.push(...containerSignal(containers));
+  await outageStep({
+    check: classifyCheck({ containers, errorCode: errors.find((e) => e.source === 'containers')?.code ?? null }),
+    log, now, userId, fresh, failed,
+  });
   // The budget counts the log as well: without it the count would drop and the alert flap, so the
   // budget's alert stays as it was until the log reads again.
   if (log) {
@@ -333,6 +348,25 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   return state;
 }
 
+// R-43: the check into the outage windows, the log into their evidence, then a pass of the message
+// trace and its alert. Each part fails alone (logged): the trace alert then stays as it was.
+async function outageStep({ check, log, now, userId, fresh, failed }) {
+  try {
+    await recordCheck({ check, now, userId });
+    if (log) await updateEvidence(log, now);
+  } catch (err) {
+    console.error(`Mail node outage windows were not updated: ${err?.code || err?.message || 'error'}`);
+  }
+  const source = getTraceSource();
+  try {
+    await runOutageTrace({ source, now, log });
+    if (source) fresh.push(...waitingSignal(await waitingSummary(now)));
+  } catch (err) {
+    console.error(`Mail node outage trace failed: ${err?.code || err?.message || 'error'}`);
+    failed.push('trace');
+  }
+}
+
 // The ping of a run: /fail only for an alert of severity error; every alert up, with its severity,
 // in the body.
 export function pingOf(alerts) {
@@ -353,6 +387,7 @@ function summaryOf(alert) {
     case 'terrl_budget': return { used: d.used, limit: d.limit, percent: d.percent };
     case 'eop_bypass': return { count: d.count, relays: d.relays ?? [] };
     case 'eop_host_missing': return {};
+    case 'outage_letters_waiting': return { waiting: d.waiting, soonestExpiresAt: d.soonestExpiresAt };
     default: return { count: d.count };
   }
 }
