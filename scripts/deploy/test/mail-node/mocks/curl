@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# curl for the mail node tests: the Microsoft 365 endpoints web service from recorded answers, and
+# Healthchecks pings into $MOCK_DIR/pings. The URL comes in a config file (-K), as the scripts pass
+# it. Like the real service, a URL without a clientrequestid GUID gets 400.
+#   MOCK_VERSION_FILE / MOCK_ENDPOINTS_FILE: the answer bodies
+#   MOCK_VERSION_STATUS / MOCK_ENDPOINTS_STATUS: the HTTP status (000: no answer)
+out='' cfg='' data=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) out=$2 && shift ;;
+    -K) cfg=$2 && shift ;;
+    -w | -m | --retry) shift ;;
+    --data-binary) data=1 && shift ;;
+  esac
+  shift
+done
+url=$(sed -n 's/^url = "\(.*\)"$/\1/p' "$cfg")
+if [ "$data" = 1 ]; then
+  printf '%s %s\n' "$url" "$(cat)" >>"$MOCK_DIR/pings"
+  exit 0
+fi
+printf '%s\n' "$url" >>"$MOCK_DIR/requests"
+case $url in
+  */version/*) kind=VERSION ;;
+  */endpoints/*) kind=ENDPOINTS ;;
+  *) printf 404 && exit 0 ;;
+esac
+status_var=MOCK_${kind}_STATUS
+file_var=MOCK_${kind}_FILE
+status=${!status_var:-200}
+if ! [[ $url =~ clientrequestid=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+  status=400
+fi
+case $status in
+  000) printf 000 && exit 7 ;;
+  200) cp "${!file_var}" "$out" ;;
+  400) cp "$MOCK_FIXTURES/400.txt" "$out" ;;
+  429) printf 'Too many requests' >"$out" ;;
+  *) printf 'error' >"$out" ;;
+esac
+printf '%s' "$status"

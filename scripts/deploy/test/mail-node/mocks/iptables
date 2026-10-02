@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# iptables and ip6tables (the same file under both names) for the mail node tests: the filter table
+# as files, one per chain, in $MOCK_DIR/ipt4 or ipt6, each line a rule as given after the chain.
+# MOCK_IPT_REFUSE=<text> refuses any -A whose rule contains the text; MOCK_IPT_X_FAIL=<chain>
+# refuses to delete that chain (as when something else still refers to it).
+case ${0##*/} in
+  ip6tables) dir=$MOCK_DIR/ipt6 ;;
+  *) dir=$MOCK_DIR/ipt4 ;;
+esac
+mkdir -p "$dir"
+[ "$1" != -w ] || shift
+printf '%s %s\n' "${0##*/}" "$*" >>"$MOCK_DIR/calls"
+op=$1 chain=$2
+shift 2
+rule="$*"
+no_chain() { echo "iptables: No chain/target/match by that name." >&2; exit 1; }
+case $op in
+  -S)
+    [ -f "$dir/$chain" ] || no_chain
+    printf -- '-N %s\n' "$chain"
+    while IFS= read -r line; do printf -- '-A %s %s\n' "$chain" "$line"; done <"$dir/$chain"
+    ;;
+  -N) [ ! -f "$dir/$chain" ] || { echo "iptables: Chain already exists." >&2; exit 1; }; : >"$dir/$chain" ;;
+  -F) [ -f "$dir/$chain" ] || no_chain; : >"$dir/$chain" ;;
+  -X)
+    [ -f "$dir/$chain" ] || no_chain
+    if grep -qx -- "-j $chain" "$dir"/* || [ "${MOCK_IPT_X_FAIL:-}" = "$chain" ]; then echo "iptables: Too many links." >&2; exit 1; fi
+    rm -f "$dir/$chain"
+    ;;
+  -E)
+    [ -f "$dir/$chain" ] || no_chain
+    mv "$dir/$chain" "$dir/$1"
+    for f in "$dir"/*; do sed -i "s/^-j $chain\$/-j $1/" "$f"; done
+    ;;
+  -A)
+    [ -f "$dir/$chain" ] || no_chain
+    if [ -n "${MOCK_IPT_REFUSE:-}" ] && [[ $rule == *"$MOCK_IPT_REFUSE"* ]]; then echo "iptables v1.8.10: bad rule" >&2; exit 2; fi
+    printf '%s\n' "$rule" >>"$dir/$chain"
+    ;;
+  -I)
+    [ -f "$dir/$chain" ] || no_chain
+    pos=1
+    if [[ $1 =~ ^[0-9]+$ ]]; then pos=$1 && shift; fi
+    rule="$*"
+    { head -n $((pos - 1)) "$dir/$chain"; printf '%s\n' "$rule"; tail -n +"$pos" "$dir/$chain"; } >"$dir/.tmp"
+    mv "$dir/.tmp" "$dir/$chain"
+    ;;
+  -C) [ -f "$dir/$chain" ] && grep -qxF -- "$rule" "$dir/$chain" || exit 1 ;;
+  -D)
+    [ -f "$dir/$chain" ] || no_chain
+    grep -qxF -- "$rule" "$dir/$chain" || exit 1
+    awk -v r="$rule" '!done && $0 == r { done = 1; next } { print }' "$dir/$chain" >"$dir/.tmp"
+    mv "$dir/.tmp" "$dir/$chain"
+    ;;
+  *) exit 2 ;;
+esac

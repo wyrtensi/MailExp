@@ -1,0 +1,9 @@
+# MailExpert mail node (scripts/deploy/mail-node/setup.sh): the EOP ranges and the firewall every
+# hour, and the firewall from the last good list at boot. Used only on a host without systemd: the
+# boot run comes a minute after the start, so until then mailcow's ports are published without the
+# rules (with systemd the restore runs before Docker). Failures go to the Healthchecks ping, not mail.
+MAILTO=""
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+@reboot root sleep 60 && @DIR@/eop-ranges.sh --restore
+17 * * * * root @DIR@/eop-ranges.sh

@@ -35,6 +35,7 @@ import {
   parseNetwork,
   parseNetworkList,
   parseTlsParameters,
+  prefilterDoneKey,
   prefilterPending,
   rateFrameKey,
   rateLimitError,
@@ -50,6 +51,17 @@ import {
   hasDnsErrors,
   normalizeExpectedValues,
 } from './mailNode.js';
+
+describe('prefilterDoneKey', () => {
+  it('words the notice by how the forwarding hosts went', () => {
+    assert.equal(prefilterDoneKey({ status: 'changed', forwardingHosts: { status: 'changed' } }), 'admin.mailNode.prefilterDoneWithRanges');
+    assert.equal(prefilterDoneKey({ status: 'ok', forwardingHosts: { status: 'ok' } }), 'admin.mailNode.prefilterDoneWithRanges');
+    assert.equal(prefilterDoneKey({ forwardingHosts: { status: 'failed', code: 'fwdhost_keep_spam' } }), 'admin.mailNode.prefilterDoneRangesNot');
+    assert.equal(prefilterDoneKey({ forwardingHosts: { status: 'skipped', code: 'eop_ranges_invalid' } }), 'admin.mailNode.prefilterDoneRangesNot');
+    assert.equal(prefilterDoneKey({ status: 'changed', forwardingHosts: null }), 'admin.mailNode.prefilterDone');
+    assert.equal(prefilterDoneKey(undefined), 'admin.mailNode.prefilterDone');
+  });
+});
 
 describe('domainMailboxFormError', () => {
   it('accepts a valid name before @ with a picked domain', () => {

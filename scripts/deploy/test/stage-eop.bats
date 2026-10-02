@@ -2,7 +2,7 @@
 # The stand's fake-EOP hook into Postfix: one line of mailcow's extra.cf, everything else kept.
 
 setup() {
-  EXTRA_CF=$BATS_TEST_DIRNAME/fake-eop/extra-cf.sh
+  EXTRA_CF=$BATS_TEST_DIRNAME/../mail-node/extra-cf.sh
   F=$BATS_TEST_TMPDIR/extra.cf
 }
 

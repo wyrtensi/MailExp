@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# apt-get for the mail node tests: records the call.
+printf 'apt-get %s\n' "$*" >>"$MOCK_DIR/calls"

@@ -30,6 +30,25 @@ others() {
   fi
 }
 
+# write: stdin into the file through a temporary file in the same directory and a rename, so a full
+# disk never leaves the file cut short; owner and mode of the file it replaces are kept (mailcow's
+# postfix container relies on them), a new file gets 644.
+write() {
+  dir=$(dirname "$file")
+  mkdir -p "$dir"
+  tmp=$(mktemp "$file.XXXXXX")
+  if ! cat >"$tmp"; then rm -f "$tmp"; exit 1; fi
+  if [ -e "$file" ]; then
+    if ! { chmod "$(stat -c %a "$file")" "$tmp" && chown "$(stat -c %u:%g "$file")" "$tmp"; }; then
+      rm -f "$tmp"
+      exit 1
+    fi
+  else
+    chmod 644 "$tmp"
+  fi
+  mv -f "$tmp" "$file"
+}
+
 case $action in
   get)
     [ -f "$file" ] || exit 1
@@ -44,17 +63,10 @@ case $action in
       exit 2
     fi
     case $value in *[[:space:]]*) echo "extra-cf.sh: the value must be one word" >&2; exit 2 ;; esac
-    tmp=$(mktemp)
-    { others; printf '%s = %s\n' "$key" "$value"; } >"$tmp"
-    # cat, not mv: keeps the file's owner and mode, which mailcow's postfix container relies on.
-    cat "$tmp" >"$file"
-    rm -f "$tmp"
+    { others; printf '%s = %s\n' "$key" "$value"; } | write
     ;;
   unset)
     [ -f "$file" ] || exit 0
-    tmp=$(mktemp)
-    others >"$tmp"
-    cat "$tmp" >"$file"
-    rm -f "$tmp"
+    others | write
     ;;
 esac

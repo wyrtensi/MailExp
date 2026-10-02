@@ -1,0 +1,14 @@
+[Unit]
+Description=MailExpert: EOP ranges and the mail node firewall, checked every hour
+# After Docker when it runs, but never starts it.
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@DIR@/eop-ranges.sh
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/mailexpert-node
