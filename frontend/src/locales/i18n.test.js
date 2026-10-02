@@ -199,6 +199,12 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'scheduled.attachments_few', 'scheduled.attachments_many',
     'scheduled.failedOnStartTitle_few', 'scheduled.failedOnStartTitle_many',
     'scheduled.navFailed_few', 'scheduled.navFailed_many',
+    'messageList.outage.summaryWaiting_few', 'messageList.outage.summaryWaiting_many',
+    'messageList.outage.summaryLost_few', 'messageList.outage.summaryLost_many',
+    'messageList.outage.summaryDelayed_few', 'messageList.outage.summaryDelayed_many',
+    'admin.outages.bannerWaiting_few', 'admin.outages.bannerWaiting_many',
+    'admin.nodeOps.alertDetailOutageWaiting_few', 'admin.nodeOps.alertDetailOutageWaiting_many',
+    'admin.nodeOps.alertDetailOutageWaitingAsOf_few', 'admin.nodeOps.alertDetailOutageWaitingAsOf_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

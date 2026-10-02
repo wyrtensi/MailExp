@@ -77,6 +77,9 @@ const CONCRETE_PATH = {
   '/mail-node/quarantine': '/mail-node/quarantine',
   '/mail-node/quarantine/:param': '/mail-node/quarantine/41',
   '/mail-node/quarantine/settings': '/mail-node/quarantine/settings',
+  '/mail-node/outage-letters': '/mail-node/outage-letters',
+  '/mail-node/outages': '/mail-node/outages',
+  '/mail-node/outages/:param/letters': '/mail-node/outages/demo-outage-2/letters',
   '/mail-node/messages/:param/spam-verdict': '/mail-node/messages/demo-fx-02-00-00/spam-verdict',
   '/accounts/:param/folders': '/accounts/demo-sales/folders',
   '/accounts/:param/aliases': '/accounts/demo-sales/aliases',
@@ -530,6 +533,23 @@ test('the node operations answer: queue actions, alerts, budget', async () => {
   const saved = await answer('/mail-node/alerts/settings', 'PUT', '/mail-node/alerts/settings', { pingUrl: 'https://hc.example.com/p/alerts', deferredCount: 5, deferredMinutes: 30 });
   assert.equal(saved.settings.deferredMinutes, 30);
   await reject('/mail-node/alerts/settings', 'PUT', '/mail-node/alerts/settings', { pingUrl: 'http://insecure.example' }, /https/);
+});
+
+test('the outage windows answer: by hand, closed, changed, deleted, the trace, the retention (R-43)', async () => {
+  await reject('/mail-node/outages', 'POST', '/mail-node/outages', { startedAt: '2026-10-01T10:00:00Z' }, /reason/);
+  const added = await answer('/mail-node/outages', 'POST', '/mail-node/outages', { startedAt: '2026-10-01T10:00:00Z', reason: 'Planned maintenance', planned: true });
+  assert.equal(added.window.open, true);
+  const changed = await answer('/mail-node/outages/:param', 'PUT', `/mail-node/outages/${added.window.id}`, { startedAt: '2026-10-01T09:50:00Z', reason: 'Began earlier' });
+  assert.equal(changed.window.startedAt, '2026-10-01T09:50:00.000Z');
+  const closed = await answer('/mail-node/outages/:param/close', 'POST', `/mail-node/outages/${added.window.id}/close`, { endedAt: '2026-10-01T11:00:00Z', reason: 'Back' });
+  assert.equal(closed.window.open, false);
+  await reject('/mail-node/outages/:param', 'DELETE', `/mail-node/outages/${added.window.id}`, { confirm: true }, /reason/);
+  assert.deepEqual(await answer('/mail-node/outages/:param', 'DELETE', `/mail-node/outages/${added.window.id}`, { confirm: true, reason: 'Marked twice' }), { ok: true });
+  const traced = await answer('/mail-node/outages/trace', 'POST', '/mail-node/outages/trace');
+  assert.equal(traced.connected, true);
+  const settings = await answer('/mail-node/outage-settings', 'PUT', '/mail-node/outage-settings', { retentionDays: 14 });
+  assert.equal(settings.settings.retentionDays, 14);
+  await reject('/mail-node/outage-settings', 'PUT', '/mail-node/outage-settings', { retentionDays: 0 }, /1 to 90/);
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {

@@ -11,7 +11,7 @@
 #   scripts/deploy/test/stage.sh panel [--version sha-<12>] update the panel to another build
 #   scripts/deploy/test/stage.sh status
 #   scripts/deploy/test/stage.sh down [--purge]             remove the server (--purge: and its data)
-#   scripts/deploy/test/stage.sh eop up|down|status|send|mode|connector|list|show|clear|inject|logs|relaylog|queue
+#   scripts/deploy/test/stage.sh eop up|down|status|send|mode|connector|list|show|clear|inject|logs|relaylog|queue|inbound|ndr|trace
 #                                   fake Exchange Online Protection as mailcow's relayhost (see below)
 #   scripts/deploy/test/stage.sh dns up|down|status|variant <name>|query <type> <name>
 #                                   DNS fixtures for the zone stage.test (opt-in, see below)
@@ -249,7 +249,7 @@ eop_up() {
   inner "docker network inspect $MAILCOW_NET >/dev/null 2>&1" || die "mailcow's network $MAILCOW_NET does not exist; is the stand up? ($0 status)"
   log "copying fake-EOP into $NAME:/opt/fake-eop"
   inner 'rm -rf /opt/fake-eop && mkdir -p /opt/fake-eop /opt/fake-eop-data/tls'
-  tar -C "$TEST_DIR/fake-eop" -c eop.mjs lib.mjs server.mjs | dk exec -i "$NAME" tar -x -C /opt/fake-eop
+  tar -C "$TEST_DIR/fake-eop" -c eop.mjs lib.mjs server.mjs inbound.mjs | dk exec -i "$NAME" tar -x -C /opt/fake-eop
   # A certificate for eop.test.local from the stand CA; the CA key never leaves /opt/testca.
   inner "cd /opt/testca && { { [ -s eop.crt ] && [ -s eop.key ]; } || { openssl req -newkey rsa:2048 -nodes -keyout eop.key -out eop.csr -subj '/CN=$EOP_HOST' 2>/dev/null \
     && printf 'subjectAltName=DNS:$EOP_HOST\nextendedKeyUsage=serverAuth\n' > eop.cnf \
@@ -349,7 +349,15 @@ eop_main() {
       inner "docker logs --tail ${1:-300} $POSTFIX 2>&1 | grep -E 'relay=|status=|TLS connection' | tail -n 30"
       ;;
     queue) inner "docker exec $POSTFIX postqueue -p" ;;
-    *) die "usage: $0 eop up|down|status|mode <mode> [--stage mail|rcpt|data]|connector <host name>|list|show [id]|clear|inject <id|latest> [verdict] --to <a@b>|send [from] [to]|logs [n]|relaylog [n]|queue" 2 ;;
+    # Inbound mail EOP queues while the node is down (R-43): inbound send --from a@b --to x@stage.test
+    # [--subject S] [--expire-seconds N], inbound list|show [id]|retry|clear, inbound config
+    # [--retry-seconds N] [--expiry-seconds N]; ndr list|show [id]|clear: the reports to senders;
+    # trace [--start ISO] [--end ISO]: the trace of the inbound queue in Graph's shapes (the same
+    # answer as http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces).
+    inbound) [ $# -ge 1 ] || die "usage: $0 eop inbound send|list|show|retry|clear|config ..." 2; eop_ctl inbound "$@" ;;
+    ndr) [ $# -ge 1 ] || die "usage: $0 eop ndr list|show [id]|clear" 2; eop_ctl ndr "$@" ;;
+    trace) eop_ctl trace "$@" ;;
+    *) die "usage: $0 eop up|down|status|mode <mode> [--stage mail|rcpt|data]|connector <host name>|list|show [id]|clear|inject <id|latest> [verdict] --to <a@b>|send [from] [to]|logs [n]|relaylog [n]|queue|inbound ...|ndr ...|trace" 2 ;;
   esac
 }
 

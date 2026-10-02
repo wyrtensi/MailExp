@@ -16,6 +16,8 @@ describe('AUDIT_ACTIONS', () => {
       'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',
       'mail_node.quarantine_released', 'mail_node.quarantine_deleted', 'mail_node.quarantine_learned_spam',
       'mail_node.quarantine_settings_applied',
+      'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
+      'mail_node.outage_deleted',
     ]);
     assert.equal(auditActionLabelKey('mail_node.applied'), 'admin.audit.actionMailNodeApplied');
     assert.equal(auditActionLabelKey('mailbox.rate_limit_changed'), 'admin.audit.actionMailboxRateLimitChanged');
@@ -397,6 +399,24 @@ describe('auditDetail of the node operations', () => {
       key: 'admin.audit.detailAlertRaised', values: {}, valueKeys: { alert: 'admin.nodeOps.alertConnectorBlocked' },
     });
     assert.equal(auditDetail({ action: 'mail_node.alert_cleared', details: { alert: 'eop_bypass' } }).key, 'admin.audit.detailAlertCleared');
+  });
+
+  it('describes an outage window of the node: what failed, its times, the reason, the fields changed (R-43)', () => {
+    const times = { startedAt: '2026-10-02T12:22:40.902Z', endedAt: '2026-10-02T12:26:21.702Z' };
+    assert.equal(auditDetail({ action: 'mail_node.outage_opened', details: { ...times, endedAt: null, down: ['postfix-mailcow'] } }).values.down, 'postfix-mailcow');
+    assert.equal(auditDetail({ action: 'mail_node.outage_opened', details: { startedAt: times.startedAt, down: [] } }).key, 'admin.audit.detailOutageOpenedApi');
+    const closed = auditDetail({ action: 'mail_node.outage_closed', details: { ...times, minutes: 4 } });
+    assert.equal(closed.key, 'admin.audit.detailOutageClosed');
+    assert.equal(closed.values.minutes, 4);
+    assert.notEqual(closed.values.start, '—');
+    assert.equal(auditDetail({ action: 'mail_node.outage_closed', details: { ...times, reason: 'Back' } }).key, 'admin.audit.detailOutageClosedReason');
+    assert.equal(auditDetail({ action: 'mail_node.outage_added', details: { ...times, planned: true, reason: 'Update' } }).key, 'admin.audit.detailOutageAddedPlanned');
+    assert.equal(auditDetail({ action: 'mail_node.outage_added', details: { startedAt: times.startedAt, endedAt: null, reason: 'x' } }).values.end, '—');
+    assert.deepEqual(auditDetail({ action: 'mail_node.outage_changed', details: { ...times, fields: ['startedAt', 'reason'], reason: 'Earlier' } }).valueKeys, {
+      fields: ['admin.audit.fieldOutageStart', 'admin.audit.fieldOutageReason'],
+    });
+    assert.equal(auditDetail({ action: 'mail_node.outage_deleted', details: { ...times, reason: 'Twice' } }).values.reason, 'Twice');
+    assert.equal(auditDetail({ action: 'mail_node.config_changed', details: { settings: 'outages', fields: ['retentionDays'] } }).key, 'admin.audit.detailOutageSettingsChanged');
   });
 
   it('names the alert settings and the TERRL fields that changed', () => {
