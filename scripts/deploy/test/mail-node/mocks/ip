@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# ip for the mail node tests: the default route goes out through eth0.
+if [ "$*" = "-o route show default" ]; then echo "default via 192.0.2.1 dev eth0 proto static"; fi

@@ -1,0 +1,10 @@
+[Unit]
+Description=MailExpert: EOP ranges every hour
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

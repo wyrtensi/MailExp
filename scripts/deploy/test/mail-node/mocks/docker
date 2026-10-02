@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# docker for the mail node tests: records `docker compose` calls with the directory they ran in.
+# MOCK_RUNNING lists the mailcow services that run (space separated).
+printf 'docker %s (in %s)\n' "$*" "$PWD" >>"$MOCK_DIR/calls"
+if [ "$1 $2" = "compose ps" ] && [ "$3" = -q ]; then
+  [[ " ${MOCK_RUNNING:-} " != *" $4 "* ]] || echo "0123456789ab"
+fi
+exit 0

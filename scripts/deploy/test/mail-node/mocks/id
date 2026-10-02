@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# id for the mail node tests: the scripts run as root.
+echo 0

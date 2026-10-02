@@ -1,0 +1,12 @@
+[Unit]
+Description=MailExpert: mail node firewall from the last good EOP ranges (ipsets and rules do not survive a reboot)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@DIR@/eop-ranges.sh --restore
+
+[Install]
+WantedBy=multi-user.target

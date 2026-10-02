@@ -69,6 +69,31 @@ version_ge() {
   return 0
 }
 
+# ping_target <base url> <start|success|fail>: the URL of the event (Healthchecks-style: the base
+# URL is success, /start and /fail are the others).
+ping_target() {
+  local base=${1%/}
+  case $2 in
+    success) printf '%s\n' "$base" ;;
+    start | fail) printf '%s/%s\n' "$base" "$2" ;;
+    *) return 1 ;;
+  esac
+}
+
+# send_ping <base url> <start|success|fail> [text]: tells the monitoring service; never fails the
+# caller. The URL carries the check's key, so it reaches curl through a config on a file
+# descriptor, not through argv; curl's own messages are dropped for the same reason. Shared by the
+# panel's scripts and the mail node's (mail-node/eop-ranges.sh).
+send_ping() {
+  local base=$1 kind=$2 body=${3:-} target
+  [ -n "$base" ] || return 0
+  target=$(ping_target "$base" "$kind") || return 0
+  if ! printf '%s' "$body" | curl -fsS -m 10 --retry 2 -o /dev/null --data-binary @- \
+    -K <(printf 'url = "%s"\n' "$target") 2>/dev/null; then
+    warn "could not reach the monitoring service ($kind ping)"
+  fi
+}
+
 # gen_hex <bytes>: random bytes as lowercase hex, two characters per byte.
 gen_hex() {
   head -c "$1" /dev/urandom | od -A n -v -t x1 | tr -d ' \n'

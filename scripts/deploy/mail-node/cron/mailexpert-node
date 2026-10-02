@@ -1,0 +1,6 @@
+# MailExpert mail node (scripts/deploy/mail-node/setup.sh): the EOP ranges every hour, and the
+# firewall from the last good list at boot. Used only on a host without systemd.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+@reboot root sleep 60 && @DIR@/eop-ranges.sh --restore
+17 * * * * root @DIR@/eop-ranges.sh

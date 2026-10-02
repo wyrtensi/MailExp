@@ -1,0 +1,8 @@
+[Unit]
+Description=MailExpert: EOP ranges for the mail node firewall
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@DIR@/eop-ranges.sh
