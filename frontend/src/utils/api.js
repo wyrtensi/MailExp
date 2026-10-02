@@ -425,6 +425,19 @@ export const api = {
     saveQuarantineSettings: (data) => request('PUT', '/mail-node/quarantine/settings', data),
     // "Why is this letter in Spam": rspamd's verdict on a letter of a node mailbox.
     spamVerdict: (messageId) => request('GET', `/mail-node/messages/${encodeURIComponent(messageId)}/spam-verdict`),
+    // Letters delayed or lost while the node was down (R-43): the panel mailboxes' letters for
+    // everyone; the outage windows, their letters, windows by hand, a trace pass now and how long
+    // letters are kept for administrators. A window change needs a reason; deleting needs
+    // { confirm: true, reason }.
+    outageLetters: () => request('GET', '/mail-node/outage-letters'),
+    getOutages: () => request('GET', '/mail-node/outages'),
+    getOutageLetters: (id) => request('GET', `/mail-node/outages/${encodeURIComponent(id)}/letters`),
+    addOutage: (data) => request('POST', '/mail-node/outages', data),
+    updateOutage: (id, data) => request('PUT', `/mail-node/outages/${encodeURIComponent(id)}`, data),
+    closeOutage: (id, data) => request('POST', `/mail-node/outages/${encodeURIComponent(id)}/close`, data),
+    deleteOutage: (id, reason) => request('DELETE', `/mail-node/outages/${encodeURIComponent(id)}`, { confirm: true, reason }),
+    traceOutages: () => request('POST', '/mail-node/outages/trace'),
+    saveOutageSettings: (data) => request('PUT', '/mail-node/outage-settings', data),
   },
   updateAccount: (id, data) => request('PUT', `/accounts/${id}`, data),
   deleteAccount: (id) => request('DELETE', `/accounts/${id}`),

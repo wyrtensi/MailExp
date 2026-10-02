@@ -146,6 +146,17 @@ const ERROR_KEYS = {
   deferred_count_invalid: 'admin.nodeOps.errorDeferredCount',
   deferred_minutes_invalid: 'admin.nodeOps.errorDeferredMinutes',
   alert_check_failed: 'admin.nodeOps.errorAlertCheck',
+  // The outage windows (backend routes/mailNodeOutages.js, R-43).
+  outage_start_invalid: 'admin.outages.errorStart',
+  outage_end_invalid: 'admin.outages.errorEnd',
+  outage_end_before_start: 'admin.outages.errorEndBeforeStart',
+  outage_reason_required: 'admin.outages.errorReason',
+  outage_reason_too_long: 'admin.outages.errorReasonTooLong',
+  outage_not_found: 'admin.outages.errorNotFound',
+  outage_already_closed: 'admin.outages.errorAlreadyClosed',
+  outage_delete_unconfirmed: 'admin.outages.errorDeleteUnconfirmed',
+  retention_days_invalid: 'admin.outages.errorRetention',
+  trace_cooldown: 'admin.outages.errorCooldown',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -854,6 +865,7 @@ const ALERT_TITLE_KEYS = {
   certificate: 'admin.nodeOps.alertCertificate',
   containers: 'admin.nodeOps.alertContainers',
   terrl_budget: 'admin.nodeOps.alertTerrlBudget',
+  outage_letters_waiting: 'admin.nodeOps.alertOutageLettersWaiting',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -869,6 +881,7 @@ const ALERT_SOURCE_KEYS = {
   certificate: 'admin.nodeOps.sourceCertificate',
   containers: 'admin.nodeOps.sourceContainers',
   terrl: 'admin.nodeOps.sourceTerrl',
+  trace: 'admin.nodeOps.sourceTrace',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -907,6 +920,14 @@ export function alertDetail(alert) {
       };
     case 'terrl_budget':
       return { key: 'admin.nodeOps.alertDetailTerrl', values: { used: d.used ?? 0, limit: d.limit ?? '—', percent: d.percent ?? '—' } };
+    // Letters to the node still in EOP's queue after an outage (R-43): EOP gives up on the first
+    // at `at`.
+    case 'outage_letters_waiting':
+      return {
+        key: d.asOf ? 'admin.nodeOps.alertDetailOutageWaitingAsOf' : 'admin.nodeOps.alertDetailOutageWaiting',
+        values: { count: d.waiting ?? 0, asOf: d.asOf ? new Date(d.asOf).toLocaleString() : '' },
+        at: d.soonestExpiresAt ?? null,
+      };
     default:
       return null;
   }

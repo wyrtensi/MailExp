@@ -270,7 +270,9 @@ export function dotStuff(raw) {
 
 // A minimal SMTP client: one plain connection, one transaction. Resolves with the final reply
 // ({ ok: true }) or with the first 4xx/5xx reply ({ ok: false }); rejects when the connection
-// fails, times out or closes before the final reply.
+// fails, times out or closes before the final reply. Once the server accepted the message (its
+// reply to the end of DATA), a lost connection or any reply to QUIT still resolves { ok: true }:
+// the message is the server's, and trying it again would deliver it twice.
 export function smtpSend({ host, port = 25, from, to, raw, helo = 'eop.test.local', timeoutMs = 30000 }) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host, port });
@@ -284,6 +286,7 @@ export function smtpSend({ host, port = 25, from, to, raw, helo = 'eop.test.loca
     let buffer = '';
     let step = 0;
     const replies = [];
+    let accepted = null;
     const body = dotStuff(raw);
     const steps = [
       () => `EHLO ${helo}`,
@@ -293,8 +296,9 @@ export function smtpSend({ host, port = 25, from, to, raw, helo = 'eop.test.loca
       () => `${body}.`,
       () => 'QUIT',
     ];
-    socket.on('error', (error) => settle(reject, error));
-    socket.on('close', () => settle(reject, new Error(`connection closed before the final reply${replies.length ? ` (last reply: ${replies[replies.length - 1]})` : ''}`)));
+    const acceptedOr = (fn, value) => (accepted ? settle(resolve, { ok: true, reply: accepted, replies }) : settle(fn, value));
+    socket.on('error', (error) => acceptedOr(reject, error));
+    socket.on('close', () => acceptedOr(reject, new Error(`connection closed before the final reply${replies.length ? ` (last reply: ${replies[replies.length - 1]})` : ''}`)));
     socket.on('data', (chunk) => {
       buffer += chunk.toString('latin1');
       for (;;) {
@@ -304,16 +308,18 @@ export function smtpSend({ host, port = 25, from, to, raw, helo = 'eop.test.loca
         buffer = buffer.slice(match[0].length);
         replies.push(reply);
         const code = Number(reply.slice(0, 3));
+        if (accepted) {
+          socket.end();
+          settle(resolve, { ok: true, reply: accepted, replies });
+          return;
+        }
         if (code >= 400) {
           socket.end('QUIT\r\n');
           settle(resolve, { ok: false, reply, replies });
           return;
         }
-        if (step >= steps.length) {
-          socket.end();
-          settle(resolve, { ok: true, reply: replies[replies.length - 2], replies });
-          return;
-        }
+        // The reply to the message itself: the step still to come is QUIT.
+        if (step === steps.length - 1) accepted = reply;
         const line = steps[step]();
         step += 1;
         socket.write(`${line}\r\n`);

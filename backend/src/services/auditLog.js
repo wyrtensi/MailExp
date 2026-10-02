@@ -4,7 +4,8 @@ import { query } from './db.js';
 // itself, MailExpert restoring a rejected mail node password, taking in the mail node domains
 // that already had mailboxes, a scheduled DNS check whose result changed, a mail node alert that
 // was raised or cleared, and an administrator releasing, deleting or training a letter of the
-// mail node's quarantine or writing its settings. Mail sync and inbox rules never write here.
+// mail node's quarantine or writing its settings, and a mail node outage window opened or closed by
+// the alert job or added, changed, closed or deleted by an administrator. Mail sync and inbox rules never write here.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
@@ -16,6 +17,8 @@ export const AUDIT_ACTIONS = Object.freeze([
   'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',
   'mail_node.quarantine_released', 'mail_node.quarantine_deleted', 'mail_node.quarantine_learned_spam',
   'mail_node.quarantine_settings_applied',
+  'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
+  'mail_node.outage_deleted',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 

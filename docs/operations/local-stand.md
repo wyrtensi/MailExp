@@ -96,6 +96,10 @@ scripts/deploy/test/stage.sh eop down
 | `eop list`, `eop show [id]`, `eop clear` | сохранённые письма |
 | `eop inject <id\|latest> [вердикт] --to a@b[,c@d] [--auth pass\|fail] [--folded]` | вернуть сохранённое письмо на порт 25 узла с заголовками EOP; `--to` обязателен |
 | `eop logs [n]`, `eop relaylog [n]`, `eop queue` | журнал fake-EOP; строки `relay=`/`status=` журнала Postfix; очередь Postfix |
+| `eop inbound send --from a@b --to x@stage.test [--subject S] [--expire-seconds N]` | письмо «из интернета» ящику стенда через очередь fake-EOP (см. ниже) |
+| `eop inbound list`, `show [id]`, `retry`, `clear`, `config [--retry-seconds N] [--expiry-seconds N]` | очередь входящей почты; `retry` — все ждущие письма сразу; настройки повтора и срока |
+| `eop ndr list`, `ndr show [id]`, `ndr clear` | отбивки, которые fake-EOP «отправил» внешним отправителям |
+| `eop trace [--start ISO] [--end ISO]` | трассировка очереди входящей почты в формах Graph |
 
 **Что делает fake-EOP.** Принимает SMTP на порту 25 только после STARTTLS (до него `530 5.7.0`) с
 сертификатом от CA стенда. Запрашивает клиентский сертификат (Postfix mailcow предъявляет
@@ -139,6 +143,24 @@ CRLF, одиночный LF получает `500 5.5.2 Error: bare <LF> receive
 `blocked-sender` (`SFV:SKB`), `rule-spam` (`SFV:SKS`), `none` (без заголовка) или своя строка вида
 `SFV:SKQ;CAT:SPM`. `--folded` переносит заголовок на несколько строк, как это бывает у настоящего EOP.
 
+**Очередь входящей почты: узел не принимает (R-43).** `eop inbound send` ставит письмо внешнего
+отправителя ящику стенда в очередь fake-EOP (`/opt/fake-eop-data/inbound`), как его принял бы EOP. Процесс
+`serve` раз в 10 секунд (`EOP_INBOUND_TICK`) смотрит очередь и отдаёт письмо `postfix-mailcow:25` с
+заголовками EOP (вердикт `clean`) — сразу и затем каждые `retrySeconds` (900, как у EOP; `eop inbound config
+--retry-seconds 60` — для проверки). Пока узел не отвечает, в журнале fake-EOP — `event=defer` с причиной
+в форме EOP: `450 4.4.316 Connection refused`, `4.4.315` (таймаут), `4.4.318` (обрыв), `4.4.317`, а на
+стенде чаще `450 4.4.312 DNS query failed`: остановленный контейнер пропадает из DNS Docker; `4xx` самого
+узла записывается как есть. Через `expirySeconds` (86400; у одного письма — `--expire-seconds`) письмо
+получает `550 4.4.7 QUEUE.Expired; message expired`, а отправителю пишется отбивка (`multipart/report`,
+`Status: 4.4.7`) в `/opt/fake-eop-data/ndr` — дальше она никуда не уходит. `5xx` узла — отказ и отбивка
+сразу. Трассировка этой очереди в формах Graph (`messageTraces` с `$filter` по `receivedDateTime`, `$top`,
+`@odata.nextLink`; `getDetailsByRecipient` с событиями `Receive`, `Defer`, `Send`, `Fail`) — на
+`http://eop.test.local:8080/v1.0` в сети mailcow и в `eop trace`; панель ветки читает её с
+`MAIL_NODE_TRACE_URL=http://eop.test.local:8080/v1.0` (контейнер панели нужно подключить к сети mailcow).
+Простой узла на стенде: `docker compose stop postfix-mailcow` в `/opt/mailcow` внутри `me-stage`, потом
+`start` (проверено 2026-10-02, требования, раздел 5.9). После проверки — `eop inbound clear`, `eop ndr clear`,
+`eop inbound config --retry-seconds 900 --expiry-seconds 86400`.
+
 **Чего fake-EOP не имитирует.** Интернет и получателей (письма никуда дальше не идут), тенант, DBEB и
 accepted domains (`recipient-denied` отвечает всем получателям одинаково), лимиты и счётчики TERRL,
 исходящую фильтрацию, DKIM-подпись на стороне EOP, диапазоны адресов EOP. Поэтому `eop inject` идёт с
@@ -181,7 +203,8 @@ accepted domains (`recipient-denied` отвечает всем получате�
 
 Тесты fake-EOP: `node --test scripts/deploy/test/fake-eop/eop.test.mjs` (нужен `openssl`; разбор сертификата,
 режимы, полный диалог SMTP с STARTTLS и клиентским сертификатом, строгие строки и лимиты, возобновление
-сессии TLS, inject и коды возврата команды). Правка `extra.cf` — `scripts/deploy/mail-node/extra-cf.sh` (тот же
+сессии TLS, inject и коды возврата команды, очередь входящей почты с повтором, истечением и отбивкой,
+трассировка в формах Graph). Правка `extra.cf` — `scripts/deploy/mail-node/extra-cf.sh` (тот же
 инструмент, которым `setup.sh` ставит relayhost на рабочем узле), тесты — `scripts/deploy/test/stage-eop.bats`. В CI это отдельное задание «Stand fake-EOP».
 
 ## Карантин и rspamd на стенде
