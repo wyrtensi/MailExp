@@ -3,6 +3,7 @@ import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
+import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
 import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1424,8 +1425,9 @@ export default function ComposeModal() {
                       {displayName} &lt;{a.email_address}&gt;
                     </option>
                     {aliases.map(alias => (
-                      <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}>
-                        {alias.name} &lt;{alias.email}&gt;
+                      <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}
+                        disabled={isForeignNodeAlias(a, alias)}>
+                        {alias.name} &lt;{alias.email}&gt;{isForeignNodeAlias(a, alias) ? ` (${t('compose.nodeAliasStaleOption')})` : ''}
                       </option>
                     ))}
                   </optgroup>
@@ -2076,8 +2078,9 @@ export default function ComposeModal() {
                     {displayName} &lt;{a.email_address}&gt;
                   </option>
                   {aliases.map(alias => (
-                    <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}>
-                      {alias.name} &lt;{alias.email}&gt;
+                    <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}
+                      disabled={isForeignNodeAlias(a, alias)}>
+                      {alias.name} &lt;{alias.email}&gt;{isForeignNodeAlias(a, alias) ? ` (${t('compose.nodeAliasStaleOption')})` : ''}
                     </option>
                   ))}
                 </optgroup>

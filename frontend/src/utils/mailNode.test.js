@@ -54,6 +54,7 @@ import {
   isForeignNodeAlias,
   isNodeMailbox,
   mailboxPrefillFromAlias,
+  mailboxWithAddress,
 } from './mailNode.js';
 
 describe('prefilterDoneKey', () => {
@@ -225,6 +226,7 @@ describe('errors', () => {
     assert.equal(mailNodeErrorKey('domain_nothing_to_restart'), 'admin.mailNode.errorNothingToRestart');
     assert.equal(mailNodeErrorKey('mail_node_host_mismatch'), 'admin.mailNode.errorHostMismatch');
     assert.equal(mailNodeErrorKey('node_alias_address_mismatch'), 'admin.aliases.errorNodeAddress');
+    assert.equal(mailNodeErrorKey('address_is_node_alias'), 'admin.accounts.add.domainErrorNodeAlias');
   });
 
   it('shows the node words of a refusal only', () => {
@@ -610,5 +612,14 @@ describe('aliases of node mailboxes keep the mailbox address (D-16)', () => {
       localPart: 'orders', domain: 'example.com', senderName: 'Orders desk',
     });
     assert.deepEqual(mailboxPrefillFromAlias({ name: '', email: 'broken' }), { localPart: 'broken', domain: '', senderName: '' });
+  });
+});
+
+describe('mailboxWithAddress', () => {
+  it('finds a mailbox of the panel by address, any case and spacing', () => {
+    const accounts = [{ id: 'a', email_address: 'Orders@Example.com' }, { id: 'b', email_address: 'sales@example.com' }];
+    assert.equal(mailboxWithAddress(accounts, ' orders@example.COM')?.id, 'a');
+    assert.equal(mailboxWithAddress(accounts, 'none@example.com'), null);
+    assert.equal(mailboxWithAddress(undefined, 'x@example.com'), null);
   });
 });

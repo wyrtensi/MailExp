@@ -60,6 +60,11 @@ test('a removed signature stays removed, and a letter without an author cannot b
   assert.deepEqual(scheduledActions({ status: 'needs_attention', canManage: true, author: null }), ['edit', 'discard']);
 });
 
+test('a letter refused for a stale node alias is edited, not sent again as it is (D-16)', () => {
+  assert.deepEqual(scheduledActions({ status: 'failed', canManage: true, errorCode: 'node_alias_stale', author: { id: 'u' } }), ['edit', 'discard']);
+  assert.equal(sendFailureKey('node_alias_stale'), 'compose.errorNodeAliasStale');
+});
+
 test('failure codes map to their messages and statuses to outcomes', () => {
   assert.equal(sendFailureKey('send_uncertain'), 'scheduled.failure.uncertain');
   assert.equal(sendFailureKey('gmail_invalid_recipient'), 'compose.gmailInvalidRecipient');

@@ -34,14 +34,15 @@ const buttonStyle = (primary, enabled = true) => ({
 // knows and connects it; `onCreated` gets the new account row, with the second name as its alias.
 // `initial` ({ localPart, domain, senderName }) starts the form from given values, as when an
 // administrator turns an alias with another address into its own mailbox (D-16); a domain the node
-// cannot take mailboxes in is not chosen, and the form says so. `onCancel` adds a Cancel button.
+// cannot take mailboxes in is not chosen, and the form says why: a node domain not ready yet, or a
+// domain that is not on the node at all (gmail.com, say). `onCancel` adds a Cancel button.
 export default function DomainMailboxAddForm({ accounts = [], onCreated, initial = null, onCancel = null }) {
   const { t } = useTranslation();
   const [domains, setDomains] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [localPart, setLocalPart] = useState(initial?.localPart ?? '');
   const [domain, setDomain] = useState('');
-  const [initialDomainMissing, setInitialDomainMissing] = useState(false);
+  const [initialDomainProblem, setInitialDomainProblem] = useState(null); // null | 'notReady' | 'notNode'
   const [senderName, setSenderName] = useState(initial?.senderName ?? '');
   const [senderNameAlt, setSenderNameAlt] = useState('');
   const [name, setName] = useState('');
@@ -63,7 +64,9 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
         const list = selectableDomains(data?.domains);
         setDomains(list);
         const wanted = initial?.domain ?? '';
-        setInitialDomainMissing(!!wanted && !list.includes(wanted));
+        if (wanted && !list.includes(wanted)) {
+          setInitialDomainProblem((data?.domains ?? []).some((d) => d.domain === wanted) ? 'notReady' : 'notNode');
+        }
         setDomain((current) => current || (list.includes(wanted) ? wanted : list[0]) || '');
       })
       .catch((err) => { if (live) setLoadError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) }); });
@@ -174,9 +177,9 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
       {localPart && addressError && (
         <div style={{ marginTop: 6, fontSize: 11, color: taken ? 'var(--red)' : 'var(--text-tertiary)' }}>{t(addressError)}</div>
       )}
-      {initialDomainMissing && (
-        <div role="status" data-prefill-domain-missing style={{ marginTop: 6, fontSize: 11, color: 'var(--amber)' }}>
-          {t('admin.accounts.add.domainPrefillMissing', { domain: initial.domain })}
+      {initialDomainProblem && (
+        <div role="status" data-prefill-domain={initialDomainProblem} style={{ marginTop: 6, fontSize: 11, color: 'var(--amber)' }}>
+          {t(initialDomainProblem === 'notReady' ? 'admin.accounts.add.domainPrefillNotReady' : 'admin.accounts.add.domainPrefillNotNode', { domain: initial.domain })}
         </div>
       )}
 

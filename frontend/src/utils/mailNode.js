@@ -158,6 +158,7 @@ const ERROR_KEYS = {
   retention_days_invalid: 'admin.outages.errorRetention',
   trace_cooldown: 'admin.outages.errorCooldown',
   node_alias_address_mismatch: 'admin.aliases.errorNodeAddress',
+  address_is_node_alias: 'admin.accounts.add.domainErrorNodeAlias',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -195,6 +196,12 @@ export function foreignNodeAliases(accounts) {
     }
   }
   return rows.sort((a, b) => String(a.alias.email).localeCompare(String(b.alias.email)));
+}
+
+// The mailbox of the panel with this address (any kind), or null: such an alias cannot become a
+// mailbox, it is only deleted.
+export function mailboxWithAddress(accounts, email) {
+  return (accounts ?? []).find((a) => sameAddress(a?.email_address, email)) ?? null;
 }
 
 // The create-mailbox form's starting values for such an alias: its address split at @ and its

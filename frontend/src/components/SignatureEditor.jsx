@@ -32,7 +32,9 @@ function Sep() {
   return <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 3px', flexShrink: 0 }} />;
 }
 
-export default function SignatureEditor({ value, onChange }) {
+// `labelledBy`: the id of the visible heading that names the field (a contenteditable cannot be the
+// target of <label htmlFor>), given to both the rich editor and the source textarea.
+export default function SignatureEditor({ value, onChange, labelledBy }) {
   const { t } = useTranslation();
   const { addNotification } = useStore();
   const editorRef = useRef(null);
@@ -190,6 +192,7 @@ export default function SignatureEditor({ value, onChange }) {
           value={sourceVal}
           onChange={handleSourceChange}
           spellCheck={false}
+          aria-labelledby={labelledBy}
           style={{
             display: 'block', width: '100%', minHeight: 120,
             padding: '10px 12px', background: 'transparent',
@@ -204,6 +207,9 @@ export default function SignatureEditor({ value, onChange }) {
           ref={editorRef}
           contentEditable
           suppressContentEditableWarning
+          role="textbox"
+          aria-multiline="true"
+          aria-labelledby={labelledBy}
           onInput={emit}
           style={{
             minHeight: 100, padding: '10px 12px',

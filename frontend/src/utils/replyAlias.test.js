@@ -173,3 +173,16 @@ describe('pickReplyAlias with a second sender name', () => {
     }), 'al-other');
   });
 });
+
+describe('pickReplyAlias for a mail node mailbox (D-16)', () => {
+  const aliases = [{ id: 'old', name: 'Orders desk', email: 'orders@example.com' }];
+  const letter = { deliveryAddresses: ['orders@example.com'], toAddresses: [{ email: 'orders@example.com' }], accountEmail: 'sales@example.com' };
+
+  it('never picks an alias with another address: sending from it is refused', () => {
+    assert.equal(pickReplyAlias({ aliases, ...letter, mailNode: true }), null);
+  });
+
+  it('still picks it for a mailbox that is not on the mail node', () => {
+    assert.equal(pickReplyAlias({ aliases, ...letter }), 'old');
+  });
+});

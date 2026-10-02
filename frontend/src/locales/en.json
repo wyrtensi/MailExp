@@ -107,6 +107,7 @@
   "compose": {
     "newMessage": "New Message",
     "errorNodeAliasStale": "This sender address is not a mailbox of its own: choose another From. An administrator can turn it into a separate mailbox.",
+    "nodeAliasStaleOption": "not a mailbox, cannot send",
     "reply": "Reply",
     "replyAll": "Reply All",
     "forward": "Forward",
@@ -1096,7 +1097,9 @@
         "domainDescription": "MailExpert creates it on the mail node and connects it. No password to enter.",
         "domainNotConfigured": "The mail node is not set up yet: ask an administrator.",
         "domainAddressLabel": "Address",
-        "domainPrefillMissing": "{{domain}} is not a ready domain of the mail node, so another domain is chosen: pick the right one or bring {{domain}} through onboarding first.",
+        "domainPrefillNotReady": "{{domain}} is a domain of the mail node that is not ready for mailboxes yet, so another domain is chosen: bring {{domain}} through onboarding first, or pick another domain.",
+        "domainPrefillNotNode": "{{domain}} is not a domain of the mail node (an outside domain such as gmail.com cannot be a node mailbox), so another domain is chosen: pick one of the node, or delete the alias.",
+        "domainErrorNodeAlias": "The mail node has an alias with this address, made in mailcow by hand. Remove it in mailcow first; mail to the address then goes to the new mailbox.",
         "domainLocalPartPh": "name",
         "domainDomainLabel": "Domain",
         "domainNameLabel": "Name in the mailbox list (optional)",
@@ -1246,7 +1249,8 @@
       "addNameButton": "Add sender name",
       "nodeAddressHint": "A different address is a separate mailbox: create one in Add account.",
       "errorNodeAddress": "A mailbox on the mail node sends only from its own address. A different address is a separate mailbox: create one in Add account.",
-      "foreignNodeAlias": "Another address: letters are not sent from it. An administrator turns it into a separate mailbox or deletes it (Settings, Integrations)."
+      "foreignNodeAlias": "Another address: letters are not sent from it. An administrator turns it into a separate mailbox or deletes it (Settings, Integrations).",
+      "foreignNodeAliasOpen": "Open the list"
     },
     "foreignAliases": {
       "title": "Aliases with another address",
@@ -1262,7 +1266,10 @@
       "created": "Mailbox {{email}} created; the alias was removed.",
       "createdAliasKept": "Mailbox {{email}} created, but the alias could not be removed ({{error}}): delete it here.",
       "deleteTitle": "Delete alias?",
-      "deleteMessage": "The alias {{email}} is removed from {{mailbox}}. Nothing changes on the mail node."
+      "deleteMessage": "The alias {{email}} is removed from {{mailbox}}. Nothing changes on the mail node.",
+      "mailboxExists": "A mailbox with this address is already in MailExpert: delete the alias.",
+      "formNote": "The alias signature and Reply-To go to the new mailbox. If an alias with this address was made in mailcow by hand (it delivered to {{mailbox}}), the node refuses the new mailbox until it is removed in mailcow; after that, mail to the address goes to the new mailbox, no longer to {{mailbox}}.",
+      "carryFailed": "The signature or Reply-To of the alias did not reach the new mailbox ({{error}}): set them in its settings."
     },
     "appearance": {
       "title": "Appearance",

@@ -813,8 +813,9 @@ export function AccountsTab() {
     setAliasFormId(alias.id);
     setAliasFormData({
       name: alias.name,
-      // A node mailbox's aliases are names for its own address (D-16): the address is fixed, so
-      // saving an alias with another address left from before keeps the name for this address.
+      // A node mailbox's aliases are names for its own address (D-16): the address is fixed. An alias
+      // with another address left from before is not edited here (no Edit button): an administrator
+      // turns it into a separate mailbox or deletes it (MailNodeForeignAliases).
       email: isNodeMailbox(editTarget) ? editTarget.email_address : alias.email,
       reply_to: alias.reply_to || '',
       signature: alias.signature || '',
@@ -944,21 +945,22 @@ export function AccountsTab() {
                 onBlur={e => e.target.style.borderColor = 'var(--border)'} />
             )}
           </Field>
-          <Field label={t('admin.aliases.replyTo')}>
-            <input value={aliasFormData.reply_to} onChange={e => setAliasFormData(f => ({ ...f, reply_to: e.target.value }))}
+          <Field label={t('admin.aliases.replyTo')} htmlFor="alias-reply-to">
+            <input id="alias-reply-to" value={aliasFormData.reply_to} onChange={e => setAliasFormData(f => ({ ...f, reply_to: e.target.value }))}
               placeholder={t('admin.aliases.replyToPh')} style={inputStyle}
               onFocus={e => e.target.style.borderColor = 'var(--accent)'}
               onBlur={e => e.target.style.borderColor = 'var(--border)'} />
           </Field>
 
           <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+          <div id="alias-signature-label" style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
             {t('admin.aliases.signatureSection')}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
             {t('admin.aliases.signatureNote')}
           </div>
           <SignatureEditor
+            labelledBy="alias-signature-label"
             value={aliasFormData.signature}
             onChange={val => setAliasFormData(f => ({ ...f, signature: val }))}
           />
@@ -1057,6 +1059,17 @@ export function AccountsTab() {
                 {isForeignNodeAlias(editTarget, alias) && (
                   <div data-foreign-node-alias style={{ fontSize: 11, color: 'var(--amber)', marginTop: 2, lineHeight: 1.5 }}>
                     {t('admin.aliases.foreignNodeAlias')}
+                    {isAdmin && (
+                      <>
+                        {' '}
+                        <button type="button" onClick={() => useStore.getState().setAdminTab('integrations')} style={{
+                          background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer',
+                          fontSize: 11, textDecoration: 'underline',
+                        }}>
+                          {t('admin.aliases.foreignNodeAliasOpen')}
+                        </button>
+                      </>
+                    )}
                   </div>
                 )}
                 {alias.reply_to && (
@@ -1066,12 +1079,14 @@ export function AccountsTab() {
                 )}
               </div>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                <IconBtn onClick={() => handleAliasEdit(alias)} title={t('common.edit')}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
-                </IconBtn>
+                {!isForeignNodeAlias(editTarget, alias) && (
+                  <IconBtn onClick={() => handleAliasEdit(alias)} title={t('common.edit')}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                      <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                  </IconBtn>
+                )}
                 <IconBtn onClick={() => handleAliasDelete(alias.id)} title={t('common.delete')} danger>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="3 6 5 6 21 6"/>

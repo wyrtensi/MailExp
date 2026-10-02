@@ -70,7 +70,7 @@ const NODE = account('n1', 'sales@example.com', {
   mail_node: true,
   aliases: [
     { id: 'al-name', account_id: 'n1', name: 'Sales Department', email: 'sales@example.com', reply_to: null, signature: null },
-    { id: 'al-old', account_id: 'n1', name: 'Orders desk', email: 'orders@example.com', reply_to: null, signature: null },
+    { id: 'al-old', account_id: 'n1', name: 'Orders desk', email: 'orders@example.com', reply_to: 'desk@example.com', signature: '<p>Orders</p>' },
   ],
 });
 const GMAIL = account('g1', 'me@gmail.example', {
@@ -98,6 +98,8 @@ beforeEach(() => {
     'GET /api/mail-node/domains': { domains: [{ domain: 'example.com', active: true, state: 'ready' }] },
     'POST /api/accounts': account('n2', 'orders@example.com', { mail_node: true }),
     'DELETE /api/accounts/n1/aliases/al-old': { ok: true },
+    'PUT /api/accounts/n2': { signature: '<p>Orders</p>' },
+    'POST /api/accounts/n2/aliases': { id: 'al-new', account_id: 'n2', name: 'Orders desk', email: 'orders@example.com', reply_to: 'desk@example.com', signature: null },
   };
   mockFetch();
   useStore.setState({ accounts: [NODE, GMAIL], accountsReady: true, user: { id: 'u1', isAdmin: true } });
@@ -156,19 +158,81 @@ describe('aliases with another address on node mailboxes (admin list)', () => {
       { kind: 'domain', localPart: 'orders', domain: 'example.com', senderName: 'Orders desk' },
     );
     assert.ok(calls.some((c) => c.method === 'DELETE' && c.path === '/api/accounts/n1/aliases/al-old'));
+    // The alias signature and Reply-To go to the new mailbox.
+    assert.deepEqual(calls.find((c) => c.method === 'PUT' && c.path === '/api/accounts/n2').body, { signature: '<p>Orders</p>' });
+    assert.deepEqual(calls.find((c) => c.method === 'POST' && c.path === '/api/accounts/n2/aliases').body,
+      { name: 'Orders desk', email: 'orders@example.com', reply_to: 'desk@example.com', signature: null });
     const accounts = useStore.getState().accounts;
-    assert.ok(accounts.some((a) => a.email_address === 'orders@example.com'), 'the new mailbox is in the list');
+    const made = accounts.find((a) => a.email_address === 'orders@example.com');
+    assert.ok(made, 'the new mailbox is in the list');
+    assert.equal(made.signature, '<p>Orders</p>');
+    assert.deepEqual(made.aliases.map((a) => a.reply_to), ['desk@example.com']);
     assert.deepEqual(accounts.find((a) => a.id === 'n1').aliases.map((a) => a.id), ['al-name']);
     assert.ok(host.textContent.includes('admin.foreignAliases.created'));
     await unmount();
   });
 
-  test('a domain the node cannot take is not chosen and the form says so', async () => {
-    useStore.setState({ accounts: [account('n3', 'hr@example.org', { mail_node: true, aliases: [{ id: 'x', name: 'Jobs', email: 'jobs@example.org' }] })] });
+  test('a domain the node cannot take is not chosen, and the form says why', async () => {
+    const legacyOn = (domain) => [account('n3', 'hr@example.com', { mail_node: true, aliases: [{ id: 'x', name: 'Jobs', email: `jobs@${domain}` }] })];
+
+    useStore.setState({ accounts: legacyOn('gmail.example') });
+    let mounted = await mount(React.createElement(MailNodeForeignAliases));
+    await click(button(mounted.host, 'admin.foreignAliases.create'));
+    assert.equal(mounted.host.querySelector('select').value, 'example.com');
+    assert.equal(mounted.host.querySelector('[data-prefill-domain]').dataset.prefillDomain, 'notNode');
+    await mounted.unmount();
+
+    answers['GET /api/mail-node/domains'] = { domains: [
+      { domain: 'example.com', active: true, state: 'ready' }, { domain: 'example.org', active: true, state: 'dns_ok' },
+    ] };
+    useStore.setState({ accounts: legacyOn('example.org') });
+    mounted = await mount(React.createElement(MailNodeForeignAliases));
+    await click(button(mounted.host, 'admin.foreignAliases.create'));
+    assert.equal(mounted.host.querySelector('[data-prefill-domain]').dataset.prefillDomain, 'notReady');
+    await mounted.unmount();
+  });
+
+  test('Cancel closes the form and creates nothing', async () => {
     const { host, unmount } = await mount(React.createElement(MailNodeForeignAliases));
     await click(button(host, 'admin.foreignAliases.create'));
-    assert.equal(host.querySelector('select').value, 'example.com');
-    assert.ok(host.querySelector('[data-prefill-domain-missing]'));
+    assert.ok(host.querySelector('#domain-add-local'));
+    await click(button(host, 'common.cancel'));
+    assert.equal(host.querySelector('#domain-add-local'), null);
+    assert.equal(calls.some((c) => c.method !== 'GET'), false);
+    await unmount();
+  });
+
+  test('an alias that could not be removed after the mailbox was made stays, with a message', async () => {
+    answers['DELETE /api/accounts/n1/aliases/al-old'] = { status: 500, body: { error: 'Database down' } };
+    const { host, unmount } = await mount(React.createElement(MailNodeForeignAliases));
+    await click(button(host, 'admin.foreignAliases.create'));
+    await click(button(host, 'admin.accounts.add.domainNext'));
+    await click(button(host, 'admin.accounts.add.domainCreate'));
+    assert.ok(host.querySelector('[role="alert"]').textContent.includes('admin.foreignAliases.createdAliasKept'));
+    assert.ok(host.querySelector('[data-foreign-alias="al-old"]'), 'the row stays to be deleted by hand');
+    assert.ok(useStore.getState().accounts.some((a) => a.email_address === 'orders@example.com'), 'the mailbox is kept');
+    await unmount();
+  });
+
+  test('an alias already gone (404) counts as removed', async () => {
+    answers['DELETE /api/accounts/n1/aliases/al-old'] = { status: 404, body: { error: 'Alias not found' } };
+    const { host, unmount } = await mount(React.createElement(MailNodeForeignAliases));
+    await click(button(host, 'admin.foreignAliases.create'));
+    await click(button(host, 'admin.accounts.add.domainNext'));
+    await click(button(host, 'admin.accounts.add.domainCreate'));
+    assert.equal(host.querySelector('[role="alert"]'), null);
+    assert.ok(host.textContent.includes('admin.foreignAliases.created'));
+    assert.deepEqual(useStore.getState().accounts.find((a) => a.id === 'n1').aliases.map((a) => a.id), ['al-name']);
+    await unmount();
+  });
+
+  test('an address that is already a mailbox of the panel offers only Delete', async () => {
+    useStore.setState({ accounts: [NODE, GMAIL, account('n9', 'Orders@example.com', { mail_node: true })] });
+    const { host, unmount } = await mount(React.createElement(MailNodeForeignAliases));
+    const row = host.querySelector('[data-foreign-alias="al-old"]');
+    assert.ok(row.querySelector('[data-mailbox-exists]'));
+    assert.equal(button(row, 'admin.foreignAliases.create'), undefined);
+    assert.ok(button(row, 'common.delete'));
     await unmount();
   });
 
@@ -195,6 +259,12 @@ describe('alias editor of a node mailbox', () => {
     await openAliases(host, 'sales@example.com');
     assert.ok(host.textContent.includes('admin.aliases.descriptionNode'));
     assert.equal(host.querySelectorAll('[data-foreign-node-alias]').length, 1, 'the old foreign alias is marked');
+    // The old foreign alias offers Delete only (no Edit that would rewrite its address); the name
+    // with the mailbox address keeps both.
+    assert.equal(host.querySelectorAll('button[title="common.edit"]').length, 1);
+    assert.equal(host.querySelectorAll('button[title="common.delete"]').length, 2);
+    await click(button(host, 'admin.aliases.foreignNodeAliasOpen'));
+    assert.equal(useStore.getState().adminTab, 'integrations', 'the marker leads to the list in Integrations');
 
     await click(button(host, 'admin.aliases.addNameButton'));
     const email = host.querySelector('#alias-email');
@@ -202,7 +272,10 @@ describe('alias editor of a node mailbox', () => {
     assert.equal(email.value, 'sales@example.com');
     assert.equal(email.getAttribute('aria-describedby'), 'alias-email-hint');
     assert.equal(host.querySelector('#alias-email-hint').textContent, 'admin.aliases.nodeAddressHint');
-    assert.equal(host.querySelector('label[for="alias-email"]') !== null, true);
+    assert.ok(host.querySelector('label[for="alias-email"]'));
+    assert.ok(host.querySelector('label[for="alias-reply-to"]'));
+    assert.ok(host.querySelector('#alias-reply-to'));
+    assert.equal(host.querySelector('[contenteditable]').getAttribute('aria-labelledby'), 'alias-signature-label');
     await unmount();
   });
 

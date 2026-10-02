@@ -1974,7 +1974,7 @@ export async function demoRequest(method, path, body = {}) {
     if (foreignNodeAliasAddress(account, body?.email)) throw nodeAliasAddressError();
     const alias = {
       id: `${accountId}-alias-${nextAliasSequence++}`, account_id: accountId,
-      name: body?.name || '', email: body?.email || account.email_address,
+      name: body?.name || '', email: account.mail_node === true ? account.email_address : (body?.email || account.email_address),
       reply_to: body?.reply_to || null, signature: body?.signature || null,
     };
     account.aliases = [...(account.aliases || []), alias];
@@ -1985,9 +1985,11 @@ export async function demoRequest(method, path, body = {}) {
     const account = accountFor(decodeURIComponent(aliasItemMatch[1]));
     const alias = account?.aliases?.find(a => a.id === decodeURIComponent(aliasItemMatch[2]));
     if (!alias) throw demoError('Alias not found');
-    if (foreignNodeAliasAddress(account, body?.email ?? alias.email)) throw nodeAliasAddressError();
+    // As routes/accounts.js: a full alias each time, name and address required.
+    if (!body?.name || !body?.email) throw demoError('Name and email required');
+    if (foreignNodeAliasAddress(account, body.email)) throw nodeAliasAddressError();
     Object.assign(alias, {
-      name: body?.name ?? alias.name, email: body?.email ?? alias.email,
+      name: body.name, email: account.mail_node === true ? account.email_address : body.email,
       reply_to: body?.reply_to ?? alias.reply_to, signature: body?.signature ?? alias.signature,
     });
     return clone(alias);

@@ -700,11 +700,13 @@ test('a node mailbox keeps its address on its aliases and does not send from an 
     { code: 'node_alias_address_mismatch' },
   );
   await assert.rejects(
-    () => demoRequest('PUT', `/accounts/${node.id}/aliases/${legacy.id}`, { name: 'Orders' }),
+    () => demoRequest('PUT', `/accounts/${node.id}/aliases/${legacy.id}`, { name: 'Orders', email: legacy.email }),
     { code: 'node_alias_address_mismatch' },
   );
+  await assert.rejects(() => demoRequest('PUT', `/accounts/${node.id}/aliases/${legacy.id}`, { name: 'Orders' }), /Name and email required/);
   const added = await demoRequest('POST', `/accounts/${node.id}/aliases`, { name: 'Second name', email: node.email_address.toUpperCase() });
   assert.equal(added.name, 'Second name');
+  assert.equal(added.email, node.email_address, 'stored as the mailbox spells its address');
 
   await assert.rejects(
     () => demoRequest('POST', '/mail/send', { accountId: node.id, aliasId: legacy.id, to: ['you@example.com'], subject: 'Hi', body: 'Hello' }),
