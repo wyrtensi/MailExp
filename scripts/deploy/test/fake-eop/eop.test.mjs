@@ -12,6 +12,9 @@ import {
   acceptReply, attribute, dotStuff, eopHeaders, headerMessageId, fold, listMessages, loadMessage, modeReply, newId, parseAddress, readState, saveMessage, smtpSend, writeState,
 } from './lib.mjs';
 import { createServer, MAX_LINE, MAX_SIZE } from './server.mjs';
+import {
+  composeLetter, deferReason, loadInbound, parseTraceFilter, receiveInbound, runInboundPass, traceAnswer,
+} from './inbound.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const T = { timeout: 30000 };
@@ -582,4 +585,111 @@ test('eop.mjs: bad usage exits 2, a bad value exits 1, a wildcard connector is r
   const ok = await cli(['mode', 'tempfail', '--stage', 'data'], env);
   assert.equal(ok.code, 0);
   assert.match(ok.stdout, /mode=tempfail stage=data/);
+});
+
+// --- inbound mail queued while the node is down (R-43) ------------------------------------------
+
+const inboundDirs = (name) => ({ dir: file(`${name}/inbound`), ndrDir: file(`${name}/ndr`) });
+const letter = (dir, { expirySeconds = 86400, now = new Date('2026-10-02T10:00:00Z'), to = ['anna@stage.test'] } = {}) => receiveInbound(dir, {
+  from: 'partner@fabrikam.example', to, subject: 'Order 42', messageId: '<order-42@fabrikam.example>',
+  raw: composeLetter({ from: 'partner@fabrikam.example', to, subject: 'Order 42', messageId: '<order-42@fabrikam.example>', now }), now, expirySeconds,
+});
+
+test('deferReason: the 4.4.x of EOP for each way a connection fails', () => {
+  const reason = (error) => deferReason(error, 'postfix-mailcow').code;
+  assert.equal(reason(Object.assign(new Error('x'), { code: 'ECONNREFUSED' })), '4.4.316');
+  assert.equal(reason(Object.assign(new Error('x'), { code: 'ENOTFOUND' })), '4.4.312');
+  assert.equal(reason(new Error('timeout after 20000 ms')), '4.4.315');
+  assert.equal(reason(new Error('connection closed before the final reply')), '4.4.318');
+  assert.equal(reason(Object.assign(new Error('x'), { code: 'EHOSTUNREACH' })), '4.4.317');
+  assert.match(deferReason(Object.assign(new Error('x'), { code: 'ECONNREFUSED' }), 'postfix-mailcow').text, /^450 4\.4\.316 Connection refused .*LastAttemptedServerName=postfix-mailcow/);
+});
+
+test('runInboundPass: a refused node defers every 15 minutes, a node back takes the letter', T, async () => {
+  const { dir, ndrDir } = inboundDirs('pass-1');
+  const item = letter(dir);
+  const start = new Date('2026-10-02T10:00:00Z');
+  const refused = (one) => smtpSend({ host: '127.0.0.1', port: 1, from: one.from, to: one.to, raw: Buffer.from('x') });
+  const lines = [];
+  let summary = await runInboundPass({ dir, ndrDir, deliver: refused, now: start, log: (line) => lines.push(line) });
+  assert.deepEqual(summary, { tried: 1, delivered: 0, deferred: 1, failed: 0, expired: 0 });
+  let stored = loadInbound(dir, item.id).item;
+  assert.equal(stored.status, 'pending');
+  assert.equal(stored.nextAttemptAt, '2026-10-02T10:15:00.000Z');
+  assert.match(stored.events.at(-1).description, /450 4\.4\.316 Connection refused/);
+  assert.match(lines[0], /event=defer attempt=1 reply="450 4\.4\.316/);
+  // Not due before the next 15 minutes, unless forced.
+  summary = await runInboundPass({ dir, ndrDir, deliver: refused, now: new Date('2026-10-02T10:05:00Z') });
+  assert.equal(summary.tried, 0);
+  summary = await runInboundPass({ dir, ndrDir, deliver: async () => ({ ok: false, reply: '451 4.3.0 try later' }), now: new Date('2026-10-02T10:05:00Z'), force: true });
+  assert.equal(summary.deferred, 1);
+  assert.match(loadInbound(dir, item.id).item.events.at(-1).description, /Remote server returned '451 4\.3\.0 try later'/);
+  summary = await runInboundPass({ dir, ndrDir, deliver: async () => ({ ok: true, reply: '250 2.0.0 Ok: queued as 1A2B3C' }), now: new Date('2026-10-02T10:20:00Z') });
+  assert.equal(summary.delivered, 1);
+  stored = loadInbound(dir, item.id).item;
+  assert.equal(stored.status, 'delivered');
+  assert.deepEqual(stored.events.map((e) => e.event), ['Receive', 'Defer', 'Defer', 'Send']);
+  assert.equal(fs.existsSync(ndrDir), false);
+});
+
+test('runInboundPass: past its expiry a letter fails with 4.4.7 and the sender gets a report; a 5xx fails at once', T, async () => {
+  const { dir, ndrDir } = inboundDirs('pass-2');
+  const expiring = letter(dir, { expirySeconds: 120 });
+  const refusedUser = letter(dir, { to: ['nobody@stage.test'] });
+  const lines = [];
+  const summary = await runInboundPass({
+    dir, ndrDir, now: new Date('2026-10-02T10:03:00Z'), log: (line) => lines.push(line),
+    deliver: async (one) => ({ ok: false, reply: one.to[0] === 'nobody@stage.test' ? '550 5.1.1 <nobody@stage.test>: Recipient address rejected: User unknown' : '250 ok' }),
+  });
+  assert.deepEqual(summary, { tried: 1, delivered: 0, deferred: 0, failed: 1, expired: 1 });
+  const expired = loadInbound(dir, expiring.id).item;
+  assert.equal(expired.status, 'failed');
+  assert.equal(expired.expired, true);
+  assert.match(expired.events.at(-1).description, /550 4\.4\.7 QUEUE\.Expired; message expired/);
+  const ndr = fs.readFileSync(path.join(ndrDir, `${expiring.id}.eml`), 'latin1');
+  assert.match(ndr, /^To: partner@fabrikam\.example\r$/m);
+  assert.match(ndr, /^Status: 4\.4\.7\r$/m);
+  assert.match(ndr, /^Diagnostic-Code: smtp;550 4\.4\.7 QUEUE\.Expired; message expired\r$/m);
+  assert.match(ndr, /report-type=delivery-status/);
+  assert.equal(loadInbound(dir, refusedUser.id).item.expired, false);
+  assert.match(fs.readFileSync(path.join(ndrDir, `${refusedUser.id}.eml`), 'latin1'), /^Status: 5\.1\.1\r$/m);
+  assert.ok(lines.some((line) => /event=fail reply="550 4\.4\.7/.test(line) && /ndr_to=<partner@fabrikam\.example>/.test(line)));
+});
+
+test('traceAnswer: Graph-shaped rows per recipient within the bounds, pages, details per recipient', () => {
+  const { dir } = inboundDirs('trace-1');
+  const first = letter(dir, { to: ['anna@stage.test', "o'neil@stage.test"] });
+  letter(dir, { now: new Date('2026-10-05T10:00:00Z') });
+  const base = 'http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces';
+  const filter = encodeURIComponent('receivedDateTime ge 2026-10-02T09:00:00Z and receivedDateTime le 2026-10-02T11:00:00Z');
+  const page1 = traceAnswer(dir, new URL(`${base}?$filter=${filter}&$top=1`));
+  assert.equal(page1.status, 200);
+  assert.deepEqual(Object.keys(page1.body.value[0]).sort(), ['fromIP', 'id', 'messageId', 'receivedDateTime', 'recipientAddress', 'senderAddress', 'size', 'status', 'subject', 'toIP']);
+  assert.equal(page1.body.value[0].status, 'pending');
+  const page2 = traceAnswer(dir, new URL(page1.body['@odata.nextLink']));
+  assert.equal(page2.body.value[0].recipientAddress, "o'neil@stage.test");
+  assert.equal(page2.body['@odata.nextLink'], undefined);
+  const details = traceAnswer(dir, new URL(`${base}/${first.traceId}/getDetailsByRecipient(recipientAddress='${encodeURIComponent("o''neil@stage.test")}')`));
+  assert.deepEqual(details.body.value.map((e) => e.event), ['Receive']);
+  assert.equal(traceAnswer(dir, new URL(`${base}/${first.traceId}/getDetailsByRecipient(recipientAddress='x@stage.test')`)).status, 404);
+  assert.deepEqual(parseTraceFilter("recipientAddress eq 'Anna@stage.test'"), { start: null, end: null, recipient: 'anna@stage.test' });
+});
+
+test('eop.mjs: inbound send, list, retry, config, trace and ndr', T, async () => {
+  const env = { EOP_DATA: file('cli-inbound') };
+  assert.equal((await cli(['inbound', 'send', '--to', 'anna@stage.test'], env)).code, 2);
+  assert.equal((await cli(['inbound', 'frob'], env)).code, 2);
+  const sent = await cli(['inbound', 'send', '--from', 'partner@fabrikam.example', '--to', 'anna@stage.test,boris@stage.test', '--subject', 'Invoice', '--expire-seconds', '300'], env);
+  assert.equal(sent.code, 0, sent.stderr);
+  assert.match(sent.stdout, /^queued \S+ trace=[0-9a-f-]{36} <inbound-\d+-[0-9a-f]+@fabrikam\.example> to=anna@stage\.test,boris@stage\.test expires=/);
+  assert.match((await cli(['inbound', 'list'], env)).stdout, /pending attempts=0 from=<partner@fabrikam\.example> .* last="Receive: /);
+  assert.match((await cli(['inbound', 'retry'], env)).stdout, /^1 pending letters due now/);
+  assert.match((await cli(['status'], env)).stdout, /inbound=1 pending=1/);
+  assert.equal((await cli(['inbound', 'config', '--retry-seconds', '0'], env)).code, 1);
+  assert.match((await cli(['inbound', 'config', '--retry-seconds', '30', '--expiry-seconds', '600'], env)).stdout, /retrySeconds=30 expirySeconds=600/);
+  const trace = JSON.parse((await cli(['trace'], env)).stdout);
+  assert.deepEqual(trace.value.map((row) => [row.recipientAddress, row.subject, row.status]), [['anna@stage.test', 'Invoice', 'pending'], ['boris@stage.test', 'Invoice', 'pending']]);
+  assert.equal((await cli(['ndr', 'list'], env)).stdout, '');
+  assert.equal((await cli(['ndr', 'show'], env)).code, 1);
+  assert.match((await cli(['inbound', 'clear'], env)).stdout, /inbound queue cleared/);
 });
