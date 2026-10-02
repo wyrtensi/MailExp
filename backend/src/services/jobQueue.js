@@ -1,7 +1,7 @@
 // A general durable job queue (migration 0087, table jobs). Work that runs later, in the background,
 // and survives a restart: the first kind is send_message (undo send and send later, see
-// services/sendQueue.js); reminders, auto-replies, tenant jobs and delayed mailbox actions are meant
-// to follow. docs/architecture/job-queue.md describes how to add a kind.
+// services/sendQueue.js), then the Microsoft tenant's jobs (services/tenant/tenantJobs.js);
+// reminders, auto-replies and delayed mailbox actions are meant to follow. docs/architecture/job-queue.md describes how to add a kind.
 //
 // Life of a job:
 //   1. enqueueJob inserts it queued with a run_at. An enqueue that names a dedupe_key already used
