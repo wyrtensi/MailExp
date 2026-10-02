@@ -39,17 +39,6 @@ backup_configured() {
   [ -z "$(env_missing "$1" "${RESTIC_KEYS[@]}")" ]
 }
 
-# ping_target <base url> <start|success|fail>: the URL of the event (Healthchecks-style: the base
-# URL is success, /start and /fail are the others).
-ping_target() {
-  local base=${1%/}
-  case $2 in
-    success) printf '%s\n' "$base" ;;
-    start | fail) printf '%s/%s\n' "$base" "$2" ;;
-    *) return 1 ;;
-  esac
-}
-
 # backup_checks <weekday 1-7> <tag> <verify 0|1>: what follows a backup. verify: restore into a
 # scratch database and decrypt; check: restic reads back 5% of the data; none. The nightly
 # backup verifies on Sundays and checks on the other days; other tags only with --verify.
@@ -265,19 +254,6 @@ backup_ping_url() {
   url=$(env_get "$ENV_FILE" BACKUP_PING_URL) || url=
   if [ -z "$url" ]; then url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=; fi
   printf '%s\n' "$url"
-}
-
-# send_ping <base url> <start|success|fail> [text]: tells the monitoring service; never fails the
-# caller. The URL carries the check's key, so it reaches curl through a config on a file
-# descriptor, not through argv; curl's own messages are dropped for the same reason.
-send_ping() {
-  local base=$1 kind=$2 body=${3:-} target
-  [ -n "$base" ] || return 0
-  target=$(ping_target "$base" "$kind") || return 0
-  if ! printf '%s' "$body" | curl -fsS -m 10 --retry 2 -o /dev/null --data-binary @- \
-    -K <(printf 'url = "%s"\n' "$target") 2>/dev/null; then
-    warn "could not reach the monitoring service ($kind ping)"
-  fi
 }
 
 # dump_database <dir>: <dir>/db.dump (pg_dump custom format, uncompressed: restic compresses and

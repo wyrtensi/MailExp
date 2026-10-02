@@ -23,6 +23,9 @@ export function createFakeMailcow(initial = {}) {
       ban_time: 1800, max_ban_time: 10000, ban_time_increment: true, max_attempts: 10, retry_window: 600,
       netban_ipv4: 32, netban_ipv6: 128, banlist_id: 'b1', manage_external: 0, whitelist: '', blacklist: '',
     },
+    // Forwarding hosts as Redis keeps them: { host, source, keepSpam } (WHITELISTED_FWD_HOST and
+    // KEEP_SPAM, functions.fwdhost.inc.php).
+    fwdhosts: [],
     restartFails: false,
     // add/global-filter answers "written" without writing (the file is missing in mailcow).
     prefilterLost: false,
@@ -72,6 +75,11 @@ export function createFakeMailcow(initial = {}) {
     }
     if (path === 'get/global_filters/prefilter') return node.prefilter ? node.prefilter : {};
     if (path === 'get/fail2ban') return { ...node.fail2ban, regex: { 1: 'x' }, perm_bans: '', active_bans: '' };
+    if (path === 'get/fwdhost/all') {
+      return node.fwdhosts.length
+        ? node.fwdhosts.map((h) => ({ host: h.host, source: h.source, keep_spam: h.keepSpam ? 'yes' : 'no' }))
+        : {};
+    }
     return null;
   }
 
@@ -147,6 +155,18 @@ export function createFakeMailcow(initial = {}) {
         node.fail2ban.whitelist = listed.sort().join('\n');
         return body.items.map((network) => success('object_modified', network));
       }
+      case 'add/fwdhost': {
+        // An address or network is kept as given; filter_spam other than 1 sets KEEP_SPAM, and adding
+        // an existing host again with filter_spam: 1 clears it.
+        const host = String(body.hostname ?? '').trim();
+        if (!/^[0-9a-fA-F:./]+$/.test(host)) return [danger('invalid_host', host)];
+        const keepSpam = Number(body.filter_spam) !== 1;
+        node.fwdhosts = [...node.fwdhosts.filter((h) => h.host !== host), { host, source: String(body.hostname), keepSpam }];
+        return [success('forwarding_host_added', host)];
+      }
+      case 'delete/fwdhost':
+        node.fwdhosts = node.fwdhosts.filter((h) => !body.includes(h.host));
+        return body.map((host) => success('forwarding_host_removed', host));
       default:
         return { type: 'error', msg: 'route not found' };
     }

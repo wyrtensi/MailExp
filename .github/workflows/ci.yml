@@ -100,8 +100,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # jq: the mail node scripts parse the Microsoft 365 endpoints answers with it (the image has none).
       - name: Deploy script unit tests
-        run: docker run --rm -v "$PWD:/code:ro" -w /code bats/bats:1.14.0 scripts/deploy/test
+        run: docker run --rm -v "$PWD:/code:ro" -w /code --entrypoint bash bats/bats:1.14.0 -c 'apk add --no-cache -q jq && bats scripts/deploy/test'
 
   fake-eop:
     name: Stand fake-EOP

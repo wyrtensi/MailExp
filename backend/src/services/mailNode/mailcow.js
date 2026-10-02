@@ -419,6 +419,32 @@ export async function unwhitelistFail2ban(cfg, networks) {
   return listed.filter((n) => drop.has(n.toLowerCase()));
 }
 
+// mailcow's forwarding hosts (get/fwdhost/all, Redis WHITELISTED_FWD_HOST): addresses and networks
+// rspamd treats as a relay in front of the node (eop-panel-requirements.md, section 2.5): no
+// greylisting, reject lowered to add header, no positive weights from the rbl, policies and hfilter
+// groups. host: as mailcow keeps it (a name given to add/fwdhost becomes its addresses, with the name
+// in source). keepSpam: mailcow's keep_spam "yes", the entry was added without filter_spam, and rspamd
+// accepts its mail without checking it at all.
+export async function listForwardingHosts(cfg) {
+  return asList(await request(cfg, 'GET', 'get/fwdhost/all')).map((h) => ({
+    host: String(h.host ?? '').trim(),
+    source: String(h.source ?? ''),
+    keepSpam: String(h.keep_spam ?? '').toLowerCase() === 'yes',
+  })).filter((h) => h.host);
+}
+
+// Always with filter_spam: 1, never anything else: without it mailcow sets KEEP_SPAM for the host
+// and rspamd stops checking its mail (functions.fwdhost.inc.php, rspamd.local.lua). Adding a host
+// that is listed already replaces it and clears its KEEP_SPAM.
+export async function addForwardingHost(cfg, cidr) {
+  await request(cfg, 'POST', 'add/fwdhost', { hostname: cidr, filter_spam: 1 });
+}
+
+// delete/fwdhost takes the hosts exactly as get/fwdhost/all lists them.
+export async function deleteForwardingHosts(cfg, hosts) {
+  await request(cfg, 'POST', 'delete/fwdhost', hosts);
+}
+
 function mailboxInfo(m) {
   return {
     email: String(m.username ?? '').toLowerCase(),
