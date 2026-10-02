@@ -281,8 +281,9 @@ async function handleSendJob(job, ctx, imapManager) {
   });
 }
 
-// Tells the author (their open tabs) how the letter ended, and every tab to refresh its list.
-function onSendSettled(job) {
+// Tells the author (their open tabs) how the letter ended, and every tab to refresh its list. A
+// failure names the letter's subject to its author only, so they know which one it was.
+async function onSendSettled(job) {
   broadcast({ type: 'scheduled_changed', accountId: job.account_id });
   if (!job.created_by) return;
   if (job.status === 'done') {
@@ -298,9 +299,10 @@ function onSendSettled(job) {
     action: 'message.send_failed',
     details: { jobId: String(job.id), messageId: job.payload?.messageId ?? null, status: job.status, code: job.error_code ?? null },
   });
+  const { rows: [letter] } = await query("SELECT compose->>'subject' AS subject FROM outgoing_messages WHERE job_id = $1", [job.id]);
   broadcast({
     type: 'send_failed', jobId: String(job.id), accountId: job.account_id,
-    status: job.status, code: job.error_code ?? null, error: job.last_error ?? null,
+    status: job.status, code: job.error_code ?? null, error: job.last_error ?? null, subject: letter?.subject ?? null,
   }, job.created_by);
 }
 
@@ -318,7 +320,7 @@ export function registerSendJobKind({ imapManager }) {
     onSettled: (row) => {
       const result = results.get(String(row.id));
       results.delete(String(row.id));
-      onSendSettled({ ...row, result });
+      return onSendSettled({ ...row, result });
     },
   });
 }
