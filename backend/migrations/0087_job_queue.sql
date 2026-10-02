@@ -15,8 +15,11 @@
 -- handing the letter to the mail server). A running job whose lease ran out without it is queued
 -- again; with it, it needs attention.
 -- dedupe_key: an enqueue with the same (kind, dedupe_key) returns the job already there (a double
--- click on Send). created_by / account_id: who asked for the job and which mailbox it is about.
+-- click on Send). created_by / account_id: who asked for the job and which mailbox it is about. A
+-- deleted mailbox leaves its jobs with no account_id: they are failed first (failJobsOfAccount), so
+-- the author hears of an unsent letter instead of it vanishing.
 -- finished_at: when it became done or cancelled; such rows are deleted after a retention period.
+-- Failed and needs_attention rows are deleted 30 days after their last change.
 CREATE TABLE IF NOT EXISTS jobs (
   id                 BIGSERIAL PRIMARY KEY,
   kind               TEXT NOT NULL,
@@ -34,7 +37,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   effect_started_at  TIMESTAMPTZ,
   dedupe_key         TEXT,
   created_by         UUID REFERENCES users(id) ON DELETE SET NULL,
-  account_id         UUID REFERENCES email_accounts(id) ON DELETE CASCADE,
+  account_id         UUID REFERENCES email_accounts(id) ON DELETE SET NULL,
   finished_at        TIMESTAMPTZ,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -48,12 +51,14 @@ CREATE INDEX IF NOT EXISTS idx_jobs_finished ON jobs (finished_at) WHERE finishe
 
 -- The letter a send_message job sends, kept apart from the job so listing jobs never reads it.
 -- compose: what the writer composed (recipients, subject, body, reply context), to reopen it in
--- the composer on undo or edit. mail: the built message (nodemailer options, attachments in
+-- the composer on undo or edit. summary: subject, recipients and attachment count, what the list
+-- of waiting letters shows (so listing never reads the body). mail: the built message (nodemailer options, attachments in
 -- base64), compiled to MIME when it is sent. Deleted as soon as the letter is sent or the job is
--- cancelled; kept with a failed job so the letter can be sent again.
+-- cancelled; kept with a failed job so the letter can be sent again (until the job is deleted).
 CREATE TABLE IF NOT EXISTS outgoing_messages (
   job_id      BIGINT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
   compose     JSONB NOT NULL,
+  summary     JSONB NOT NULL DEFAULT '{}',
   mail        BYTEA NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

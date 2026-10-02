@@ -15,6 +15,7 @@ const jobs = await import('./jobQueue.js');
 const {
   enqueueJob, cancelJob, rescheduleJob, getJob, listJobs, claimDueJobs, runJob, runDueJobs,
   sweepExpiredLeases, cleanupFinishedJobs, registerJobKind, unregisterJobKind, JobError,
+  failJobsOfDeletedAccount, stopJobWorker, _resumeJobWorkerForTests,
 } = jobs;
 
 const ACCOUNT = '40000000-0000-4000-8000-000000000001';
@@ -286,20 +287,67 @@ describe('listing and cleanup', () => {
     expect((await listJobs({ kind: 'test', statuses: ['cancelled'] })).map(j => j.id)).toEqual([b.id]);
   });
 
-  it('deletes finished jobs past the retention, keeps failed ones, and drops content left by finished jobs', async () => {
+  it('deletes finished jobs past the retention, keeps failed ones 30 days, and drops content left by finished jobs', async () => {
     registerJobKind('test', { handler: vi.fn() });
     const { job: old } = await due();
     const { job: recent } = await due();
     const { job: failed } = await due();
+    const { job: expired } = await due();
     await cancelJob(old.id);
     await cancelJob(recent.id);
     await db.query("UPDATE jobs SET finished_at = now() - interval '8 days' WHERE id = $1", [old.id]);
-    await db.query("UPDATE jobs SET status = 'failed', updated_at = now() - interval '90 days' WHERE id = $1", [failed.id]);
-    await db.query("INSERT INTO outgoing_messages (job_id, compose, mail) VALUES ($1, '{}', '\\x00'), ($2, '{}', '\\x00')", [recent.id, failed.id]);
-    expect(await cleanupFinishedJobs()).toBe(1);
+    await db.query("UPDATE jobs SET status = 'failed', updated_at = now() - interval '20 days' WHERE id = $1", [failed.id]);
+    await db.query("UPDATE jobs SET status = 'needs_attention', updated_at = now() - interval '31 days' WHERE id = $1", [expired.id]);
+    await db.query("INSERT INTO outgoing_messages (job_id, compose, mail) VALUES ($1, '{}', '\\x00'), ($2, '{}', '\\x00'), ($3, '{}', '\\x00')", [recent.id, failed.id, expired.id]);
+    expect(await cleanupFinishedJobs()).toBe(2);
     expect(await getJob(old.id)).toBeNull();
+    expect(await getJob(expired.id)).toBeNull();
     expect(await getJob(recent.id)).not.toBeNull();
     const { rows } = await db.query('SELECT job_id FROM outgoing_messages');
     expect(rows.map(r => String(r.job_id))).toEqual([String(failed.id)]);
+  });
+
+  it('fails the jobs of a mailbox about to be deleted, and keeps them once it is gone', async () => {
+    const onSettled = vi.fn();
+    registerJobKind('test', { handler: vi.fn(), onSettled });
+    const { job: waiting } = await due({ delayMs: 60000 });
+    const { job: done } = await due();
+    await runDueJobs({ wait: true });
+    const failed = await failJobsOfDeletedAccount(ACCOUNT);
+    expect(failed.map(j => j.id)).toEqual([waiting.id]);
+    await vi.waitFor(() => expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({ id: waiting.id, status: 'failed', error_code: 'account_missing' })));
+    await db.query('DELETE FROM email_accounts WHERE id = $1', [ACCOUNT]);
+    expect(await getJob(waiting.id)).toMatchObject({ status: 'failed', account_id: null });
+    expect(await getJob(done.id)).toMatchObject({ status: 'done', account_id: null });
+  });
+
+  it('moves a job with a payload change', async () => {
+    registerJobKind('test', { handler: vi.fn() });
+    const { job } = await due({ delayMs: 60000 });
+    const moved = await rescheduleJob(job.id, { runAt: new Date(Date.now() + 3600e3), payloadPatch: { scheduled: true } });
+    expect(moved.payload).toEqual({ n: 1, scheduled: true });
+  });
+});
+
+describe('stopping', () => {
+  it('claims nothing once stopping, and waits for running jobs at most the grace', async () => {
+    let release;
+    const handler = vi.fn(() => new Promise(resolve => { release = resolve; }));
+    registerJobKind('test', { handler });
+    const { job: first } = await due();
+    const started = runDueJobs();
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    await started;
+    const { job: second } = await due();
+    try {
+      expect(await stopJobWorker({ waitMs: 50 })).toBe(false); // the running one did not end in time
+      expect(await runDueJobs({ wait: true })).toEqual([]);
+      expect((await getJob(second.id)).status).toBe('queued');
+      release();
+      expect(await stopJobWorker({ waitMs: 1000 })).toBe(true);
+      expect((await getJob(first.id)).status).toBe('done');
+    } finally {
+      _resumeJobWorkerForTests();
+    }
   });
 });

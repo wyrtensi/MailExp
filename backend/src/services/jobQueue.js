@@ -31,9 +31,12 @@ export const JOB_DEFAULT_MAX_ATTEMPTS = 5;
 export const JOB_RETRY_BASE_MS = 60 * 1000;
 export const JOB_RETRY_MAX_MS = 30 * 60 * 1000;
 // Done and cancelled jobs are kept this long (an enqueue retried with the same key still finds its
-// job), then deleted. Failed jobs and those that need attention stay until someone acts on them.
+// job), then deleted.
 export const JOB_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const JOB_CLEANUP_MS = 60 * 60 * 1000;
+// Failed jobs and those that need attention (an unsent letter) are kept this long after their last
+// change, so someone can act on them.
+export const JOB_KEPT_FAILED_MS = 30 * 24 * 60 * 60 * 1000;
 const ERROR_TEXT_MAX = 500;
 
 export function jobRetryDelayMs(attempts) {
@@ -99,7 +102,7 @@ export async function enqueueJob({
                   ELSE now() + make_interval(secs => $4::double precision / 1000) END,
              $5, $6, $7, $8)
      ON CONFLICT (kind, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
-     RETURNING *`,
+     RETURNING *, (EXTRACT(EPOCH FROM (run_at - now())) * 1000)::float8 AS due_in_ms`,
     [kind, JSON.stringify(payload ?? {}), runAt ? new Date(runAt).toISOString() : null, Number(delayMs) || 0,
       max, createdBy, accountId, dedupeKey]
   );
@@ -107,7 +110,10 @@ export async function enqueueJob({
     wakeAt(job.run_at);
     return { job, created: true };
   }
-  const { rows: [existing] } = await db.query('SELECT * FROM jobs WHERE kind = $1 AND dedupe_key = $2', [kind, dedupeKey]);
+  const { rows: [existing] } = await db.query(
+    'SELECT *, (EXTRACT(EPOCH FROM (run_at - now())) * 1000)::float8 AS due_in_ms FROM jobs WHERE kind = $1 AND dedupe_key = $2',
+    [kind, dedupeKey]
+  );
   return { job: existing, created: false };
 }
 
@@ -147,16 +153,18 @@ export async function cancelJob(id, { from = ['queued'] } = {}, db = { query }) 
 // Moves a job to runAt (a Date) and queues it, while it is in one of `from` (queued by default).
 // Passing failed or needs_attention in `from` runs it again: its attempts and error are cleared.
 // Resolves the row, or null.
-export async function rescheduleJob(id, { runAt, from = ['queued'] }, db = { query }) {
+// payloadPatch: keys merged into the payload with the move (the send queue marks the letter scheduled).
+export async function rescheduleJob(id, { runAt, from = ['queued'], payloadPatch = null }, db = { query }) {
   const { rows: [job] } = await db.query(
     `UPDATE jobs SET run_at = $2::timestamptz, status = 'queued', updated_at = now(),
+                     payload = payload || COALESCE($4::jsonb, '{}'::jsonb),
                      attempts = CASE WHEN status = 'queued' THEN attempts ELSE 0 END,
                      last_error = CASE WHEN status = 'queued' THEN last_error ELSE NULL END,
                      error_code = CASE WHEN status = 'queued' THEN error_code ELSE NULL END,
                      effect_started_at = NULL, claim_token = NULL, lease_until = NULL
       WHERE id = $1 AND status = ANY($3::text[])
      RETURNING *`,
-    [id, new Date(runAt).toISOString(), from]
+    [id, new Date(runAt).toISOString(), from, payloadPatch ? JSON.stringify(payloadPatch) : null]
   );
   if (job) wakeAt(job.run_at);
   return job || null;
@@ -322,19 +330,44 @@ export async function sweepExpiredLeases() {
 }
 
 // Deletes done and cancelled jobs older than the retention, and any letter content left behind by
-// a job that finished.
-export async function cleanupFinishedJobs({ retentionMs = JOB_RETENTION_MS } = {}) {
+// a job that finished. Failed jobs and those that need attention are kept JOB_KEPT_FAILED_MS after
+// their last change (the list says until when), then deleted with what they held.
+export async function cleanupFinishedJobs({ retentionMs = JOB_RETENTION_MS, keptFailedMs = JOB_KEPT_FAILED_MS } = {}) {
   await query(
     `DELETE FROM outgoing_messages o USING jobs j
       WHERE o.job_id = j.id AND j.status IN ('done', 'cancelled')`
   );
   const { rowCount } = await query(
     `DELETE FROM jobs
-      WHERE status IN ('done', 'cancelled')
-        AND finished_at < now() - make_interval(secs => $1::double precision / 1000)`,
-    [retentionMs]
+      WHERE (status IN ('done', 'cancelled')
+             AND finished_at < now() - make_interval(secs => $1::double precision / 1000))
+         OR (status IN ('failed', 'needs_attention')
+             AND updated_at < now() - make_interval(secs => $2::double precision / 1000))`,
+    [retentionMs, keptFailedMs]
   );
   return rowCount;
+}
+
+// Fails the waiting and kept jobs of a mailbox about to be deleted (both deletion paths call it
+// before the row goes), so each ends through its kind's onSettled (the journal, the author told)
+// instead of losing its mailbox silently; the rows stay, with account_id NULL. A job running right
+// now finds the mailbox gone in its handler. Never throws: a deletion is never blocked by this.
+// Resolves the rows it failed.
+export async function failJobsOfDeletedAccount(accountId) {
+  try {
+    const { rows } = await query(
+      `UPDATE jobs SET status = 'failed', error_code = 'account_missing', last_error = 'The mailbox was deleted.',
+                       claim_token = NULL, lease_until = NULL, updated_at = now()
+        WHERE account_id = $1 AND status IN ('queued', 'failed', 'needs_attention')
+       RETURNING *`,
+      [accountId]
+    );
+    for (const row of rows) notifySettled(row);
+    return rows;
+  } catch (err) {
+    console.error('[jobs] Failing the jobs of a deleted mailbox failed:', err?.code || err?.message);
+    return [];
+  }
 }
 
 // ── The worker ──────────────────────────────────────────────────────────────────────────────
@@ -344,13 +377,34 @@ let cleanupTimer = null;
 let wakeTimer = null;
 let wakeAtMs = null;
 let ticking = false;
+let stopping = false;
 let concurrency = JOB_CONCURRENCY;
+// Longest wake timer: a job due further ahead is picked up by the poll (setTimeout overflows past
+// 24.8 days).
+const WAKE_MAX_MS = 60 * 60 * 1000;
+
+// Gives back jobs claimed while the worker was stopping: queued again, the claim not counted.
+async function releaseClaims(jobs) {
+  if (!jobs.length) return;
+  await query(
+    `UPDATE jobs SET status = 'queued', attempts = GREATEST(attempts - 1, 0), claim_token = NULL, lease_until = NULL,
+                     claimed_at = NULL, updated_at = now()
+      WHERE status = 'running' AND claim_token = ANY($1::text[]) AND effect_started_at IS NULL`,
+    [jobs.map(job => job.claim_token)]
+  );
+}
 
 // Claims as many due jobs as there are free slots and starts them. wait: resolve once they ended
-// (tests); the worker's tick does not wait, so a long send never holds up the next claim.
+// (tests); the worker's tick does not wait, so a long send never holds up the next claim. Once the
+// worker is stopping it claims nothing, and gives back what a claim already in flight brought.
 export async function runDueJobs({ wait = false } = {}) {
+  if (stopping) return [];
   const free = concurrency - running.size;
   const jobs = await claimDueJobs(free);
+  if (stopping) {
+    await releaseClaims(jobs);
+    return [];
+  }
   const started = jobs.map((job) => {
     const p = runJob(job).finally(() => running.delete(p));
     running.add(p);
@@ -361,7 +415,7 @@ export async function runDueJobs({ wait = false } = {}) {
 }
 
 async function tick() {
-  if (ticking) return;
+  if (ticking || stopping) return;
   ticking = true;
   try {
     await sweepExpiredLeases();
@@ -376,18 +430,19 @@ async function tick() {
 // Runs a tick at the given due time (a Date or string) if it is before the next poll, so a job
 // due in five seconds starts on time rather than up to a poll late.
 function wakeAt(runAt) {
-  if (!pollTimer) return;
+  if (!pollTimer || stopping) return;
   const at = new Date(runAt).getTime();
   if (!Number.isFinite(at)) return;
   if (wakeAtMs != null && wakeAtMs <= at) return;
   clearTimeout(wakeTimer);
   wakeAtMs = at;
-  wakeTimer = setTimeout(() => { wakeAtMs = null; tick(); }, Math.max(0, at - Date.now()) + 20);
+  wakeTimer = setTimeout(() => { wakeAtMs = null; tick(); }, Math.min(WAKE_MAX_MS, Math.max(0, at - Date.now()) + 20));
   wakeTimer.unref?.();
 }
 
 export function startJobWorker({ pollMs = JOB_POLL_MS, maxConcurrent = JOB_CONCURRENCY } = {}) {
   if (pollTimer) return;
+  stopping = false;
   concurrency = maxConcurrent;
   pollTimer = setInterval(tick, pollMs);
   pollTimer.unref?.();
@@ -398,12 +453,24 @@ export function startJobWorker({ pollMs = JOB_POLL_MS, maxConcurrent = JOB_CONCU
   setTimeout(tick, 0).unref?.();
 }
 
-// Stops claiming; jobs already running finish (resolves once they did).
-export async function stopJobWorker() {
+// Stops claiming at once (a tick in progress included) and waits for the running jobs, at most
+// waitMs, so a send in progress can finish before the process exits. Resolves true when they all
+// ended in time.
+export async function stopJobWorker({ waitMs = 8000 } = {}) {
+  stopping = true;
   clearInterval(pollTimer);
   clearInterval(cleanupTimer);
   clearTimeout(wakeTimer);
   pollTimer = cleanupTimer = wakeTimer = null;
   wakeAtMs = null;
-  await Promise.allSettled([...running]);
+  let timer;
+  const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(false), waitMs); timer.unref?.(); });
+  const ended = await Promise.race([Promise.allSettled([...running]).then(() => true), timeout]);
+  clearTimeout(timer);
+  return ended;
+}
+
+// Test-only: a stopped worker claims again.
+export function _resumeJobWorkerForTests() {
+  stopping = false;
 }

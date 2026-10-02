@@ -13,7 +13,9 @@ import { buildRawMessage } from '../services/gmailApiSender.js';
 import { imapManager } from '../index.js';
 import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
 import { smtpFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
-import { enqueueOutgoingSend, existingSendJob, parseSendAt, sendJobResponse } from '../services/sendQueue.js';
+import {
+  enqueueOutgoingSend, existingSendJob, parseSendAt, pickComposeContext, sendJobResponse, sendRetryConflict,
+} from '../services/sendQueue.js';
 
 // Re-exported for send.smtpConnectionFailure.test.js — the logic itself lives in
 // services/smtpErrors.js, shared with services/mailSendTransport.js and services/ruleForwarder.js.
@@ -101,19 +103,26 @@ router.post('/send', async (req, res) => {
     if (!serialized || Buffer.byteLength(serialized) > COMPOSE_CONTEXT_MAX_BYTES) {
       return res.status(400).json({ error: 'context must be an object under 16 KB' });
     }
-    composeContext = req.body.context;
+    // Only the known keys are kept (services/sendQueue.js COMPOSE_CONTEXT_KEYS): whoever reopens the
+    // letter (its author, or an administrator) gets nothing else of the client's object.
+    composeContext = pickComposeContext(req.body.context);
   }
 
   // Idempotency: the client sends a stable X-Idempotency-Key per logical send. A retry (or a
   // second click) with the same key gets the job the first one enqueued; the database's unique
-  // (kind, dedupe_key) makes two concurrent submits enqueue one job between them.
+  // (kind, dedupe_key) makes two concurrent submits enqueue one job between them. The same key for a
+  // cancelled letter or another time is a different send, and refused.
   const idempotencyKey = typeof req.headers['x-idempotency-key'] === 'string'
     ? req.headers['x-idempotency-key'].slice(0, 128)
     : null;
   const dedupeKey = idempotencyKey ? `${req.session.userId}:${idempotencyKey}` : null;
   if (dedupeKey) {
     const existing = await existingSendJob(dedupeKey);
-    if (existing) return res.json(sendJobResponse(existing));
+    if (existing) {
+      const conflict = sendRetryConflict(existing, sendAt);
+      if (conflict) return res.status(conflict.status).json({ error: conflict.error, code: conflict.code });
+      return res.json(sendJobResponse(existing));
+    }
   }
 
   if (attachments !== undefined) {
@@ -354,7 +363,7 @@ router.post('/send', async (req, res) => {
   const uploads = uploadedAttachments.map((_, i) => inlineImageAttachments.length + i);
 
   try {
-    const { job } = await enqueueOutgoingSend({
+    const { job, created } = await enqueueOutgoingSend({
       userId: req.session.userId,
       accountId: account.id,
       dedupeKey,
@@ -362,6 +371,8 @@ router.post('/send', async (req, res) => {
       compose,
       mail: { options: mailOptions, meta, uploads },
     });
+    const conflict = created ? null : sendRetryConflict(job, sendAt);
+    if (conflict) return res.status(conflict.status).json({ error: conflict.error, code: conflict.code });
     res.json(sendJobResponse(job));
   } catch (err) {
     console.error('Send: enqueue failed:', err.message);

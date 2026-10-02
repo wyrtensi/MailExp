@@ -28,7 +28,9 @@ const sendRoutes = (await import('./send.js')).default;
 const scheduledRoutes = (await import('./scheduled.js')).default;
 const { createAccountSendTransport } = await import('../services/mailSendTransport.js');
 const { registerSendJobKind, SEND_JOB_KIND } = await import('../services/sendQueue.js');
-const { claimDueJobs, runJob, runDueJobs, sweepExpiredLeases, unregisterJobKind } = await import('../services/jobQueue.js');
+const {
+  claimDueJobs, failJobsOfDeletedAccount, runJob, runDueJobs, sweepExpiredLeases, unregisterJobKind,
+} = await import('../services/jobQueue.js');
 
 const ACCOUNT = '40000000-0000-4000-8000-000000000001';
 const ANNA = '42000000-0000-4000-8000-000000000001';
@@ -289,5 +291,85 @@ describe('Failures after the writer left', () => {
     await runDueJobs({ wait: true });
     expect(sendMail).not.toHaveBeenCalled();
     expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'author_disabled' });
+  });
+});
+
+describe('Review round', () => {
+  it('answers how long until the letter is due by the database clock', async () => {
+    const { body } = await send();
+    expect(body.dueInMs).toBeGreaterThan(3000);
+    expect(body.dueInMs).toBeLessThanOrEqual(5000);
+  });
+
+  it('refuses a repeated key for a cancelled letter or another time', async () => {
+    const at = new Date(Date.now() + 3600e3).toISOString();
+    const first = await send({ sendAt: at }, { key: 'k1' });
+    expect((await send({ sendAt: at }, { key: 'k1' })).body.jobId).toBe(first.body.jobId);
+    const other = await send({ sendAt: new Date(Date.now() + 7200e3).toISOString() }, { key: 'k1' });
+    expect(other).toMatchObject({ status: 409, body: { code: 'idempotency_conflict' } });
+    expect((await send({}, { key: 'k1' })).body.code).toBe('idempotency_conflict');
+    await call('POST', `/scheduled/${first.body.jobId}/cancel`, { body: {} });
+    expect((await send({ sendAt: at }, { key: 'k1' })).body.code).toBe('send_cancelled');
+  });
+
+  it('refuses a send time without a time zone', async () => {
+    const local = new Date(Date.now() + 3600e3).toISOString().replace('Z', '');
+    expect((await send({ sendAt: local })).body.code).toBe('send_at_invalid');
+  });
+
+  it('gives an edited scheduled letter back with its time, and keeps context to the known keys', async () => {
+    const at = new Date(Date.now() + 3 * 3600e3);
+    const { body } = await send({ sendAt: at.toISOString(), context: { isReply: true, draftUid: 7, draftFolder: 'Drafts' } });
+    const res = await call('POST', `/scheduled/${body.jobId}/cancel`, { body: { reason: 'edit' } });
+    const answer = await res.json();
+    expect(answer).toMatchObject({ sendAt: at.toISOString(), scheduled: true });
+    expect(answer.compose.context).toEqual({ isReply: true });
+  });
+
+  it('marks a letter moved out of its undo window as scheduled', async () => {
+    const { body } = await send();
+    await call('PATCH', `/scheduled/${body.jobId}`, { body: { sendAt: new Date(Date.now() + 86400e3).toISOString() } });
+    const { letter } = await (await call('GET', `/scheduled/${body.jobId}`)).json();
+    expect(letter.scheduled).toBe(true);
+  });
+
+  it('a delivered letter whose lease was swept meanwhile ends done, never left to be resent', async () => {
+    const { body } = await send();
+    sendMail.mockImplementation(async () => {
+      // The worker stalls past its lease while the server takes the letter.
+      await db.query("UPDATE jobs SET lease_until = now() - interval '1 second' WHERE id = $1", [body.jobId]);
+      await sweepExpiredLeases();
+      return {};
+    });
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(await job(body.jobId)).toMatchObject({ status: 'done', error_code: null });
+    expect(await content(body.jobId)).toBeUndefined();
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'send_done', jobId: body.jobId }), ANNA));
+    const resend = await call('PATCH', `/scheduled/${body.jobId}`, { body: { resend: true } });
+    expect(resend.status).toBe(409);
+  });
+
+  it('a deleted mailbox fails its waiting letters: journaled, the author told, the row kept', async () => {
+    const { body } = await send({ sendAt: new Date(Date.now() + 3600e3).toISOString() });
+    await failJobsOfDeletedAccount(ACCOUNT);
+    await db.query('DELETE FROM email_accounts WHERE id = $1', [ACCOUNT]);
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'account_missing', account_id: null });
+    await vi.waitFor(async () => expect(await audit('message.send_failed')).toHaveLength(1));
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'send_failed', jobId: body.jobId, code: 'account_missing', subject: 'Quarterly numbers' }), ANNA));
+    const { letters } = await (await call('GET', '/scheduled')).json();
+    expect(letters[0]).toMatchObject({ id: body.jobId, status: 'failed', accountId: null });
+    expect(letters[0].keptUntil).toBeTruthy();
+  });
+
+  it('fails a running letter whose mailbox went, and journals the failure of an author-less letter', async () => {
+    const { body } = await send();
+    await db.query('UPDATE jobs SET account_id = NULL, created_by = NULL WHERE id = $1', [body.jobId]);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed' });
+    await vi.waitFor(async () => expect(await audit('message.send_failed')).toHaveLength(1));
   });
 });

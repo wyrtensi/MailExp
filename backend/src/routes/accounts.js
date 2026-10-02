@@ -27,6 +27,7 @@ import { cancelDeletion, requestDeletion } from '../services/mailNode/mailboxDel
 import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
 import { newMailboxRateLimit } from '../services/mailNode/nodeApply.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
+import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 
@@ -642,6 +643,8 @@ router.delete('/:id', async (req, res) => {
     // Delete from DB first (cascades to messages and folders immediately).
     // Disconnect IMAP afterward — fire-and-forget so a slow server logout
     // doesn't block the response.
+    // Letters waiting to be sent from it fail first, so their authors hear of them (jobQueue.js).
+    await failJobsOfDeletedAccount(id);
     await query('DELETE FROM email_accounts WHERE id = $1', [id]);
     // The row is gone, so the entry names the mailbox by the address read above.
     recordAudit({

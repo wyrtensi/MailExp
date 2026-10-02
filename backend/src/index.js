@@ -356,9 +356,11 @@ httpServer.listen(PORT, () => {
 
 process.on('SIGTERM', () => {
   console.log('SIGTERM received — shutting down gracefully');
+  // The job queue stops claiming at once, before anything else (a tick in progress included), and
+  // its running jobs get up to 8 s: a send in progress finishes rather than being cut mid-DATA.
+  const workerStopped = stopJobWorker({ waitMs: 8000 }).catch(() => false);
   httpServer.close(async () => {
-    // Claim no more jobs and let the running ones (a send in progress) finish within the grace.
-    try { await stopJobWorker(); } catch { /* ignore */ }
+    await workerStopped;
     // close() lets pending commands finish before the connection is shut down.
     try { await redisClient.close(); } catch { /* ignore */ }
     process.exit(0);

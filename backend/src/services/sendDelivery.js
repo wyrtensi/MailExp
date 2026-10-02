@@ -168,8 +168,14 @@ export function deliveryFailure(err, account) {
 // snippet). actorUserId: the author, journaled as the sender. markEffectStarted: called right
 // before the letter goes to the mail server. onDelivered(messageId): called once the server took
 // the letter, before anything else (the job records itself done there); its failure never turns
-// a delivered letter into a failed send. Resolves { messageId, sentFolder, sentCopySaved }.
-export async function deliverOutgoingMessage({ account: inputAccount, mail, actorUserId, imapManager, markEffectStarted = async () => {}, onDelivered = async () => {} }) {
+// a delivered letter into a failed send. Resolves { messageId, sentFolder, sentCopySaved }; with
+// detachPostSend, resolves { messageId, postSend } as soon as the server took the letter, postSend
+// being the Sent copy work (a promise of { sentFolder, sentCopySaved } that never rejects), so the
+// caller (a queue worker slot) is free before the up to 20 s APPEND.
+export async function deliverOutgoingMessage({
+  account: inputAccount, mail, actorUserId, imapManager, markEffectStarted = async () => {}, onDelivered = async () => {},
+  detachPostSend = false,
+}) {
   const mailOptions = { ...mail.options };
   const meta = mail.meta;
 
@@ -257,6 +263,15 @@ export async function deliverOutgoingMessage({ account: inputAccount, mail, acto
 
   learnRecipients([...meta.to, ...meta.cc, ...meta.bcc]);
 
+  const postSend = saveSentCopy({ account, mailOptions, meta, rawMessage, serverAutoSaves, imapManager });
+  if (detachPostSend) return { messageId: mailOptions.messageId, postSend };
+  return { messageId: mailOptions.messageId, ...(await postSend) };
+}
+
+// The Sent copy after a delivered send: APPEND it (a server that does not save it itself) or seed
+// its row once the server shows it, then sync Sent. Resolves { sentFolder, sentCopySaved }; never
+// rejects.
+async function saveSentCopy({ account, mailOptions, meta, rawMessage, serverAutoSaves, imapManager }) {
   let sentFolder = null;
   // sentCopySaved: null = not applicable (server auto-saves, or no Sent folder resolved);
   // true/false = whether OUR IMAP APPEND landed the Sent copy.
@@ -345,5 +360,5 @@ export async function deliverOutgoingMessage({ account: inputAccount, mail, acto
     console.error('Post-send processing failed:', err.message);
     sentCopySaved = false;
   }
-  return { messageId: mailOptions.messageId, sentFolder, sentCopySaved };
+  return { sentFolder, sentCopySaved };
 }
