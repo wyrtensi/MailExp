@@ -56,6 +56,7 @@ import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABE
 import { isValidForwardAddress } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
+import { buildAccountSearchIndex, searchAccounts } from '../utils/accountSearch.js';
 import { LANGUAGES } from '../utils/language.js';
 import { providerIdsBackfillText } from '../utils/providerIdsBackfill.js';
 import { threadModeLabel, threadModeOf, threadRecomputeText, threadSwitchTarget } from '../utils/threadMode.js';
@@ -472,9 +473,10 @@ function threadingBlockedMessage(err, t) {
   }
 }
 
-function AccountsTab() {
+// Exported (like ThemesTab below) only so AccountsTab.render.test.js can mount it.
+export function AccountsTab() {
   const { t } = useTranslation();
-  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, addAccountRequested, clearAddAccountRequest } = useStore();
+  const { accounts, setAccounts, updateAccount, setUnreadCounts, addNotification, backfillProgress, user, addAccountRequested, clearAddAccountRequest, accountSettingsRequested, clearAccountSettingsRequest, accountsReady } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subview, setSubview] = useState('list'); // 'list' | 'add' | 'edit' | 'folders' | 'aliases'
   const [editTarget, setEditTarget] = useState(null);
@@ -515,6 +517,37 @@ function AccountsTab() {
     setAddKind(null);
     setSubview('add');
   }, [addAccountRequested, clearAddAccountRequest]);
+
+  // The sidebar's "Account settings" item names the account (openAccountSettings): open that
+  // account's own settings view, the edit form. The request stays until the account is in the
+  // list, because the form works from the whole account object; one that never arrives (deleted
+  // in the meantime) is dropped once the list is loaded, so it cannot linger and open a view later.
+  useEffect(() => {
+    if (!accountSettingsRequested) return;
+    const target = accounts.find(a => a.id === accountSettingsRequested);
+    if (!target) {
+      if (accountsReady) clearAccountSettingsRequest();
+      return;
+    }
+    clearAccountSettingsRequest();
+    setEditTarget(target);
+    setSubview('edit');
+  }, [accountSettingsRequested, accounts, accountsReady, clearAccountSettingsRequest]);
+
+  // Search over the list below. Local state: it is this screen's own query, not the sidebar's
+  // mailbox filter. The searchable text of every account is built once per account list, so a
+  // keystroke is only a substring scan.
+  const [searchQuery, setSearchQuery] = useState('');
+  const mailNodeLabel = t('admin.accounts.mailNodeBadge');
+  const searchIndex = useMemo(
+    () => buildAccountSearchIndex(accounts, { mailNodeLabel }),
+    [accounts, mailNodeLabel],
+  );
+  const searching = searchQuery.trim() !== '';
+  const shownAccounts = useMemo(
+    () => (searching ? searchAccounts(searchIndex, searchQuery) : accounts),
+    [searching, searchIndex, searchQuery, accounts],
+  );
 
   // Alias form state
   const [aliasFormMode, setAliasFormMode] = useState(null); // null | 'add' | 'edit'
@@ -852,7 +885,7 @@ function AccountsTab() {
         <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 20 }}>
           {editTarget.email_address}
         </div>
-        <AccountForm initial={editTarget} onSave={handleEdit} onCancel={() => { setSubview('list'); setEditTarget(null); }} />
+        <AccountForm key={editTarget.id} initial={editTarget} onSave={handleEdit} onCancel={() => { setSubview('list'); setEditTarget(null); }} />
       </div>
     );
   }
@@ -1140,7 +1173,42 @@ function AccountsTab() {
         </div>
       )}
 
-      {accounts.map(account => (
+      {accounts.length > 1 && (
+        <div style={{ marginBottom: 14 }}>
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            onKeyDown={e => {
+              // Escape empties the box (and is not passed on while there is something to empty).
+              if (e.key === 'Escape' && searchQuery) { setSearchQuery(''); e.stopPropagation(); }
+            }}
+            placeholder={t('admin.accounts.search.placeholder')}
+            aria-label={t('admin.accounts.search.label')}
+            spellCheck={false}
+            autoComplete="off"
+            style={inputStyle}
+            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+            onBlur={e => e.target.style.borderColor = 'var(--border)'}
+          />
+          {/* One live region that is always in the page (a region that mounts with its text is not
+              reliably announced): the count while there are results, the empty-state message when
+              there are none. */}
+          <div role="status" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 5, minHeight: 14 }}>
+            {!searching ? '' : shownAccounts.length > 0
+              ? t('admin.accounts.search.count', { count: accounts.length, shown: shownAccounts.length, total: accounts.length })
+              : t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
+          </div>
+        </div>
+      )}
+
+      {searching && accounts.length > 0 && shownAccounts.length === 0 && (
+        <div aria-hidden="true" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-tertiary)', fontSize: 13 }}>
+          {t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
+        </div>
+      )}
+
+      {shownAccounts.map(account => (
         <div key={account.id} style={{
           border: '1px solid var(--border-subtle)', borderRadius: 10,
           background: 'var(--bg-tertiary)', marginBottom: 10, overflow: 'hidden',
@@ -1338,7 +1406,7 @@ function AccountsTab() {
 }
 
 // ─── Themes Tab ───────────────────────────────────────────────────────────────
-// Exported (only this one, everything else here stays private) so ThemesTab.render.test.js can
+// Exported (with AccountsTab and LayoutsTab; everything else here stays private) so ThemesTab.render.test.js can
 // mount it directly instead of the whole admin panel, for the "как в системе" checkbox (#508).
 export function ThemesTab() {
   const { t } = useTranslation();
@@ -1781,10 +1849,11 @@ function SwipeActionIcon({ action, size = 17 }) {
   return <svg {...common}><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a1 1 0 001 1h14a1 1 0 001-1V8"/><polyline points="9 13 12 16 15 13"/><line x1="12" y1="11" x2="12" y2="16"/></svg>;
 }
 
-function LayoutsTab() {
+// Exported (like AccountsTab) only so LayoutsTab.render.test.js can mount it.
+export function LayoutsTab() {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, hoverActionSet, setHoverActionSet, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender } = useStore();
+  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, hoverActionSet, setHoverActionSet, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender, sortAccountsByLatest, setSortAccountsByLatest } = useStore();
   const [senderFaviconsError, setSenderFaviconsError] = useState('');
 
   // "Set MailExpert as your default email app": registerProtocolHandler is the
@@ -1910,6 +1979,25 @@ function LayoutsTab() {
             </button>
           );
         })}
+      </div>
+
+      {/* Sidebar */}
+      <div style={{ marginTop: 28, paddingTop: 22, borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
+          {t('admin.appearance.sidebarTitle')}
+        </div>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={sortAccountsByLatest}
+            onChange={e => setSortAccountsByLatest(e.target.checked)}
+            style={{ marginTop: 2, flexShrink: 0 }}
+          />
+          <div>
+            <div>{t('admin.appearance.sortAccountsByLatest')}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.appearance.sortAccountsByLatestHint')}</div>
+          </div>
+        </label>
       </div>
 
       {/* Message list behaviour */}
@@ -8270,6 +8358,7 @@ function makeSearchIndex(t) {
     { label: tabLabel('theme'), keywords: ['theme', 'dark', 'light', 'color', 'colour', 'dark mode', 'light mode'], tab: 'appearance', subtab: 'theme', breadcrumb: `${tabLabel('appearance')} › ${tabLabel('theme')}` },
     // Appearance > Layout
     { label: t('admin.appearance.layout'), keywords: ['layout', 'pane', 'split', 'preview', 'reading pane', 'side by side', 'stacked'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
+    { label: t('admin.appearance.sortAccountsByLatest'), keywords: ['sidebar', 'account order', 'sort accounts', 'latest mail', 'pin', 'pinned', 'order'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.scrollingMode'), keywords: ['scroll', 'infinite', 'paginated', 'pagination', 'pages'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.perPagePaginated'), keywords: ['per page', 'batch', 'messages per page', 'count', '25', '50', '100', '200', 'page size'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.hoverQuickActionsMode'), keywords: ['hover', 'quick actions', 'hover buttons', 'row actions'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },

@@ -36,6 +36,7 @@ import { loadRecompute, recomputeState, recordRecomputeError } from './threading
 import { restoreNodeMailboxPassword } from './mailNode/passwordRestore.js';
 import { currentAuthPass, noteRestoredPassword } from './mailNode/currentPassword.js';
 import { recordAudit } from './auditLog.js';
+import { recordInboxArrival } from './accountReceived.js';
 import { MoveQueue } from './moveQueue.js';
 import { randomUUID } from 'crypto';
 
@@ -4661,6 +4662,9 @@ export class ImapManager {
         let newMessages = [];
         let insertedCount = 0;
         let broadcastedNewMessages = false;
+        // The newest arrival into the INBOX in this pass (ms), read or unread: what the account's
+        // last_received_at moves to (services/accountReceived.js).
+        let inboxArrivalAt = null;
 
         // Inbox-ingest facts core hands to plugins after this batch (via the `inboxIngest` hook):
         //   • newInboxIds — the id of every row this sync newly inserts into INBOX, read or unread.
@@ -4845,6 +4849,10 @@ export class ImapManager {
             ]);
             if (result.rows[0]?.is_new) {
               insertedCount++;
+              if (folder === 'INBOX') {
+                const arrived = safeDate(parsed.date).getTime();
+                if (inboxArrivalAt === null || arrived > inboxArrivalAt) inboxArrivalAt = arrived;
+              }
               const report = deliveryReportOf(msg.bodyStructure);
               if (report) {
                 deliveryReports.push({ uid: Number(parsed.uid), report, inReplyTo, references: refs, date: safeDate(parsed.date) });
@@ -5168,6 +5176,13 @@ export class ImapManager {
               });
             }
           }
+        }
+
+        // The mailbox received mail: record it and tell the clients, also when every arrival was
+        // already read (new_messages above carries only the unread ones). A failure here must not
+        // fail the sync batch: the next arrival moves the date on.
+        if (inboxArrivalAt !== null) {
+          await recordInboxArrival(account, inboxArrivalAt, (event) => this.broadcast(event), logAccount);
         }
 
         // Inbox-ingest: hand the newly-arrived INBOX rows to any active ingest plugin so it can

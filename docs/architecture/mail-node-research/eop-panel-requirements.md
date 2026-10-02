@@ -1320,7 +1320,7 @@ queue id другому письму) или другой отправитель
 экраны — `MailNodeOutagesSection` («Интеграции» администратора, под «Эксплуатацией узла»),
 `MailNodeOutageNotice` (над списком писем ящика, `MessageList`), правила — `frontend/src/utils/mailNodeOutage.js`,
 демо — `frontend/src/demo/outages.js`; fake-EOP — `scripts/deploy/test/fake-eop/inbound.mjs`. Порядок для
-администратора — [runbook, раздел 6д](../../operations/mail-node.md). Миграция `0085_mail_node_outages.sql`:
+администратора — [runbook, раздел 6д](../../operations/mail-node.md). Миграция `0086_mail_node_outages.sql`:
 `mail_node_outages` (окно: начало, конец, `detected`/`manual`, плановое ли, причина, что упало, свидетельства
 лога, последний проход трассировки; открытое найденное окно — не больше одного) и `mail_node_outage_letters`
 (строка на окно, id трассировки и получателя: отправитель, тема, когда EOP получил, статус трассировки,

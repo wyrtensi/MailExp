@@ -3,7 +3,7 @@ import { recordAudit } from '../auditLog.js';
 import { parseWholeNumber } from './mailcow.js';
 import { SYSTEM_ACTOR } from './domains.js';
 
-// Windows during which the mail node could not take mail from EOP (R-43; migration 0085). EOP keeps
+// Windows during which the mail node could not take mail from EOP (R-43; migration 0086). EOP keeps
 // what it could not deliver for at most 24 hours, retrying every 15 minutes, then returns it to the
 // sender with 550 4.4.7 QUEUE.Expired; the panel cannot make EOP retry, flush or resend (owner's
 // option A, D-15: observe and report). What became of the letters of a window is the message

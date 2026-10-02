@@ -1442,6 +1442,74 @@ describe('syncMessages — EOP category (R-41)', () => {
   });
 });
 
+describe('syncMessages — the mailbox\'s last received mail (email_accounts.last_received_at)', () => {
+  // The sidebar orders mailboxes by the newest ARRIVAL into the INBOX: a letter stored for the first
+  // time, read or unread, whatever becomes of it afterwards.
+  async function syncOne({ folder = 'INBOX', isNew = true, isRead = true, date = new Date('2026-10-01T10:00:00Z') } = {}) {
+    const account = {
+      id: 'acct-lr', user_id: 'user-1', email_address: 'me@example.com',
+      gtd_enabled: false, categorization_enabled: false, imap_host: 'imap.example.com',
+    };
+    const client = {
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      mailbox: { exists: 1, uidValidity: 100, highestModseq: 500n },
+      fetch: vi.fn(async function* () { yield { uid: 501 }; }),
+    };
+    query.mockReset();
+    sendPushToActiveUsers.mockResolvedValue();
+    query.mockImplementation((sql) => {
+      if (sql.includes('SELECT uid_validity, highest_modseq FROM folders')) return Promise.resolve({ rows: [{ uid_validity: 100, highest_modseq: '500' }] });
+      if (sql.includes('COUNT(*) FILTER (WHERE is_read = false)') && !sql.includes('UPDATE folders')) return Promise.resolve({ rows: [{ n: 0 }] });
+      if (sql.includes('COALESCE(MAX(uid), 0)')) return Promise.resolve({ rows: [{ max_uid: 0 }] });
+      if (sql.includes('INSERT INTO messages')) return Promise.resolve({ rows: [{ id: 'x', is_new: isNew }] });
+      if (sql.includes('UPDATE email_accounts') && sql.includes('last_received_at')) {
+        return Promise.resolve({ rows: [{ last_received_at: date.toISOString() }] });
+      }
+      return Promise.resolve({ rows: [] });
+    });
+    parseMessage.mockReset();
+    parseMessage.mockResolvedValue({
+      uid: 501, messageId: '<lr@x>', subject: 'Hello', fromName: 'Pat', fromEmail: 'pat@example.net',
+      to: [], cc: [], replyTo: [], inReplyTo: null, references: null, date,
+      snippet: 'hi', isRead, isStarred: false, hasAttachments: false, flags: isRead ? ['\\Seen'] : [], isBulk: false, parsedHeaders: {},
+    });
+    const mgr = {
+      ...noMoves(), broadcast: vi.fn(), scheduleCountRefresh: vi.fn(),
+      // What an unread arrival sets going afterwards: not under test here.
+      prefetchNewMessageBodies: vi.fn(() => Promise.resolve()), upsertAutoContacts: vi.fn(() => Promise.resolve()),
+    };
+    await ImapManager.prototype.syncMessages.call(mgr, account, client, folder, 50, false, true);
+    const update = query.mock.calls.find(([sql]) => sql.includes('UPDATE email_accounts') && sql.includes('last_received_at'));
+    return { update, events: mgr.broadcast.mock.calls.map(([event]) => event) };
+  }
+
+  it('records a letter that arrived already read, and tells the clients (new_messages would not)', async () => {
+    const { update, events } = await syncOne({ isRead: true });
+    expect(update[1]).toEqual(['acct-lr', '2026-10-01T10:00:00.000Z']);
+    expect(events.find(e => e.type === 'account_received')).toEqual({
+      type: 'account_received', accountId: 'acct-lr', lastReceivedAt: '2026-10-01T10:00:00.000Z',
+    });
+    expect(events.some(e => e.type === 'new_messages')).toBe(false);
+  });
+
+  it('records an unread arrival too', async () => {
+    const { update, events } = await syncOne({ isRead: false });
+    expect(update).toBeTruthy();
+    expect(events.some(e => e.type === 'account_received')).toBe(true);
+  });
+
+  it('records nothing for a letter the mailbox already had', async () => {
+    const { update, events } = await syncOne({ isNew: false });
+    expect(update).toBeUndefined();
+    expect(events.some(e => e.type === 'account_received')).toBe(false);
+  });
+
+  it('records nothing for mail stored in another folder: only the inbox receives', async () => {
+    const { update } = await syncOne({ folder: 'Archive' });
+    expect(update).toBeUndefined();
+  });
+});
+
 describe('syncMessages — unread_count recompute ordering (folder badge fix)', () => {
   it('recomputes folders.unread_count from rows AFTER inserting new messages', async () => {
     // The provisional unread_count written before the fetch left on-demand folders (e.g. Junk)
