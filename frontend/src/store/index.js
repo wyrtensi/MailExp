@@ -21,6 +21,7 @@ import {
 import { applyGtdRemovalGuard } from '../utils/pendingGtdRemovals.js';
 import { DEFAULT_HOVER_ACTIONS, sanitizeHoverActionSet } from '../utils/hoverActions.js';
 import { clampRightSidebarWidth } from '../utils/rightSidebar.js';
+import { pinAccountIds, prunePinnedIds, unpinAccountIds } from '../utils/accountOrder.js';
 import { threadCacheKey } from '../utils/threadKey.js';
 import {
   cacheFolderOrderFromPreferences,
@@ -178,8 +179,18 @@ export const useStore = create((set, get) => ({
       clearTimeout(pendingCountTimer);
       pendingCountTimer = null;
     }
+    // One person leaves, another (or nobody) takes the tab: the sidebar's per-user view (pins, the
+    // order switch, which mailboxes are expanded) must not be inherited. The first sign-in of a
+    // page load (nobody -> someone) keeps what this browser cached for that person's sake.
+    const leaving = get().user != null && get().user.id !== user?.id;
+    if (leaving) {
+      for (const key of ['mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts']) {
+        localStorage.removeItem(key);
+      }
+    }
     set(state => ({
       user,
+      ...(leaving ? { pinnedAccounts: [], sortAccountsByLatest: true, expandedAccounts: {} } : {}),
       ...(state.user?.id !== user?.id ? {
         // An expired session shows the sign-in screen without a page reload, so the next
         // person to sign in on this tab must not inherit the previous user's mail or draft.
@@ -599,12 +610,20 @@ export const useStore = create((set, get) => ({
   // Admin panel
   showAdmin: false,
   adminTab: 'accounts', // 'accounts' | 'appearance' | 'integrations' | 'users'
-  setShowAdmin: (v) => set({ showAdmin: v }),
+  // Closing the settings also drops a request still waiting for the (lazy-loaded) panel to take it,
+  // so it cannot fire later and open a view nobody asked for.
+  setShowAdmin: (v) => set(v ? { showAdmin: true } : { showAdmin: false, addAccountRequested: false, accountSettingsRequested: null }),
   setAdminTab: (t) => set({ adminTab: t }),
   // Set by the sidebar's "Add account" item; the accounts tab opens its add view and clears it.
   addAccountRequested: false,
   openAddAccount: () => set({ showAdmin: true, adminTab: 'accounts', addAccountRequested: true }),
   clearAddAccountRequest: () => set({ addAccountRequested: false }),
+  // Set by the sidebar's "Account settings" item with the account's id: the accounts tab opens
+  // that account's own settings view (the edit form) and clears it. Same hand-off as above, so
+  // the target survives the tab not being mounted yet.
+  accountSettingsRequested: null,
+  openAccountSettings: (accountId) => set({ showAdmin: true, adminTab: 'accounts', accountSettingsRequested: accountId || null }),
+  clearAccountSettingsRequest: () => set({ accountSettingsRequested: null }),
 
   // Contacts view
   showContacts: false,
@@ -1062,6 +1081,61 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ folderOrder: next });
   },
 
+  // Sidebar account list order (utils/accountOrder.js). Pinned mailboxes stay on top in the order
+  // they were pinned; the others rise by their latest received mail unless that is switched off.
+  // Both are per-user preferences, saved with the others so they follow the user across devices.
+  pinnedAccounts: (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('mailexpert_pinned_accounts') || '[]');
+      return Array.isArray(saved) ? saved.filter(id => typeof id === 'string') : [];
+    } catch { return []; }
+  })(),
+  // Local only: the server is told by pinAccount / unpinAccount (what changed) or
+  // reorderPinnedAccounts (the whole new order), never by a blind write of this list.
+  setPinnedAccounts: (ids) => {
+    const next = Array.isArray(ids) ? ids : [];
+    localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(next));
+    set({ pinnedAccounts: next });
+  },
+  // A pin or unpin is sent at once as the one change it is (not queued with the other preferences,
+  // whose queue keeps only the last value of a key), and the server applies it to ITS list: a tab
+  // holding a stale list cannot overwrite a pin made on another device. Pins of mailboxes that are
+  // gone are dropped from the local list on the way, never while the account list is still loading
+  // (an empty list would wipe every pin).
+  pinAccount: (accountId) => {
+    const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
+    const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
+    setPinnedAccounts(pinAccountIds(current, accountId));
+    api.savePreferences({ pinAccount: accountId }).catch(err => console.error('Failed to save the pin:', err?.message || err));
+  },
+  unpinAccount: (accountId) => {
+    const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
+    const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
+    setPinnedAccounts(unpinAccountIds(current, accountId));
+    api.savePreferences({ unpinAccount: accountId }).catch(err => console.error('Failed to save the unpin:', err?.message || err));
+  },
+  // Move up / down among the pinned mailboxes: the whole new order is the change.
+  reorderPinnedAccounts: (ids) => {
+    get().setPinnedAccounts(ids);
+    schedulePrefSave({ pinnedAccounts: get().pinnedAccounts });
+  },
+  sortAccountsByLatest: localStorage.getItem('mailexpert_sort_accounts_by_latest') !== 'false',
+  setSortAccountsByLatest: (val) => {
+    localStorage.setItem('mailexpert_sort_accounts_by_latest', String(val));
+    set({ sortAccountsByLatest: val });
+    schedulePrefSave({ sortAccountsByLatest: val });
+  },
+  // A new_messages event for the inbox: that mailbox just received mail, which is newer than what
+  // the last account list said. Only ever moves the date forward; nothing is saved or refetched.
+  noteAccountReceived: (accountId, receivedAt) => set(state => {
+    const account = state.accounts.find(a => a.id === accountId);
+    const incoming = Date.parse(receivedAt);
+    if (!account || Number.isNaN(incoming)) return {};
+    const current = Date.parse(account.last_received_at);
+    if (!Number.isNaN(current) && current >= incoming) return {};
+    return { accounts: state.accounts.map(a => (a.id === accountId ? { ...a, last_received_at: receivedAt } : a)) };
+  }),
+
   // Sidebar tree state — persisted so the tree looks the same after reload/re-login
   expandedAccounts: (() => {
     try { return JSON.parse(localStorage.getItem('mailexpert_expanded_accounts') || '{}'); }
@@ -1235,6 +1309,16 @@ export const useStore = create((set, get) => ({
       if (prefs.expandedAccounts && typeof prefs.expandedAccounts === 'object' && !Array.isArray(prefs.expandedAccounts)) {
         localStorage.setItem('mailexpert_expanded_accounts', JSON.stringify(prefs.expandedAccounts));
         set({ expandedAccounts: prefs.expandedAccounts });
+      }
+      // What the server says is the whole truth for this user: a key it does not have means no
+      // pins and the default order, not whatever the previous user of this tab left behind.
+      {
+        const pinned = Array.isArray(prefs.pinnedAccounts) ? prefs.pinnedAccounts.filter(id => typeof id === 'string') : [];
+        localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(pinned));
+        set({ pinnedAccounts: pinned });
+        const sortByLatest = typeof prefs.sortAccountsByLatest === 'boolean' ? prefs.sortAccountsByLatest : true;
+        localStorage.setItem('mailexpert_sort_accounts_by_latest', String(sortByLatest));
+        set({ sortAccountsByLatest: sortByLatest });
       }
       if (Array.isArray(prefs.collapsedFolders)) {
         localStorage.setItem('mailexpert_collapsed_folders', JSON.stringify(prefs.collapsedFolders));

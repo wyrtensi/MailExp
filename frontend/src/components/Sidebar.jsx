@@ -3,6 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { unreadBadge } from '../utils/unreadBadge.js';
 import { filterAccounts } from '../utils/accountFilter.js';
+import { useStableAccountOrder } from '../hooks/useStableAccountOrder.js';
+import { useRovingRows } from '../hooks/useRovingRows.js';
+import { manualMoveNeighbour, movePinnedId, prunePinnedIds } from '../utils/accountOrder.js';
 import { HEALTH_LABEL_KEYS, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { api } from '../utils/api.js';
@@ -21,7 +24,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import LogoMark from './LogoMark.jsx';
 import ProfileModal from './ProfileModal.jsx';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
-import { CheckIcon, CloseIcon } from './UiIcons.jsx';
+import { CheckIcon, CloseIcon, PinIcon } from './UiIcons.jsx';
 import { PendingDeletionLine } from './MailboxDeletionNotice.jsx';
 
 const ICONS = {
@@ -129,6 +132,7 @@ function isProtectedFolder(folder, folderMappings) {
 // ─── Sidebar context menu (folders + accounts) ────────────────────────────────
 function SidebarCtxMenu({ x, y, items, title, subtitle, onClose }) {
   const menuRef = useRef(null);
+  const listRef = useRef(null);
   const uiScale = useUiScale();
   const [pos, setPos] = useState({ x, y });
 
@@ -147,22 +151,69 @@ function SidebarCtxMenu({ x, y, items, title, subtitle, onClose }) {
   const onCloseRef = useRef(onClose);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
 
+  const enabledItems = () => [...(listRef.current?.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])') ?? [])];
+
+  // Focus goes to the first item when the menu opens, and comes back to whatever had it (the row
+  // the menu was opened from) when the menu closes, however it closes. After a click elsewhere the
+  // focus belongs to what was clicked and is left alone.
+  useEffect(() => {
+    const opener = document.activeElement;
+    const menu = menuRef.current;
+    enabledItems()[0]?.focus({ preventScroll: true });
+    return () => {
+      const holder = document.activeElement;
+      const focusLost = !holder || holder === document.body || menu?.contains(holder);
+      if (focusLost && opener && opener !== document.body && opener.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, []);
+
   useEffect(() => {
     const handleMouseDown = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) onCloseRef.current();
     };
-    const handleKey = (e) => { if (e.key === 'Escape') onCloseRef.current(); };
+    // Capture phase, and stopped: Escape closes this menu and nothing else (not a dialog under it,
+    // not a remapped global shortcut).
+    const handleKey = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onCloseRef.current();
+    };
     document.addEventListener('mousedown', handleMouseDown);
-    document.addEventListener('keydown', handleKey);
+    document.addEventListener('keydown', handleKey, true);
     return () => {
       document.removeEventListener('mousedown', handleMouseDown);
-      document.removeEventListener('keydown', handleKey);
+      document.removeEventListener('keydown', handleKey, true);
     };
   }, []);
+
+  // The arrow keys walk the enabled items; Tab leaves the menu (it closes, focus returns to the
+  // row), so focus never wanders off with the menu still open. The keys it uses do not reach the
+  // app's global shortcut handler, whatever they are remapped to.
+  const handleMenuKeyDown = (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+      onCloseRef.current();
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const list = enabledItems();
+    if (!list.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const at = list.indexOf(document.activeElement);
+    let next;
+    if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = list.length - 1;
+    else if (e.key === 'ArrowDown') next = (at + 1) % list.length;
+    else next = at <= 0 ? list.length - 1 : at - 1;
+    list[next].focus({ preventScroll: true });
+  };
 
   return (
     <div
       ref={menuRef}
+      onKeyDown={handleMenuKeyDown}
       style={{
         position: 'fixed', left: descale(pos.x, uiScale), top: descale(pos.y, uiScale),
         background: 'var(--bg-elevated)',
@@ -178,9 +229,13 @@ function SidebarCtxMenu({ x, y, items, title, subtitle, onClose }) {
           from { opacity: 0; transform: scale(0.96) translateY(-3px); }
           to   { opacity: 1; transform: scale(1) translateY(0); }
         }
+        .sidebar-ctx-item:focus { outline: none; }
+        /* !important: the item's own inline background (the pointer highlight) would win otherwise */
+        .sidebar-ctx-item:focus-visible { background: var(--bg-hover) !important; }
+        .sidebar-ctx-item-danger:focus-visible { background: rgba(248,113,113,0.08) !important; color: var(--red) !important; }
       `}</style>
 
-      {/* Header */}
+      {/* Header: a label for the menu below, not an item of it */}
       {(title || subtitle) && (
         <div style={{
           padding: '9px 13px 7px',
@@ -205,10 +260,10 @@ function SidebarCtxMenu({ x, y, items, title, subtitle, onClose }) {
         </div>
       )}
 
-      <div style={{ padding: '4px 0' }}>
+      <div ref={listRef} role="menu" aria-label={[title, subtitle].filter(Boolean).join(' - ') || undefined} style={{ padding: '4px 0' }}>
         {items.map((item, i) => {
           if (item.separator) {
-            return <div key={i} style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />;
+            return <div key={i} role="separator" style={{ height: 1, background: 'var(--border-subtle)', margin: '3px 0' }} />;
           }
           return (
             <CtxMenuItem
@@ -229,11 +284,23 @@ function SidebarCtxMenu({ x, y, items, title, subtitle, onClose }) {
   );
 }
 
+// tabIndex -1: reachable by the menu's own arrow keys, never by Tab (Tab closes the menu). The
+// highlight follows the pointer, or keyboard focus (:focus-visible), but a focus the menu gave its
+// first item on opening does not light it up under a mouse user's pointer.
 function CtxMenuItem({ icon, label, onClick, danger, disabled }) {
   const [hov, setHov] = useState(false);
   return (
     <div
+      role="menuitem"
+      tabIndex={-1}
+      aria-disabled={disabled ? 'true' : undefined}
+      className={danger ? 'sidebar-ctx-item sidebar-ctx-item-danger' : 'sidebar-ctx-item'}
       onClick={disabled ? undefined : onClick}
+      onKeyDown={disabled ? undefined : (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.stopPropagation();
+        activateOnKey(onClick)(e);
+      }}
       onMouseEnter={() => !disabled && setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
@@ -258,6 +325,9 @@ function CtxMenuItem({ icon, label, onClick, danger, disabled }) {
   );
 }
 
+// The longest the account list stays frozen for one drag (see dragInProgress in Sidebar).
+const DRAG_FREEZE_LIMIT_MS = 60000;
+
 // Theme variables per health code, so the indicator follows light and dark themes.
 const HEALTH_COLORS = {
   healthy: 'var(--green)',
@@ -273,7 +343,7 @@ export default function Sidebar() {
   const uiScale = useUiScale();
   const {
     accounts, unreadCounts, selectedAccountId, selectedFolder,
-    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount,
+    setSelectedAccount, setShowAdmin, setAdminTab, openCompose, openAddAccount, openAccountSettings,
     folders, setFolders, setAccounts, user, setUser, lockScreen, sidebarCollapsed: sidebarCollapsedPref, toggleSidebar,
     blockRemoteImages, setBlockRemoteImages, setMobileSidebarOpen, addNotification,
     searchAllFolders, setSearchAllFolders,
@@ -287,6 +357,7 @@ export default function Sidebar() {
     isSidebarResizing,
     showContacts, setShowContacts,
     accountFilter, setAccountFilter,
+    pinnedAccounts, sortAccountsByLatest, pinAccount, unpinAccount, reorderPinnedAccounts,
   } = useStore();
 
   const isMobile = useMobile();
@@ -297,10 +368,6 @@ export default function Sidebar() {
   // While the input is hidden the filter is not applied either, so a leftover query can
   // never hide an account the user has no way to bring back.
   const showAccountFilter = accounts.length > 1 && !sidebarCollapsed;
-  const visibleAccounts = useMemo(
-    () => (showAccountFilter ? filterAccounts(accounts, accountFilter) : accounts),
-    [showAccountFilter, accounts, accountFilter],
-  );
 
   // Close the mobile drawer whenever the user navigates to a different folder/account
   useEffect(() => {
@@ -474,6 +541,52 @@ export default function Sidebar() {
   const [createName, setCreateName] = useState('');
   const createInputRef = useRef(null);
 
+  // A drag of anything (a message onto a folder, a folder, a favorite) is under way. Tracked on
+  // the document because a message drag starts in the message list, outside this component.
+  // A drag that is cancelled or whose source left the page may never report its end to the
+  // document (a dragend goes to the source element), and the list would stay frozen. So it also
+  // ends when the pointer moves with no button down (pointer events stop for the whole of a native
+  // drag), when a dragend or drop is seen anywhere in the window, and after a minute at the latest.
+  const [dragInProgress, setDragInProgress] = useState(false);
+  useEffect(() => {
+    let safety = null;
+    const end = () => { clearTimeout(safety); safety = null; setDragInProgress(false); };
+    const begin = () => {
+      setDragInProgress(true);
+      clearTimeout(safety);
+      safety = setTimeout(end, DRAG_FREEZE_LIMIT_MS);
+    };
+    const pointerMoved = (e) => { if (e.buttons === 0) end(); };
+    document.addEventListener('dragstart', begin);
+    window.addEventListener('dragend', end, true);
+    window.addEventListener('drop', end, true);
+    window.addEventListener('pointermove', pointerMoved, true);
+    return () => {
+      clearTimeout(safety);
+      document.removeEventListener('dragstart', begin);
+      window.removeEventListener('dragend', end, true);
+      window.removeEventListener('drop', end, true);
+      window.removeEventListener('pointermove', pointerMoved, true);
+    };
+  }, []);
+
+  // The mailboxes in sidebar order: pinned first, then by latest received mail (when that is on),
+  // then the filter. The rows hold still while a menu is open or a drag is under way, so the one
+  // being aimed at cannot move out from under the pointer. This one list serves the expanded and
+  // the collapsed sidebar alike.
+  // (Every drag, a favorite's or a folder's included, starts with a dragstart: dragInProgress is
+  // the one signal, and the one with a way out if the drag's own state is ever left behind.)
+  const orderFrozen = !!accountCtxMenu || !!folderCtxMenu || dragInProgress;
+  const orderedAccounts = useStableAccountOrder(accounts, {
+    pinnedIds: pinnedAccounts, sortByLatest: sortAccountsByLatest, frozen: orderFrozen,
+  });
+  const visibleAccounts = useMemo(
+    () => (showAccountFilter ? filterAccounts(orderedAccounts, accountFilter) : orderedAccounts),
+    [showAccountFilter, orderedAccounts, accountFilter],
+  );
+  const pinnedSet = useMemo(() => new Set(pinnedAccounts), [pinnedAccounts]);
+  const roving = useRovingRows();
+
   // Per-account toggle to reveal hidden folders
   const [showHiddenFor, setShowHiddenFor] = useState(new Set()); // Set of accountIds
   const toggleShowHidden = useCallback((accountId) => {
@@ -551,7 +664,8 @@ export default function Sidebar() {
       'mailexpert_page_size', 'mailexpert_scroll_mode',
       'mailexpert_threaded_view', 'mailexpert_plaintext_email',
       'mailexpert_hover_quick_actions', 'mailexpert_swipe_actions',
-      'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders',
+      'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders', 'mailexpert_pinned_accounts',
+      'mailexpert_sort_accounts_by_latest',
     ].forEach(k => localStorage.removeItem(k));
     setUser(null);
     window.location.href = res?.endSessionUrl || '/login';
@@ -706,12 +820,14 @@ export default function Sidebar() {
     }
   };
 
+  // A hand-made move swaps the mailbox with the next unpinned one as the list is shown, so the
+  // row the person sees move is the one that moves; the swap is made in the server's own order.
   const handleMoveAccount = useCallback(async (account, direction) => {
+    const targetAccount = manualMoveNeighbour(orderedAccounts, pinnedAccounts, account.id, direction);
+    if (!targetAccount) return;
     const idx = accounts.findIndex(a => a.id === account.id);
-    if (idx === -1) return;
-    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (targetIdx < 0 || targetIdx >= accounts.length) return;
-    const targetAccount = accounts[targetIdx];
+    const targetIdx = accounts.findIndex(a => a.id === targetAccount.id);
+    if (idx === -1 || targetIdx === -1) return;
     const newOrder = [...accounts];
     newOrder[idx] = accounts[targetIdx];
     newOrder[targetIdx] = accounts[idx];
@@ -725,7 +841,7 @@ export default function Sidebar() {
       setAccounts(accounts);
       addNotification({ title: t('sidebar.accountMenu.moveFailed'), body: err.message });
     }
-  }, [accounts, setAccounts, addNotification, t]);
+  }, [accounts, orderedAccounts, pinnedAccounts, setAccounts, addNotification, t]);
 
   // ── Folder context menu items ──────────────────────────────────────────────
   const buildFolderMenuItems = (accountId, folderObj) => {
@@ -807,9 +923,16 @@ export default function Sidebar() {
 
   // ── Account context menu items ─────────────────────────────────────────────
   const buildAccountMenuItems = (account) => {
-    const idx = accounts.findIndex(a => a.id === account.id);
-    const isFirst = idx === 0;
-    const isLast = idx === accounts.length - 1;
+    const isPinned = pinnedSet.has(account.id);
+    // Move up / down: a pinned mailbox moves among the pinned ones (it reorders the pins, and
+    // always shows); an unpinned one moves among the unpinned, by the server's own order, which
+    // only shows while the list is not ordered by latest mail.
+    const pinnedUp = isPinned ? movePinnedId(pinnedAccounts, accounts, account.id, 'up') : null;
+    const pinnedDown = isPinned ? movePinnedId(pinnedAccounts, accounts, account.id, 'down') : null;
+    const canMove = isPinned ? prunePinnedIds(pinnedAccounts, accounts).length > 1 : (accounts.length > 1 && !sortAccountsByLatest);
+    const isFirst = isPinned ? !pinnedUp : !manualMoveNeighbour(orderedAccounts, pinnedAccounts, account.id, 'up');
+    const isLast = isPinned ? !pinnedDown : !manualMoveNeighbour(orderedAccounts, pinnedAccounts, account.id, 'down');
+    const moveBy = (direction, pinnedNext) => (isPinned ? reorderPinnedAccounts(pinnedNext) : handleMoveAccount(account, direction));
     const items = [
       {
         label: t('sidebar.accountMenu.newFolder'),
@@ -833,28 +956,39 @@ export default function Sidebar() {
       },
       { separator: true },
     ];
-    if (accounts.length > 1) {
+    items.push(isPinned
+      ? {
+        label: t('sidebar.accountMenu.unpin'),
+        icon: <PinIcon size={14} crossed />,
+        action: () => unpinAccount(account.id),
+      }
+      : {
+        label: t('sidebar.accountMenu.pin'),
+        icon: <PinIcon size={14} />,
+        action: () => pinAccount(account.id),
+      });
+    if (canMove) {
       items.push(
         {
           label: t('sidebar.accountMenu.moveUp'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="18 15 12 9 6 15"/></svg>,
-          action: () => handleMoveAccount(account, 'up'),
+          action: () => moveBy('up', pinnedUp),
           disabled: isFirst,
         },
         {
           label: t('sidebar.accountMenu.moveDown'),
           icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><polyline points="6 9 12 15 18 9"/></svg>,
-          action: () => handleMoveAccount(account, 'down'),
+          action: () => moveBy('down', pinnedDown),
           disabled: isLast,
         },
-        { separator: true },
       );
     }
     items.push(
+      { separator: true },
       {
         label: t('sidebar.accountMenu.settings'),
         icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
-        action: () => { setAdminTab('accounts'); setShowAdmin(true); },
+        action: () => openAccountSettings(account.id),
       },
       {
         label: t('sidebar.accountMenu.reconnect'),
@@ -984,7 +1118,14 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav style={{ flex: 1, overflow: 'hidden auto', padding: '4px 8px' }}>
+      {/* The rows (favorites, mailboxes, folders) are one tab stop: arrows move between them,
+          Shift+F10 / the Menu key opens a row's context menu (hooks/useRovingRows.js). */}
+      <nav
+        ref={roving.containerRef}
+        onKeyDown={roving.onKeyDown}
+        onFocus={roving.onFocus}
+        style={{ flex: 1, overflow: 'hidden auto', padding: '4px 8px' }}
+      >
         {/* Favorites section */}
         {!sidebarCollapsed && favoriteFolders.length > 0 && (() => {
           const visibleFaves = favoriteFolders.filter(({ accountId }) => accounts.some(a => a.id === accountId));
@@ -1010,6 +1151,8 @@ export default function Sidebar() {
                 return (
                   <div
                     key={`${accountId}:${path}`}
+                    data-nav-row={`fav:${accountId}:${path}`}
+                    aria-current={isActive ? 'true' : undefined}
                     className="no-callout"
                     onDragOver={e => {
                       e.preventDefault();
@@ -1282,8 +1425,14 @@ export default function Sidebar() {
           const healthTitle = health === 'failed' && account.sync_error
             ? t('sidebar.health.failedDetail', { detail: account.sync_error })
             : healthLabel;
+          const isPinnedRow = pinnedSet.has(account.id);
+          const pinnedLabel = t('sidebar.pinned');
           const rowLabel = collapsedTooltip(
-            health === 'healthy' ? account.email_address : `${account.email_address} — ${healthLabel}`,
+            [
+              account.email_address,
+              ...(health === 'healthy' ? [] : [healthLabel]),
+              ...(isPinnedRow ? [pinnedLabel] : []),
+            ].join(' — '),
             sidebarCollapsed,
           );
           const hasInbox = hasRenderedInbox(accountFolders, {
@@ -1317,16 +1466,18 @@ export default function Sidebar() {
                     e.currentTarget.style.background = 'transparent';
                 }}
                 onClick={onAccountClick}
-                onContextMenu={!sidebarCollapsed ? (e) => openAccountCtxMenu(e, account) : undefined}
+                onContextMenu={(e) => openAccountCtxMenu(e, account)}
                 title={rowLabel}
                 aria-label={rowLabel}
                 role={sidebarCollapsed ? 'button' : undefined}
-                tabIndex={sidebarCollapsed ? 0 : undefined}
-                onKeyDown={sidebarCollapsed ? activateOnKey(selectInbox) : undefined}
+                data-nav-row={`account:${account.id}`}
+                aria-expanded={sidebarCollapsed ? undefined : !!expanded}
+                aria-current={isAccountActive ? 'true' : undefined}
               >
                 {/* Account indicator */}
                 {sidebarCollapsed ? (
                   <div style={{
+                    position: 'relative',
                     width: 28, height: 28, borderRadius: 7,
                     background: account.color + '22',
                     border: `1px solid ${account.color}66`,
@@ -1337,6 +1488,16 @@ export default function Sidebar() {
                     userSelect: 'none',
                   }}>
                     {(account.name || account.email_address || '?').charAt(0).toUpperCase()}
+                    {/* The row's own label already says "pinned"; the icon is for the eye only. */}
+                    {isPinnedRow && (
+                      <span aria-hidden="true" style={{
+                        position: 'absolute', top: -4, right: -4, width: 14, height: 14, borderRadius: '50%',
+                        background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <PinIcon size={9} />
+                      </span>
+                    )}
                   </div>
                 ) : (
                   <div style={{
@@ -1391,6 +1552,16 @@ export default function Sidebar() {
                           {t('sidebar.accountMenu.reconnect')}
                         </button>
                       )}
+                      {isPinnedRow && (
+                        <span
+                          role="img"
+                          aria-label={pinnedLabel}
+                          title={pinnedLabel}
+                          style={{ display: 'flex', color: 'var(--text-tertiary)' }}
+                        >
+                          <PinIcon size={11} />
+                        </span>
+                      )}
                       <span
                         role="img"
                         aria-label={healthTitle}
@@ -1412,6 +1583,8 @@ export default function Sidebar() {
                       )}
                       {/* Expand toggle */}
                       <button
+                        data-nav-toggle
+                        tabIndex={-1}
                         onClick={e => { e.stopPropagation(); toggleAccount(account.id); }}
                         aria-label={expanded ? t('sidebar.collapseAccount', { name: account.name || account.email_address }) : t('sidebar.expandAccount', { name: account.name || account.email_address })}
                         title={expanded ? t('sidebar.collapseAccount', { name: account.name || account.email_address }) : t('sidebar.expandAccount', { name: account.name || account.email_address })}
@@ -1567,6 +1740,9 @@ export default function Sidebar() {
                         }}
                         onMouseEnter={e => { if (!isFolderSelected && !isRenaming) e.currentTarget.style.background = 'var(--bg-tertiary)'; }}
                         onMouseLeave={e => { if (!isFolderSelected) e.currentTarget.style.background = 'transparent'; }}
+                        data-nav-row={`folder:${account.id}:${folder.path}`}
+                        aria-expanded={hasChildren ? isExpanded : undefined}
+                        aria-current={isFolderSelected ? 'true' : undefined}
                         onClick={() => !isRenaming && setSelectedAccount(account.id, folder.path)}
                         onContextMenu={e => openFolderCtxMenu(e, account.id, folder)}
                         onDragOver={event => {
@@ -1614,6 +1790,8 @@ export default function Sidebar() {
                         {/* Chevron toggle for parent folders; invisible spacer for leaf folders to align icons */}
                         {hasChildren ? (
                           <button
+                            data-nav-toggle
+                            tabIndex={-1}
                             onClick={e => { e.stopPropagation(); toggleCollapsedFolder(account.id, folder.path); }}
                             aria-label={isExpanded ? t('sidebar.collapseFolder', { name: folder.name }) : t('sidebar.expandFolder', { name: folder.name })}
                             title={isExpanded ? t('sidebar.collapseFolder', { name: folder.name }) : t('sidebar.expandFolder', { name: folder.name })}

@@ -188,6 +188,13 @@ export function useWebSocket(enabled = true) {
         break;
       }
 
+      // The server recorded an arrival into this mailbox's INBOX (read or unread, whatever became of
+      // the letter since): its latest-received date, which orders the sidebar. The server's value
+      // only; the client derives nothing from the letters it happens to see.
+      case 'account_received':
+        if (data.accountId && data.lastReceivedAt) useStore.getState().noteAccountReceived(data.accountId, data.lastReceivedAt);
+        break;
+
       case 'exists_hint':
         // EXISTS reports membership, not UNSEEN. The status observer supplies badges.
         break;

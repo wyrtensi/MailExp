@@ -196,7 +196,7 @@ describe('sync intervals are install-wide', () => {
     await patchPreferences({ session: { userId: 'user-1' }, body: { syncInterval: '15', folderSyncInterval: '0' } }, res);
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/syncInterval|folderSyncInterval/);
-    expect(params).toHaveLength(41);
+    expect(params).toHaveLength(45);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
@@ -244,5 +244,149 @@ describe('PATCH /auth/preferences hoverActionSet (#440)', () => {
     query.mockClear();
     await call({ hoverActionSet: 'markRead' }); // not an array — ignored, not stored
     expect(query.mock.calls[0][1][39]).toBeNull();
+  });
+});
+
+describe('PATCH /auth/preferences pinnedAccounts', () => {
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const call = async (body) => {
+    const req = { session: { userId: 'user-1' }, body };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences(req, res);
+    return res;
+  };
+
+  it('merges the pin list into preferences as JSONB, in pin order', async () => {
+    const res = await call({ pinnedAccounts: [B, A] });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('pinnedAccounts', $42::jsonb)");
+    expect(params[41]).toBe(JSON.stringify([B, A]));
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+  });
+
+  it('stores only account ids, once each', async () => {
+    await call({ pinnedAccounts: [A, 'junk', 7, A, B, { id: A }] });
+    expect(query.mock.calls[0][1][41]).toBe(JSON.stringify([A, B]));
+  });
+
+  it('stores an empty list, which is how the last pin is removed', async () => {
+    await call({ pinnedAccounts: [] });
+    expect(query.mock.calls[0][1][41]).toBe('[]');
+  });
+
+  it('leaves the stored list untouched when the key is absent', async () => {
+    await call({ theme: 'dark' });
+    expect(query.mock.calls[0][1][41]).toBeNull();
+    expect(query.mock.calls[0][1][43]).toBeNull();
+    expect(query.mock.calls[0][1][44]).toBeNull();
+  });
+
+  it('rejects a list that is not an array without querying, like a bad sort switch', async () => {
+    for (const bad of [A, null, {}, 7, 'x']) {
+      query.mockClear();
+      const res = await call({ pinnedAccounts: bad });
+      expect(res.status, JSON.stringify(bad)).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith({ error: 'pinnedAccounts must be an array of account ids' });
+      expect(query).not.toHaveBeenCalled();
+    }
+  });
+
+  it('pins one id with an atomic append, lower-cased', async () => {
+    await call({ pinAccount: A.toUpperCase() });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('pinnedAccounts'");
+    expect(sql).toContain('$44::text');
+    expect(params[43]).toBe(A);
+    expect(params[44]).toBeNull();
+    expect(params[41]).toBeNull();
+  });
+
+  it('unpins one id with an atomic removal', async () => {
+    await call({ unpinAccount: B });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('$45::text');
+    expect(params[44]).toBe(B);
+    expect(params[43]).toBeNull();
+  });
+
+  it('rejects a malformed id, or both operations at once, without querying', async () => {
+    for (const body of [{ pinAccount: 'nope' }, { unpinAccount: 5 }, { pinAccount: null }, { pinAccount: A, unpinAccount: B }]) {
+      query.mockClear();
+      const res = await call(body);
+      expect(res.status, JSON.stringify(body)).toHaveBeenCalledWith(400);
+      expect(query).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('PATCH /auth/preferences sortAccountsByLatest', () => {
+  const call = async (body) => {
+    const req = { session: { userId: 'user-1' }, body };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await patchPreferences(req, res);
+    return res;
+  };
+
+  it('merges the boolean into preferences as JSONB, true and false alike', async () => {
+    await call({ sortAccountsByLatest: false });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('sortAccountsByLatest', $43::boolean)");
+    expect(params[42]).toBe(false);
+    query.mockClear();
+    await call({ sortAccountsByLatest: true });
+    expect(query.mock.calls[0][1][42]).toBe(true);
+  });
+
+  it('rejects a non-boolean without querying', async () => {
+    const res = await call({ sortAccountsByLatest: 'yes' });
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({ error: 'sortAccountsByLatest must be a boolean' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('leaves the stored value untouched when the key is absent', async () => {
+    await call({ theme: 'dark' });
+    expect(query.mock.calls[0][1][42]).toBeNull();
+  });
+});
+
+describe('GET /auth/preferences pinnedAccounts', () => {
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const GONE = '33333333-3333-4333-8333-333333333333';
+
+  it('drops the pins of mailboxes that no longer exist, keeping the pin order', async () => {
+    query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT preferences')) return { rows: [{ preferences: { pinnedAccounts: [B, GONE, A] } }] };
+      if (sql.includes('FROM email_accounts')) return { rows: [{ id: A }, { id: B }] };
+      return { rows: [] };
+    });
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await getPreferences({ session: { userId: 'user-1' } }, res);
+    expect(res.json.mock.calls[0][0].pinnedAccounts).toEqual([B, A]);
+    const lookup = query.mock.calls.find(([sql]) => sql.includes('FROM email_accounts'));
+    expect(lookup[1]).toEqual([[B, GONE, A]]);
+  });
+
+  it('asks nothing about mailboxes when nothing is pinned', async () => {
+    query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT preferences')) return { rows: [{ preferences: { pinnedAccounts: [] } }] };
+      return { rows: [] };
+    });
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await getPreferences({ session: { userId: 'user-1' } }, res);
+    expect(res.json.mock.calls[0][0].pinnedAccounts).toEqual([]);
+    expect(query.mock.calls.some(([sql]) => sql.includes('FROM email_accounts'))).toBe(false);
+  });
+
+  it('cleans a stored value that is not a list of ids', async () => {
+    query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT preferences')) return { rows: [{ preferences: { pinnedAccounts: ['junk', 3] } }] };
+      return { rows: [] };
+    });
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    await getPreferences({ session: { userId: 'user-1' } }, res);
+    expect(res.json.mock.calls[0][0].pinnedAccounts).toEqual([]);
   });
 });

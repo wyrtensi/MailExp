@@ -606,3 +606,66 @@ test('the demo sends a new mailbox under its sender name and offers the second o
   assert.equal(gmail.sender_name, 'Иван Петров');
   assert.deepEqual(gmail.aliases.map(a => a.name), ['Ivan Petrov']);
 });
+
+test('the demo reports when each mailbox last received mail, so the sidebar order shows', async () => {
+  const accounts = await demoRequest('GET', '/accounts');
+  assert.ok(accounts.every(a => a.last_received_at === null || !Number.isNaN(Date.parse(a.last_received_at))));
+  const byLatest = accounts.filter(a => a.last_received_at).sort((a, b) => Date.parse(b.last_received_at) - Date.parse(a.last_received_at));
+  // Mail that arrived just now sits in mailboxes down the fleet: they come before the older ones.
+  assert.deepEqual(byLatest.slice(0, 3).map(a => a.id), ['demo-fx-19', 'demo-fx-41', 'demo-fx-07']);
+  assert.notDeepEqual(byLatest.slice(0, 3).map(a => a.id), accounts.slice(0, 3).map(a => a.id), 'not just the stored order');
+  // A mailbox's date is its newest INBOX letter, not one in another folder.
+  const { messages } = await demoRequest('GET', '/mail/messages?accountId=demo-fx-19&folder=INBOX&limit=500');
+  const newest = messages.map(m => m.date).sort().at(-1);
+  assert.equal(accounts.find(a => a.id === 'demo-fx-19').last_received_at, newest);
+});
+
+test('the demo\'s last-received date is a record of arrivals: archiving the letter does not take it back', async () => {
+  const before = (await demoRequest('GET', '/accounts')).find(a => a.id === 'demo-fx-19').last_received_at;
+  const { messages } = await demoRequest('GET', '/mail/messages?accountId=demo-fx-19&folder=INBOX&limit=500');
+  const newest = messages.find(m => m.date === before);
+  assert.ok(newest);
+  await demoRequest('POST', '/mail/messages/bulk-move', { ids: [newest.id], folder: 'Archive' });
+  const after = (await demoRequest('GET', '/mail/messages?accountId=demo-fx-19&folder=INBOX&limit=500')).messages;
+  assert.ok(!after.some(m => m.id === newest.id), 'the letter left the inbox');
+  assert.equal((await demoRequest('GET', '/accounts')).find(a => a.id === 'demo-fx-19').last_received_at, before);
+});
+
+test('the demo\'s accounts carry no date ahead of now', async () => {
+  const now = Date.now();
+  for (const account of await demoRequest('GET', '/accounts')) {
+    assert.ok(account.last_received_at === null || Date.parse(account.last_received_at) <= now, account.id);
+  }
+});
+
+test('the demo pins and unpins one mailbox at a time, on its stored list, with the server\'s rules', async () => {
+  await demoRequest('PATCH', '/auth/preferences', { pinnedAccounts: ['demo-fx-03'] });
+  await demoRequest('PATCH', '/auth/preferences', { pinAccount: 'demo-ops' });
+  await demoRequest('PATCH', '/auth/preferences', { pinAccount: 'demo-ops' });
+  assert.deepEqual((await demoRequest('GET', '/auth/preferences')).pinnedAccounts, ['demo-fx-03', 'demo-ops']);
+  await demoRequest('PATCH', '/auth/preferences', { unpinAccount: 'demo-fx-03' });
+  assert.deepEqual((await demoRequest('GET', '/auth/preferences')).pinnedAccounts, ['demo-ops']);
+  await assert.rejects(() => demoRequest('PATCH', '/auth/preferences', { pinnedAccounts: 'demo-ops' }), /must be an array/);
+  await assert.rejects(() => demoRequest('PATCH', '/auth/preferences', { pinAccount: 7 }), /must be an account id/);
+  await assert.rejects(() => demoRequest('PATCH', '/auth/preferences', { pinAccount: 'a', unpinAccount: 'b' }), /cannot be sent together/);
+});
+
+test('the demo keeps pins and the sort switch in its preferences, with the server\'s rules', async () => {
+  const first = await demoRequest('GET', '/auth/preferences');
+  assert.deepEqual(first.pinnedAccounts, ['demo-fx-24', 'demo-fx-09']);
+  assert.equal(first.sortAccountsByLatest, true);
+
+  await demoRequest('PATCH', '/auth/preferences', { pinnedAccounts: ['demo-fx-03', 'demo-fx-03', 7, 'demo-ops'], sortAccountsByLatest: false });
+  const saved = await demoRequest('GET', '/auth/preferences');
+  assert.deepEqual(saved.pinnedAccounts, ['demo-fx-03', 'demo-ops'], 'ids only, once each, in pin order');
+  assert.equal(saved.sortAccountsByLatest, false);
+
+  // Another preference leaves them alone; a pin of a mailbox that does not exist is dropped on read.
+  await demoRequest('PATCH', '/auth/preferences', { theme: 'dusk' });
+  assert.deepEqual((await demoRequest('GET', '/auth/preferences')).pinnedAccounts, ['demo-fx-03', 'demo-ops']);
+  await demoRequest('PATCH', '/auth/preferences', { pinnedAccounts: ['demo-fx-03', 'gone'] });
+  assert.deepEqual((await demoRequest('GET', '/auth/preferences')).pinnedAccounts, ['demo-fx-03']);
+
+  await assert.rejects(() => demoRequest('PATCH', '/auth/preferences', { sortAccountsByLatest: 'yes' }), /must be a boolean/);
+  assert.equal((await demoRequest('GET', '/auth/preferences')).sortAccountsByLatest, false);
+});

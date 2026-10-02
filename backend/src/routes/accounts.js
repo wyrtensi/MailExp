@@ -95,7 +95,8 @@ router.get('/', async (req, res) => {
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
-            deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error
+            deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
+            last_received_at
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
