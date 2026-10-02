@@ -951,6 +951,8 @@ export default function ComposeModal() {
         send_at_invalid: 'scheduled.timeProblem.invalid',
         idempotency_conflict: 'scheduled.conflict',
         send_cancelled: 'scheduled.conflict',
+        // An alias with another address on a mail node mailbox (D-16): not a mailbox, not sent from.
+        node_alias_stale: 'compose.errorNodeAliasStale',
       };
       if (Object.hasOwn(SEND_ERROR_KEYS, err.code)) {
         // A conflict means this key is spent: the next attempt is a new send.

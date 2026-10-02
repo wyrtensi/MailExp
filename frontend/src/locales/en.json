@@ -106,6 +106,7 @@
   },
   "compose": {
     "newMessage": "New Message",
+    "errorNodeAliasStale": "This sender address is not a mailbox of its own: choose another From. An administrator can turn it into a separate mailbox.",
     "reply": "Reply",
     "replyAll": "Reply All",
     "forward": "Forward",
@@ -1095,6 +1096,7 @@
         "domainDescription": "MailExpert creates it on the mail node and connects it. No password to enter.",
         "domainNotConfigured": "The mail node is not set up yet: ask an administrator.",
         "domainAddressLabel": "Address",
+        "domainPrefillMissing": "{{domain}} is not a ready domain of the mail node, so another domain is chosen: pick the right one or bring {{domain}} through onboarding first.",
         "domainLocalPartPh": "name",
         "domainDomainLabel": "Domain",
         "domainNameLabel": "Name in the mailbox list (optional)",
@@ -1239,7 +1241,28 @@
       "errorRequired": "Name and email are required",
       "deleteConfirmTitle": "Delete alias?",
       "deleteConfirmBody": "This alias will be permanently removed. This cannot be undone.",
-      "deleteConfirmLabel": "Delete"
+      "deleteConfirmLabel": "Delete",
+      "descriptionNode": "A mailbox on the mail node sends only from its own address. Add more sender names for it here, for instance one in Russian and one in English, and choose one in the From field when composing.",
+      "addNameButton": "Add sender name",
+      "nodeAddressHint": "A different address is a separate mailbox: create one in Add account.",
+      "errorNodeAddress": "A mailbox on the mail node sends only from its own address. A different address is a separate mailbox: create one in Add account.",
+      "foreignNodeAlias": "Another address: letters are not sent from it. An administrator turns it into a separate mailbox or deletes it (Settings, Integrations)."
+    },
+    "foreignAliases": {
+      "title": "Aliases with another address",
+      "description": "Each address on the mail node is a separate mailbox, and a mailbox sends only from its own address. These aliases were saved on mailboxes before that, and letters are no longer sent from them. Create the address as its own mailbox, or delete the alias. Nothing is changed automatically.",
+      "columnAddress": "Address",
+      "columnName": "Sender name",
+      "columnMailbox": "On mailbox",
+      "columnActions": "Actions",
+      "create": "Create a separate mailbox",
+      "createAria": "Create a separate mailbox for {{email}}",
+      "deleteAria": "Delete the alias {{email}}",
+      "formTitle": "New mailbox for {{email}}",
+      "created": "Mailbox {{email}} created; the alias was removed.",
+      "createdAliasKept": "Mailbox {{email}} created, but the alias could not be removed ({{error}}): delete it here.",
+      "deleteTitle": "Delete alias?",
+      "deleteMessage": "The alias {{email}} is removed from {{mailbox}}. Nothing changes on the mail node."
     },
     "appearance": {
       "title": "Appearance",

@@ -157,6 +157,7 @@ const ERROR_KEYS = {
   outage_delete_unconfirmed: 'admin.outages.errorDeleteUnconfirmed',
   retention_days_invalid: 'admin.outages.errorRetention',
   trace_cooldown: 'admin.outages.errorCooldown',
+  node_alias_address_mismatch: 'admin.aliases.errorNodeAddress',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -167,6 +168,45 @@ export function mailNodeErrorKey(code) {
 // Whether a refusal code is one the mail node screens translate.
 export function isMailNodeErrorCode(code) {
   return Object.hasOwn(ERROR_KEYS, code);
+}
+
+// Owner decision D-16: a mailbox on the mail node sends only from its own address. Its aliases are
+// more sender names for that address (a Russian and an English one, say); another address is a
+// separate, billed mailbox. Gmail and IMAP mailboxes keep aliases with any address.
+export function isNodeMailbox(account) {
+  return account?.mail_node === true;
+}
+
+const sameAddress = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+
+// Whether an alias of the account has an address a node mailbox cannot send from (the server
+// refuses to save it and to send from it: node_alias_address_mismatch, node_alias_stale).
+export function isForeignNodeAlias(account, alias) {
+  return isNodeMailbox(account) && !sameAddress(alias?.email, account.email_address);
+}
+
+// The aliases with another address left on node mailbox rows from before D-16, for the
+// administrator to turn into separate mailboxes or delete: [{ account, alias }], by address.
+export function foreignNodeAliases(accounts) {
+  const rows = [];
+  for (const account of accounts ?? []) {
+    for (const alias of account?.aliases ?? []) {
+      if (isForeignNodeAlias(account, alias)) rows.push({ account, alias });
+    }
+  }
+  return rows.sort((a, b) => String(a.alias.email).localeCompare(String(b.alias.email)));
+}
+
+// The create-mailbox form's starting values for such an alias: its address split at @ and its
+// name as the sender name.
+export function mailboxPrefillFromAlias(alias) {
+  const email = String(alias?.email ?? '').trim().toLowerCase();
+  const at = email.lastIndexOf('@');
+  return {
+    localPart: at > 0 ? email.slice(0, at) : email,
+    domain: at > 0 ? email.slice(at + 1) : '',
+    senderName: String(alias?.name ?? '').trim(),
+  };
 }
 
 // A mail node mailbox someone asked to delete (GET /api/accounts fields, migration 0081): when it

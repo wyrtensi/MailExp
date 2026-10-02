@@ -50,6 +50,10 @@ import {
   expectedValuesError,
   hasDnsErrors,
   normalizeExpectedValues,
+  foreignNodeAliases,
+  isForeignNodeAlias,
+  isNodeMailbox,
+  mailboxPrefillFromAlias,
 } from './mailNode.js';
 
 describe('prefilterDoneKey', () => {
@@ -220,6 +224,7 @@ describe('errors', () => {
     assert.equal(mailNodeErrorKey('domain_node_changed'), 'admin.mailNode.errorDomainNodeChanged');
     assert.equal(mailNodeErrorKey('domain_nothing_to_restart'), 'admin.mailNode.errorNothingToRestart');
     assert.equal(mailNodeErrorKey('mail_node_host_mismatch'), 'admin.mailNode.errorHostMismatch');
+    assert.equal(mailNodeErrorKey('node_alias_address_mismatch'), 'admin.aliases.errorNodeAddress');
   });
 
   it('shows the node words of a refusal only', () => {
@@ -566,5 +571,44 @@ describe('the DNS checks', () => {
     assert.equal(mailNodeConfigError({ ...form, nodeIp: '' }), null);
     assert.equal(mailNodeConfigError({ ...form, nodeIp: '203.0.113.10' }), null);
     assert.equal(mailNodeConfigError({ ...form, nodeIp: '2001:db8::10' }), 'admin.eop.errorNodeIp');
+  });
+});
+
+describe('aliases of node mailboxes keep the mailbox address (D-16)', () => {
+  const node = {
+    id: 'n1', email_address: 'Sales@example.com', mail_node: true,
+    aliases: [
+      { id: 'a1', name: 'Sales Department', email: 'sales@EXAMPLE.com ' },
+      { id: 'a2', name: 'Orders desk', email: 'orders@example.com' },
+    ],
+  };
+  const gmail = { id: 'g1', email_address: 'me@gmail.example', aliases: [{ id: 'a3', name: 'Work', email: 'work@example.org' }] };
+  const legacy = { id: 'n2', email_address: 'hr@example.org', mail_node: true, aliases: [{ id: 'a4', name: 'Jobs', email: 'jobs@example.org' }] };
+
+  it('tells a node mailbox by mail_node only', () => {
+    assert.equal(isNodeMailbox(node), true);
+    assert.equal(isNodeMailbox(gmail), false);
+    assert.equal(isNodeMailbox({ mail_node: null }), false);
+    assert.equal(isNodeMailbox(null), false);
+  });
+
+  it('marks only another address on a node mailbox', () => {
+    assert.equal(isForeignNodeAlias(node, node.aliases[0]), false);
+    assert.equal(isForeignNodeAlias(node, node.aliases[1]), true);
+    assert.equal(isForeignNodeAlias(gmail, gmail.aliases[0]), false);
+  });
+
+  it('lists the foreign-address aliases of node mailboxes by address', () => {
+    const rows = foreignNodeAliases([legacy, gmail, node]);
+    assert.deepEqual(rows.map((r) => [r.account.id, r.alias.id]), [['n2', 'a4'], ['n1', 'a2']]);
+    assert.deepEqual(foreignNodeAliases(undefined), []);
+    assert.deepEqual(foreignNodeAliases([{ mail_node: true, email_address: 'x@example.com' }]), []);
+  });
+
+  it('prefills the create-mailbox form from an alias', () => {
+    assert.deepEqual(mailboxPrefillFromAlias({ name: ' Orders desk ', email: ' Orders@Example.com' }), {
+      localPart: 'orders', domain: 'example.com', senderName: 'Orders desk',
+    });
+    assert.deepEqual(mailboxPrefillFromAlias({ name: '', email: 'broken' }), { localPart: 'broken', domain: '', senderName: '' });
   });
 });
