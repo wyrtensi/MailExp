@@ -13,6 +13,8 @@ import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from './terrl.js'
 import { classifyCheck, recordCheck, updateEvidence } from './outages.js';
 import { runOutageTrace, waitingSignal, waitingSummary } from './outageTrace.js';
 import { getTraceSource } from './traceSource.js';
+import { getTenantDriver, tenantOf } from '../tenant/driver.js';
+import { POLL_INTERVAL_MS, getTenantState } from '../tenant/tenantJobs.js';
 
 // The mail node's alerts (R-18): what an administrator must hear about before the employees notice,
 // checked every five minutes and shown in the panel, and pinged to a Healthchecks-style check URL
@@ -34,7 +36,13 @@ import { getTraceSource } from './traceSource.js';
 //   (services/mailNode/terrl.js). It counts the log too, so when the log could not be read the
 //   budget keeps its previous alert instead of falling back to the journal and flapping;
 // - trace: letters to the node's domains still waiting in EOP's queue after an outage of the node
-//   (R-43, services/mailNode/outageTrace.js), a warning with the time EOP gives up on the first.
+//   (R-43, services/mailNode/outageTrace.js), a warning with the time EOP gives up on the first;
+// - tenant: with a tenant driver and the tenant configured, what the tenant poll stored
+//   (services/tenant/tenantJobs.js, every 10 minutes): a blocked inbound connector in
+//   Get-BlockedConnector (R-27, connector_blocked_tenant, error) and the application certificate in
+//   the tenant worker expiring (tenant_certificate: a warning from 30 days left, an error from 14
+//   and once expired). The run reads only the stored state, never the tenant; a poll that failed or
+//   is older than TENANT_STALE_MS counts as a source that could not be read.
 //
 // The same run keeps the outage windows of R-43 (services/mailNode/outages.js): the containers'
 // answer (or the API not answering at all) is one check, the log read is the windows' evidence,
@@ -73,6 +81,8 @@ export const ALERTS = Object.freeze({
   containers: ['containers', 'error'],
   terrl_budget: ['terrl', 'warning'],
   outage_letters_waiting: ['trace', 'warning'],
+  connector_blocked_tenant: ['tenant', 'error'],
+  tenant_certificate: ['tenant', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -164,6 +174,43 @@ export function terrlSignal(budget) {
     severity: budget.exceeded ? 'error' : 'warning',
     details: { used: budget.used, limit: budget.limit, percent: budget.percent, rampPercent: budget.rampPercent },
   }];
+}
+
+// The tenant poll's answer is stale after three missed polls: the worker or the queue stopped.
+export const TENANT_STALE_MS = 3 * POLL_INTERVAL_MS;
+export const TENANT_CERT_WARN_DAYS = 30;
+export const TENANT_CERT_ERROR_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// The tenant alerts from the stored poll state: { alerts, stale } (stale: the blocked connector
+// list could not be read lately, so its alert stays as it was).
+export function tenantSignals(state, now = Date.now()) {
+  const alerts = [];
+  const blocked = state?.blockedConnectors;
+  const readAt = Date.parse(blocked?.at ?? '');
+  const stale = !blocked || blocked.ok === false || !Number.isFinite(readAt) || now - readAt > TENANT_STALE_MS;
+  if (!stale && blocked.items?.length) {
+    alerts.push({
+      key: 'connector_blocked_tenant',
+      severity: 'error',
+      details: { count: blocked.items.length, connectors: blocked.items.slice(0, SAMPLES), checkedAt: blocked.at },
+    });
+  }
+  const notAfter = Date.parse(state?.certificate?.notAfter ?? '');
+  if (Number.isFinite(notAfter)) {
+    const daysLeft = Math.floor((notAfter - now) / DAY_MS);
+    if (daysLeft < TENANT_CERT_WARN_DAYS) {
+      alerts.push({
+        key: 'tenant_certificate',
+        severity: daysLeft < TENANT_CERT_ERROR_DAYS ? 'error' : 'warning',
+        details: {
+          code: notAfter <= now ? 'cert_expired' : 'cert_expiring', daysLeft, notAfter: new Date(notAfter).toISOString(),
+          thumbprint: state.certificate.thumbprint ?? null,
+        },
+      });
+    }
+  }
+  return { alerts, stale };
 }
 
 // The alerts of this run (fresh: those the sources that were read gave) merged with the previous
@@ -309,6 +356,7 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
     check: classifyCheck({ containers, errorCode: errors.find((e) => e.source === 'containers')?.code ?? null }),
     log, now, userId, fresh, failed,
   });
+  await tenantStep({ eop, now, fresh, failed, errors });
   // The budget counts the log as well: without it the count would drop and the alert flap, so the
   // budget's alert stays as it was until the log reads again.
   if (log) {
@@ -372,6 +420,24 @@ async function outageStep({ check, log, now, userId, fresh, failed }) {
   return source;
 }
 
+// The tenant alerts, without a tenant driver or a configured tenant none (they clear). A stale or
+// failed poll keeps the connector alert as it was and names the source in the errors, so the ping
+// is not sent and the check service notices the silence.
+async function tenantStep({ eop, now, fresh, failed, errors }) {
+  if (!getTenantDriver() || !tenantOf(eop)) return;
+  try {
+    const { alerts, stale } = tenantSignals(await getTenantState(), now);
+    fresh.push(...alerts);
+    if (stale) {
+      failed.push('tenant');
+      errors.push({ source: 'tenant', code: 'tenant_poll_stale', message: 'The tenant poll has no recent answer' });
+    }
+  } catch (err) {
+    errors.push(errorOf('tenant', err));
+    failed.push('tenant');
+  }
+}
+
 // A pass of the message trace, not waited for: it has its own single flight and deadline
 // (services/mailNode/outageTrace.js). Its failure is logged.
 function startOutageTrace({ source, now, log }) {
@@ -402,6 +468,8 @@ function summaryOf(alert) {
     case 'eop_bypass': return { count: d.count, relays: d.relays ?? [] };
     case 'eop_host_missing': return {};
     case 'outage_letters_waiting': return { waiting: d.waiting, soonestExpiresAt: d.soonestExpiresAt };
+    case 'connector_blocked_tenant': return { count: d.count, connectorIds: (d.connectors ?? []).map((c) => c.connectorId) };
+    case 'tenant_certificate': return { code: d.code, daysLeft: d.daysLeft };
     default: return { count: d.count };
   }
 }

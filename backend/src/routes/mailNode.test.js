@@ -558,7 +558,7 @@ describe('/api/mail-node', () => {
       const body = await (await call('GET', '/eop')).json();
       expect(body).toEqual({
         ...EOP_DEFAULTS, dkimMode: 'mailcow', sendLimitPerHour: 50, tlsPolicy: 'secure', tlsPolicyParameters: null,
-        tenantConfigured: false, tenantDriverActive: false,
+        tenantConfigured: false, tenantDriverActive: false, tenantDriver: null,
       });
       session.isAdmin = false;
       expect((await call('GET', '/eop')).status).toBe(403);
@@ -577,7 +577,7 @@ describe('/api/mail-node', () => {
       };
       expect(saveEopSettings).toHaveBeenCalledWith(saved);
       expect(await res.json()).toEqual({
-        ...EOP_DEFAULTS, ...saved, tenantConfigured: false, tenantDriverActive: false,
+        ...EOP_DEFAULTS, ...saved, tenantConfigured: false, tenantDriverActive: false, tenantDriver: null,
         applying: true,
       });
       expect(recordAudit).toHaveBeenCalledWith({

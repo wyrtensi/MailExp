@@ -1,0 +1,56 @@
+{
+  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6).",
+  "worker": {
+    "certificate": {
+      "thumbprint": "3F2A9C4D5E6B7A8C9D0E1F2A3B4C5D6E7F8A9B0C",
+      "thumbprintSha256": "5C8E0A7B3D2F14E6A9B8C7D6E5F4A3B2C1D0E9F8A7B6C5D4E3F2A1B0C9D8E7F6",
+      "subject": "CN=mailexpert-tenant",
+      "notBefore": "2026-09-01T00:00:00.000Z",
+      "notAfter": "2027-09-01T00:00:00.000Z"
+    }
+  },
+  "exo": {
+    "whoami": [
+      { "Name": "contoso.onmicrosoft.com", "DisplayName": "Contoso", "Identity": "contoso.onmicrosoft.com", "Guid": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f" }
+    ],
+    "get_blocked_connector": [],
+    "get_blocked_connector.blocked": [
+      {
+        "ConnectorId": "9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a",
+        "ConnectorName": "From mail node",
+        "TenantId": "11111111-2222-4333-8444-555555555555",
+        "Reason": "Suspicious connector activity",
+        "CreatedTime": "2026-10-03T08:15:00.0000000Z",
+        "ExpirationTime": null
+      }
+    ],
+    "get_content_filter_policy": [
+      {
+        "Identity": "Default",
+        "IsDefault": true,
+        "SpamAction": "MoveToJmf",
+        "HighConfidenceSpamAction": "MoveToJmf",
+        "PhishSpamAction": "Quarantine",
+        "HighConfidencePhishAction": "Quarantine",
+        "BulkSpamAction": "MoveToJmf",
+        "BulkThreshold": 7,
+        "QuarantineRetentionPeriod": 15,
+        "RedirectToRecipients": [],
+        "WhenChanged": "2026-09-20T10:00:00.0000000Z"
+      }
+    ],
+    "get_accepted_domain": [
+      { "DomainName": "example.com", "DomainType": "InternalRelay", "Default": false, "Identity": "example.com" }
+    ]
+  },
+  "graph": {
+    "token": { "token_type": "Bearer", "expires_in": 3599, "ext_expires_in": 3599, "access_token": "fake-graph-access-token" },
+    "domains": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#domains(id,isInitial,isVerified,supportedServices)",
+      "value": [
+        { "id": "contoso.onmicrosoft.com", "isInitial": true, "isVerified": true, "supportedServices": ["Email", "OfficeCommunicationsOnline"] },
+        { "id": "example.com", "isInitial": false, "isVerified": true, "supportedServices": ["Email"] }
+      ]
+    }
+  }
+}

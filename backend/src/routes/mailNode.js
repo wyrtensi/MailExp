@@ -47,6 +47,7 @@ import {
   MAX_EXPECTED_MX,
 } from '../services/mailNode/domains.js';
 import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
+import { getTenantDriver } from '../services/tenant/driver.js';
 import {
   EOP_FIELDS,
   MAX_LICENSES,
@@ -131,6 +132,7 @@ const ERRORS = {
   send_limit_invalid: [400, `Send limit must be a whole number of messages per hour from 1 to ${MAX_SEND_LIMIT_PER_HOUR}`],
   terrl_invalid: [400, `TERRL must be a whole number of recipients from 1 to ${MAX_TERRL}`],
   tenant_id_invalid: [400, 'Tenant ID must be a GUID'],
+  tenant_domain_invalid: [400, "Tenant domain must be the tenant's initial domain such as contoso.onmicrosoft.com"],
   app_id_invalid: [400, 'Application ID must be a GUID'],
   thumbprint_invalid: [400, 'Certificate thumbprint must be 40 hexadecimal characters'],
   tls_policy_invalid: [400, 'TLS policy must be secure, dane, dane-only, verify, fingerprint, encrypt or default'],
@@ -531,8 +533,13 @@ router.post('/domains/:domain/acknowledge', requireAdmin, async (req, res) => {
   return res.json({ ok: true, domain });
 });
 
+// tenantDriver: the tenant driver the backend runs with ('worker', 'fake' or null), for the
+// "Microsoft tenant" part of the screen (routes/mailNodeTenant.js).
 function eopAnswer(settings) {
-  return { ...settings, tenantConfigured: tenantConfigured(settings), tenantDriverActive: tenantDriverActive() };
+  return {
+    ...settings, tenantConfigured: tenantConfigured(settings), tenantDriverActive: tenantDriverActive(),
+    tenantDriver: getTenantDriver()?.kind ?? null,
+  };
 }
 
 router.get('/eop', requireAdmin, async (req, res) => {
@@ -544,7 +551,8 @@ const NODE_APPLIED_FIELDS = Object.freeze(['eopHost', 'tlsPolicy', 'tlsPolicyPar
 
 // Checked and kept; the next hop, its TLS, the DKIM mode and the send limit are applied to the node
 // (a run that never deletes a DKIM key nor writes the spam filing rule). TLS policy parameters must
-// fit the policy (eopSettingsConflict). The tenant fields are only kept until the tenant driver comes.
+// fit the policy (eopSettingsConflict). The tenant fields are kept; the tenant jobs read them
+// (services/tenant/tenantJobs.js).
 router.put('/eop', requireAdmin, async (req, res) => {
   const { settings, error } = parseEopSettings(req.body);
   if (error) return refuse(res, error);
