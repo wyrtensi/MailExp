@@ -127,6 +127,9 @@ const SAME_VALUE_ALLOWED = {
   'admin.integrations.google.title':        'any', // Google / Gmail — brand names
   'admin.integrations.googleApps.clientIdPh': 'any', // 1234567890-abc123.apps.googleusercontent.com
   'admin.eop.guidPh':                        'any', // 00000000-0000-0000-0000-000000000000
+  'admin.eop.tenantDomainPh':                'any', // contoso.onmicrosoft.com (Microsoft Learn's placeholder)
+  'admin.tenant.stepGraph':                  'any', // Microsoft Graph — product name
+  'admin.tenant.stepExo':                    'any', // Exchange Online PowerShell — product name
   'admin.eop.tlsParametersPh':               'any', // match=nexthop:dot-nexthop (Postfix syntax)
   'admin.mailNode.panelIpsPh':               'any', // 203.0.113.10
   'admin.mailNode.nodeIpPh':                 'any', // 203.0.113.10

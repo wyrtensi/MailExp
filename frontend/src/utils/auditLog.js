@@ -48,6 +48,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.outage_added': 'admin.audit.actionMailNodeOutageAdded',
   'mail_node.outage_changed': 'admin.audit.actionMailNodeOutageChanged',
   'mail_node.outage_deleted': 'admin.audit.actionMailNodeOutageDeleted',
+  'tenant.connection_tested': 'admin.audit.actionTenantConnectionTested',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -307,6 +308,10 @@ export function auditDetail(entry) {
           },
           valueKeys: { action: queueActionKey(details.action) },
         };
+    case 'tenant.connection_tested':
+      return details.ok
+        ? { key: 'admin.audit.detailTenantTestOk', values: {} }
+        : { key: 'admin.audit.detailTenantTestFailed', values: { steps: (details.failed ?? []).join(', ') || '—' } };
     case 'mail_node.alert_raised':
     case 'mail_node.alert_cleared':
       return {

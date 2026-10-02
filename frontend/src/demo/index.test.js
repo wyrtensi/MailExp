@@ -337,17 +337,38 @@ test('the demo refuses to disable a mail node mailbox but not a connected one', 
   assert.equal(updated.enabled, false);
 });
 
-test('the demo EOP settings start at mailcow signing and 50 messages an hour, and keep a save', async () => {
+test('the demo EOP settings start at mailcow signing, 50 messages an hour and a fake tenant connected, and keep a save', async () => {
   const initial = await demoRequest('GET', '/mail-node/eop');
   assert.equal(initial.dkimMode, 'mailcow');
   assert.equal(initial.sendLimitPerHour, 50);
-  assert.equal(initial.tenantConfigured, false);
-  const saved = await demoRequest('PUT', '/mail-node/eop', {
-    tenantId: '11111111-2222-4333-8444-555555555555', appId: '22222222-3333-4444-8555-666666666666', certThumbprint: 'A'.repeat(40),
+  assert.equal(initial.tenantConfigured, true);
+  assert.equal(initial.tenantDriver, 'fake');
+  assert.equal(initial.tenantDomain, 'contoso.onmicrosoft.com');
+  await assert.rejects(() => demoRequest('PUT', '/mail-node/eop', { tenantDomain: 'contoso.com' }), err => err.code === 'tenant_domain_invalid');
+  let saved = await demoRequest('PUT', '/mail-node/eop', { tenantDomain: '' });
+  assert.equal(saved.tenantConfigured, false);
+  await assert.rejects(() => demoRequest('POST', '/mail-node/tenant/test'), err => err.code === 'tenant_not_configured');
+  saved = await demoRequest('PUT', '/mail-node/eop', {
+    tenantDomain: 'Contoso.onmicrosoft.com', appId: '22222222-3333-4444-8555-666666666666',
   });
   assert.equal(saved.tenantConfigured, true);
+  assert.equal(saved.tenantDomain, 'contoso.onmicrosoft.com');
   assert.equal(saved.tenantDriverActive, false);
   assert.equal((await demoRequest('GET', '/mail-node/eop')).appId, '22222222-3333-4444-8555-666666666666');
+});
+
+test('the demo tenant: the certificate warning, a test with another thumbprint stops at the certificate', async () => {
+  const tenant = await demoRequest('GET', '/mail-node/tenant');
+  assert.ok(Date.parse(tenant.state.certificate.notAfter) - Date.now() < 30 * 86400000);
+  assert.deepEqual(tenant.state.blockedConnectors.items, []);
+  const { state } = await demoRequest('GET', '/mail-node/alerts');
+  assert.ok(state.alerts.some(a => a.key === 'tenant_certificate' && a.severity === 'warning'));
+  await demoRequest('PUT', '/mail-node/eop', { certThumbprint: 'B'.repeat(40) });
+  await demoRequest('POST', '/mail-node/tenant/test');
+  const after = await demoRequest('GET', '/mail-node/tenant');
+  assert.equal(after.state.connection.ok, false);
+  assert.equal(after.state.connection.steps.certificate.code, 'certificate_mismatch');
+  await demoRequest('PUT', '/mail-node/eop', { certThumbprint: '3F2A9C4D5E6B7A8C9D0E1F2A3B4C5D6E7F8A9B0C' });
 });
 
 test('the demo EOP settings refuse and normalize like the server', async () => {

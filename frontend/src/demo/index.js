@@ -1,5 +1,6 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoOutageRequest, demoOutageWaiting } from './outages.js';
+import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
 import { demoRole } from '../utils/demoRole.js';
 import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
@@ -1006,7 +1007,8 @@ let mailNodeDomains = [
 ].sort((a, b) => a.domain.localeCompare(b.domain));
 for (const d of mailNodeDomains) if (d.state !== 'unknown') demoNode.dkimKeys.add(d.domain);
 
-// The EOP settings screen: the defaults with the next hop and certificate filled in, no tenant yet.
+// The EOP settings screen: the defaults with the next hop and certificate filled in, and a fake
+// tenant connected (demo/tenant.js).
 let demoEopSettings = {
   eopHost: 'demo-mailexpert-local.mail.protection.outlook.com',
   tlsPolicy: 'secure',
@@ -1017,15 +1019,15 @@ let demoEopSettings = {
   terrl: null,
   licenses: 120,
   tenantCreatedOn: null,
-  tenantId: null,
-  appId: null,
-  certThumbprint: null,
+  ...DEMO_TENANT_SETTINGS,
   nodeIp: '203.0.113.10',
 };
 
 function eopSettingsAnswer() {
   const s = demoEopSettings;
-  return clone({ ...s, tenantConfigured: !!(s.tenantId && s.appId && s.certThumbprint), tenantDriverActive: false });
+  return clone({
+    ...s, tenantConfigured: !!(s.tenantId && s.tenantDomain && s.appId && s.certThumbprint), tenantDriverActive: false, tenantDriver: 'fake',
+  });
 }
 
 let demoPanelIps = ['203.0.113.10'];
@@ -1404,6 +1406,8 @@ function demoCheckAlerts(trigger) {
   // The outage going on (demo/outages.js): letters wait in EOP's queue (R-43).
   const waiting = demoOutageWaiting();
   if (waiting.waiting) fresh.push({ key: 'outage_letters_waiting', severity: 'warning', details: waiting });
+  // The fake tenant's application certificate, 25 days left (demo/tenant.js).
+  fresh.push(...demoTenantAlerts(demoEopSettings, now));
   demoAlertState = {
     at, trigger, errors: [],
     alerts: fresh.map(a => ({ ...a, since: before.get(a.key)?.since ?? at, seenAt: at })),
@@ -2698,6 +2702,10 @@ export async function demoRequest(method, path, body = {}) {
     return clone({ settings: demoAlertSettings });
   }
   if (verb === 'GET' && pathname === '/mail-node/eop/budget') return clone(demoTerrlBudget());
+  if (pathname.startsWith('/mail-node/tenant')) {
+    const tenantAnswer = demoTenantRequest(verb, pathname, demoEopSettings, demoError);
+    if (tenantAnswer !== undefined) return tenantAnswer;
+  }
   const quarantineAnswer = demoQuarantineRequest(verb, pathname, body);
   if (quarantineAnswer !== undefined) return quarantineAnswer;
   const outageAnswer = demoOutageRequest(verb, pathname, body);
