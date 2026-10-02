@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { unreadBadge } from '../utils/unreadBadge.js';
 import { filterAccounts } from '../utils/accountFilter.js';
+import { useStableAccountOrder } from '../hooks/useStableAccountOrder.js';
+import { manualMoveNeighbour } from '../utils/accountOrder.js';
 import { HEALTH_LABEL_KEYS, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { api } from '../utils/api.js';
@@ -21,7 +23,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import LogoMark from './LogoMark.jsx';
 import ProfileModal from './ProfileModal.jsx';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
-import { CheckIcon, CloseIcon } from './UiIcons.jsx';
+import { CheckIcon, CloseIcon, PinIcon } from './UiIcons.jsx';
 import { PendingDeletionLine } from './MailboxDeletionNotice.jsx';
 
 const ICONS = {
@@ -160,9 +162,26 @@ function SidebarCtxMenu({ x, y, items, title, subtitle, onClose }) {
     };
   }, []);
 
+  // Keyboard: the menu takes focus when it opens (the first enabled item), the arrow keys move
+  // between the enabled items, Enter and Space activate the focused one (CtxMenuItem), Escape closes.
+  const enabledItems = () => [...(menuRef.current?.querySelectorAll('[role="menuitem"]:not([aria-disabled="true"])') ?? [])];
+  useEffect(() => { enabledItems()[0]?.focus(); }, []);
+  const handleMenuKeyDown = (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const items = enabledItems();
+    if (!items.length) return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement);
+    const next = e.key === 'ArrowDown' ? (at + 1) % items.length : (at <= 0 ? items.length - 1 : at - 1);
+    items[next].focus();
+  };
+
   return (
     <div
       ref={menuRef}
+      role="menu"
+      aria-label={title || undefined}
+      onKeyDown={handleMenuKeyDown}
       style={{
         position: 'fixed', left: descale(pos.x, uiScale), top: descale(pos.y, uiScale),
         background: 'var(--bg-elevated)',
@@ -233,9 +252,15 @@ function CtxMenuItem({ icon, label, onClick, danger, disabled }) {
   const [hov, setHov] = useState(false);
   return (
     <div
+      role="menuitem"
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled ? 'true' : undefined}
       onClick={disabled ? undefined : onClick}
+      onKeyDown={disabled ? undefined : activateOnKey(onClick)}
       onMouseEnter={() => !disabled && setHov(true)}
       onMouseLeave={() => setHov(false)}
+      onFocus={() => !disabled && setHov(true)}
+      onBlur={() => setHov(false)}
       style={{
         display: 'flex', alignItems: 'center', gap: 9,
         padding: '6px 13px', cursor: disabled ? 'default' : 'pointer',
@@ -287,6 +312,7 @@ export default function Sidebar() {
     isSidebarResizing,
     showContacts, setShowContacts,
     accountFilter, setAccountFilter,
+    pinnedAccounts, sortAccountsByLatest, pinAccount, unpinAccount,
   } = useStore();
 
   const isMobile = useMobile();
@@ -297,10 +323,6 @@ export default function Sidebar() {
   // While the input is hidden the filter is not applied either, so a leftover query can
   // never hide an account the user has no way to bring back.
   const showAccountFilter = accounts.length > 1 && !sidebarCollapsed;
-  const visibleAccounts = useMemo(
-    () => (showAccountFilter ? filterAccounts(accounts, accountFilter) : accounts),
-    [showAccountFilter, accounts, accountFilter],
-  );
 
   // Close the mobile drawer whenever the user navigates to a different folder/account
   useEffect(() => {
@@ -474,6 +496,37 @@ export default function Sidebar() {
   const [createName, setCreateName] = useState('');
   const createInputRef = useRef(null);
 
+  // A drag of anything (a message onto a folder, a folder, a favorite) is under way. Tracked on
+  // the document because a message drag starts in the message list, outside this component.
+  const [dragInProgress, setDragInProgress] = useState(false);
+  useEffect(() => {
+    const begin = () => setDragInProgress(true);
+    const end = () => setDragInProgress(false);
+    document.addEventListener('dragstart', begin);
+    document.addEventListener('dragend', end);
+    document.addEventListener('drop', end);
+    return () => {
+      document.removeEventListener('dragstart', begin);
+      document.removeEventListener('dragend', end);
+      document.removeEventListener('drop', end);
+    };
+  }, []);
+
+  // The mailboxes in sidebar order: pinned first, then by latest received mail (when that is on),
+  // then the filter. The rows hold still while a menu is open or a drag is under way, so the one
+  // being aimed at cannot move out from under the pointer. This one list serves the expanded and
+  // the collapsed sidebar alike.
+  const orderFrozen = !!accountCtxMenu || !!folderCtxMenu || dragInProgress
+    || favDragIdx !== null || !!folderDrag || !!msgDragTarget;
+  const orderedAccounts = useStableAccountOrder(accounts, {
+    pinnedIds: pinnedAccounts, sortByLatest: sortAccountsByLatest, frozen: orderFrozen,
+  });
+  const visibleAccounts = useMemo(
+    () => (showAccountFilter ? filterAccounts(orderedAccounts, accountFilter) : orderedAccounts),
+    [showAccountFilter, orderedAccounts, accountFilter],
+  );
+  const pinnedSet = useMemo(() => new Set(pinnedAccounts), [pinnedAccounts]);
+
   // Per-account toggle to reveal hidden folders
   const [showHiddenFor, setShowHiddenFor] = useState(new Set()); // Set of accountIds
   const toggleShowHidden = useCallback((accountId) => {
@@ -551,7 +604,7 @@ export default function Sidebar() {
       'mailexpert_page_size', 'mailexpert_scroll_mode',
       'mailexpert_threaded_view', 'mailexpert_plaintext_email',
       'mailexpert_hover_quick_actions', 'mailexpert_swipe_actions',
-      'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders',
+      'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders', 'mailexpert_pinned_accounts',
     ].forEach(k => localStorage.removeItem(k));
     setUser(null);
     window.location.href = res?.endSessionUrl || '/login';
@@ -706,12 +759,14 @@ export default function Sidebar() {
     }
   };
 
+  // A hand-made move swaps the mailbox with the next unpinned one as the list is shown, so the
+  // row the person sees move is the one that moves; the swap is made in the server's own order.
   const handleMoveAccount = useCallback(async (account, direction) => {
+    const targetAccount = manualMoveNeighbour(orderedAccounts, pinnedAccounts, account.id, direction);
+    if (!targetAccount) return;
     const idx = accounts.findIndex(a => a.id === account.id);
-    if (idx === -1) return;
-    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-    if (targetIdx < 0 || targetIdx >= accounts.length) return;
-    const targetAccount = accounts[targetIdx];
+    const targetIdx = accounts.findIndex(a => a.id === targetAccount.id);
+    if (idx === -1 || targetIdx === -1) return;
     const newOrder = [...accounts];
     newOrder[idx] = accounts[targetIdx];
     newOrder[targetIdx] = accounts[idx];
@@ -725,7 +780,7 @@ export default function Sidebar() {
       setAccounts(accounts);
       addNotification({ title: t('sidebar.accountMenu.moveFailed'), body: err.message });
     }
-  }, [accounts, setAccounts, addNotification, t]);
+  }, [accounts, orderedAccounts, pinnedAccounts, setAccounts, addNotification, t]);
 
   // ── Folder context menu items ──────────────────────────────────────────────
   const buildFolderMenuItems = (accountId, folderObj) => {
@@ -807,9 +862,12 @@ export default function Sidebar() {
 
   // ── Account context menu items ─────────────────────────────────────────────
   const buildAccountMenuItems = (account) => {
-    const idx = accounts.findIndex(a => a.id === account.id);
-    const isFirst = idx === 0;
-    const isLast = idx === accounts.length - 1;
+    const isPinned = pinnedSet.has(account.id);
+    // Moving by hand shows only while the list is not ordered by latest mail, and only among the
+    // unpinned mailboxes (the pinned ones are ordered by their pins).
+    const canMoveByHand = !sortAccountsByLatest && !isPinned;
+    const isFirst = !manualMoveNeighbour(orderedAccounts, pinnedAccounts, account.id, 'up');
+    const isLast = !manualMoveNeighbour(orderedAccounts, pinnedAccounts, account.id, 'down');
     const items = [
       {
         label: t('sidebar.accountMenu.newFolder'),
@@ -833,7 +891,18 @@ export default function Sidebar() {
       },
       { separator: true },
     ];
-    if (accounts.length > 1) {
+    items.push(isPinned
+      ? {
+        label: t('sidebar.accountMenu.unpin'),
+        icon: <PinIcon size={14} crossed />,
+        action: () => unpinAccount(account.id),
+      }
+      : {
+        label: t('sidebar.accountMenu.pin'),
+        icon: <PinIcon size={14} />,
+        action: () => pinAccount(account.id),
+      });
+    if (accounts.length > 1 && canMoveByHand) {
       items.push(
         {
           label: t('sidebar.accountMenu.moveUp'),
@@ -847,10 +916,10 @@ export default function Sidebar() {
           action: () => handleMoveAccount(account, 'down'),
           disabled: isLast,
         },
-        { separator: true },
       );
     }
     items.push(
+      { separator: true },
       {
         label: t('sidebar.accountMenu.settings'),
         icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>,
@@ -1282,8 +1351,14 @@ export default function Sidebar() {
           const healthTitle = health === 'failed' && account.sync_error
             ? t('sidebar.health.failedDetail', { detail: account.sync_error })
             : healthLabel;
+          const isPinnedRow = pinnedSet.has(account.id);
+          const pinnedLabel = t('sidebar.pinned');
           const rowLabel = collapsedTooltip(
-            health === 'healthy' ? account.email_address : `${account.email_address} — ${healthLabel}`,
+            [
+              account.email_address,
+              ...(health === 'healthy' ? [] : [healthLabel]),
+              ...(isPinnedRow ? [pinnedLabel] : []),
+            ].join(' — '),
             sidebarCollapsed,
           );
           const hasInbox = hasRenderedInbox(accountFolders, {
@@ -1327,6 +1402,7 @@ export default function Sidebar() {
                 {/* Account indicator */}
                 {sidebarCollapsed ? (
                   <div style={{
+                    position: 'relative',
                     width: 28, height: 28, borderRadius: 7,
                     background: account.color + '22',
                     border: `1px solid ${account.color}66`,
@@ -1337,6 +1413,16 @@ export default function Sidebar() {
                     userSelect: 'none',
                   }}>
                     {(account.name || account.email_address || '?').charAt(0).toUpperCase()}
+                    {/* The row's own label already says "pinned"; the icon is for the eye only. */}
+                    {isPinnedRow && (
+                      <span aria-hidden="true" style={{
+                        position: 'absolute', top: -4, right: -4, width: 14, height: 14, borderRadius: '50%',
+                        background: 'var(--bg-secondary)', color: 'var(--text-secondary)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <PinIcon size={9} />
+                      </span>
+                    )}
                   </div>
                 ) : (
                   <div style={{
@@ -1390,6 +1476,16 @@ export default function Sidebar() {
                         >
                           {t('sidebar.accountMenu.reconnect')}
                         </button>
+                      )}
+                      {isPinnedRow && (
+                        <span
+                          role="img"
+                          aria-label={pinnedLabel}
+                          title={pinnedLabel}
+                          style={{ display: 'flex', color: 'var(--text-tertiary)' }}
+                        >
+                          <PinIcon size={11} />
+                        </span>
                       )}
                       <span
                         role="img"

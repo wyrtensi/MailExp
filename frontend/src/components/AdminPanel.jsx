@@ -1402,7 +1402,7 @@ export function AccountsTab() {
 }
 
 // ─── Themes Tab ───────────────────────────────────────────────────────────────
-// Exported (with AccountsTab; everything else here stays private) so ThemesTab.render.test.js can
+// Exported (with AccountsTab and LayoutsTab; everything else here stays private) so ThemesTab.render.test.js can
 // mount it directly instead of the whole admin panel, for the "как в системе" checkbox (#508).
 export function ThemesTab() {
   const { t } = useTranslation();
@@ -1845,10 +1845,11 @@ function SwipeActionIcon({ action, size = 17 }) {
   return <svg {...common}><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a1 1 0 001 1h14a1 1 0 001-1V8"/><polyline points="9 13 12 16 15 13"/><line x1="12" y1="11" x2="12" y2="16"/></svg>;
 }
 
-function LayoutsTab() {
+// Exported (like AccountsTab) only so LayoutsTab.render.test.js can mount it.
+export function LayoutsTab() {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, hoverActionSet, setHoverActionSet, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender } = useStore();
+  const { layout, setLayout, pageSize, setPageSize, scrollMode, setScrollMode, swipeActions, setSwipeAction, threadedView, setThreadedView, plaintextEmail, setPlaintextEmail, hoverQuickActions, setHoverQuickActions, hoverActionSet, setHoverActionSet, showMobileAvatars, setShowMobileAvatars, gravatarAvatars, setGravatarAvatars, replyDefault, setReplyDefault, markReadBehavior, setMarkReadBehavior, markReadDelay, setMarkReadDelay, senderFavicons, senderFaviconsSaving, setSenderFavicons, showMessagePreviews, setShowMessagePreviews, accounts, defaultSender, setDefaultSender, sortAccountsByLatest, setSortAccountsByLatest } = useStore();
   const [senderFaviconsError, setSenderFaviconsError] = useState('');
 
   // "Set MailExpert as your default email app": registerProtocolHandler is the
@@ -1974,6 +1975,25 @@ function LayoutsTab() {
             </button>
           );
         })}
+      </div>
+
+      {/* Sidebar */}
+      <div style={{ marginTop: 28, paddingTop: 22, borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
+          {t('admin.appearance.sidebarTitle')}
+        </div>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={sortAccountsByLatest}
+            onChange={e => setSortAccountsByLatest(e.target.checked)}
+            style={{ marginTop: 2, flexShrink: 0 }}
+          />
+          <div>
+            <div>{t('admin.appearance.sortAccountsByLatest')}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>{t('admin.appearance.sortAccountsByLatestHint')}</div>
+          </div>
+        </label>
       </div>
 
       {/* Message list behaviour */}
@@ -8333,6 +8353,7 @@ function makeSearchIndex(t) {
     { label: tabLabel('theme'), keywords: ['theme', 'dark', 'light', 'color', 'colour', 'dark mode', 'light mode'], tab: 'appearance', subtab: 'theme', breadcrumb: `${tabLabel('appearance')} › ${tabLabel('theme')}` },
     // Appearance > Layout
     { label: t('admin.appearance.layout'), keywords: ['layout', 'pane', 'split', 'preview', 'reading pane', 'side by side', 'stacked'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
+    { label: t('admin.appearance.sortAccountsByLatest'), keywords: ['sidebar', 'account order', 'sort accounts', 'latest mail', 'pin', 'pinned', 'order'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.scrollingMode'), keywords: ['scroll', 'infinite', 'paginated', 'pagination', 'pages'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.perPagePaginated'), keywords: ['per page', 'batch', 'messages per page', 'count', '25', '50', '100', '200', 'page size'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },
     { label: t('admin.messageList.hoverQuickActionsMode'), keywords: ['hover', 'quick actions', 'hover buttons', 'row actions'], tab: 'appearance', subtab: 'layout', breadcrumb: layoutCrumb },

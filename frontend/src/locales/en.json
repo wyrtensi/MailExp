@@ -681,6 +681,8 @@
       "reconnect": "Reconnect",
       "moveUp": "Move up",
       "moveDown": "Move down",
+      "pin": "Pin",
+      "unpin": "Unpin",
       "moveFailed": "Failed to reorder accounts"
     },
     "confirmDelete": "Delete folder \"{{name}}\"? All messages in it will be permanently deleted.",
@@ -692,6 +694,7 @@
     "emptying": "Emptying \"{{name}}\"…",
     "emptied": "Folder emptied",
     "backToAccounts": "Back to accounts",
+    "pinned": "Pinned",
     "updateAvailable": "Update available: v{{version}}",
     "pendingDeletion": "Deleted on {{date}}"
   },
@@ -1233,6 +1236,9 @@
       "typographyMono": "Mono",
       "layout": "Layout",
       "layoutDescription": "Choose how the sidebar, message list, and reading pane are arranged",
+      "sidebarTitle": "Sidebar",
+      "sortAccountsByLatest": "Sort accounts by latest mail",
+      "sortAccountsByLatestHint": "The account that received a letter most recently rises to the top. Pinned accounts stay above. When off, accounts keep the order you set.",
       "language": "Language",
       "languageDescription": "Choose the display language for the interface",
       "fontSize": "Font Size",

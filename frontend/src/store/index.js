@@ -21,6 +21,7 @@ import {
 import { applyGtdRemovalGuard } from '../utils/pendingGtdRemovals.js';
 import { DEFAULT_HOVER_ACTIONS, sanitizeHoverActionSet } from '../utils/hoverActions.js';
 import { clampRightSidebarWidth } from '../utils/rightSidebar.js';
+import { pinAccountIds, prunePinnedIds, unpinAccountIds } from '../utils/accountOrder.js';
 import { threadCacheKey } from '../utils/threadKey.js';
 import {
   cacheFolderOrderFromPreferences,
@@ -1068,6 +1069,50 @@ export const useStore = create((set, get) => ({
     schedulePrefSave({ folderOrder: next });
   },
 
+  // Sidebar account list order (utils/accountOrder.js). Pinned mailboxes stay on top in the order
+  // they were pinned; the others rise by their latest received mail unless that is switched off.
+  // Both are per-user preferences, saved with the others so they follow the user across devices.
+  pinnedAccounts: (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('mailexpert_pinned_accounts') || '[]');
+      return Array.isArray(saved) ? saved.filter(id => typeof id === 'string') : [];
+    } catch { return []; }
+  })(),
+  setPinnedAccounts: (ids) => {
+    const next = Array.isArray(ids) ? ids : [];
+    localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(next));
+    set({ pinnedAccounts: next });
+    schedulePrefSave({ pinnedAccounts: next });
+  },
+  // Pins of mailboxes that are gone are dropped when the list is rewritten, never while the
+  // account list is still loading (an empty list would wipe every pin).
+  pinAccount: (accountId) => {
+    const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
+    const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
+    setPinnedAccounts(pinAccountIds(current, accountId));
+  },
+  unpinAccount: (accountId) => {
+    const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
+    const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
+    setPinnedAccounts(unpinAccountIds(current, accountId));
+  },
+  sortAccountsByLatest: localStorage.getItem('mailexpert_sort_accounts_by_latest') !== 'false',
+  setSortAccountsByLatest: (val) => {
+    localStorage.setItem('mailexpert_sort_accounts_by_latest', String(val));
+    set({ sortAccountsByLatest: val });
+    schedulePrefSave({ sortAccountsByLatest: val });
+  },
+  // A new_messages event for the inbox: that mailbox just received mail, which is newer than what
+  // the last account list said. Only ever moves the date forward; nothing is saved or refetched.
+  noteAccountReceived: (accountId, receivedAt) => set(state => {
+    const account = state.accounts.find(a => a.id === accountId);
+    const incoming = Date.parse(receivedAt);
+    if (!account || Number.isNaN(incoming)) return {};
+    const current = Date.parse(account.last_received_at);
+    if (!Number.isNaN(current) && current >= incoming) return {};
+    return { accounts: state.accounts.map(a => (a.id === accountId ? { ...a, last_received_at: receivedAt } : a)) };
+  }),
+
   // Sidebar tree state — persisted so the tree looks the same after reload/re-login
   expandedAccounts: (() => {
     try { return JSON.parse(localStorage.getItem('mailexpert_expanded_accounts') || '{}'); }
@@ -1241,6 +1286,15 @@ export const useStore = create((set, get) => ({
       if (prefs.expandedAccounts && typeof prefs.expandedAccounts === 'object' && !Array.isArray(prefs.expandedAccounts)) {
         localStorage.setItem('mailexpert_expanded_accounts', JSON.stringify(prefs.expandedAccounts));
         set({ expandedAccounts: prefs.expandedAccounts });
+      }
+      if (Array.isArray(prefs.pinnedAccounts)) {
+        const pinned = prefs.pinnedAccounts.filter(id => typeof id === 'string');
+        localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(pinned));
+        set({ pinnedAccounts: pinned });
+      }
+      if (typeof prefs.sortAccountsByLatest === 'boolean') {
+        localStorage.setItem('mailexpert_sort_accounts_by_latest', String(prefs.sortAccountsByLatest));
+        set({ sortAccountsByLatest: prefs.sortAccountsByLatest });
       }
       if (Array.isArray(prefs.collapsedFolders)) {
         localStorage.setItem('mailexpert_collapsed_folders', JSON.stringify(prefs.collapsedFolders));
