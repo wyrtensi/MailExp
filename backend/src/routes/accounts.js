@@ -24,6 +24,7 @@ import {
   provisionMailbox,
 } from '../services/mailNode/mailcow.js';
 import { cancelDeletion, requestDeletion } from '../services/mailNode/mailboxDeletion.js';
+import { LAST_RECEIVED_AT_SQL } from '../services/accountLastReceived.js';
 import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
 import { newMailboxRateLimit } from '../services/mailNode/nodeApply.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
@@ -95,7 +96,8 @@ router.get('/', async (req, res) => {
             include_in_unified_inbox,
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
-            deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error
+            deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
+            ${LAST_RECEIVED_AT_SQL} AS last_received_at
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
