@@ -1018,7 +1018,8 @@
         "label": "Search mail accounts",
         "placeholder": "Search by address, name, alias or provider…",
         "noMatch": "No mail accounts match \"{{query}}\"",
-        "count": "{{shown}} of {{total}} accounts"
+        "count_one": "{{shown}} of {{total}} account",
+        "count_other": "{{shown}} of {{total}} accounts"
       },
       "connected": "Connected",
       "folderMappings": "Folder mappings",

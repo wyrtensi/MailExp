@@ -884,7 +884,7 @@ export function AccountsTab() {
         <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 20 }}>
           {editTarget.email_address}
         </div>
-        <AccountForm initial={editTarget} onSave={handleEdit} onCancel={() => { setSubview('list'); setEditTarget(null); }} />
+        <AccountForm key={editTarget.id} initial={editTarget} onSave={handleEdit} onCancel={() => { setSubview('list'); setEditTarget(null); }} />
       </div>
     );
   }
@@ -1190,16 +1190,19 @@ export function AccountsTab() {
             onFocus={e => e.target.style.borderColor = 'var(--accent)'}
             onBlur={e => e.target.style.borderColor = 'var(--border)'}
           />
+          {/* One live region that is always in the page (a region that mounts with its text is not
+              reliably announced): the count while there are results, the empty-state message when
+              there are none. */}
           <div role="status" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 5, minHeight: 14 }}>
-            {searching && shownAccounts.length > 0
-              ? t('admin.accounts.search.count', { shown: shownAccounts.length, total: accounts.length })
-              : ''}
+            {!searching ? '' : shownAccounts.length > 0
+              ? t('admin.accounts.search.count', { count: accounts.length, shown: shownAccounts.length, total: accounts.length })
+              : t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
           </div>
         </div>
       )}
 
       {searching && accounts.length > 0 && shownAccounts.length === 0 && (
-        <div role="status" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-tertiary)', fontSize: 13 }}>
+        <div aria-hidden="true" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--text-tertiary)', fontSize: 13 }}>
           {t('admin.accounts.search.noMatch', { query: searchQuery.trim() })}
         </div>
       )}

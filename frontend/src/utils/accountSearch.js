@@ -9,6 +9,13 @@
 
 const text = (value) => (typeof value === 'string' ? value : '');
 
+// The mail server's own name without its role label: 'imap.fastmail.com' is Fastmail, found by
+// 'fastmail'. Nothing common to every mailbox is indexed (not the protocol, not 'imap' or 'smtp'),
+// so a query like 'imap' or 'mail' does not match the whole list.
+function providerHost(host) {
+  return text(host).replace(/^(imap|smtp|pop3?|mail)\./i, '');
+}
+
 // Words a person may use for the provider, whatever the interface language: the identifiers the
 // server stores, plus the names of the products behind them.
 function providerWords(account, mailNodeLabel) {
@@ -16,7 +23,7 @@ function providerWords(account, mailNodeLabel) {
   if (account.oauth_provider === 'google') words.push('google', 'gmail');
   else if (account.oauth_provider === 'microsoft') words.push('microsoft', 'outlook', 'office 365');
   if (account.mail_node === true) words.push('mail node', mailNodeLabel);
-  words.push(text(account.protocol), text(account.imap_host), text(account.smtp_host));
+  words.push(providerHost(account.imap_host));
   return words;
 }
 

@@ -7,7 +7,6 @@ import { installCapacitorNativeBridge } from '../utils/capacitorNativeBridge.js'
 import { playNotificationSound } from '../utils/notificationSounds.js';
 import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
 import { accountEventPatch } from '../utils/accountHealth.js';
-import { receivedAtFromMessages } from '../utils/accountOrder.js';
 import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/events.js';
 import { recordDiagEvent } from '../utils/diagEvents.js';
 
@@ -144,14 +143,6 @@ export function useWebSocket(enabled = true) {
         // and the scrub net only catches emails/IPs/tokens. isInbox is the safe signal.
         recordDiagEvent({ category: 'event', type: 'new_messages', accountId, isInbox, count, alertCount });
 
-        // The mailbox just received mail: that is its latest-received date for the sidebar order
-        // (utils/accountOrder.js), without refetching the account list. Inbox only, like the
-        // server's last_received_at; the event carries the unread arrivals, which is what counts here.
-        if (isInbox) {
-          const receivedAt = receivedAtFromMessages(messages);
-          if (receivedAt) useStore.getState().noteAccountReceived(accountId, receivedAt);
-        }
-
         if (messages && messages.length > 0) {
           // In-app notifications and sounds are inbox-only — non-inbox folder syncs
           // (Archive, Spam, on-demand syncs) should not trigger alerts for old mail.
@@ -196,6 +187,13 @@ export function useWebSocket(enabled = true) {
         }
         break;
       }
+
+      // The server recorded an arrival into this mailbox's INBOX (read or unread, whatever became of
+      // the letter since): its latest-received date, which orders the sidebar. The server's value
+      // only; the client derives nothing from the letters it happens to see.
+      case 'account_received':
+        if (data.accountId && data.lastReceivedAt) useStore.getState().noteAccountReceived(data.accountId, data.lastReceivedAt);
+        break;
 
       case 'exists_hint':
         // EXISTS reports membership, not UNSEEN. The status observer supplies badges.

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  freezeOrder, manualMoveNeighbour, orderAccounts, pinAccountIds, prunePinnedIds, receivedAtFromMessages, unpinAccountIds,
+  freezeOrder, manualMoveNeighbour, movePinnedId, orderAccounts, pinAccountIds, prunePinnedIds, unpinAccountIds,
 } from './accountOrder.js';
 
 const at = (iso) => ({ last_received_at: iso });
@@ -150,25 +150,21 @@ describe('manualMoveNeighbour', () => {
   });
 });
 
-describe('receivedAtFromMessages', () => {
-  const NOW = Date.parse('2026-09-20T12:00:00.000Z');
+describe('movePinnedId', () => {
+  const accounts = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
 
-  it('is the newest message date, as an ISO string', () => {
-    const got = receivedAtFromMessages([{ date: '2026-09-20T09:00:00Z' }, { date: '2026-09-20T11:00:00Z' }, { date: '2026-09-19T00:00:00Z' }], NOW);
-    assert.equal(got, '2026-09-20T11:00:00.000Z');
+  it('swaps a pinned mailbox with its neighbour', () => {
+    assert.deepEqual(movePinnedId(['a', 'b', 'c'], accounts, 'b', 'up'), ['b', 'a', 'c']);
+    assert.deepEqual(movePinnedId(['a', 'b', 'c'], accounts, 'b', 'down'), ['a', 'c', 'b']);
   });
 
-  it('never runs ahead of now, so a future-dated letter cannot hold a mailbox on top', () => {
-    assert.equal(receivedAtFromMessages([{ date: '2027-01-01T00:00:00Z' }], NOW), new Date(NOW).toISOString());
+  it('is null at the ends and for a mailbox that is not pinned', () => {
+    assert.equal(movePinnedId(['a', 'b'], accounts, 'a', 'up'), null);
+    assert.equal(movePinnedId(['a', 'b'], accounts, 'b', 'down'), null);
+    assert.equal(movePinnedId(['a', 'b'], accounts, 'c', 'up'), null);
   });
 
-  it('counts the arrival itself for a letter without a usable date', () => {
-    assert.equal(receivedAtFromMessages([{ subject: 'x' }], NOW), new Date(NOW).toISOString());
-    assert.equal(receivedAtFromMessages([{ date: 'garbage' }], NOW), new Date(NOW).toISOString());
-  });
-
-  it('is null when there are no messages', () => {
-    assert.equal(receivedAtFromMessages([], NOW), null);
-    assert.equal(receivedAtFromMessages(undefined, NOW), null);
+  it('skips pins of mailboxes that are gone when looking for the neighbour', () => {
+    assert.deepEqual(movePinnedId(['a', 'gone', 'b'], accounts, 'b', 'up'), ['b', 'a']);
   });
 });

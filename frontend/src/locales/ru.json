@@ -1046,7 +1046,10 @@
         "label": "Поиск по почтовым аккаунтам",
         "placeholder": "Поиск по адресу, имени, псевдониму или провайдеру…",
         "noMatch": "Нет аккаунтов по запросу «{{query}}»",
-        "count": "{{shown}} из {{total}} аккаунтов"
+        "count_one": "{{shown}} из {{total}} аккаунта",
+        "count_few": "{{shown}} из {{total}} аккаунтов",
+        "count_many": "{{shown}} из {{total}} аккаунтов",
+        "count_other": "{{shown}} из {{total}} аккаунта"
       },
       "connected": "Подключён",
       "folderMappings": "Сопоставление папок",

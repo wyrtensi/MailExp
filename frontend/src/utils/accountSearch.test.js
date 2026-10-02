@@ -75,8 +75,17 @@ describe('searchAccounts', () => {
     assert.deepEqual(find('почтовый узел', { mailNodeLabel: 'Почтовый узел' }), ['a4']);
   });
 
-  it('matches the mail server host', () => {
-    assert.deepEqual(find('imap.gmail'), ['a2']);
+  it('matches the mail server by its own name', () => {
+    const custom = [...ACCOUNTS, { id: 'a6', name: 'Fast', email_address: 'me@own.test', imap_host: 'imap.fastmail.com', smtp_host: 'smtp.fastmail.com', protocol: 'imap' }];
+    const got = (q) => ids(searchAccounts(buildAccountSearchIndex(custom), q));
+    assert.deepEqual(got('fastmail'), ['a6']);
+    assert.deepEqual(got('fastmail.com'), ['a6']);
+  });
+
+  it('does not index what every mailbox has, so \'imap\', \'smtp\' and \'mail.\' match nothing on their own', () => {
+    assert.deepEqual(find('imap'), []);
+    assert.deepEqual(find('smtp'), []);
+    assert.deepEqual(find('imap.gmail'), [], 'the role label of the host is not part of the name');
   });
 
   it('requires every word of the query, in any order', () => {

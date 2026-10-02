@@ -2,8 +2,8 @@
 // unit-tested with `node --test`.
 //
 // Pinned mailboxes come first, in the order they were pinned. The rest follow by the date of the
-// letter they received last (`last_received_at`, set by GET /api/accounts and kept fresh from the
-// WebSocket's new_messages event), newest first, when "sort by latest mail" is on; with it off they
+// letter they received last (`last_received_at`, the server's record of arrivals: GET /api/accounts
+// and the WebSocket's account_received event, never derived on the client), newest first, when "sort by latest mail" is on; with it off they
 // keep the given order, which is the server's sort_order. A mailbox with no inbox mail has no date
 // and goes after those that have one, in the given order, so the list does not shuffle among them.
 
@@ -98,16 +98,16 @@ export function manualMoveNeighbour(shownAccounts, pinnedIds, accountId, directi
   return unpinned[direction === 'up' ? at - 1 : at + 1] ?? null;
 }
 
-// The "received at" a new_messages event gives its mailbox: the newest date among the letters it
-// carries, never ahead of `now` (a future Date header would hold the mailbox on top for good). A
-// letter with no usable date counts from the moment it arrived. Null when the event has no letters.
-export function receivedAtFromMessages(messages, now = Date.now()) {
-  if (!Array.isArray(messages) || !messages.length) return null;
-  let newest = -Infinity;
-  for (const message of messages) {
-    const parsed = Date.parse(message?.date);
-    const time = Number.isNaN(parsed) ? now : Math.min(parsed, now);
-    if (time > newest) newest = time;
-  }
-  return new Date(newest).toISOString();
+// "Move up / down" for a pinned mailbox reorders the pins themselves: the pin list with `accountId`
+// swapped with its neighbour in `direction`, or null at either end or when it is not pinned. The
+// list is first cleaned of pins that name no mailbox in `accounts`, so a neighbour is always a row
+// the person can see.
+export function movePinnedId(pinnedIds, accounts, accountId, direction) {
+  const list = prunePinnedIds(pinnedIds, accounts);
+  const at = list.indexOf(accountId);
+  const to = direction === 'up' ? at - 1 : at + 1;
+  if (at === -1 || to < 0 || to >= list.length) return null;
+  const next = [...list];
+  [next[at], next[to]] = [next[to], next[at]];
+  return next;
 }

@@ -179,8 +179,18 @@ export const useStore = create((set, get) => ({
       clearTimeout(pendingCountTimer);
       pendingCountTimer = null;
     }
+    // One person leaves, another (or nobody) takes the tab: the sidebar's per-user view (pins, the
+    // order switch, which mailboxes are expanded) must not be inherited. The first sign-in of a
+    // page load (nobody -> someone) keeps what this browser cached for that person's sake.
+    const leaving = get().user != null && get().user.id !== user?.id;
+    if (leaving) {
+      for (const key of ['mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts']) {
+        localStorage.removeItem(key);
+      }
+    }
     set(state => ({
       user,
+      ...(leaving ? { pinnedAccounts: [], sortAccountsByLatest: true, expandedAccounts: {} } : {}),
       ...(state.user?.id !== user?.id ? {
         // An expired session shows the sign-in screen without a page reload, so the next
         // person to sign in on this tab must not inherit the previous user's mail or draft.
@@ -600,7 +610,9 @@ export const useStore = create((set, get) => ({
   // Admin panel
   showAdmin: false,
   adminTab: 'accounts', // 'accounts' | 'appearance' | 'integrations' | 'users'
-  setShowAdmin: (v) => set({ showAdmin: v }),
+  // Closing the settings also drops a request still waiting for the (lazy-loaded) panel to take it,
+  // so it cannot fire later and open a view nobody asked for.
+  setShowAdmin: (v) => set(v ? { showAdmin: true } : { showAdmin: false, addAccountRequested: false, accountSettingsRequested: null }),
   setAdminTab: (t) => set({ adminTab: t }),
   // Set by the sidebar's "Add account" item; the accounts tab opens its add view and clears it.
   addAccountRequested: false,
@@ -1078,23 +1090,34 @@ export const useStore = create((set, get) => ({
       return Array.isArray(saved) ? saved.filter(id => typeof id === 'string') : [];
     } catch { return []; }
   })(),
+  // Local only: the server is told by pinAccount / unpinAccount (what changed) or
+  // reorderPinnedAccounts (the whole new order), never by a blind write of this list.
   setPinnedAccounts: (ids) => {
     const next = Array.isArray(ids) ? ids : [];
     localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(next));
     set({ pinnedAccounts: next });
-    schedulePrefSave({ pinnedAccounts: next });
   },
-  // Pins of mailboxes that are gone are dropped when the list is rewritten, never while the
-  // account list is still loading (an empty list would wipe every pin).
+  // A pin or unpin is sent at once as the one change it is (not queued with the other preferences,
+  // whose queue keeps only the last value of a key), and the server applies it to ITS list: a tab
+  // holding a stale list cannot overwrite a pin made on another device. Pins of mailboxes that are
+  // gone are dropped from the local list on the way, never while the account list is still loading
+  // (an empty list would wipe every pin).
   pinAccount: (accountId) => {
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
     setPinnedAccounts(pinAccountIds(current, accountId));
+    api.savePreferences({ pinAccount: accountId }).catch(err => console.error('Failed to save the pin:', err?.message || err));
   },
   unpinAccount: (accountId) => {
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
     setPinnedAccounts(unpinAccountIds(current, accountId));
+    api.savePreferences({ unpinAccount: accountId }).catch(err => console.error('Failed to save the unpin:', err?.message || err));
+  },
+  // Move up / down among the pinned mailboxes: the whole new order is the change.
+  reorderPinnedAccounts: (ids) => {
+    get().setPinnedAccounts(ids);
+    schedulePrefSave({ pinnedAccounts: get().pinnedAccounts });
   },
   sortAccountsByLatest: localStorage.getItem('mailexpert_sort_accounts_by_latest') !== 'false',
   setSortAccountsByLatest: (val) => {
@@ -1287,14 +1310,15 @@ export const useStore = create((set, get) => ({
         localStorage.setItem('mailexpert_expanded_accounts', JSON.stringify(prefs.expandedAccounts));
         set({ expandedAccounts: prefs.expandedAccounts });
       }
-      if (Array.isArray(prefs.pinnedAccounts)) {
-        const pinned = prefs.pinnedAccounts.filter(id => typeof id === 'string');
+      // What the server says is the whole truth for this user: a key it does not have means no
+      // pins and the default order, not whatever the previous user of this tab left behind.
+      {
+        const pinned = Array.isArray(prefs.pinnedAccounts) ? prefs.pinnedAccounts.filter(id => typeof id === 'string') : [];
         localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(pinned));
         set({ pinnedAccounts: pinned });
-      }
-      if (typeof prefs.sortAccountsByLatest === 'boolean') {
-        localStorage.setItem('mailexpert_sort_accounts_by_latest', String(prefs.sortAccountsByLatest));
-        set({ sortAccountsByLatest: prefs.sortAccountsByLatest });
+        const sortByLatest = typeof prefs.sortAccountsByLatest === 'boolean' ? prefs.sortAccountsByLatest : true;
+        localStorage.setItem('mailexpert_sort_accounts_by_latest', String(sortByLatest));
+        set({ sortAccountsByLatest: sortByLatest });
       }
       if (Array.isArray(prefs.collapsedFolders)) {
         localStorage.setItem('mailexpert_collapsed_folders', JSON.stringify(prefs.collapsedFolders));

@@ -202,13 +202,214 @@ describe('Sidebar account list', () => {
     assert.ok(!rows[1].getAttribute('aria-label').includes('sidebar.pinned'));
   });
 
-  test('the menu is a keyboard menu: items are focusable menu items and the first takes focus', async () => {
-    await openMenu('a');
-    const items = [...host.querySelectorAll('[role="menuitem"]')];
-    assert.ok(items.length > 3);
-    assert.ok(items.every(el => el.hasAttribute('tabindex')));
-    assert.equal(dom.window.document.activeElement, items[0], 'focus moves into the menu');
-    await React.act(async () => { items[0].dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); });
-    assert.equal(dom.window.document.activeElement, items[1], 'the arrow keys walk the items');
+  const key = (el, k, init = {}) => React.act(async () => {
+    el.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
+  });
+  const navRows = () => [...host.querySelectorAll('[data-nav-row]')];
+  const accountRow = (id) => host.querySelector(`[data-nav-row="account:${id}"]`);
+  const menuOpen = () => host.querySelector('[role="menu"]') != null;
+
+  describe('the account menu from the keyboard', () => {
+    test('the menu is a keyboard menu: items are menu items, the first takes focus, the arrows walk them', async () => {
+      await openMenu('a');
+      const items = [...host.querySelectorAll('[role="menuitem"]')];
+      assert.ok(items.length > 3);
+      assert.ok(items.every(el => el.getAttribute('tabindex') === '-1'), 'reachable by the arrows, not by Tab');
+      assert.equal(dom.window.document.activeElement, items[0], 'focus moves into the menu');
+      await key(items[0], 'ArrowDown');
+      assert.equal(dom.window.document.activeElement, items[1]);
+      await key(items[1], 'ArrowUp');
+      await key(items[0], 'ArrowUp');
+      assert.equal(dom.window.document.activeElement, items[items.length - 1], 'wraps round');
+      await key(items[items.length - 1], 'Home');
+      assert.equal(dom.window.document.activeElement, items[0]);
+    });
+
+    test('the header is a label outside the menu, separators are separators', async () => {
+      await openMenu('a');
+      const menu = host.querySelector('[role="menu"]');
+      assert.ok(!menu.textContent.includes('Alpha'), 'the title is not an item of the menu');
+      assert.ok(menu.getAttribute('aria-label').includes('Alpha'), 'it names the menu');
+      assert.ok(menu.querySelectorAll('[role="separator"]').length >= 1);
+      assert.ok([...menu.children].every(el => ['menuitem', 'separator'].includes(el.getAttribute('role'))), 'only items and separators inside');
+    });
+
+    test('opened with the mouse, only the item under the pointer is highlighted, not the one that took focus', async () => {
+      await openMenu('a');
+      const items = [...host.querySelectorAll('[role="menuitem"]')];
+      assert.equal(dom.window.document.activeElement, items[0]);
+      assert.equal(items[0].style.background, 'transparent', 'the focused first item is not lit by the focus alone');
+      assert.ok(items.every(el => el.style.background === 'transparent'), 'nothing is lit until the pointer is over an item');
+    });
+
+    test('Escape closes it and focus returns to the row it was opened from', async () => {
+      const row = accountRow('b');
+      row.focus();
+      await key(row, 'F10', { shiftKey: true });
+      assert.ok(menuOpen(), 'Shift+F10 on a focused row opens its menu');
+      assert.notEqual(dom.window.document.activeElement, row, 'focus is in the menu');
+      await key(dom.window.document.activeElement, 'Escape');
+      assert.ok(!menuOpen());
+      assert.equal(dom.window.document.activeElement, row, 'focus is back on the row');
+    });
+
+    test('choosing an item with Enter runs it and focus returns to the row', async () => {
+      const row = accountRow('c');
+      row.focus();
+      await key(row, 'ContextMenu');
+      assert.ok(menuOpen(), 'the Menu key opens it too');
+      const pin = menuItem('sidebar.accountMenu.pin');
+      pin.focus();
+      await key(pin, 'Enter');
+      assert.deepEqual(useStore.getState().pinnedAccounts, ['c']);
+      assert.ok(!menuOpen());
+      assert.equal(dom.window.document.activeElement, accountRow('c'), 'the row is still the place focus is');
+    });
+
+    test('Tab closes the menu instead of walking out of it, and focus returns to the row', async () => {
+      const row = accountRow('a');
+      row.focus();
+      await key(row, 'F10', { shiftKey: true });
+      assert.ok(menuOpen());
+      let prevented = false;
+      await React.act(async () => {
+        const event = new dom.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+        dom.window.document.activeElement.dispatchEvent(event);
+        prevented = event.defaultPrevented;
+      });
+      assert.ok(prevented, 'the browser does not move focus on by itself');
+      assert.ok(!menuOpen());
+      assert.equal(dom.window.document.activeElement, row);
+    });
+
+    test('the keys the menu uses do not reach the app\'s global shortcut handler', async () => {
+      const seen = [];
+      const spy = (e) => seen.push(e.key);
+      dom.window.document.addEventListener('keydown', spy);
+      try {
+        await openMenu('a');
+        const first = host.querySelector('[role="menuitem"]');
+        await key(first, 'ArrowDown');
+        await key(dom.window.document.activeElement, 'Tab');
+        assert.deepEqual(seen, [], 'neither the arrows nor Tab got through');
+        await openMenu('a');
+        await key(dom.window.document.activeElement, 'Escape');
+        assert.deepEqual(seen, [], 'nor Escape, which closes the menu and nothing else');
+      } finally {
+        dom.window.document.removeEventListener('keydown', spy);
+      }
+    });
+  });
+
+  describe('the list as one tab stop', () => {
+    test('exactly one row can be tabbed to, the others are reached by the arrows', () => {
+      const rows = navRows();
+      assert.ok(rows.length >= 4);
+      assert.equal(rows.filter(r => r.getAttribute('tabindex') === '0').length, 1);
+      assert.equal(rows[0].getAttribute('tabindex'), '0');
+    });
+
+    test('the arrow keys move between rows and the stop follows focus', async () => {
+      const rows = navRows();
+      rows[0].focus();
+      await key(rows[0], 'ArrowDown');
+      assert.equal(dom.window.document.activeElement, rows[1]);
+      assert.equal(rows[1].getAttribute('tabindex'), '0');
+      assert.equal(rows[0].getAttribute('tabindex'), '-1');
+      await key(rows[1], 'End');
+      assert.equal(dom.window.document.activeElement, rows[rows.length - 1]);
+      await key(rows[rows.length - 1], 'Home');
+      assert.equal(dom.window.document.activeElement, rows[0]);
+    });
+
+    test('Enter on a row activates it', async () => {
+      const row = accountRow('c');
+      row.focus();
+      await key(row, 'Enter');
+      assert.equal(useStore.getState().selectedAccountId, 'c');
+    });
+
+    test('Right and Left open and close an account', async () => {
+      const row = accountRow('a');
+      row.focus();
+      assert.equal(row.getAttribute('aria-expanded'), 'false');
+      await key(row, 'ArrowRight');
+      assert.equal(useStore.getState().expandedAccounts.a, true);
+      await key(accountRow('a'), 'ArrowLeft');
+      assert.equal(useStore.getState().expandedAccounts.a, false);
+    });
+
+    test('keys typed in a field inside the list are left to the field', async () => {
+      const filter = host.querySelector('input');
+      assert.ok(filter);
+      const event = new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+      await React.act(async () => { filter.dispatchEvent(event); });
+      assert.equal(event.defaultPrevented, false);
+    });
+
+    test('the collapsed sidebar has the same one tab stop and its rows open the menu from the keyboard', async () => {
+      await React.act(async () => { useStore.setState({ sidebarCollapsed: true }); });
+      const rows = navRows();
+      assert.equal(rows.filter(r => r.getAttribute('tabindex') === '0').length, 1);
+      rows[1].focus();
+      await key(rows[1], 'F10', { shiftKey: true });
+      assert.ok(menuOpen(), 'it has an account menu now, as the expanded row does');
+    });
+
+    test('a right-click on a collapsed row opens the account menu', async () => {
+      await React.act(async () => { useStore.setState({ sidebarCollapsed: true }); });
+      await React.act(async () => {
+        accountRow('b').dispatchEvent(new dom.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      });
+      assert.ok(menuOpen());
+      assert.ok(menuItem('sidebar.accountMenu.pin'));
+    });
+  });
+
+  describe('pinned mailboxes can be moved among the pinned ones', () => {
+    test('Move up / down show for a pinned mailbox even with the order by latest mail on, and reorder the pins', async () => {
+      await React.act(async () => { useStore.getState().setPinnedAccounts(['a', 'b', 'c']); });
+      assert.deepEqual(rowOrder(), ['a', 'b', 'c', 'd']);
+      await openMenu('b');
+      assert.ok(menuItem('sidebar.accountMenu.moveUp'));
+      await click(menuItem('sidebar.accountMenu.moveUp'));
+      assert.deepEqual(useStore.getState().pinnedAccounts, ['b', 'a', 'c']);
+      assert.deepEqual(rowOrder(), ['b', 'a', 'c', 'd']);
+    });
+
+    test('the first pin cannot move up and the last cannot move down', async () => {
+      await React.act(async () => { useStore.getState().setPinnedAccounts(['a', 'b']); });
+      await openMenu('a');
+      assert.equal(menuItem('sidebar.accountMenu.moveUp').getAttribute('aria-disabled'), 'true');
+      assert.equal(menuItem('sidebar.accountMenu.moveDown').getAttribute('aria-disabled'), null);
+    });
+  });
+
+  describe('a drag that never reports its end', () => {
+    const dragStart = () => React.act(async () => { document.dispatchEvent(new dom.window.Event('dragstart', { bubbles: true })); });
+
+    test('the list is released when the pointer moves with no button down (the source left the page)', async () => {
+      await dragStart();
+      await React.act(async () => { useStore.getState().noteAccountReceived('d', '2026-09-20T00:00:00.000Z'); });
+      assert.deepEqual(rowOrder(), ['c', 'b', 'a', 'd'], 'held while the drag lasts');
+      await React.act(async () => { dom.window.dispatchEvent(new dom.window.MouseEvent('pointermove', { buttons: 0 })); });
+      assert.deepEqual(rowOrder(), ['d', 'c', 'b', 'a'], 'released: a cancelled drag does not freeze the list for good');
+    });
+
+    test('a pointer move with the button still down does not release it', async () => {
+      await dragStart();
+      await React.act(async () => { useStore.getState().noteAccountReceived('d', '2026-09-20T00:00:00.000Z'); });
+      await React.act(async () => { dom.window.dispatchEvent(new dom.window.MouseEvent('pointermove', { buttons: 1 })); });
+      assert.deepEqual(rowOrder(), ['c', 'b', 'a', 'd']);
+      await React.act(async () => { dom.window.dispatchEvent(new dom.window.Event('dragend')); });
+      assert.deepEqual(rowOrder(), ['d', 'c', 'b', 'a'], 'a dragend seen anywhere in the window ends it');
+    });
+
+    test('a drop anywhere in the window ends it', async () => {
+      await dragStart();
+      await React.act(async () => { useStore.getState().noteAccountReceived('d', '2026-09-20T00:00:00.000Z'); });
+      await React.act(async () => { dom.window.dispatchEvent(new dom.window.Event('drop')); });
+      assert.deepEqual(rowOrder(), ['d', 'c', 'b', 'a']);
+    });
   });
 });

@@ -131,6 +131,33 @@ describe('AccountsTab opened for one account (sidebar "Account settings")', () =
     assert.ok(!showsList());
   });
 
+  test('a request made while another account is being edited shows the new account, title and fields alike', async () => {
+    useStore.getState().openAccountSettings('a1');
+    await React.act(async () => { root.render(React.createElement(AccountsTab)); });
+    await settle();
+    const nameField = () => host.querySelector('input[placeholder="admin.accounts.displayNamePh"]');
+    assert.ok(showsEditFor('sales@example.invalid'));
+    assert.equal(nameField().value, 'Sales Team');
+
+    await React.act(async () => { useStore.getState().openAccountSettings('a2'); });
+    await settle();
+    assert.ok(showsEditFor('ops@example.invalid'), 'the title names the second account');
+    assert.ok(!host.textContent.includes('sales@example.invalid'));
+    // The form is the second account's own: not the first one's fields saved into it.
+    assert.equal(nameField().value, 'Operations', 'the fields are the second account\'s, not the first one\'s');
+  });
+
+  test('closing the settings drops a request that has not been taken yet', async () => {
+    useStore.getState().openAccountSettings('a2');
+    useStore.setState({ addAccountRequested: true });
+    useStore.getState().setShowAdmin(false);
+    assert.equal(useStore.getState().accountSettingsRequested, null);
+    assert.equal(useStore.getState().addAccountRequested, false);
+    await React.act(async () => { root.render(React.createElement(AccountsTab)); });
+    await settle();
+    assert.ok(showsList(), 'nothing opens later');
+  });
+
   test('a request for an account that is not in the list is dropped, the list stays', async () => {
     useStore.getState().openAccountSettings('gone');
     await React.act(async () => { root.render(React.createElement(AccountsTab)); });

@@ -240,6 +240,21 @@ const MESSAGE_FIXTURES = [
   })),
 ];
 
+// Each mailbox's last_received_at, the stored record of arrivals the server keeps (migration 0085):
+// set here from the inbox letters the demo starts with, never ahead of now, null for a mailbox with
+// none, and moved forward when the demo adds an INBOX letter. It is a record, not a reading of the
+// inbox: moving or deleting a letter later does not take it back.
+{
+  const now = Date.now();
+  for (const account of ACCOUNT_FIXTURES) {
+    const times = MESSAGE_FIXTURES
+      .filter(item => item.account_id === account.id && item.folder === 'INBOX' && item.date)
+      .map(item => Date.parse(item.date))
+      .filter(time => !Number.isNaN(time) && time <= now);
+    account.last_received_at = times.length ? new Date(Math.max(...times)).toISOString() : null;
+  }
+}
+
 const CONTACT_FIXTURES = [
   {
     id: 'demo-contact-1', uid: 'demo-contact-1', display_name: 'Maya Chen', first_name: 'Maya', last_name: 'Chen',
@@ -526,17 +541,6 @@ function parsePath(path) {
 
 function accountFor(id) {
   return ACCOUNT_FIXTURES.find(account => account.id === id);
-}
-
-// The accounts as GET /api/accounts lists them: each with the date of its newest inbox letter
-// (last_received_at, null when it has none), which is what orders the sidebar.
-function withLastReceived(accounts) {
-  const newest = {};
-  for (const item of messages) {
-    if (item.folder !== 'INBOX' || !item.date) continue;
-    if (!newest[item.account_id] || item.date > newest[item.account_id]) newest[item.account_id] = item.date;
-  }
-  return accounts.map(account => ({ ...account, last_received_at: newest[account.id] ?? null }));
 }
 
 function visibleMessages() {
@@ -1399,6 +1403,7 @@ function welcomeLetter(account) {
     date: new Date().toISOString(), snippet: `Письма на ${account.email_address} теперь видны всей команде.`,
     category: 'automated',
   }));
+  account.last_received_at = new Date().toISOString();
 }
 
 // The second sender name becomes an alias with the mailbox's own address, as on the server
@@ -1745,20 +1750,33 @@ export async function demoRequest(method, path, body = {}) {
     return clone({ ...preferences, pinnedAccounts: (preferences.pinnedAccounts || []).filter(id => accountFor(id)) });
   }
   if (verb === 'PATCH' && pathname === '/auth/preferences') {
-    const { pinnedAccounts, sortAccountsByLatest, ...rest } = clone(body);
-    // The same rules as the server: a list of ids, once each; a boolean or nothing (400).
+    const { pinnedAccounts, pinAccount, unpinAccount, sortAccountsByLatest, ...rest } = clone(body);
+    // The same rules as the server (routes/auth.js): a list of ids, once each, or a 400; one id to
+    // pin or unpin, applied to the stored list; a boolean or a 400.
     if ('sortAccountsByLatest' in body && typeof sortAccountsByLatest !== 'boolean') {
       throw demoError('sortAccountsByLatest must be a boolean', 'invalid_preference');
     }
+    if ('pinnedAccounts' in body && !Array.isArray(pinnedAccounts)) {
+      throw demoError('pinnedAccounts must be an array of account ids', 'invalid_preference');
+    }
+    for (const [key, value] of [['pinAccount', pinAccount], ['unpinAccount', unpinAccount]]) {
+      if (key in body && typeof value !== 'string') throw demoError(key + ' must be an account id', 'invalid_preference');
+    }
+    if ('pinAccount' in body && 'unpinAccount' in body) throw demoError('pinAccount and unpinAccount cannot be sent together', 'invalid_preference');
+    let pins = Array.isArray(pinnedAccounts)
+      ? [...new Set(pinnedAccounts.filter(id => typeof id === 'string'))]
+      : [...(preferences.pinnedAccounts || [])];
+    if ('pinAccount' in body && !pins.includes(pinAccount)) pins = [...pins, pinAccount];
+    if ('unpinAccount' in body) pins = pins.filter(id => id !== unpinAccount);
     preferences = {
       ...preferences,
       ...rest,
-      ...(Array.isArray(pinnedAccounts) ? { pinnedAccounts: [...new Set(pinnedAccounts.filter(id => typeof id === 'string'))] } : {}),
+      ...('pinnedAccounts' in body || 'pinAccount' in body || 'unpinAccount' in body ? { pinnedAccounts: pins } : {}),
       ...('sortAccountsByLatest' in body ? { sortAccountsByLatest } : {}),
     };
     return { ok: true };
   }
-  if (verb === 'GET' && pathname === '/accounts') return clone(withLastReceived(ACCOUNT_FIXTURES));
+  if (verb === 'GET' && pathname === '/accounts') return clone(ACCOUNT_FIXTURES);
   // "Mailbox on our domain": the demo adds it to the account list for this page session.
   if (verb === 'POST' && pathname === '/accounts' && body?.kind === 'domain') return clone(createDomainMailbox(body));
   if (verb === 'POST' && pathname === '/oauth/google/start') return connectGmail(body);

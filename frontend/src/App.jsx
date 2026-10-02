@@ -71,15 +71,17 @@ export default function App() {
     if (isDemoMode) {
       // The demo is about conversations: it opens threaded unless this browser chose otherwise.
       if (localStorage.getItem('mailexpert_threaded_view') === null) useStore.getState().setThreadedView(true);
-      // No preferences to load in the demo: this browser's own choice is all there is.
+      // The demo does not load the server-style preferences (loadPreferences): this browser's own
+      // choices, kept in localStorage, are what applies. One exception is below.
       if (needsLanguageChoice({ stored: localStorage.getItem('mailexpert_language') })) useStore.getState().setLanguagePickerOpen(true);
       setUser(demoUser());
       setLocked(false);
-      // Theme, font, and layout were applied above from localStorage. Do not use
-      // loadPreferences here: demo mode must not call an API before the adapter is ready.
-      // The one thing read from the demo's preferences is which mailboxes are pinned, the first
-      // time this browser opens the demo, so the sidebar shows pins at once; from then on the
-      // browser's own choice (localStorage, kept by the store) is all there is.
+      // Theme, font, and layout were applied above from localStorage. The exception: which
+      // mailboxes are pinned is read once from the demo adapter's preferences, the first time this
+      // browser opens the demo, so the sidebar shows pins at once. It goes through the same
+      // adapter every other call uses (api.js hands demo mode to it, imported up front); after
+      // that the pins live in localStorage, kept by the store, and are written back to the
+      // adapter's preferences by pinning and unpinning.
       if (localStorage.getItem('mailexpert_pinned_accounts') === null) {
         api.getPreferences()
           .then((prefs) => { if (Array.isArray(prefs?.pinnedAccounts)) useStore.getState().setPinnedAccounts(prefs.pinnedAccounts); })

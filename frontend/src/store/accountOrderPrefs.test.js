@@ -61,13 +61,34 @@ describe('account order preferences', () => {
     assert.equal(useStore.getState().sortAccountsByLatest, true);
   });
 
-  it('pinning appends to the pins in order, keeps them in localStorage and queues the preference', () => {
+  it('pinning appends to the pins in order, keeps them in localStorage and tells the server each change at once', () => {
     useStore.getState().pinAccount('c');
     useStore.getState().pinAccount('a');
     assert.deepEqual(useStore.getState().pinnedAccounts, ['c', 'a']);
     assert.equal(localStorage.getItem('mailexpert_pinned_accounts'), JSON.stringify(['c', 'a']));
+    // Two quick pins are two operations; the preference queue would have kept only the last.
+    assert.deepEqual(saved, [{ pinAccount: 'c' }, { pinAccount: 'a' }]);
+  });
+
+  it('unpinning sends the one removal, never the whole list', () => {
+    useStore.getState().setPinnedAccounts(['a', 'b']);
+    useStore.getState().unpinAccount('a');
+    assert.deepEqual(saved, [{ unpinAccount: 'a' }]);
+  });
+
+  it('reordering the pins sends the whole new order, queued like other preferences', () => {
+    useStore.getState().setPinnedAccounts(['a', 'b', 'c']);
+    useStore.getState().reorderPinnedAccounts(['b', 'a', 'c']);
+    assert.deepEqual(useStore.getState().pinnedAccounts, ['b', 'a', 'c']);
+    assert.deepEqual(saved, []);
     flush();
-    assert.deepEqual(saved, [{ pinnedAccounts: ['c', 'a'] }]);
+    assert.deepEqual(saved, [{ pinnedAccounts: ['b', 'a', 'c'] }]);
+  });
+
+  it('setPinnedAccounts alone changes nothing on the server', () => {
+    useStore.getState().setPinnedAccounts(['a']);
+    flush();
+    assert.deepEqual(saved, []);
   });
 
   it('pinning twice is a no-op, unpinning removes just that one', () => {
@@ -112,13 +133,48 @@ describe('account order preferences', () => {
     assert.equal(localStorage.getItem('mailexpert_sort_accounts_by_latest'), 'false');
   });
 
-  it('loadPreferences keeps what is there when the server has neither', async () => {
+  it('loadPreferences treats a missing key as no pins and the default order, not as what a previous user left', async () => {
     useStore.getState().setUser({ id: 'u1' });
     useStore.setState({ pinnedAccounts: ['a'], sortAccountsByLatest: false, accounts: ACCOUNTS, accountsReady: true });
+    localStorage.setItem('mailexpert_pinned_accounts', JSON.stringify(['a']));
     api.getPreferences = async () => ({ theme: 'daylight' });
     await useStore.getState().loadPreferences();
-    assert.deepEqual(useStore.getState().pinnedAccounts, ['a']);
-    assert.equal(useStore.getState().sortAccountsByLatest, false);
+    assert.deepEqual(useStore.getState().pinnedAccounts, []);
+    assert.equal(useStore.getState().sortAccountsByLatest, true);
+    assert.equal(localStorage.getItem('mailexpert_pinned_accounts'), '[]');
+  });
+
+  describe('another person signing in on the same tab', () => {
+    it('does not inherit the previous user\'s pins, order switch or expanded mailboxes', () => {
+      useStore.getState().setUser({ id: 'u1' });
+      useStore.setState({ pinnedAccounts: ['a', 'b'], sortAccountsByLatest: false, expandedAccounts: { a: true } });
+      localStorage.setItem('mailexpert_pinned_accounts', '["a","b"]');
+      localStorage.setItem('mailexpert_sort_accounts_by_latest', 'false');
+      localStorage.setItem('mailexpert_expanded_accounts', '{"a":true}');
+
+      useStore.getState().setUser({ id: 'u2' });
+
+      assert.deepEqual(useStore.getState().pinnedAccounts, []);
+      assert.equal(useStore.getState().sortAccountsByLatest, true);
+      assert.deepEqual(useStore.getState().expandedAccounts, {});
+      for (const key of ['mailexpert_pinned_accounts', 'mailexpert_sort_accounts_by_latest', 'mailexpert_expanded_accounts']) {
+        assert.equal(localStorage.getItem(key), null, key);
+      }
+    });
+
+    it('also not after signing out', () => {
+      useStore.getState().setUser({ id: 'u1' });
+      useStore.setState({ pinnedAccounts: ['a'] });
+      useStore.getState().setUser(null);
+      assert.deepEqual(useStore.getState().pinnedAccounts, []);
+    });
+
+    it('but the first sign-in of a page load keeps what this browser cached for that user', () => {
+      useStore.getState().setUser(null);
+      useStore.setState({ pinnedAccounts: ['a'] });
+      useStore.getState().setUser({ id: 'u1' });
+      assert.deepEqual(useStore.getState().pinnedAccounts, ['a']);
+    });
   });
 
   describe('noteAccountReceived', () => {
