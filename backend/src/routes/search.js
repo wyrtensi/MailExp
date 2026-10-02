@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { resolveAccountScope } from '../services/unifiedInbox.js';
+import { deliveryStateColumn } from '../services/deliveryStatus.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -269,6 +270,7 @@ router.get('/', searchLimiter, async (req, res) => {
         m.id, m.uid, m.folder, m.subject, m.from_name, m.from_email,
         m.to_addresses, m.cc_addresses, m.delivery_addresses,
         m.date, m.snippet, m.is_read, m.is_starred, m.has_attachments, m.account_id, m.eop_category,
+        ${deliveryStateColumn('m')} AS delivery_state,
         a.name as account_name, a.email_address as account_email, a.color as account_color
       FROM messages m
       JOIN email_accounts a ON m.account_id = a.id

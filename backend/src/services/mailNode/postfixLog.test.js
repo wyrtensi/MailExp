@@ -10,12 +10,12 @@ vi.mock('./mailcow.js', () => ({
 }));
 
 import {
-  BYPASS_SENT, DISCARDED, EXPIRED, SENT_TO_EOP_ADDRESS, SENT_TO_RECIPIENT_M365_MX, STAND_LOG, STAND_QUEUE_ACTIONS, STAND_SENT_LOCAL,
-  STAND_SENT_VIA_EOP,
+  BYPASS_SENT, DISCARDED, EXPIRED, SENT_TO_EOP_ADDRESS, SENT_TO_RECIPIENT_M365_MX, STAND_DELIVERY, STAND_LOG, STAND_QUEUE_ACTIONS,
+  STAND_SENT_LOCAL, STAND_SENT_VIA_EOP,
 } from './postfixLog.fixtures.js';
 import {
-  MAX_LOG_LINES, clearPostfixLogCache, correlateByQueueId, parsePostfixEntry, parsePostfixLog, parseRelay, readPostfixLog,
-  relayKind,
+  MAX_LOG_LINES, clearPostfixLogCache, correlateByQueueId, parsePostfixEntry, parsePostfixLog, parseRelay, parseTlsLine,
+  readPostfixLog, relayKind,
 } from './postfixLog.js';
 
 beforeEach(() => {
@@ -80,6 +80,30 @@ describe('parsePostfixEntry', () => {
       expect(parsePostfixEntry(bad)).toBeNull();
     }
     expect(parsePostfixEntry({ time: 'soon', program: 'postfix/qmgr', message: 'C9244193F13: removed' })).toMatchObject({ at: null, epoch: null, event: 'removed' });
+  });
+});
+
+describe('process id, delays and TLS lines (R-17)', () => {
+  it('has no process id in the API\'s entries, and reads one where an entry carries it', () => {
+    expect(parsePostfixEntry(STAND_DELIVERY[1])).toMatchObject({ pid: null, program: 'postfix/smtp', service: 'smtp' });
+    expect(parsePostfixEntry({ ...STAND_DELIVERY[1], program: 'postfix/smtp[442]' })).toMatchObject({ pid: 442, program: 'postfix/smtp', service: 'smtp' });
+    expect(parsePostfixEntry({ ...STAND_DELIVERY[1], pid: '443' })).toMatchObject({ pid: 443 });
+  });
+
+  it('reads the delays of a delivery line', () => {
+    expect(parsePostfixEntry(STAND_DELIVERY[1]).delays).toEqual([0.09, 0.02, 0.1, 0.05]);
+    expect(parsePostfixEntry(STAND_LOG[0]).delays).toBeNull();
+  });
+
+  it('reads the smtp client\'s TLS line, and only that one', () => {
+    expect(parsePostfixEntry(STAND_DELIVERY[3])).toMatchObject({
+      event: 'other', queueId: null,
+      tls: { level: 'untrusted', host: 'eop.test.local', ip: '172.22.1.7', port: 25, protocol: 'TLSv1.3', cipher: 'TLS_AES_256_GCM_SHA384', bits: '256/256 bits' },
+    });
+    expect(parseTlsLine('Verified TLS connection established to mx.example.org[2001:db8::1]:25: TLSv1.2 with cipher ECDHE-RSA-AES256-GCM-SHA384 (256/256 bits)'))
+      .toMatchObject({ level: 'verified', host: 'mx.example.org', ip: '2001:db8::1', protocol: 'TLSv1.2' });
+    expect(parsePostfixEntry({ time: '1790933357', program: 'postfix/submission/smtpd', message: 'Anonymous TLS connection established from unknown[172.22.1.1]: TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits)' }).tls).toBeNull();
+    expect(parsePostfixEntry(STAND_DELIVERY[1]).tls).toBeNull();
   });
 });
 

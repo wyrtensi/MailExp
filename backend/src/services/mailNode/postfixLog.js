@@ -15,14 +15,19 @@ import { getPostfixLog } from './mailcow.js';
 // One parsed line (parsePostfixEntry):
 // {
 //   at: ISO time | null, epoch: ms | null, program: 'postfix/smtp', service: 'smtp',
+//   pid: the process id when the entry carries one (a pid field, or "postfix/smtp[123]") | null;
+//     mailcow's syslog-ng template writes $PROGRAM without $PID, so its API never does,
 //   queueId: '53A99193F13' | null, event: one of LOG_EVENTS,
 //   to, origTo, from: addresses without <> (from may be '' for the null sender) | null,
 //   relay: the relay= value as written | null, relayHost, relayIp, relayPort: its parts | null,
 //   dsn: '4.7.500' | null, status: sent|deferred|bounced|expired|undeliverable|deliverable | null,
 //   statusText: the text in parentheses after status=, to the end of the line | null,
 //   reply: the remote server's words in it (after "said: ", without "(in reply to ...)") | null,
-//   delay: seconds | null, messageId: '<id@host>' | null, size, nrcpt: numbers | null,
+//   delay: seconds | null, delays: [before queue, in queue, connection setup, transmission] in
+//     seconds | null, messageId: '<id@host>' | null, size, nrcpt: numbers | null,
 //   notificationQueueId: the queue id of the bounce or delay notice a bounce line names | null,
+//   tls: for "<level> TLS connection established to host[ip]:port: <protocol> with cipher <cipher>
+//     (<bits>)" of the smtp client, { level, host, ip, port, protocol, cipher, bits } | null,
 //   message: the line as logged (folded to one line),
 // }
 
@@ -104,6 +109,43 @@ const numberOr = (value) => {
   return value != null && value !== '' && Number.isFinite(n) ? n : null;
 };
 
+// delays=a/b/c/d: time before the queue manager, in the queue, setting up the connection (DNS,
+// HELO, TLS) and transmitting the message.
+function delaysOf(value) {
+  if (!value) return null;
+  const parts = value.split('/').map(Number);
+  return parts.length === 4 && parts.every(Number.isFinite) ? parts : null;
+}
+
+// The smtp client's TLS line: "Untrusted TLS connection established to eop.test.local[172.22.1.7]:25:
+// TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits) key-exchange x25519 ...". The level is
+// Postfix's own verdict on the server certificate: Verified (the name matched under a policy that
+// checks it), Trusted (the chain is good, the name was not checked), Untrusted (no trusted chain)
+// or Anonymous (no certificate). Null for any other line, the server side ("established from")
+// included.
+export function parseTlsLine(message) {
+  const match = /^(Verified|Trusted|Untrusted|Anonymous) TLS connection (?:established|reused) to ([^\s[\]]*)\[([^\]]*)\](?::(\d+))?: (\S+) with cipher (\S+)(?: \(([^)]*)\))?/
+    .exec(String(message ?? ''));
+  if (!match) return null;
+  return {
+    level: match[1].toLowerCase(),
+    host: match[2].toLowerCase() || null,
+    ip: match[3].replace(/^ipv6:/i, '') || null,
+    port: match[4] ? Number(match[4]) : null,
+    protocol: match[5],
+    cipher: match[6],
+    bits: match[7] ?? null,
+  };
+}
+
+// The process id of an entry: its own pid field, or the "[123]" after the program name.
+function pidOf(item, program) {
+  const own = Number(item.pid);
+  if (item.pid != null && item.pid !== '' && Number.isInteger(own) && own > 0) return own;
+  const match = /\[(\d+)\]$/.exec(program);
+  return match ? Number(match[1]) : null;
+}
+
 function eventOf(service, rest, status) {
   if (status === 'expired') return 'expired';
   if (status && DELIVERY_STATUSES.has(status)) return status;
@@ -137,7 +179,9 @@ export function parsePostfixEntry(entry) {
   if (!message) return null;
   const seconds = Number(item.time);
   const epoch = item.time != null && item.time !== '' && Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
-  const program = typeof item.program === 'string' ? item.program : '';
+  const rawProgram = typeof item.program === 'string' ? item.program : '';
+  const pid = pidOf(item, rawProgram);
+  const program = rawProgram.replace(/\[\d+\]$/, '');
   const service = program.split('/').pop() || null;
 
   let queueId = null;
@@ -161,6 +205,7 @@ export function parsePostfixEntry(entry) {
     epoch,
     program,
     service,
+    pid,
     queueId,
     event: eventOf(service, rest, status),
     to: address(rest, 'to'),
@@ -173,10 +218,12 @@ export function parsePostfixEntry(entry) {
     statusText: text,
     reply: remoteReply(text),
     delay: numberOr(field(rest, 'delay')),
+    delays: delaysOf(field(rest, 'delays')),
     messageId: messageIdMatch ? messageIdMatch[1] || null : null,
     size: numberOr(field(rest, 'size')),
     nrcpt: numberOr(field(rest, 'nrcpt')),
     notificationQueueId: notice ? notice[1] : null,
+    tls: !queueId && service === 'smtp' ? parseTlsLine(message) : null,
     message,
   };
 }

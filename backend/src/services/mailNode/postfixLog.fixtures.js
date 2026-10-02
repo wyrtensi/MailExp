@@ -29,6 +29,33 @@ export const STAND_LOG = Object.freeze([
   { time: '1790881379', program: 'postfix/pickup', priority: 'info', message: '53A99193F13: uid=0 from=<someone@stage.test>' },
 ]);
 
+// Two letters of the mailbox r17-delivery@stage.test sent through submission (stand, 2026-10-02,
+// newest first), each to two recipients, with the TLS lines of the smtp client: the first refused
+// by fake-EOP in recipient-denied (550 5.4.1, with the bounce notice delivered back over LMTP), the
+// second accepted by fake-EOP answering in EOP's shape (Message-ID, InternalId, Hostname, bytes).
+// The API gives no process id: program is "postfix/smtp", never "postfix/smtp[442]".
+export const STAND_DELIVERY = Object.freeze([
+  { time: '1790933738', program: 'postfix/qmgr', priority: 'info', message: '0C3BF1A4B81: removed' },
+  { time: '1790933738', program: 'postfix/smtp', priority: 'info', message: '0C3BF1A4B81: to=<second@example.org>, relay=eop.test.local[172.22.1.7]:25, delay=0.26, delays=0.09/0.02/0.1/0.05, dsn=2.6.0, status=sent (250 2.6.0 <r17-accepted-1790933733899@stage.test> [InternalId=1099511627777, Hostname=EOPSTAGE01MB0001.stageprd01.prod.eop.test.local] 1091 bytes in 0.049, 21.743 KB/sec Queued mail for delivery)' },
+  { time: '1790933738', program: 'postfix/smtp', priority: 'info', message: '0C3BF1A4B81: to=<test@example.com>, relay=eop.test.local[172.22.1.7]:25, delay=0.26, delays=0.09/0.02/0.1/0.05, dsn=2.6.0, status=sent (250 2.6.0 <r17-accepted-1790933733899@stage.test> [InternalId=1099511627777, Hostname=EOPSTAGE01MB0001.stageprd01.prod.eop.test.local] 1091 bytes in 0.049, 21.743 KB/sec Queued mail for delivery)' },
+  { time: '1790933738', program: 'postfix/smtp', priority: 'info', message: 'Untrusted TLS connection established to eop.test.local[172.22.1.7]:25: TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits) key-exchange x25519 server-signature RSA-PSS (2048 bits) server-digest SHA256 client-signature RSA-PSS (2048 bits) client-digest SHA256' },
+  { time: '1790933738', program: 'postfix/qmgr', priority: 'info', message: '0C3BF1A4B81: from=<r17-delivery@stage.test>, size=494, nrcpt=2 (queue active)' },
+  { time: '1790933738', program: 'postfix/cleanup', priority: 'info', message: '0C3BF1A4B81: message-id=<r17-accepted-1790933733899@stage.test>' },
+  { time: '1790933738', program: 'postfix/submission/smtpd', priority: 'info', message: '0C3BF1A4B81: client=unknown[172.22.1.1], sasl_method=PLAIN, sasl_username=r17-delivery@stage.test' },
+  { time: '1790933358', program: 'postfix/lmtp', priority: 'info', message: '61EB61A4B57: to=<r17-delivery@stage.test>, relay=dovecot[172.22.1.250]:24, delay=0.06, delays=0.01/0.01/0/0.04, dsn=2.0.0, status=sent (250 2.0.0 <r17-delivery@stage.test> WEvfGG55v2rJAAAAqAbqoQ Saved)' },
+  { time: '1790933358', program: 'postfix/qmgr', priority: 'info', message: '61EB61A4B57: removed' },
+  { time: '1790933358', program: 'postfix/qmgr', priority: 'info', message: '127621A4B8F: removed' },
+  { time: '1790933358', program: 'postfix/qmgr', priority: 'info', message: '61EB61A4B57: from=<>, size=3611, nrcpt=1 (queue active)' },
+  { time: '1790933358', program: 'postfix/bounce', priority: 'info', message: '127621A4B8F: sender non-delivery notification: 61EB61A4B57' },
+  { time: '1790933358', program: 'postfix/cleanup', priority: 'info', message: '61EB61A4B57: message-id=<20261002092918.61EB61A4B57@mail.test.local>' },
+  { time: '1790933358', program: 'postfix/smtp', priority: 'info', message: '127621A4B8F: to=<second@example.org>, relay=eop.test.local[172.22.1.7]:25, delay=0.34, delays=0.15/0.03/0.1/0.06, dsn=5.4.1, status=bounced (host eop.test.local[172.22.1.7] said: 550 5.4.1 Recipient address rejected: Access denied. AS(201806281) (in reply to RCPT TO command))' },
+  { time: '1790933358', program: 'postfix/smtp', priority: 'info', message: '127621A4B8F: to=<test@example.com>, relay=eop.test.local[172.22.1.7]:25, delay=0.34, delays=0.15/0.03/0.1/0.06, dsn=5.4.1, status=bounced (host eop.test.local[172.22.1.7] said: 550 5.4.1 Recipient address rejected: Access denied. AS(201806281) (in reply to RCPT TO command))' },
+  { time: '1790933358', program: 'postfix/smtp', priority: 'info', message: 'Untrusted TLS connection established to eop.test.local[172.22.1.7]:25: TLSv1.3 with cipher TLS_AES_256_GCM_SHA384 (256/256 bits) key-exchange x25519 server-signature RSA-PSS (2048 bits) server-digest SHA256 client-signature RSA-PSS (2048 bits) client-digest SHA256' },
+  { time: '1790933358', program: 'postfix/qmgr', priority: 'info', message: '127621A4B8F: from=<r17-delivery@stage.test>, size=488, nrcpt=2 (queue active)' },
+  { time: '1790933358', program: 'postfix/cleanup', priority: 'info', message: '127621A4B8F: message-id=<r17-denied-1790933353895@stage.test>' },
+  { time: '1790933358', program: 'postfix/submission/smtpd', priority: 'info', message: '127621A4B8F: client=unknown[172.22.1.1], sasl_method=PLAIN, sasl_username=r17-delivery@stage.test' },
+]);
+
 // A message accepted by fake-EOP (stand, 2026-10-01): sent through <EOP_HOST>.
 export const STAND_SENT_VIA_EOP = Object.freeze({
   time: '1790877403', program: 'postfix/smtp', priority: 'info',

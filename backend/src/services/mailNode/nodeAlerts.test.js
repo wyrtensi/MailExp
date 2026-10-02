@@ -41,8 +41,11 @@ vi.mock('./terrl.js', async (importActual) => ({
   ...(await importActual()),
   computeTerrlBudget: vi.fn(async () => fail(node.budget)),
 }));
+const capture = vi.hoisted(() => ({ result: { letters: 0, changed: 0 } }));
+vi.mock('../deliveryStatus.js', () => ({ captureFromLog: vi.fn(async () => fail(capture.result)) }));
 
 import { recordAudit } from '../auditLog.js';
+import { captureFromLog } from '../deliveryStatus.js';
 import { safeFetch } from '../safeFetch.js';
 import { MailNodeError, getMailNodeConfig } from './mailcow.js';
 import { clearPostfixLogCache, parsePostfixLog } from './postfixLog.js';
@@ -238,6 +241,29 @@ describe('runAlertCheck', () => {
       ['mail_node.alert_cleared', 'connector_blocked', 'admin-1'], ['mail_node.alert_cleared', 'terrl_exceeded', 'admin-1'],
     ]);
     expect(safeFetch.mock.calls[2][0]).toBe(PING);
+  });
+
+  it('hands the same log read to the delivery details, and their failure changes neither alerts nor ping (R-17)', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    node.log = STAND_LOG;
+    capture.result = new Error('database gone');
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const state = await runAlertCheck({ now: NOW });
+    expect(captureFromLog).toHaveBeenCalledTimes(1);
+    const [{ cfg, log, eopHost, now }] = captureFromLog.mock.calls[0];
+    expect({ cfg, eopHost, now, lines: log.lines.length }).toEqual({ cfg: node.cfg, eopHost: 'eop.test.local', now: NOW, lines: STAND_LOG.length });
+    expect(state.errors).toEqual([]);
+    expect(safeFetch.mock.calls[0][0]).toBe(`${PING}/fail`);
+    expect(errorLog).toHaveBeenCalledWith('Mail node delivery details were not captured: database gone');
+    errorLog.mockRestore();
+    capture.result = { letters: 0, changed: 0 };
+
+    // No log, no capture.
+    captureFromLog.mockClear();
+    clearPostfixLogCache();
+    node.log = new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ECONNREFUSED)');
+    await runAlertCheck({ now: NOW + 60000 });
+    expect(captureFromLog).not.toHaveBeenCalled();
   });
 
   it('sends no ping when a source could not be read and keeps that source\'s alerts', async () => {
