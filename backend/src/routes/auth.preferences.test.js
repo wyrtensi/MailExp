@@ -196,7 +196,7 @@ describe('sync intervals are install-wide', () => {
     await patchPreferences({ session: { userId: 'user-1' }, body: { syncInterval: '15', folderSyncInterval: '0' } }, res);
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/syncInterval|folderSyncInterval/);
-    expect(params).toHaveLength(43);
+    expect(params).toHaveLength(45);
     expect(res.json).toHaveBeenCalledWith({ ok: true });
   });
 
@@ -275,12 +275,48 @@ describe('PATCH /auth/preferences pinnedAccounts', () => {
     expect(query.mock.calls[0][1][41]).toBe('[]');
   });
 
-  it('leaves the stored list untouched when the key is absent or not an array', async () => {
+  it('leaves the stored list untouched when the key is absent', async () => {
     await call({ theme: 'dark' });
     expect(query.mock.calls[0][1][41]).toBeNull();
-    query.mockClear();
-    await call({ pinnedAccounts: A });
-    expect(query.mock.calls[0][1][41]).toBeNull();
+    expect(query.mock.calls[0][1][43]).toBeNull();
+    expect(query.mock.calls[0][1][44]).toBeNull();
+  });
+
+  it('rejects a list that is not an array without querying, like a bad sort switch', async () => {
+    for (const bad of [A, null, {}, 7, 'x']) {
+      query.mockClear();
+      const res = await call({ pinnedAccounts: bad });
+      expect(res.status, JSON.stringify(bad)).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith({ error: 'pinnedAccounts must be an array of account ids' });
+      expect(query).not.toHaveBeenCalled();
+    }
+  });
+
+  it('pins one id with an atomic append, lower-cased', async () => {
+    await call({ pinAccount: A.toUpperCase() });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("jsonb_build_object('pinnedAccounts'");
+    expect(sql).toContain('$44::text');
+    expect(params[43]).toBe(A);
+    expect(params[44]).toBeNull();
+    expect(params[41]).toBeNull();
+  });
+
+  it('unpins one id with an atomic removal', async () => {
+    await call({ unpinAccount: B });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('$45::text');
+    expect(params[44]).toBe(B);
+    expect(params[43]).toBeNull();
+  });
+
+  it('rejects a malformed id, or both operations at once, without querying', async () => {
+    for (const body of [{ pinAccount: 'nope' }, { unpinAccount: 5 }, { pinAccount: null }, { pinAccount: A, unpinAccount: B }]) {
+      query.mockClear();
+      const res = await call(body);
+      expect(res.status, JSON.stringify(body)).toHaveBeenCalledWith(400);
+      expect(query).not.toHaveBeenCalled();
+    }
   });
 });
 

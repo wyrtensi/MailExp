@@ -83,7 +83,7 @@ describe('GET /api/accounts health', () => {
     expect(listSql).not.toMatch(/oauth_access_token|oauth_refresh_token|auth_pass|\*/);
   });
 
-  it('carries the date of the latest received letter, read in the same query', async () => {
+  it('carries the date the mailbox last received a letter, a stored column read in the same query', async () => {
     const received = new Date('2026-09-20T10:00:00.000Z');
     const accounts = await list([
       { ...ROW, id: 'with-mail', last_sync: new Date(), last_received_at: received },
@@ -91,7 +91,7 @@ describe('GET /api/accounts health', () => {
     ]);
     expect(accounts.find(a => a.id === 'with-mail').last_received_at).toBe(received.toISOString());
     expect(accounts.find(a => a.id === 'no-mail').last_received_at).toBeNull();
-    expect(query.mock.calls[0][0]).toMatch(/AS last_received_at/);
+    expect(query.mock.calls[0][0]).toMatch(/\blast_received_at\b/);
     // One query for the accounts and one for the aliases: no extra round trip per mailbox.
     expect(query).toHaveBeenCalledTimes(2);
   });
