@@ -8,9 +8,11 @@ printf 'ipset %s\n' "$*" >>"$MOCK_DIR/calls"
 missing() { echo "ipset v7.19: The set with the given name does not exist" >&2; exit 1; }
 case $1 in
   list)
-    [ "$2" = -t ] || exit 2
-    [ -f "$dir/$3" ] || missing
-    printf 'Name: %s\nType: hash:net\nHeader: family %s\nNumber of entries: %s\n' "$3" "$(cat "$dir/$3.family")" "$(grep -c . "$dir/$3")"
+    name=$2
+    [ "$2" != -t ] || name=$3
+    [ -f "$dir/$name" ] || missing
+    printf 'Name: %s\nType: hash:net\nHeader: family %s\nNumber of entries: %s\n' "$name" "$(cat "$dir/$name.family")" "$(grep -c . "$dir/$name")"
+    if [ "$2" != -t ]; then printf 'Members:\n'; cat "$dir/$name"; fi
     ;;
   restore)
     while read -r cmd name rest; do

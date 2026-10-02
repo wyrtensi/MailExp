@@ -2,7 +2,12 @@
 # docker for the mail node tests: records `docker compose` calls with the directory they ran in.
 # MOCK_RUNNING lists the mailcow services that run (space separated).
 printf 'docker %s (in %s)\n' "$*" "$PWD" >>"$MOCK_DIR/calls"
+# MOCK_RESTART_FAIL lists the services whose restart fails.
 if [ "$1 $2" = "compose ps" ] && [ "$3" = -q ]; then
   [[ " ${MOCK_RUNNING:-} " != *" $4 "* ]] || echo "0123456789ab"
+fi
+if [ "$1 $2" = "compose restart" ] && [[ " ${MOCK_RESTART_FAIL:-} " == *" $3 "* ]]; then
+  echo "Error response from daemon: restart failed" >&2
+  exit 1
 fi
 exit 0

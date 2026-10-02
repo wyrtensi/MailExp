@@ -37,17 +37,25 @@ SKIP_FTS=n
 EOF
   chmod 640 "$MC/mailcow.conf"
   printf 'myhostname = mail.example.com\n' >"$MC/data/conf/postfix/extra.cf"
-  # Docker made its chain.
+  # Docker made its IPv4 chain (an IPv6 one only where a test says so: with_ipv6_docker_user).
   mkdir -p "$MOCK_DIR/ipt4" "$MOCK_DIR/ipt6"
   : >"$MOCK_DIR/ipt4/DOCKER-USER"
-  : >"$MOCK_DIR/ipt6/DOCKER-USER"
+  export MAILEXPERT_DOCKER_DAEMON_JSON=$BATS_TEST_TMPDIR/daemon.json
   # These libraries are what setup.sh loads; the tests call their functions directly too.
   # shellcheck source=/dev/null
   source "$NODE_SCRIPTS/lib.sh"
 }
 
-# The node's chain as the mock holds it, and DOCKER-USER.
-chain4() { cat "$MOCK_DIR/ipt4/MAILEXPERT-NODE"; }
+with_ipv6_docker_user() { : >"$MOCK_DIR/ipt6/DOCKER-USER"; }
+
+# The node's chain in force (whichever of the pair DOCKER-USER jumps to) as the mock holds it, and
+# DOCKER-USER.
+chain4() {
+  local name
+  name=$(sed -n 's/^-j \(MAILEXPERT-NODE[-0-9]*\)$/\1/p' "$MOCK_DIR/ipt4/DOCKER-USER" | head -n 1)
+  cat "$MOCK_DIR/ipt4/${name:-MAILEXPERT-NODE}"
+}
+chains4() { ls "$MOCK_DIR/ipt4" | grep MAILEXPERT || true; }
 docker_user4() { cat "$MOCK_DIR/ipt4/DOCKER-USER"; }
 set_entries() { cat "$MOCK_DIR/ipset/$1"; }
 calls() { cat "$MOCK_DIR/calls" 2>/dev/null; }
@@ -67,9 +75,9 @@ write_node_env() {
   mkdir -p "$(dirname "$MAILEXPERT_NODE_CONF")"
   cat >"$MAILEXPERT_NODE_CONF" <<EOF
 MAILCOW_DIR=$MC
+MAILCOW_ENABLE_IPV6=false
 EOP_CLIENT_REQUEST_ID=6f1c2a64-0d55-4a5e-9a11-3b2f6f0f7c21
 PANEL_IPS=203.0.113.10
-EXT_IF=eth0
 EOP_RANGES_PING_URL=https://hc.example.com/ping/eop-check
 EOF
 }

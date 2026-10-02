@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # setup.sh (R-39) and the firewall of the mail node host, with docker, iptables, ip6tables, ipset,
-# curl and systemctl mocked: mailcow.conf, extra.cf and Dovecot's extra.conf patched in place,
-# restarts only on a change, the DOCKER-USER rules swapped in whole, the timer installed, and a dry
-# run that only prints.
+# curl, ss and systemctl mocked: mailcow.conf (with its mail ports on IPv4), extra.cf and Dovecot's
+# extra.conf replaced safely, restarts only on a change, the DOCKER-USER rules swapped in whole, the
+# timer installed, and a dry run that only prints.
 
 bats_require_minimum_version 1.5.0
 
@@ -19,81 +19,126 @@ first_run() {
     --ping-url https://hc.example.com/ping/eop-check
 }
 
+fill_eop4() { printf 'create mailexpert-eop4 hash:net family inet\nadd mailexpert-eop4 40.92.0.0/15\n' | ipset restore; }
+
 # --- The firewall rules ------------------------------------------------------------------------
 
-@test "the rules: port 25 from the EOP set, the panel's ports from the panel, on the external interface only" {
-  run firewall_rules 4 eth0 203.0.113.10 198.51.100.0/28 2001:db8::10
+@test "the rules: only traffic to published ports, 25 from the EOP set, the panel's ports from the panel" {
+  run firewall_rules 4 203.0.113.10 198.51.100.0/28 2001:db8::10
   [ "$status" -eq 0 ]
-  [ "$output" = "-i eth0 -p tcp --dport 25 -m set --match-set mailexpert-eop4 src -j RETURN
--i eth0 -p tcp --dport 25 -j DROP
--i eth0 -p tcp -m multiport --dports 587,993 -s 203.0.113.10 -j RETURN
--i eth0 -p tcp -m multiport --dports 587,993 -s 198.51.100.0/28 -j RETURN
--i eth0 -p tcp -m multiport --dports 587,993 -j DROP
--i eth0 -p tcp -m multiport --dports 110,143,465,995,4190 -j DROP" ]
-  run firewall_rules 6 eth0 203.0.113.10 2001:db8::10
+  [ "$output" = "-o br-mailcow ! -i br-mailcow -p tcp --dport 25 -m set --match-set mailexpert-eop4 src -j RETURN
+-o br-mailcow ! -i br-mailcow -p tcp --dport 25 -j DROP
+-o br-mailcow ! -i br-mailcow -p tcp -m multiport --dports 587,993 -s 203.0.113.10 -j RETURN
+-o br-mailcow ! -i br-mailcow -p tcp -m multiport --dports 587,993 -s 198.51.100.0/28 -j RETURN
+-o br-mailcow ! -i br-mailcow -p tcp -m multiport --dports 587,993 -j REJECT --reject-with tcp-reset
+-o br-mailcow ! -i br-mailcow -p tcp -m multiport --dports 110,143,465,995,4190 -j DROP" ]
+  run firewall_rules 6 203.0.113.10 2001:db8::10
   [[ $output == *"--match-set mailexpert-eop6 src"* && $output == *"-s 2001:db8::10 -j RETURN"* && $output != *203.0.113.10* ]]
 }
 
-@test "the firewall waits for a filled EOP set" {
-  run firewall_apply 4 eth0 203.0.113.10
+@test "the firewall waits for a filled IPv4 EOP set" {
+  run firewall_apply 4 0 203.0.113.10
   [ "$status" -eq 1 ]
-  [[ $output == *"missing or empty"* ]]
+  [[ $output == *"missing"* ]]
   [ ! -e "$MOCK_DIR/ipt4/MAILEXPERT-NODE" ]
   printf 'create mailexpert-eop4 hash:net family inet\n' | ipset restore
-  run firewall_apply 4 eth0 203.0.113.10
+  run firewall_apply 4 0 203.0.113.10
   [ "$status" -eq 1 ]
   [ ! -e "$MOCK_DIR/ipt4/MAILEXPERT-NODE" ]
 }
 
 @test "the chain is swapped in whole, with one jump, and an unchanged chain is left alone" {
-  printf 'create mailexpert-eop4 hash:net family inet\nadd mailexpert-eop4 40.92.0.0/15\n' | ipset restore
+  fill_eop4
   printf -- '-j RETURN\n' >"$MOCK_DIR/ipt4/DOCKER-USER"
-  run firewall_apply 4 eth0 203.0.113.10
+  run firewall_apply 4 0 203.0.113.10
   [ "$status" -eq 0 ]
   [ "$output" = changed ]
   [ "$(docker_user4)" = $'-j MAILEXPERT-NODE\n-j RETURN' ]
-  [ "$(chain4)" = "$(firewall_rules 4 eth0 203.0.113.10)" ]
+  [ "$(chain4)" = "$(firewall_rules 4 203.0.113.10)" ]
   : >"$MOCK_DIR/calls"
-  run firewall_apply 4 eth0 203.0.113.10
+  run firewall_apply 4 0 203.0.113.10
   [ "$output" = unchanged ]
   calls | lacks ' -(N|A|I|D|F|X|E) '
-  # A new panel address: a new chain first, then the old one goes.
-  run firewall_apply 4 eth0 203.0.113.20
+  # A new panel address: the other chain of the pair first, then the old one goes.
+  run firewall_apply 4 0 203.0.113.20
   [ "$output" = changed ]
-  [ "$(docker_user4)" = $'-j MAILEXPERT-NODE\n-j RETURN' ]
+  [ "$(docker_user4)" = $'-j MAILEXPERT-NODE-2\n-j RETURN' ]
   chain4 | grep -q -- '-s 203.0.113.20 -j RETURN'
   chain4 | lacks '203\.0\.113\.10'
-  [ ! -e "$MOCK_DIR/ipt4/MAILEXPERT-NODE-NEW" ]
-  [ "$(calls | grep -n -- '-I DOCKER-USER 1 -j MAILEXPERT-NODE-NEW' | cut -d: -f1)" -lt "$(calls | grep -n -- '-D DOCKER-USER -j MAILEXPERT-NODE$' | cut -d: -f1)" ]
+  [ "$(chains4)" = MAILEXPERT-NODE-2 ]
+  [ "$(calls | grep -n -- '-I DOCKER-USER 1 -j MAILEXPERT-NODE-2' | cut -d: -f1)" -lt "$(calls | grep -n -- '-D DOCKER-USER -j MAILEXPERT-NODE$' | cut -d: -f1)" ]
 }
 
-@test "a refused rule leaves the old chain and its jump in place" {
-  printf 'create mailexpert-eop4 hash:net family inet\nadd mailexpert-eop4 40.92.0.0/15\n' | ipset restore
-  firewall_apply 4 eth0 203.0.113.10
+@test "a refused rule leaves the chain in force and its jump in place" {
+  fill_eop4
+  firewall_apply 4 0 203.0.113.10
   export MOCK_IPT_REFUSE=203.0.113.99
-  run firewall_apply 4 eth0 203.0.113.99
+  run firewall_apply 4 0 203.0.113.99
   [ "$status" -eq 1 ]
-  [ "$(chain4)" = "$(firewall_rules 4 eth0 203.0.113.10)" ]
-  grep -qx -- '-j MAILEXPERT-NODE' "$MOCK_DIR/ipt4/DOCKER-USER"
+  [ "$(chain4)" = "$(firewall_rules 4 203.0.113.10)" ]
+  [ "$(docker_user4)" = '-j MAILEXPERT-NODE' ]
+}
+
+@test "DOCKER-USER is made only when asked (at boot, before Docker)" {
+  fill_eop4
+  rm -f "$MOCK_DIR/ipt4/DOCKER-USER"
+  run firewall_apply 4 0 203.0.113.10
+  [ "$status" -eq 1 ]
+  [[ $output == *"no DOCKER-USER chain"* ]]
+  run firewall_apply 4 1 203.0.113.10
+  [ "$status" -eq 0 ]
+  [ "$(docker_user4)" = '-j MAILEXPERT-NODE' ]
+}
+
+@test "other DOCKER-USER rules on the mail ports are found, the node's jump is not" {
+  printf -- '-j MAILEXPERT-NODE\n-i eth0 -p tcp -m multiport --dports 587,993 ! -s 203.0.113.10 -j DROP\n-p tcp -m tcp --dport 25 -j DROP\n-p tcp --dport 8080 -j DROP\n-j RETURN\n' >"$MOCK_DIR/ipt4/DOCKER-USER"
+  run foreign_port_rules 4
+  [ "$(echo "$output" | wc -l)" -eq 2 ]
+  [[ $output == *"--dports 587,993"* && $output == *"--dport 25 -j DROP"* && $output != *8080* ]]
 }
 
 # --- mailcow's files ---------------------------------------------------------------------------
 
-@test "mailcow.conf: the four settings set in place, other lines kept, missing ones appended" {
-  run kv_render "$MC/mailcow.conf" SKIP_CLAMD=y SKIP_OLEFY=y SKIP_FTS=y ENABLE_IPV6=false
+@test "mailcow.conf: the settings in place, every mail port on IPv4, other lines kept, missing ones appended" {
+  printf 'SUBMISSION_PORT=203.0.113.5:587\nIMAPS_PORT=[::]:993\nSIEVE_PORT=\n' >>"$MC/mailcow.conf"
+  mapfile -t settings < <(mailcow_settings "$MC/mailcow.conf")
+  run kv_render "$MC/mailcow.conf" "${settings[@]}"
   [ "$status" -eq 0 ]
   [ "$output" = "# ------------------------------
 # mailcow web ui configuration
 # ------------------------------
 MAILCOW_HOSTNAME=mail.example.com
 DBPASS=not-a-real-password
-SMTP_PORT=25
+SMTP_PORT=0.0.0.0:25
 ENABLE_IPV6=false
 SKIP_CLAMD=y
 SKIP_FTS=y
-SKIP_OLEFY=y" ]
+SUBMISSION_PORT=203.0.113.5:587
+IMAPS_PORT=0.0.0.0:993
+SIEVE_PORT=0.0.0.0:4190
+SKIP_OLEFY=y
+SMTPS_PORT=0.0.0.0:465
+IMAP_PORT=0.0.0.0:143
+POP_PORT=0.0.0.0:110
+POPS_PORT=0.0.0.0:995" ]
   printf 'SKIP_FTS=n\n#SKIP_FTS=n\nSKIP_FTS=y\n' >"$BATS_TEST_TMPDIR/dup.conf"
   [ "$(kv_render "$BATS_TEST_TMPDIR/dup.conf" SKIP_FTS=y)" = $'SKIP_FTS=y\n#SKIP_FTS=n' ]
+}
+
+@test "an IPv4 binding: a bare port gets 0.0.0.0, an IPv4 address stays, IPv6 is replaced" {
+  [ "$(ipv4_binding 25 25)" = 0.0.0.0:25 ]
+  [ "$(ipv4_binding 2525 25)" = 0.0.0.0:2525 ]
+  [ "$(ipv4_binding 198.51.100.4:25 25)" = 198.51.100.4:25 ]
+  [ "$(ipv4_binding '[::]:25' 25)" = 0.0.0.0:25 ]
+  [ "$(ipv4_binding '' 4190)" = 0.0.0.0:4190 ]
+}
+
+@test "only the keys setup.sh sets are shown of mailcow.conf, never its passwords" {
+  mapfile -t settings < <(mailcow_settings "$MC/mailcow.conf")
+  kv_render "$MC/mailcow.conf" "${settings[@]}" >"$BATS_TEST_TMPDIR/new.conf"
+  run kv_changes "$MC/mailcow.conf" "$BATS_TEST_TMPDIR/new.conf" "${settings[@]%%=*}"
+  [[ $output == *"ENABLE_IPV6: true -> false"* && $output == *"SMTP_PORT: 25 -> 0.0.0.0:25"* && $output == *"SKIP_OLEFY: (none) -> y"* ]]
+  [[ $output != *DBPASS* && $output != *not-a-real-password* ]]
 }
 
 @test "the Dovecot block: added once, a copy appended by hand becomes the block, other lines kept" {
@@ -119,48 +164,76 @@ SKIP_OLEFY=y" ]
   [[ $output == *"1:service imap {"* && $output == *"2:  process_limit = 1500"* ]]
 }
 
+@test "a file is replaced through a temporary file and keeps its mode" {
+  printf 'old\n' >"$BATS_TEST_TMPDIR/f"
+  chmod 640 "$BATS_TEST_TMPDIR/f"
+  printf 'new\n' >"$BATS_TEST_TMPDIR/src"
+  replace_file "$BATS_TEST_TMPDIR/f" "$BATS_TEST_TMPDIR/src"
+  [ "$(cat "$BATS_TEST_TMPDIR/f")" = new ]
+  [ "$(stat -c %a "$BATS_TEST_TMPDIR/f")" = 640 ]
+  [ -z "$(ls "$BATS_TEST_TMPDIR" | grep '^f\.')" ]
+  run replace_file "$BATS_TEST_TMPDIR/f" "$BATS_TEST_TMPDIR/missing"
+  [ "$status" -eq 1 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/f")" = new ]
+  [ -z "$(ls "$BATS_TEST_TMPDIR" | grep '^f\.')" ]
+}
+
+@test "panel networks are addresses or networks no wider than /24 and /48" {
+  for good in 203.0.113.10 203.0.113.0/24 2001:db8::10 2001:db8::/48; do is_panel_network "$good"; done
+  for bad in 203.0.113.0/23 0.0.0.0/0 2001:db8::/47 ::/0 203.0.113.300; do
+    run is_panel_network "$bad"
+    [ "$status" -eq 1 ]
+  done
+}
+
 # --- setup.sh ----------------------------------------------------------------------------------
 
 @test "a dry run prints every change and writes nothing" {
   cp -r "$MC" "$BATS_TEST_TMPDIR/before"
   run bash "$SETUP" --mailcow-dir "$MC" --eop-host eop-tenant.mail.protection.outlook.com --panel-ip 203.0.113.10 --dry-run
   [ "$status" -eq 0 ]
-  [[ $output == *"-ENABLE_IPV6=true"*"+ENABLE_IPV6=false"* ]]
-  [[ $output == *"+SKIP_OLEFY=y"* ]]
+  [[ $output == *"ENABLE_IPV6: true -> false"* ]]
+  [[ $output == *"SKIP_OLEFY: (none) -> y"* ]]
+  [[ $output == *"SMTP_PORT: 25 -> 0.0.0.0:25"* ]]
+  [[ $output != *not-a-real-password* ]]
   [[ $output == *"+relayhost = eop-tenant.mail.protection.outlook.com"* ]]
   [[ $output == *"+# BEGIN MailExpert: dovecot-extra.conf"* ]]
-  [[ $output == *"-A MAILEXPERT-NODE -i eth0 -p tcp --dport 25 -m set --match-set mailexpert-eop4 src -j RETURN"* ]]
+  [[ $output == *"-A MAILEXPERT-NODE -o br-mailcow ! -i br-mailcow -p tcp --dport 25 -m set --match-set mailexpert-eop4 src -j RETURN"* ]]
   [[ $output != *"mailexpert-eop6"* ]]
   diff -r "$BATS_TEST_TMPDIR/before" "$MC"
   [ ! -e "$MAILEXPERT_NODE_CONF" ]
   [ ! -e "$MAILEXPERT_NODE_DIR" ]
-  [ -z "$(calls)" ]
+  # Only reads (iptables -S of DOCKER-USER).
+  calls | lacks ' -(N|A|I|D|F|X|E) |compose|^ipset|systemctl'
   [ -z "$(requests)" ]
 }
 
 @test "the first run sets up mailcow's files, the EOP ranges, the firewall and the timer" {
   first_run
   [ "$status" -eq 0 ]
-  # mailcow.conf patched in place: same mode, other lines kept.
+  # mailcow.conf replaced: same mode, other lines kept, the mail ports on IPv4.
   [ "$(stat -c %a "$MC/mailcow.conf")" = 640 ]
   grep -qx 'ENABLE_IPV6=false' "$MC/mailcow.conf"
   grep -qx 'SKIP_OLEFY=y' "$MC/mailcow.conf"
+  grep -qx 'SMTP_PORT=0.0.0.0:25' "$MC/mailcow.conf"
+  grep -qx 'IMAPS_PORT=0.0.0.0:993' "$MC/mailcow.conf"
   grep -qx 'DBPASS=not-a-real-password' "$MC/mailcow.conf"
+  [[ $output != *not-a-real-password* ]]
   [[ $output == *"run 'docker compose down && docker compose up -d' in $MC"* ]]
   [ "$(cat "$MC/data/conf/postfix/extra.cf")" = $'myhostname = mail.example.com\nrelayhost = eop-tenant.mail.protection.outlook.com' ]
   grep -q '^# BEGIN MailExpert: dovecot-extra.conf' "$MC/data/conf/dovecot/extra.conf"
   # Each changed file restarted its own container, in the mailcow directory.
   [ "$(calls | grep -c "docker compose restart postfix-mailcow (in $MC)")" -eq 1 ]
   [ "$(calls | grep -c "docker compose restart dovecot-mailcow (in $MC)")" -eq 1 ]
-  # node.env: owner-only, the panel address, a GUID made once.
+  # node.env: owner-only, the panel address, the IPv6 setting, a GUID made once.
   [ "$(stat -c %a "$MAILEXPERT_NODE_CONF")" = 600 ]
   [ "$(env_get "$MAILEXPERT_NODE_CONF" PANEL_IPS)" = 203.0.113.10 ]
-  [ "$(env_get "$MAILEXPERT_NODE_CONF" EXT_IF)" = eth0 ]
+  [ "$(env_get "$MAILEXPERT_NODE_CONF" MAILCOW_ENABLE_IPV6)" = false ]
   is_guid "$(env_get "$MAILEXPERT_NODE_CONF" EOP_CLIENT_REQUEST_ID)"
   [[ $output != *"hc.example.com/ping/eop-check"* ]]
   # The ranges, then the firewall.
   [ "$(set_entries mailexpert-eop4 | wc -l)" -eq 4 ]
-  [ "$(chain4)" = "$(firewall_rules 4 eth0 203.0.113.10)" ]
+  [ "$(chain4)" = "$(firewall_rules 4 203.0.113.10)" ]
   [ "$(docker_user4)" = '-j MAILEXPERT-NODE' ]
   [ ! -e "$MOCK_DIR/ipset/mailexpert-eop6" ]
   [ -s "$MAILEXPERT_NODE_STATE/eop-ranges.txt" ]
@@ -170,8 +243,16 @@ SKIP_OLEFY=y" ]
   [ -f "$MAILEXPERT_NODE_DIR/common.sh" ]
   grep -qx "ExecStart=$MAILEXPERT_NODE_DIR/eop-ranges.sh" "$MAILEXPERT_SYSTEMD_DIR/mailexpert-eop-ranges.service"
   grep -qx "ExecStart=$MAILEXPERT_NODE_DIR/eop-ranges.sh --restore" "$MAILEXPERT_SYSTEMD_DIR/mailexpert-node-firewall.service"
+  # The restore runs before Docker; the hourly run never starts Docker.
+  grep -qx 'Before=docker.service shutdown.target' "$MAILEXPERT_SYSTEMD_DIR/mailexpert-node-firewall.service"
+  grep -qx 'WantedBy=docker.service' "$MAILEXPERT_SYSTEMD_DIR/mailexpert-node-firewall.service"
+  grep -qx 'DefaultDependencies=no' "$MAILEXPERT_SYSTEMD_DIR/mailexpert-node-firewall.service"
+  lacks 'Wants=.*docker' <"$MAILEXPERT_SYSTEMD_DIR/mailexpert-eop-ranges.service"
+  grep -qx 'ProtectSystem=full' "$MAILEXPERT_SYSTEMD_DIR/mailexpert-eop-ranges.service"
   calls | grep -qx 'systemctl enable --now mailexpert-eop-ranges.timer'
   calls | grep -qx 'systemctl enable mailexpert-node-firewall.service'
+  # A new timer unit takes effect: the running timer is restarted.
+  calls | grep -qx 'systemctl restart mailexpert-eop-ranges.timer'
 }
 
 @test "a second run changes nothing and restarts nothing, with the stored options" {
@@ -184,8 +265,24 @@ SKIP_OLEFY=y" ]
   calls | lacks 'compose restart'
   calls | lacks '^ipset restore'
   calls | lacks ' -(N|A|I|D|E) '
+  calls | lacks 'systemctl restart'
   [ "$(env_get "$MAILEXPERT_NODE_CONF" EOP_CLIENT_REQUEST_ID)" = "$id" ]
   [[ $output != *"written"* ]]
+}
+
+@test "a failed restart is tried again by the next run" {
+  export MOCK_RESTART_FAIL=postfix-mailcow
+  first_run
+  [ "$status" -eq 0 ]
+  [[ $output == *"postfix-mailcow did not restart; the next run of setup.sh tries again"* ]]
+  [ -e "$MAILEXPERT_NODE_STATE/restart-pending-postfix-mailcow" ]
+  unset MOCK_RESTART_FAIL
+  : >"$MOCK_DIR/calls"
+  run bash "$SETUP"
+  [ "$status" -eq 0 ]
+  [ "$(calls | grep -c 'compose restart postfix-mailcow')" -eq 1 ]
+  calls | lacks 'compose restart dovecot-mailcow'
+  [ ! -e "$MAILEXPERT_NODE_STATE/restart-pending-postfix-mailcow" ]
 }
 
 @test "a new panel address replaces the old one in node.env and in the chain" {
@@ -193,8 +290,8 @@ SKIP_OLEFY=y" ]
   run bash "$SETUP" --panel-ip 203.0.113.20,198.51.100.0/28
   [ "$status" -eq 0 ]
   [ "$(env_get "$MAILEXPERT_NODE_CONF" PANEL_IPS)" = 203.0.113.20,198.51.100.0/28 ]
-  [ "$(chain4)" = "$(firewall_rules 4 eth0 203.0.113.20 198.51.100.0/28)" ]
-  [ "$(docker_user4)" = '-j MAILEXPERT-NODE' ]
+  [ "$(chain4)" = "$(firewall_rules 4 203.0.113.20 198.51.100.0/28)" ]
+  [ "$(docker_user4)" = '-j MAILEXPERT-NODE-2' ]
 }
 
 @test "without --eop-host extra.cf is left alone; stopped containers are not restarted" {
@@ -207,11 +304,27 @@ SKIP_OLEFY=y" ]
   [[ $output != *"docker compose down"* ]]
 }
 
+@test "mail ports still on IPv6 after the run are pointed out" {
+  printf '[::]:25\n[::]:587\n' >"$MOCK_DIR/listeners"
+  first_run
+  [ "$status" -eq 0 ]
+  [[ $output == *"ports 25,587 still listen on IPv6"* ]]
+  [[ $output == *"eop-ranges.sh reported a problem"* ]]
+  [[ $(pings) == *"/fail eop-ranges: ports 25,587 listen on IPv6"* ]]
+}
+
+@test "rules left from the runbook's setup by hand are listed" {
+  printf -- '-i eth0 -p tcp --dport 25 -j DROP\n' >"$MOCK_DIR/ipt4/DOCKER-USER"
+  first_run
+  [ "$status" -eq 0 ]
+  [[ $output == *"has other rules on mailcow's mail ports"* && $output == *"--dport 25 -j DROP"* ]]
+}
+
 @test "the first EOP fetch failing installs no firewall" {
   export MOCK_VERSION_STATUS=429
   first_run
   [ "$status" -eq 1 ]
-  [[ $output == *"no EOP ranges yet: the firewall rules are not installed"* ]]
+  [[ $output == *"no firewall rules are in place"* ]]
   [ ! -e "$MOCK_DIR/ipt4/MAILEXPERT-NODE" ]
   [ -z "$(docker_user4)" ]
 }
@@ -221,7 +334,7 @@ SKIP_OLEFY=y" ]
   export MOCK_VERSION_STATUS=429
   run bash "$SETUP"
   [ "$status" -eq 0 ]
-  [[ $output == *"the EOP ranges already in place stay"* ]]
+  [[ $output == *"the EOP ranges and firewall rules in place stay"* ]]
   [ "$(docker_user4)" = '-j MAILEXPERT-NODE' ]
 }
 
@@ -235,17 +348,29 @@ SKIP_OLEFY=y" ]
   [ ! -e "$MAILEXPERT_NODE_CONF" ]
 }
 
+@test "Docker's nftables backend stops the run" {
+  printf '{"firewall-backend":"nftables"}\n' >"$MAILEXPERT_DOCKER_DAEMON_JSON"
+  first_run
+  [ "$status" -eq 1 ]
+  [[ $output == *"nftables firewall backend"* ]]
+  [ ! -e "$MAILEXPERT_NODE_CONF" ]
+}
+
 @test "bad input is refused with status 2" {
   run bash "$SETUP" --mailcow-dir "$MC"
   [ "$status" -eq 2 ]
   [[ $output == *"--panel-ip is required"* ]]
   run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.300
   [ "$status" -eq 2 ]
+  run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.0.0/16
+  [ "$status" -eq 2 ]
   run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10 --eop-host 'not a host'
   [ "$status" -eq 2 ]
   run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10 --client-request-id 1234
   [ "$status" -eq 2 ]
   run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10 --ping-url http://hc.example.com/x
+  [ "$status" -eq 2 ]
+  run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10 --ext-if eth0
   [ "$status" -eq 2 ]
   run bash "$SETUP" --mailcow-dir "$BATS_TEST_TMPDIR/nowhere" --panel-ip 203.0.113.10
   [ "$status" -eq 2 ]
@@ -260,11 +385,22 @@ SKIP_OLEFY=y" ]
   requests | grep -q 'clientrequestid=0a1b2c3d-0000-4000-8000-000000000001$'
 }
 
-@test "without systemd the schedule is a cron file" {
+@test "an EXT_IF from an earlier version leaves node.env" {
+  write_node_env
+  printf 'EXT_IF=eth0\n' >>"$MAILEXPERT_NODE_CONF"
+  run bash "$SETUP"
+  [ "$status" -eq 0 ]
+  run env_get "$MAILEXPERT_NODE_CONF" EXT_IF
+  [ "$status" -eq 1 ]
+}
+
+@test "without systemd the schedule is a cron file that mails nobody" {
   export MAILEXPERT_NODE_INIT=cron
   first_run
   [ "$status" -eq 0 ]
   grep -qx "17 \* \* \* \* root $MAILEXPERT_NODE_DIR/eop-ranges.sh" "$MAILEXPERT_CRON_FILE"
   grep -q "@reboot root sleep 60 && $MAILEXPERT_NODE_DIR/eop-ranges.sh --restore" "$MAILEXPERT_CRON_FILE"
+  grep -qx 'MAILTO=""' "$MAILEXPERT_CRON_FILE"
+  [[ $output == *"not before Docker"* ]]
   calls | lacks systemctl
 }

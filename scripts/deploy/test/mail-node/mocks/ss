@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ss for the mail node tests: `ss -ltnH` prints the listeners in $MOCK_DIR/listeners (one local
+# address:port per line), as docker-proxy would show them.
+[ -f "$MOCK_DIR/listeners" ] || exit 0
+while IFS= read -r local; do
+  printf 'LISTEN 0      4096      %s      0.0.0.0:*\n' "$local"
+done <"$MOCK_DIR/listeners"

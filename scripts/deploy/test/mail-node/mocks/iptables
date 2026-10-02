@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # iptables and ip6tables (the same file under both names) for the mail node tests: the filter table
 # as files, one per chain, in $MOCK_DIR/ipt4 or ipt6, each line a rule as given after the chain.
-# MOCK_IPT_REFUSE=<text> refuses any -A whose rule contains the text.
+# MOCK_IPT_REFUSE=<text> refuses any -A whose rule contains the text; MOCK_IPT_X_FAIL=<chain>
+# refuses to delete that chain (as when something else still refers to it).
 case ${0##*/} in
   ip6tables) dir=$MOCK_DIR/ipt6 ;;
   *) dir=$MOCK_DIR/ipt4 ;;
@@ -23,7 +24,7 @@ case $op in
   -F) [ -f "$dir/$chain" ] || no_chain; : >"$dir/$chain" ;;
   -X)
     [ -f "$dir/$chain" ] || no_chain
-    if grep -qx -- "-j $chain" "$dir"/*; then echo "iptables: Too many links." >&2; exit 1; fi
+    if grep -qx -- "-j $chain" "$dir"/* || [ "${MOCK_IPT_X_FAIL:-}" = "$chain" ]; then echo "iptables: Too many links." >&2; exit 1; fi
     rm -f "$dir/$chain"
     ;;
   -E)
