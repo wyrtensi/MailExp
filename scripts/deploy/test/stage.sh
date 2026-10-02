@@ -220,8 +220,9 @@ SETUP
 # mailcow's outgoing mail to it. Nothing here touches mailcow's data beyond extra.cf.
 
 EXTRA_CF=$MAILCOW_DIR/data/conf/postfix/extra.cf
-# extra-cf.sh runs inside the server, fed on stdin: the script keeps every other line of the file.
-extra_cf() { dk exec -i "$NAME" sh -s -- "$@" <"$TEST_DIR/fake-eop/extra-cf.sh"; }
+# extra-cf.sh (the node host's own tool, scripts/deploy/mail-node/) runs inside the server, fed on
+# stdin: the script keeps every other line of the file.
+extra_cf() { dk exec -i "$NAME" sh -s -- "$@" <"$TEST_DIR/../mail-node/extra-cf.sh"; }
 eop_ctl() { dk exec "$NAME" docker exec "$EOP_NAME" node /app/eop.mjs "$@"; }
 postfix_relayhost() { inner "docker exec $POSTFIX postconf -h relayhost 2>/dev/null" | tr -d '\r'; }
 

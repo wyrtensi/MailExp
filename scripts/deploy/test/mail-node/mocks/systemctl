@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# systemctl for the mail node tests: records the call.
+printf 'systemctl %s\n' "$*" >>"$MOCK_DIR/calls"

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# ipset for the mail node tests: each set is a file in $MOCK_DIR/ipset (one entry per line, the
+# family in <name>.family). MOCK_IPSET_FAIL=<command> makes that command fail.
+dir=$MOCK_DIR/ipset
+mkdir -p "$dir"
+printf 'ipset %s\n' "$*" >>"$MOCK_DIR/calls"
+[ "${MOCK_IPSET_FAIL:-}" != "$1" ] || { echo "ipset v7.19: refused" >&2; exit 1; }
+missing() { echo "ipset v7.19: The set with the given name does not exist" >&2; exit 1; }
+case $1 in
+  list)
+    name=$2
+    [ "$2" != -t ] || name=$3
+    [ -f "$dir/$name" ] || missing
+    printf 'Name: %s\nType: hash:net\nHeader: family %s\nNumber of entries: %s\n' "$name" "$(cat "$dir/$name.family")" "$(grep -c . "$dir/$name")"
+    if [ "$2" != -t ]; then printf 'Members:\n'; cat "$dir/$name"; fi
+    ;;
+  restore)
+    while read -r cmd name rest; do
+      case $cmd in
+        create) [ -f "$dir/$name" ] || : >"$dir/$name"; sed -n 's/.*family \([a-z0-9]*\).*/\1/p' <<<"$rest" >"$dir/$name.family" ;;
+        flush) : >"$dir/$name" ;;
+        add) printf '%s\n' "${rest%% *}" >>"$dir/$name" ;;
+        *) exit 2 ;;
+      esac
+    done
+    ;;
+  create)
+    [ -f "$dir/$2" ] || { : >"$dir/$2"; printf '%s\n' "$5" >"$dir/$2.family"; }
+    ;;
+  swap)
+    [ -f "$dir/$2" ] && [ -f "$dir/$3" ] || missing
+    mv "$dir/$2" "$dir/swap.tmp" && mv "$dir/$3" "$dir/$2" && mv "$dir/swap.tmp" "$dir/$3"
+    ;;
+  destroy)
+    [ -f "$dir/$2" ] || missing
+    rm -f "$dir/$2" "$dir/$2.family"
+    ;;
+  *) exit 2 ;;
+esac

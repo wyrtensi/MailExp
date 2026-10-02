@@ -1,0 +1,24 @@
+[Unit]
+Description=MailExpert: mail node firewall from the last good EOP ranges, before Docker publishes ports
+# ipsets and iptables rules do not survive a reboot. This puts them back before Docker starts, so
+# mailcow's ports are never published without them; Docker keeps an existing DOCKER-USER chain.
+# Wanted by Docker, not required: a failed restore does not keep mail down; the hourly run fails its
+# Healthchecks ping and puts the rules in place again.
+DefaultDependencies=no
+After=local-fs.target network-pre.target
+Wants=network-pre.target
+Before=docker.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@DIR@/eop-ranges.sh --restore
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/mailexpert-node
+
+[Install]
+WantedBy=docker.service

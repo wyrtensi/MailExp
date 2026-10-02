@@ -204,8 +204,8 @@ accepted domains (`recipient-denied` отвечает всем получате�
 Тесты fake-EOP: `node --test scripts/deploy/test/fake-eop/eop.test.mjs` (нужен `openssl`; разбор сертификата,
 режимы, полный диалог SMTP с STARTTLS и клиентским сертификатом, строгие строки и лимиты, возобновление
 сессии TLS, inject и коды возврата команды, очередь входящей почты с повтором, истечением и отбивкой,
-трассировка в формах Graph). Правка `extra.cf` — `fake-eop/extra-cf.sh`, тесты —
-`scripts/deploy/test/stage-eop.bats`. В CI это отдельное задание «Stand fake-EOP».
+трассировка в формах Graph). Правка `extra.cf` — `scripts/deploy/mail-node/extra-cf.sh` (тот же
+инструмент, которым `setup.sh` ставит relayhost на рабочем узле), тесты — `scripts/deploy/test/stage-eop.bats`. В CI это отдельное задание «Stand fake-EOP».
 
 ## Карантин и rspamd на стенде
 
