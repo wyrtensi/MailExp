@@ -595,3 +595,19 @@ test('the demo sends a new mailbox under its sender name and offers the second o
   assert.equal(gmail.sender_name, 'Иван Петров');
   assert.deepEqual(gmail.aliases.map(a => a.name), ['Ivan Petrov']);
 });
+
+test('the demo shows a past outage with delayed and lost letters and one going on with letters waiting (R-43)', async () => {
+  const outages = await demoRequest('GET', '/mail-node/outages');
+  const [ongoing, past] = outages.windows;
+  assert.equal(ongoing.open, true);
+  assert.ok(ongoing.counts.waiting > 0);
+  assert.equal(past.open, false);
+  assert.ok(past.counts.delayed > 0 && past.counts.lost > 0);
+  assert.ok(outages.waiting.waiting > 0 && outages.traceConnected);
+  const { letters } = await demoRequest('GET', `/mail-node/outages/${past.id}/letters`);
+  assert.ok(letters.some(l => l.outcome === 'lost' && l.expired && l.statusCode === '4.4.7'));
+  const mine = await demoRequest('GET', '/mail-node/outage-letters');
+  assert.ok(mine.letters.length > 0 && mine.letters.every(l => l.outcome !== 'other' && l.accountId && !('detail' in l)));
+  const alerts = await demoRequest('GET', '/mail-node/alerts');
+  assert.ok(alerts.state.alerts.some(a => a.key === 'outage_letters_waiting'));
+});

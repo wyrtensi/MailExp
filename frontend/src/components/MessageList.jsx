@@ -20,6 +20,7 @@ import GtdTabList from './GtdTabList.jsx';
 import DirectionBadge from './DirectionBadge.jsx';
 import DeliveryMarker from './DeliveryMarker.jsx';
 import { mailboxBanner, isDraftFolder } from '../utils/mailboxBanner.js';
+import MailNodeOutageNotice from './MailNodeOutageNotice.jsx';
 import { isTrashOrJunkFolder } from '../utils/specialFolders.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import {
@@ -3417,6 +3418,9 @@ export default function MessageList() {
           )}
         </div>
       )}
+
+      {/* Letters to this mailbox that EOP held while the mail node was down (R-43) */}
+      {!searchQuery.trim() && <MailNodeOutageNotice accountId={selectedAccountId} showRecipient={isUnified} />}
 
       {/* Message list */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>

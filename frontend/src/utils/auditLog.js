@@ -1,5 +1,5 @@
 import { alertTitleKey, applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, queueActionKey, rateFrameKey } from './mailNode.js';
-import { formatDay } from './formatDate.js';
+import { formatDateTime, formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
 // backend/src/services/auditLog.js and the entries GET /api/admin/audit returns.
@@ -39,6 +39,11 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.quarantine_deleted': 'admin.audit.actionMailNodeQuarantineDeleted',
   'mail_node.quarantine_learned_spam': 'admin.audit.actionMailNodeQuarantineLearnedSpam',
   'mail_node.quarantine_settings_applied': 'admin.audit.actionMailNodeQuarantineSettingsApplied',
+  'mail_node.outage_opened': 'admin.audit.actionMailNodeOutageOpened',
+  'mail_node.outage_closed': 'admin.audit.actionMailNodeOutageClosed',
+  'mail_node.outage_added': 'admin.audit.actionMailNodeOutageAdded',
+  'mail_node.outage_changed': 'admin.audit.actionMailNodeOutageChanged',
+  'mail_node.outage_deleted': 'admin.audit.actionMailNodeOutageDeleted',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -91,6 +96,11 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   dkimSelector2Cname: 'admin.audit.fieldDkimSelector2Cname',
   // Who sees the node's quarantine (settings 'quarantine').
   userView: 'admin.audit.fieldQuarantineUserView',
+  // How long the outage letters are kept (settings 'outages'), and the fields of a window.
+  retentionDays: 'admin.audit.fieldOutageRetention',
+  startedAt: 'admin.audit.fieldOutageStart',
+  endedAt: 'admin.audit.fieldOutageEnd',
+  reason: 'admin.audit.fieldOutageReason',
 });
 
 // The settings a mail_node.config_changed entry is about.
@@ -100,7 +110,35 @@ const SETTINGS_DETAIL_KEYS = Object.freeze({
   domain_dns: 'admin.audit.detailDomainDnsExpectedChanged',
   alerts: 'admin.audit.detailAlertSettingsChanged',
   quarantine: 'admin.audit.detailQuarantineSettingsChanged',
+  outages: 'admin.audit.detailOutageSettingsChanged',
 });
+
+const when = (iso) => (iso ? formatDateTime(iso) : '—');
+
+// A mail node outage window (R-43): when it began and ended and the administrator's reason; for one
+// the alert job opened, which containers were down.
+function outageDetail(entry) {
+  const details = entry.details ?? {};
+  const values = { start: when(details.startedAt), end: when(details.endedAt), reason: details.reason ?? '', minutes: details.minutes ?? '' };
+  switch (entry.action) {
+    case 'mail_node.outage_opened':
+      return (details.down ?? []).length
+        ? { key: 'admin.audit.detailOutageOpened', values: { ...values, down: details.down.join(', ') } }
+        : { key: 'admin.audit.detailOutageOpenedApi', values };
+    case 'mail_node.outage_closed':
+      return { key: details.reason ? 'admin.audit.detailOutageClosedReason' : 'admin.audit.detailOutageClosed', values };
+    case 'mail_node.outage_added':
+      return { key: details.planned ? 'admin.audit.detailOutageAddedPlanned' : 'admin.audit.detailOutageAdded', values };
+    case 'mail_node.outage_changed':
+      return {
+        key: 'admin.audit.detailOutageChanged',
+        values,
+        valueKeys: { fields: (details.fields ?? []).map((field) => SETTINGS_FIELD_KEYS[field] ?? field) },
+      };
+    default:
+      return { key: 'admin.audit.detailOutageDeleted', values };
+  }
+}
 
 // A mail_node.dns_checked entry: an administrator's check of everything (the node's status and how
 // many domains ended in each), or one scope (the node or a domain) with its status and the one
@@ -364,6 +402,12 @@ export function auditDetail(entry) {
           maxSize: details.maxSize ?? '', retention: details.retentionSize ?? '', maxAge: details.maxAge ?? '', format: details.releaseFormat ?? '',
         },
       };
+    case 'mail_node.outage_opened':
+    case 'mail_node.outage_closed':
+    case 'mail_node.outage_added':
+    case 'mail_node.outage_changed':
+    case 'mail_node.outage_deleted':
+      return outageDetail(entry);
     case 'mail_node.domain_identity_acknowledged':
       return {
         key: 'admin.audit.detailDomainIdentityAcknowledged',

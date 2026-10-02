@@ -1,4 +1,5 @@
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
+import { demoOutageRequest, demoOutageWaiting } from './outages.js';
 import { demoRole } from '../utils/demoRole.js';
 import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
@@ -1199,6 +1200,9 @@ function demoCheckAlerts(trigger) {
   if (budget.warn) {
     fresh.push({ key: 'terrl_budget', severity: budget.exceeded ? 'error' : 'warning', details: { used: budget.used, limit: budget.limit, percent: budget.percent } });
   }
+  // The outage going on (demo/outages.js): letters wait in EOP's queue (R-43).
+  const waiting = demoOutageWaiting();
+  if (waiting.waiting) fresh.push({ key: 'outage_letters_waiting', severity: 'warning', details: waiting });
   demoAlertState = {
     at, trigger, errors: [],
     alerts: fresh.map(a => ({ ...a, since: before.get(a.key)?.since ?? at, seenAt: at })),
@@ -2429,6 +2433,8 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'GET' && pathname === '/mail-node/eop/budget') return clone(demoTerrlBudget());
   const quarantineAnswer = demoQuarantineRequest(verb, pathname, body);
   if (quarantineAnswer !== undefined) return quarantineAnswer;
+  const outageAnswer = demoOutageRequest(verb, pathname, body);
+  if (outageAnswer !== undefined) return outageAnswer;
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
   if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
   if ((verb === 'POST' && pathname === '/oauth/microsoft/device')
