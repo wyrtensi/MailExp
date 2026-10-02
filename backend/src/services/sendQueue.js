@@ -13,6 +13,7 @@ import {
   JOB_KEPT_FAILED_MS, cancelJob, enqueueJob, getJob, registerJobKind, rescheduleJob, JobError,
 } from './jobQueue.js';
 import { deliverOutgoingMessage } from './sendDelivery.js';
+import { fromHeaderAddress, isForeignNodeAliasAddress } from '../utils/senderNames.js';
 
 export const SEND_JOB_KIND = 'send_message';
 // The undo window after Send: fixed by the owner at five seconds.
@@ -355,12 +356,21 @@ async function handleSendJob(job, ctx, imapManager) {
     ? await query('SELECT * FROM email_accounts WHERE id = $1', [job.account_id])
     : { rows: [] };
   if (!account) throw new JobError('The mailbox of this letter was deleted.', { outcome: 'fail', code: 'account_missing' });
+  // A mail node mailbox sends only from its own address (D-16). The route refuses such an alias, but a
+  // letter queued before (scheduled, or sent again after a failure) carries its From already: the
+  // node's SMTP would refuse it, so it fails here, before SMTP.
+  const mail = deserializeMail(content.mail);
+  if (isForeignNodeAliasAddress(account, fromHeaderAddress(mail?.options?.from))) {
+    throw new JobError('This sender address is not a mailbox: choose another From. An administrator can make it a separate mailbox.', {
+      outcome: 'fail', code: 'node_alias_stale',
+    });
+  }
 
   let settledRow = null;
   let completed = false;
   const sent = await deliverOutgoingMessage({
     account,
-    mail: deserializeMail(content.mail),
+    mail,
     actorUserId: job.created_by,
     imapManager,
     detachPostSend: true,

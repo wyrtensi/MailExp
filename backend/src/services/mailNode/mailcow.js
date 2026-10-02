@@ -524,11 +524,21 @@ export async function provisionMailbox(cfg, { localPart, domain, name, rateLimit
         .catch((err) => console.error(`Mail node send limit for a mailbox it took over failed: ${err.code}`));
     }
   } else {
-    await request(cfg, 'POST', 'add/mailbox', {
-      local_part: localPart, domain, name, password, password2: password,
-      quota: cfg.quotaMb, active: 1, force_pw_update: 0,
-      ...(rateLimit ? { rl_value: String(rateLimit.value), rl_frame: rateLimit.frame } : {}),
-    });
+    try {
+      await request(cfg, 'POST', 'add/mailbox', {
+        local_part: localPart, domain, name, password, password2: password,
+        quota: cfg.quotaMb, active: 1, force_pw_update: 0,
+        ...(rateLimit ? { rl_value: String(rateLimit.value), rl_frame: rateLimit.frame } : {}),
+      });
+    } catch (err) {
+      // mailcow keeps one address either a mailbox or an alias ([danger is_alias <address>]). The
+      // panel never makes node aliases (D-16), so this one was made by hand: an administrator
+      // removes it in mailcow, and mail to the address then goes to the new mailbox.
+      if (err instanceof MailNodeError && err.code === 'mail_node_refused' && /\bis_alias\b/.test(err.message)) {
+        throw new MailNodeError('address_is_node_alias', 'The mail node has an alias with this address: remove it in mailcow first', 409);
+      }
+      throw err;
+    }
   }
   return { email, password, reused: !!existing };
 }

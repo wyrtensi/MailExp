@@ -292,6 +292,30 @@ describe('Failures after the writer left', () => {
     expect(sendMail).not.toHaveBeenCalled();
     expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'author_disabled' });
   });
+
+  // D-16: a letter queued from an alias with another address before its mailbox counted as a mail
+  // node one (or before this check existed) is refused by the job, not by the node's SMTP.
+  it('fails a queued letter whose From is not the address of its node mailbox, before SMTP', async () => {
+    const { rows: [alias] } = await db.query(
+      "INSERT INTO account_aliases (account_id, name, email) VALUES ($1, 'Orders desk', 'orders@example.com') RETURNING id",
+      [ACCOUNT],
+    );
+    const { body } = await send({ aliasId: alias.id });
+    await db.query('UPDATE email_accounts SET mail_node = true WHERE id = $1', [ACCOUNT]);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'node_alias_stale' });
+  });
+
+  it('sends a queued letter of a node mailbox under its own address', async () => {
+    await db.query('UPDATE email_accounts SET mail_node = true WHERE id = $1', [ACCOUNT]);
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect((await job(body.jobId)).status).toBe('done');
+  });
 });
 
 describe('Review round', () => {

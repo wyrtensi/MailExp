@@ -219,6 +219,29 @@ describe('aliases of a mail node mailbox keep its address', () => {
     expect(put.status).toBe(200);
   });
 
+  it('stores the mailbox address as the row spells it, not the request body', async () => {
+    stubQueries({ mailNode: true });
+    const body = { name: 'Second name', email: ' owner@EXAMPLE.com ' };
+
+    await request('POST', `${URL_ACCOUNT_ID}/aliases`, body);
+    await request('PUT', `${URL_ACCOUNT_ID}/aliases/${ALIAS_ID}`, body);
+
+    const insert = query.mock.calls.find(([sql]) => sql.startsWith('INSERT INTO account_aliases'));
+    const update = query.mock.calls.find(([sql]) => sql.startsWith('UPDATE account_aliases'));
+    expect(insert[1][2]).toBe('Owner@Example.com');
+    expect(update[1][1]).toBe('Owner@Example.com');
+  });
+
+  it('treats a mailbox with mail_node null (an older row) as not on the mail node', async () => {
+    stubQueries({ mailNode: null });
+
+    const put = await request('PUT', `${URL_ACCOUNT_ID}/aliases/${ALIAS_ID}`, aliasBody);
+
+    expect(put.status).toBe(200);
+    const update = query.mock.calls.find(([sql]) => sql.startsWith('UPDATE account_aliases'));
+    expect(update[1][1]).toBe('work@example.com');
+  });
+
   it('keeps any address for a mailbox that is not on the mail node', async () => {
     stubQueries({ mailNode: false });
 

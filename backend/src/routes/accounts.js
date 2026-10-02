@@ -699,6 +699,12 @@ function refusedNodeAliasAddress(res, account, email) {
   return true;
 }
 
+// The address an alias is stored with: a node mailbox's own address as the mailbox row spells it
+// (the request may differ in case, spacing or IDN form), anything else as given.
+function aliasAddress(account, email) {
+  return account?.mail_node === true ? account.email_address : email;
+}
+
 router.get('/:id/aliases', async (req, res) => {
   const { id } = req.params;
   const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
@@ -728,7 +734,7 @@ router.post('/:id/aliases', async (req, res) => {
 
   const result = await query(
     'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [id, name, email, reply_to || null, sanitizeSignature(signature) || null]
+    [id, name, aliasAddress(check.rows[0], email), reply_to || null, sanitizeSignature(signature) || null]
   );
   pluginRegistry.runHook('onAccountIdentityChanged', { accountId: id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
   res.json(result.rows[0]);
@@ -753,7 +759,7 @@ router.put('/:id/aliases/:aliasId', async (req, res) => {
 
   const result = await query(
     'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 RETURNING *',
-    [name, email, reply_to || null, sanitizeSignature(signature) || null, aliasId]
+    [name, aliasAddress(check.rows[0], email), reply_to || null, sanitizeSignature(signature) || null, aliasId]
   );
   pluginRegistry.runHook('onAccountIdentityChanged', { accountId: check.rows[0].account_id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
   res.json(result.rows[0]);
