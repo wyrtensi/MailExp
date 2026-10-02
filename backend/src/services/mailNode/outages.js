@@ -11,16 +11,24 @@ import { SYSTEM_ACTOR } from './domains.js';
 //
 // Detection rides on the alert job (services/mailNode/nodeAlerts.js, every five minutes), from what
 // it reads anyway. The panel cannot try port 25 (it is open to the EOP ranges only), so a check is:
-// - failed: the mailcow API did not answer at all (mail_node_unreachable), or postfix-mailcow or
-//   dovecot-mailcow is not running (get/status/containers);
-// - good: the containers were read and both are running;
-// - unknown: anything else (the API refused the key, answered an error, a receiving container is
-//   missing from the answer): it neither opens nor closes a window.
-// A window opens at the first failed check, starting at the last good check before it (to be
-// conservative: the outage may have begun right after it), and closes at the first good check.
-// Without any earlier good check, or after a long gap without checks (the panel itself was down),
-// the start is marked uncertain. The node's Postfix log is evidence, never a trigger (a quiet node
-// has long silences): inboundEvidence() notes the last session from EOP before a window, the first
+// - failed: postfix-mailcow is not running (get/status/containers), or the mailcow API did not
+//   answer at all (mail_node_unreachable). One unanswered call may be the panel's own network or a
+//   slow nginx while Postfix works, so the API counts only on the second failed check in a row;
+// - good: the containers were read and postfix-mailcow is running. Dovecot down is no outage of
+//   this kind: Postfix still takes the mail and keeps it in the node's own queue (the queue alert,
+//   R-16/R-18), EOP is not holding anything;
+// - unknown: anything else (the API refused the key, answered an error, postfix-mailcow is missing
+//   from the answer): it neither opens nor closes a window, and breaks a run of failed checks.
+// A window opens at the failed check that counts, starting at the last good check before it (to be
+// conservative: the outage may have begun right after it), and closes at the first good check. It
+// never starts before the end of an earlier detected window (an administrator may have closed one
+// while the node was still down). Without any earlier good check, or after a long gap without
+// checks (the panel itself was down), the start is marked uncertain. A window the job closed less
+// than REOPEN_MS ago opens again instead of a new one (a container in a restart loop). An open
+// detected window without a failed check for STALE_MS (the checks turned unknown, or the node's
+// settings went away) is marked stalled: the trace stops at its last failed check, and an
+// administrator closes it. The node's Postfix log is evidence, never a trigger (a quiet node has
+// long silences): inboundEvidence() notes the last session from EOP before a window, the first
 // after it and any during it.
 //
 // An administrator adds a window by hand (a planned maintenance, a panel-side outage) with a reason,
@@ -31,15 +39,20 @@ export const OUTAGE_STATE_PROVIDER = 'mail_node_outage_state';
 export const OUTAGE_DEFAULTS = Object.freeze({ retentionDays: 30 });
 export const MAX_RETENTION_DAYS = 90;
 export const MAX_REASON_LENGTH = 500;
-// The containers that take mail from EOP: Postfix on port 25 and Dovecot behind it (LMTP).
-export const RECEIVING_CONTAINERS = Object.freeze(['postfix-mailcow', 'dovecot-mailcow']);
+// The container that takes mail from EOP on port 25.
+export const RECEIVING_CONTAINER = 'postfix-mailcow';
+const MINUTE_MS = 60 * 1000;
 // The alert job runs every five minutes: a gap of more than three runs since the last good check
 // means the panel did not look in between.
-export const CHECK_GAP_MS = 15 * 60 * 1000;
+export const CHECK_GAP_MS = 15 * MINUTE_MS;
+export const REOPEN_MS = 15 * MINUTE_MS;
+export const STALE_MS = 30 * MINUTE_MS;
 // How long evidence and the trace keep following a closed window: EOP's 24 hours and an hour.
-export const FOLLOW_MS = 25 * 60 * 60 * 1000;
+export const FOLLOW_MS = 25 * 60 * MINUTE_MS;
+// How far either side of a window the trace looks.
+export const TRACE_MARGIN_MS = 60 * MINUTE_MS;
 // A manual window may be marked ahead (a planned maintenance), up to this far.
-const MAX_AHEAD_MS = 31 * 24 * 60 * 60 * 1000;
+const MAX_AHEAD_MS = 31 * 24 * 60 * MINUTE_MS;
 // Mailcow's own container names are "<service>-mailcow"; a compose install may answer
 // "mailcowdockerized-<service>-mailcow-1".
 const matches = (name, part) => String(name ?? '').toLowerCase().includes(part);
@@ -52,13 +65,17 @@ export function classifyCheck({ containers = null, errorCode = null }) {
       ? { result: 'failed', signals: ['api_unreachable'], down: [] }
       : { result: 'unknown', signals: [errorCode || 'containers_unread'], down: [] };
   }
-  const down = [];
-  for (const part of RECEIVING_CONTAINERS) {
-    const found = containers.find((c) => matches(c.name, part));
-    if (!found) return { result: 'unknown', signals: ['container_missing'], down: [{ name: part, state: 'missing' }] };
-    if (found.state !== 'running') down.push({ name: found.name, state: found.state || 'unknown' });
-  }
-  return down.length ? { result: 'failed', signals: ['containers'], down } : { result: 'good', signals: [], down: [] };
+  const found = containers.find((c) => matches(c.name, RECEIVING_CONTAINER));
+  if (!found) return { result: 'unknown', signals: ['container_missing'], down: [{ name: RECEIVING_CONTAINER, state: 'missing' }] };
+  if (found.state !== 'running') return { result: 'failed', signals: ['containers'], down: [{ name: found.name, state: found.state || 'unknown' }] };
+  return { result: 'good', signals: [], down: [] };
+}
+
+// Whether an open detected window has gone without a failed check for STALE_MS.
+export function isStalled(row, now = Date.now()) {
+  if (!row || row.ended_at || row.source !== 'detected') return false;
+  const last = Date.parse(row.last_failed_at ?? row.started_at);
+  return Number.isFinite(last) && now - last > STALE_MS;
 }
 
 // --- settings and state ------------------------------------------------------------------------
@@ -106,18 +123,19 @@ const actor = (userId) => (userId ? { actorUserId: userId } : { actorEmail: SYST
 const minutesBetween = (from, to) => Math.max(0, Math.round((Date.parse(to) - Date.parse(from)) / 60000));
 
 // A window as the screens get it. counts: letters per outcome of the trace (outageTrace.js).
-export function presentOutage(row, counts = {}) {
+export function presentOutage(row, counts = {}, now = Date.now()) {
   return {
     id: row.id,
     startedAt: iso(row.started_at),
     endedAt: iso(row.ended_at),
     open: !row.ended_at,
+    stalled: isStalled(row, now),
     source: row.source,
     planned: !!row.planned,
     reason: row.reason ?? null,
     cause: row.cause ?? {},
     evidence: row.evidence ?? null,
-    trace: row.trace ?? null,
+    trace: row.trace ? { ...row.trace, cursor: undefined } : null,
     lastFailedAt: iso(row.last_failed_at),
     counts: { delayed: 0, waiting: 0, lost: 0, other: 0, ...counts },
   };
@@ -128,13 +146,51 @@ async function openDetected() {
   return rows[0] ?? null;
 }
 
-// Keeps one check: opens, extends or closes the detected window, and the state. Returns
-// { opened, closed } (window rows or null). Journals the opening and the closing.
+async function lastClosedDetected() {
+  const { rows } = await query(
+    "SELECT * FROM mail_node_outages WHERE source = 'detected' AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1",
+  );
+  return rows[0] ?? null;
+}
+
+// Opens a detected window for a failed check that counts: again the one the job closed less than
+// REOPEN_MS ago, else a new one from the last good check (not before the last detected window's
+// end). Returns { row, reopened }.
+async function openWindow({ check, state, now, at }) {
+  const previous = await lastClosedDetected();
+  if (previous && !previous.closed_by && now - Date.parse(previous.ended_at) < REOPEN_MS) {
+    const { rows } = await query(
+      `UPDATE mail_node_outages SET ended_at = NULL, last_failed_at = $2, cause = cause || $3::jsonb, trace = NULL, updated_at = NOW()
+        WHERE id = $1 AND ended_at IS NOT NULL RETURNING *`,
+      [previous.id, at, { reopened: (previous.cause?.reopened ?? 0) + 1, down: check.down.length ? check.down : (previous.cause?.down ?? []) }],
+    );
+    if (rows[0]) return { row: rows[0], reopened: true };
+  }
+  const firstFailed = state.pendingFailure?.at ? Date.parse(state.pendingFailure.at) : now;
+  const lastGood = state.lastGoodAt ? Date.parse(state.lastGoodAt) : null;
+  const floor = previous ? Date.parse(previous.ended_at) : null;
+  let start = lastGood ?? firstFailed;
+  if (floor != null && floor > start) start = Math.min(floor, firstFailed);
+  const startUncertain = lastGood == null || firstFailed - lastGood > CHECK_GAP_MS;
+  const signals = [...new Set([...(state.pendingFailure?.signals ?? []), ...check.signals])];
+  const { rows } = await query(
+    `INSERT INTO mail_node_outages (started_at, source, cause, last_failed_at)
+     VALUES ($1, 'detected', $2, $3)
+     ON CONFLICT DO NOTHING RETURNING *`,
+    [new Date(start).toISOString(), { signals, down: check.down, firstFailedAt: new Date(firstFailed).toISOString(), startUncertain }, at],
+  );
+  return { row: rows[0] ?? null, reopened: false };
+}
+
+// Keeps one check: opens, extends or closes the detected window, and the state ({ lastCheckAt,
+// lastResult, signals, lastGoodAt, pendingFailure }). Returns { opened, closed } (window rows or
+// null). Journals the opening (and a reopening) and the closing.
 export async function recordCheck({ check, now = Date.now(), userId = null }) {
   const state = (await getOutageState()) ?? {};
   const at = new Date(now).toISOString();
   const open = await openDetected();
   let opened = null;
+  let reopened = false;
   let closed = null;
 
   if (check.result === 'good') {
@@ -147,6 +203,7 @@ export async function recordCheck({ check, now = Date.now(), userId = null }) {
       closed = rows[0] ?? null;
     }
     state.lastGoodAt = at;
+    delete state.pendingFailure;
   } else if (check.result === 'failed') {
     if (open) {
       const signals = [...new Set([...(open.cause?.signals ?? []), ...check.signals])];
@@ -154,17 +211,16 @@ export async function recordCheck({ check, now = Date.now(), userId = null }) {
         `UPDATE mail_node_outages SET last_failed_at = $2, cause = cause || $3::jsonb, updated_at = NOW() WHERE id = $1`,
         [open.id, at, { signals, down: check.down.length ? check.down : (open.cause?.down ?? []) }],
       );
+      delete state.pendingFailure;
+    } else if (check.signals.includes('api_unreachable') && !check.down.length && !state.pendingFailure) {
+      // The first unanswered call: wait for the next check before calling it an outage.
+      state.pendingFailure = { at, signals: check.signals };
     } else {
-      const lastGood = state.lastGoodAt ? Date.parse(state.lastGoodAt) : null;
-      const startUncertain = lastGood == null || now - lastGood > CHECK_GAP_MS;
-      const { rows } = await query(
-        `INSERT INTO mail_node_outages (started_at, source, cause, last_failed_at)
-         VALUES ($1, 'detected', $2, $3)
-         ON CONFLICT DO NOTHING RETURNING *`,
-        [lastGood != null ? new Date(lastGood).toISOString() : at, { signals: check.signals, down: check.down, firstFailedAt: at, startUncertain }, at],
-      );
-      opened = rows[0] ?? null;
+      ({ row: opened, reopened } = await openWindow({ check, state, now, at }));
+      delete state.pendingFailure;
     }
+  } else {
+    delete state.pendingFailure;
   }
   await writeConfig(OUTAGE_STATE_PROVIDER, {
     ...state, lastCheckAt: at, lastResult: check.result, signals: check.signals,
@@ -173,7 +229,10 @@ export async function recordCheck({ check, now = Date.now(), userId = null }) {
   recordAudit([
     ...(opened ? [{
       ...actor(userId), action: 'mail_node.outage_opened',
-      details: { outage: opened.id, source: 'detected', startedAt: iso(opened.started_at), signals: check.signals, down: check.down.map((c) => c.name) },
+      details: {
+        outage: opened.id, source: 'detected', startedAt: iso(opened.started_at), signals: check.signals, down: check.down.map((c) => c.name),
+        ...(reopened ? { reopened: true } : {}),
+      },
     }] : []),
     ...(closed ? [{
       ...actor(userId), action: 'mail_node.outage_closed',
@@ -256,6 +315,15 @@ export async function updateOutage(id, values, userId) {
   const fields = [];
   if (iso(current.started_at) !== iso(row.started_at)) fields.push('startedAt');
   if (iso(current.ended_at) !== iso(row.ended_at)) fields.push('endedAt');
+  // New times: letters the trace no longer looks at go (a narrowed window must not keep feeding the
+  // waiting count); the next pass lists the window again.
+  if (fields.includes('startedAt') || fields.includes('endedAt')) {
+    await query(
+      `DELETE FROM mail_node_outage_letters WHERE outage_id = $1
+          AND (received_at < $2 OR ($3::timestamptz IS NOT NULL AND received_at > $3))`,
+      [id, new Date(start - TRACE_MARGIN_MS).toISOString(), end != null ? new Date(end + TRACE_MARGIN_MS).toISOString() : null],
+    );
+  }
   if ((current.reason ?? null) !== (row.reason ?? null)) fields.push('reason');
   if (fields.length) {
     recordAudit({
@@ -287,7 +355,7 @@ export async function listOutages({ limit = 50 } = {}) {
   if (!rows.length) return [];
   const { rows: counts } = await query(
     `SELECT outage_id, outcome, COUNT(*)::int AS n FROM mail_node_outage_letters
-      WHERE outage_id = ANY($1::uuid[]) GROUP BY outage_id, outcome`,
+      WHERE outage_id = ANY($1::uuid[]) AND outcome <> 'unaffected' GROUP BY outage_id, outcome`,
     [rows.map((row) => row.id)],
   );
   const byWindow = new Map();
@@ -323,6 +391,21 @@ export function inboundEvidence(lines, { start, end = null }) {
   return { lastBefore: iso(lastBefore), firstAfter: iso(firstAfter), during, logFrom: iso(oldest) };
 }
 
+// The evidence of a new read over what an earlier read saw: a log that begins later (it scrolled)
+// sees less, so what the earlier read found stays (the latest session before, the first after, the
+// most during), with the earlier beginning.
+export function mergeEvidence(stored, fresh) {
+  if (!stored?.logFrom || !fresh.logFrom || Date.parse(fresh.logFrom) <= Date.parse(stored.logFrom)) return fresh;
+  const later = (a, b) => (a && b ? (Date.parse(a) >= Date.parse(b) ? a : b) : a ?? b ?? null);
+  const earlier = (a, b) => (a && b ? (Date.parse(a) <= Date.parse(b) ? a : b) : a ?? b ?? null);
+  return {
+    lastBefore: later(fresh.lastBefore, stored.lastBefore),
+    firstAfter: earlier(fresh.firstAfter, stored.firstAfter),
+    during: Math.max(fresh.during ?? 0, stored.during ?? 0),
+    logFrom: stored.logFrom,
+  };
+}
+
 // Writes the evidence of the windows still followed (open, or closed within FOLLOW_MS) from one
 // read of the log. Only rows that change are written.
 export async function updateEvidence(log, now = Date.now()) {
@@ -332,7 +415,7 @@ export async function updateEvidence(log, now = Date.now()) {
     [new Date(now).toISOString(), new Date(now - FOLLOW_MS).toISOString()],
   );
   for (const row of rows) {
-    const evidence = inboundEvidence(log.lines, { start: Date.parse(row.started_at), end: row.ended_at ? Date.parse(row.ended_at) : null });
+    const evidence = mergeEvidence(row.evidence, inboundEvidence(log.lines, { start: Date.parse(row.started_at), end: row.ended_at ? Date.parse(row.ended_at) : null }));
     // jsonb keeps its own key order: compare field by field.
     if (row.evidence && Object.keys(evidence).every((key) => evidence[key] === (row.evidence[key] ?? null))) continue;
     await query('UPDATE mail_node_outages SET evidence = $2, updated_at = NOW() WHERE id = $1', [row.id, evidence]);

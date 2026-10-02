@@ -9,6 +9,7 @@ vi.mock('../services/db.js', () => ({
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
 }));
 const auth = vi.hoisted(() => ({ admin: true }));
+const node = vi.hoisted(() => ({ cfg: null }));
 vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: '60000000-0000-4000-8000-000000000001' }; next(); },
   requireAdmin: (_req, res, next) => (auth.admin ? next() : res.status(403).json({ error: 'Admin only' })),
@@ -16,7 +17,12 @@ vi.mock('../middleware/auth.js', () => ({
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/mailNode/mailcow.js', async (importActual) => ({
   ...(await importActual()),
-  getMailNodeConfig: vi.fn(async () => null),
+  getMailNodeConfig: vi.fn(async () => node.cfg),
+}));
+// The node log the forced pass reads: from 08:00, without the fixture letters arriving.
+vi.mock('../services/mailNode/postfixLog.js', async (importActual) => ({
+  ...(await importActual()),
+  readPostfixLog: vi.fn(async () => ({ lines: [], oldestAt: '2026-10-01T08:00:00.000Z' })),
 }));
 
 const { createRealSchemaDb } = await import('../services/testing/realSchema.js');
@@ -24,10 +30,12 @@ const { default: express } = await import('express');
 const { default: routes } = await import('./mailNodeOutages.js');
 const { recordAudit } = await import('../services/auditLog.js');
 const { createFixtureTraceSource, setTraceSource } = await import('../services/mailNode/traceSource.js');
+const { resetTraceBudget } = await import('../services/mailNode/outageTrace.js');
 const { OUTAGE, TRACE_DETAILS, TRACE_ROWS } = await import('../services/mailNode/traceSource.fixtures.js');
 
 const ADMIN = '60000000-0000-4000-8000-000000000001';
 const ANNA_BOX = '61000000-0000-4000-8000-000000000001';
+const BORIS_BOX = '61000000-0000-4000-8000-000000000002';
 
 let db;
 let server;
@@ -54,6 +62,8 @@ afterAll(async () => {
 });
 beforeEach(async () => {
   auth.admin = true;
+  node.cfg = { mailHost: 'mail.test.local', apiKey: 'k' };
+  resetTraceBudget();
   setTraceSource(null);
   await db.query('DELETE FROM mail_node_outages');
   recordAudit.mockClear();
@@ -103,7 +113,15 @@ describe('the letters', () => {
     expect(admin.body).toMatchObject({ traceConnected: false, waiting: { waiting: 0 }, settings: { retentionDays: 30 }, expiryHours: 24 });
     expect(admin.body.windows).toHaveLength(1);
     expect((await call('POST', '/outages/trace')).body).toEqual({ connected: false, windows: [] });
-    expect((await call('GET', '/outage-letters')).body).toEqual({ traceConnected: false, node: false, letters: [] });
+    expect((await call('GET', '/outage-letters')).body).toEqual({ traceConnected: false, node: true, letters: [], truncated: false });
+  });
+
+  it('checks the trace now at most once every two minutes', async () => {
+    expect((await call('POST', '/outages/trace')).status).toBe(200);
+    const again = await call('POST', '/outages/trace');
+    expect(again.status).toBe(429);
+    expect(again.body.code).toBe('trace_cooldown');
+    expect(Date.parse(again.body.retryAt)).toBeGreaterThan(Date.now());
   });
 
   it('administrators get every letter of a window, users those of the panel\'s mailboxes', async () => {
@@ -113,14 +131,32 @@ describe('the letters', () => {
     expect(pass.body.windows[0].trace.counts).toEqual({ delayed: 1, waiting: 1, lost: 1, other: 1 });
     const all = await call('GET', `/outages/${window.id}/letters`);
     expect(all.body.letters.map((l) => l.recipient)).toEqual(['boris@stage.test', 'anna@stage.test', 'anna@stage.test', 'boris@stage.test']);
-    expect(all.body.letters[0]).toHaveProperty('nodeLog');
+    expect(all.body.letters[0]).toMatchObject({ statusCode: '4.4.316', status: 'pending' });
+    expect(all.body.letters[2]).toMatchObject({ outcome: 'delayed', nodeLog: 'missing' });
     auth.admin = false;
     const mine = await call('GET', '/outage-letters');
     expect(mine.body.traceConnected).toBe(true);
-    expect(mine.body.letters.map((l) => [l.accountId, l.outcome, l.sender])).toEqual([
-      [ANNA_BOX, 'lost', 'partner@fabrikam.com'],
-      [ANNA_BOX, 'delayed', 'sender@contoso.com'],
+    expect(mine.body.letters.map((l) => [l.accountId, l.outcome, l.sender, l.expired])).toEqual([
+      [ANNA_BOX, 'lost', 'partner@fabrikam.com', true],
+      [ANNA_BOX, 'delayed', 'sender@contoso.com', false],
     ]);
+    // Users get no EOP codes, trace statuses, details or node log.
+    for (const letter of mine.body.letters) {
+      for (const field of ['statusCode', 'status', 'detail', 'nodeLog', 'nodeSeenAt', 'messageId']) expect(letter).not.toHaveProperty(field);
+    }
+  });
+
+  it('shows no letter as still waiting once no trace is connected', async () => {
+    await db.query("INSERT INTO email_accounts (id, name, email_address, imap_host, mail_node) VALUES ($1, 'Boris', 'boris@stage.test', 'mail.test.local', true)", [BORIS_BOX]);
+    setTraceSource(createFixtureTraceSource({ rows: TRACE_ROWS, details: TRACE_DETAILS }));
+    await addWindow();
+    await call('POST', '/outages/trace');
+    expect((await call('GET', '/outages')).body.waiting.waiting).toBe(1);
+    expect((await call('GET', '/outage-letters')).body.letters.some((l) => l.outcome === 'waiting')).toBe(true);
+    setTraceSource(null);
+    expect((await call('GET', '/outages')).body.waiting).toEqual({ waiting: 0, soonestExpiresAt: null, asOf: null });
+    expect((await call('GET', '/outage-letters')).body.letters.some((l) => l.outcome === 'waiting')).toBe(false);
+    await db.query('DELETE FROM email_accounts WHERE id = $1', [BORIS_BOX]);
   });
 });
 

@@ -38,8 +38,9 @@ import { getTraceSource } from './traceSource.js';
 //
 // The same run keeps the outage windows of R-43 (services/mailNode/outages.js): the containers'
 // answer (or the API not answering at all) is one check, the log read is the windows' evidence,
-// and a pass of the message trace follows. A failure there is logged and kept with the windows; it
-// never stops the run or its ping (the trace alert then stays as it was).
+// and a pass of the message trace starts after the ping, not waited for. A failure there is logged
+// and kept with the windows; it never stops the run or its ping (the trace alert then stays as it
+// was).
 //
 // What it keeps: the settings in integration_config 'mail_node_alerts' (ping URL, thresholds), the
 // last run in 'mail_node_alert_state' ({ at, alerts, errors, log }). An alert keeps the time it was
@@ -304,7 +305,7 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   if (!failed.includes('certificate')) fresh.push(...certificateSignal(nodeDns));
   const containers = await read('containers', () => getContainers(cfg));
   if (containers) fresh.push(...containerSignal(containers));
-  await outageStep({
+  const traceSource = await outageStep({
     check: classifyCheck({ containers, errorCode: errors.find((e) => e.source === 'containers')?.code ?? null }),
     log, now, userId, fresh, failed,
   });
@@ -345,11 +346,13 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
     const { fail, body } = pingOf(merged.alerts);
     await ping(settings.pingUrl, fail, body);
   }
+  startOutageTrace({ source: traceSource, now, log });
   return state;
 }
 
-// R-43: the check into the outage windows, the log into their evidence, then a pass of the message
-// trace and its alert. Each part fails alone (logged): the trace alert then stays as it was.
+// R-43: the check into the outage windows, the log into their evidence, and the alert from the
+// letters stored. Each part fails alone (logged): the trace alert then stays as it was. Returns the
+// trace source for the pass after the ping.
 async function outageStep({ check, log, now, userId, fresh, failed }) {
   try {
     await recordCheck({ check, now, userId });
@@ -357,14 +360,25 @@ async function outageStep({ check, log, now, userId, fresh, failed }) {
   } catch (err) {
     console.error(`Mail node outage windows were not updated: ${err?.code || err?.message || 'error'}`);
   }
+  // The alert comes from what earlier passes stored (a cheap query); the pass itself runs after the
+  // ping (startOutageTrace), so a slow trace never holds up the job or its ping.
   const source = getTraceSource();
   try {
-    await runOutageTrace({ source, now, log });
     if (source) fresh.push(...waitingSignal(await waitingSummary(now)));
   } catch (err) {
-    console.error(`Mail node outage trace failed: ${err?.code || err?.message || 'error'}`);
+    console.error(`Mail node outage letters could not be counted: ${err?.code || err?.message || 'error'}`);
     failed.push('trace');
   }
+  return source;
+}
+
+// A pass of the message trace, not waited for: it has its own single flight and deadline
+// (services/mailNode/outageTrace.js). Its failure is logged.
+function startOutageTrace({ source, now, log }) {
+  if (!source) return;
+  runOutageTrace({ source, now, log }).catch((err) => {
+    console.error(`Mail node outage trace failed: ${err?.code || err?.message || 'error'}`);
+  });
 }
 
 // The ping of a run: /fail only for an alert of severity error; every alert up, with its severity,
@@ -414,6 +428,8 @@ async function scheduledRun() {
 // minutes.
 export function startNodeAlertJob() {
   if (timer) return;
+  // Names a stand-only trace setting in the log at start (services/mailNode/traceSource.js).
+  getTraceSource();
   firstRun = setTimeout(scheduledRun, FIRST_RUN_DELAY_MS);
   firstRun.unref?.();
   timer = setInterval(scheduledRun, INTERVAL_MS);

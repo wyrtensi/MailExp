@@ -18,7 +18,7 @@ import {
   updateOutage,
 } from '../services/mailNode/outages.js';
 import {
-  EOP_EXPIRY_MS, mailboxLetters, runOutageTrace, waitingSummary, windowLetters,
+  EOP_EXPIRY_MS, forceOutageTrace, mailboxLetters, waitingSummary, windowLetters,
 } from '../services/mailNode/outageTrace.js';
 import { getTraceSource } from '../services/mailNode/traceSource.js';
 import { MailNodeError, getMailNodeConfig } from '../services/mailNode/mailcow.js';
@@ -46,6 +46,7 @@ const ERRORS = {
   outage_not_found: [404, 'No such outage window'],
   outage_already_closed: [409, 'The window is closed already'],
   outage_delete_unconfirmed: [400, 'Deleting a window needs { confirm: true } and a reason'],
+  trace_cooldown: [429, 'The trace was checked a moment ago: try again in two minutes'],
   retention_days_invalid: [400, `Days to keep letters must be a whole number from 1 to ${MAX_RETENTION_DAYS}`],
 };
 
@@ -54,18 +55,23 @@ function refuse(res, code) {
   return res.status(status).json({ error, code });
 }
 
-// The letters of the panel's mailboxes, for the notice in each mailbox. traceConnected false: no
-// message trace is set up, so nothing can be known about such letters.
+// The letters of the panel's mailboxes, for the notice in each mailbox (the newest 500; truncated
+// says there were more). traceConnected false: no message trace is set up, so nothing new can be
+// known and no letter shows as still waiting.
 router.get('/outage-letters', async (req, res) => {
-  const [letters, cfg] = await Promise.all([mailboxLetters(), getMailNodeConfig()]);
-  res.json({ traceConnected: !!getTraceSource(), node: !!cfg, letters });
+  const traceConnected = !!getTraceSource();
+  const [{ letters, truncated }, cfg] = await Promise.all([mailboxLetters({ withWaiting: traceConnected }), getMailNodeConfig()]);
+  res.json({ traceConnected, node: !!cfg, letters, truncated });
 });
 
-// The windows (newest 50), the last check, the letters waiting in EOP's queue and the settings.
+// The windows (newest 50), the last check, the letters waiting in EOP's queue (none without a
+// trace: nobody can tell they still wait) and the settings.
 router.get('/outages', requireAdmin, async (req, res) => {
-  const [windows, state, waiting, settings] = await Promise.all([listOutages(), getOutageState(), waitingSummary(), getOutageSettings()]);
+  const traceConnected = !!getTraceSource();
+  const [windows, state, stored, settings] = await Promise.all([listOutages(), getOutageState(), waitingSummary(), getOutageSettings()]);
+  const waiting = traceConnected ? stored : { waiting: 0, soonestExpiresAt: null, asOf: null };
   res.json({
-    windows, state, waiting, settings, defaults: OUTAGE_DEFAULTS, traceConnected: !!getTraceSource(), expiryHours: EOP_EXPIRY_MS / 3600000,
+    windows, state, waiting, settings, defaults: OUTAGE_DEFAULTS, traceConnected, expiryHours: EOP_EXPIRY_MS / 3600000,
   });
 });
 
@@ -115,7 +121,9 @@ router.delete('/outages/:id', requireAdmin, async (req, res) => {
   return res.json({ ok: true });
 });
 
-// A pass of the trace over every followed window now (or the pass going): { connected, windows }.
+// A pass of the trace over every followed window now (or the pass going): { connected, windows };
+// at most once every two minutes (429 trace_cooldown with retryAt), its requests counted against
+// the same budget as the job's passes.
 // The node's log (the shared cached read) tells delayed letters from those that arrived in time;
 // without it the pass goes on and keeps what earlier passes learnt from the log.
 router.post('/outages/trace', requireAdmin, async (req, res) => {
@@ -126,7 +134,9 @@ router.post('/outages/trace', requireAdmin, async (req, res) => {
       throw err;
     })
     : null;
-  res.json(await runOutageTrace({ force: true, log }));
+  const result = await forceOutageTrace({ log });
+  if (result.cooldown) return res.status(429).json({ error: ERRORS.trace_cooldown[1], code: 'trace_cooldown', retryAt: result.retryAt });
+  return res.json(result);
 });
 
 router.put('/outage-settings', requireAdmin, async (req, res) => {

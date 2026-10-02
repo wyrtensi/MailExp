@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../safeFetch.js', () => ({ safeFetch: vi.fn() }));
 
 const {
-  TraceSourceError, createFixtureTraceSource, createGraphTraceSource, getTraceSource, graphTime, keepRows,
-  normalizeTraceRow, setTraceSource, traceRanges,
+  TRACE_MAX_BYTES, TraceSourceError, createFixtureTraceSource, createGraphTraceSource, getTraceSource, graphTime, keepRows,
+  normalizeTraceRow, readJsonCapped, resetTraceSourceWarning, setTraceSource, traceRanges,
 } = await import('./traceSource.js');
 const { TRACE_DETAILS, TRACE_ROWS } = await import('./traceSource.fixtures.js');
 
@@ -46,7 +46,8 @@ describe('createGraphTraceSource', () => {
     expect(result).toMatchObject({ requests: 2, complete: true });
     expect(result.rows).toHaveLength(7);
     const first = decodeURIComponent(fetchImpl.mock.calls[0][0]);
-    expect(first).toBe(`${BASE}/admin/exchange/tracing/messageTraces?$filter=receivedDateTime ge 2026-10-01T09:00:00Z and receivedDateTime le 2026-10-01T15:00:00Z&$top=1000`);
+    expect(first).toBe(`${BASE}/admin/exchange/tracing/messageTraces?$filter=receivedDateTime ge 2026-10-01T09:00:00Z and receivedDateTime le 2026-10-01T15:00:00Z&$top=5000`);
+    expect(fetchImpl.mock.calls[0][1].redirect).toBe('error');
     expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBeUndefined();
   });
 
@@ -61,7 +62,33 @@ describe('createGraphTraceSource', () => {
     const fetchImpl = vi.fn().mockResolvedValue(json({ value: TRACE_ROWS.slice(0, 1), '@odata.nextLink': `${BASE}/admin/exchange/tracing/messageTraces?$skiptoken=n` }));
     const source = createGraphTraceSource({ baseUrl: BASE, fetchImpl, now: () => NOW });
     const result = await source.list({ start: NOW - 3600000, end: NOW, maxRequests: 3 });
-    expect(result).toMatchObject({ requests: 3, complete: false });
+    expect(result).toMatchObject({ requests: 3, complete: false, cursor: { range: 0, next: `${BASE}/admin/exchange/tracing/messageTraces?$skiptoken=n` } });
+  });
+
+  it('goes on from the cursor of an unfinished listing, in the same part of the range', async () => {
+    const day = 24 * 3600000;
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(json({ value: TRACE_ROWS.slice(0, 1), '@odata.nextLink': `${BASE}/admin/exchange/tracing/messageTraces?$skiptoken=p2` }))
+      .mockResolvedValueOnce(json({ value: TRACE_ROWS.slice(1, 2) }))
+      .mockResolvedValueOnce(json({ value: TRACE_ROWS.slice(2, 3) }));
+    const source = createGraphTraceSource({ baseUrl: BASE, fetchImpl, now: () => NOW });
+    const range = { start: NOW - 15 * day, end: NOW };
+    const first = await source.list({ ...range, maxRequests: 1 });
+    expect(first.cursor).toEqual({ range: 0, next: `${BASE}/admin/exchange/tracing/messageTraces?$skiptoken=p2` });
+    const rest = await source.list({ ...range, maxRequests: 5, cursor: first.cursor });
+    expect(rest).toMatchObject({ requests: 2, complete: true, cursor: null });
+    expect(fetchImpl.mock.calls[1][0]).toBe(`${BASE}/admin/exchange/tracing/messageTraces?$skiptoken=p2`);
+    expect(decodeURIComponent(fetchImpl.mock.calls[2][0])).toContain(`receivedDateTime ge ${graphTime(NOW - 5 * day)}`);
+    expect(rest.rows).toHaveLength(2);
+  });
+
+  it('refuses an answer larger than the cap', async () => {
+    const big = { ok: true, status: 200, headers: { get: () => String(TRACE_MAX_BYTES + 1) }, json: async () => ({ value: [] }) };
+    const source = createGraphTraceSource({ baseUrl: BASE, fetchImpl: vi.fn().mockResolvedValue(big), now: () => NOW });
+    await expect(source.list({ start: NOW - 3600000, end: NOW })).rejects.toMatchObject({ code: 'trace_failed' });
+    const stream = new Response('x'.repeat(64));
+    await expect(readJsonCapped(stream, 10)).rejects.toMatchObject({ code: 'trace_failed' });
+    expect(await readJsonCapped(new Response('{"value":[]}'), 100)).toEqual({ value: [] });
   });
 
   it('refuses a next page on another host and maps HTTP failures to codes', async () => {
@@ -101,7 +128,16 @@ describe('createFixtureTraceSource and getTraceSource', () => {
   it('is null without a trace, the Graph shape for MAIL_NODE_TRACE_URL, the override first', () => {
     expect(getTraceSource({ env: {} })).toBeNull();
     expect(getTraceSource({ env: { MAIL_NODE_TRACE_URL: 'ftp://x' } })).toBeNull();
-    expect(getTraceSource({ env: { MAIL_NODE_TRACE_URL: BASE } }).kind).toBe('graph');
+    const warn = vi.fn();
+    resetTraceSourceWarning();
+    expect(getTraceSource({ env: { MAIL_NODE_TRACE_URL: BASE }, warn }).kind).toBe('graph');
+    expect(getTraceSource({ env: { MAIL_NODE_TRACE_URL: BASE }, warn }).kind).toBe('graph');
+    expect(warn).toHaveBeenCalledTimes(1);
+    // In production only with the stand's flag.
+    resetTraceSourceWarning();
+    expect(getTraceSource({ env: { MAIL_NODE_TRACE_URL: BASE, NODE_ENV: 'production' }, warn })).toBeNull();
+    expect(warn.mock.calls.at(-1)[0]).toMatch(/ignored/);
+    expect(getTraceSource({ env: { MAIL_NODE_TRACE_URL: BASE, NODE_ENV: 'production', MAIL_NODE_TRACE_STAND: '1' }, warn }).kind).toBe('graph');
     const fixture = createFixtureTraceSource();
     setTraceSource(fixture);
     expect(getTraceSource({ env: {} })).toBe(fixture);

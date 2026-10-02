@@ -4,8 +4,9 @@ import { safeFetch } from '../safeFetch.js';
 // received while the node was down): a small interface, so the tenant driver of stage 7 (R-22,
 // R-30) plugs in without touching the correlation (services/mailNode/outageTrace.js).
 //
-//   source.list({ start, end, recipientDomains, statuses, maxRequests })
-//     -> { rows, requests, complete }
+//   source.list({ start, end, recipientDomains, statuses, maxRequests, cursor })
+//     -> { rows, requests, complete, cursor }
+//   (an unfinished listing returns a cursor; passed back, the listing goes on from there)
 //   source.details(row) -> { events, requests }
 //
 // Rows have the shape of Graph's exchangeMessageTrace (GET /admin/exchange/tracing/messageTraces):
@@ -33,8 +34,12 @@ export const TRACE_STATUSES = Object.freeze(['gettingStatus', 'pending', 'failed
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const TRACE_MAX_RANGE_MS = 10 * DAY_MS;
 export const TRACE_HISTORY_MS = 90 * DAY_MS;
-export const TRACE_PAGE_SIZE = 1000;
+// Graph's largest page: a long window lists the whole tenant's mail (no domain filter), so fewer,
+// larger pages spend less of the request budget.
+export const TRACE_PAGE_SIZE = 5000;
 const TRACE_TIMEOUT_MS = 30000;
+// The most a single answer may hold: 5000 rows of a few hundred bytes, with room.
+export const TRACE_MAX_BYTES = 16 * 1024 * 1024;
 
 export class TraceSourceError extends Error {
   constructor(code, message) {
@@ -110,6 +115,37 @@ export function traceRanges(start, end, now = Date.now()) {
 
 const ODATA_QUOTE = (value) => String(value).replace(/'/g, "''");
 
+// The body of an answer as JSON, read up to max bytes: a larger one is refused rather than read.
+export async function readJsonCapped(res, max) {
+  const declared = Number(res.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > max) throw new TraceSourceError('trace_failed', 'The message trace answered too much');
+  let text;
+  if (res.body?.getReader) {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > max) {
+        await reader.cancel().catch(() => {});
+        throw new TraceSourceError('trace_failed', 'The message trace answered too much');
+      }
+      chunks.push(value);
+    }
+    text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+  } else {
+    text = typeof res.text === 'function' ? await res.text() : JSON.stringify(await res.json());
+    if (Buffer.byteLength(text) > max) throw new TraceSourceError('trace_failed', 'The message trace answered too much');
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new TraceSourceError('trace_failed', 'The message trace did not answer with JSON');
+  }
+}
+
 export function createGraphTraceSource({
   baseUrl, getToken = null, fetchImpl = null, pageSize = TRACE_PAGE_SIZE, allowPrivate = false, now = () => Date.now(),
 }) {
@@ -123,30 +159,33 @@ export function createGraphTraceSource({
     if (getToken) headers.Authorization = `Bearer ${await getToken()}`;
     let res;
     try {
-      res = await doFetch(url, { headers, signal: AbortSignal.timeout(TRACE_TIMEOUT_MS) });
+      // A redirect is refused: a next page or a token must not be sent anywhere else.
+      res = await doFetch(url, { headers, redirect: 'error', signal: AbortSignal.timeout(TRACE_TIMEOUT_MS) });
     } catch (err) {
       throw new TraceSourceError('trace_unreachable', `The message trace is unreachable (${err?.code || err?.name || 'error'})`);
     }
     if (res.status === 429) throw new TraceSourceError('trace_throttled', 'The message trace asked to slow down (HTTP 429)');
     if (res.status === 401 || res.status === 403) throw new TraceSourceError('trace_auth', `The message trace refused the request (HTTP ${res.status})`);
     if (!res.ok) throw new TraceSourceError('trace_failed', `The message trace answered HTTP ${res.status}`);
-    try {
-      return await res.json();
-    } catch {
-      throw new TraceSourceError('trace_failed', 'The message trace did not answer with JSON');
-    }
+    return readJsonCapped(res, TRACE_MAX_BYTES);
   }
 
   return {
     kind: 'graph',
-    async list({ start, end, recipientDomains = null, statuses = null, maxRequests = 20 }) {
+    // cursor: { range, next } — the part of [start, end] and the next page an earlier call stopped at.
+    async list({ start, end, recipientDomains = null, statuses = null, maxRequests = 20, cursor = null }) {
       const rows = [];
       let requests = 0;
-      for (const [from, to] of traceRanges(start, end, now())) {
+      const ranges = traceRanges(start, end, now());
+      const first = cursor && Number.isInteger(cursor.range) && cursor.range < ranges.length ? cursor.range : 0;
+      for (let index = first; index < ranges.length; index += 1) {
+        const [from, to] = ranges[index];
         const filter = `receivedDateTime ge ${graphTime(from)} and receivedDateTime le ${graphTime(to)}`;
-        let url = `${base}/admin/exchange/tracing/messageTraces?$filter=${encodeURIComponent(filter)}&$top=${pageSize}`;
+        let url = index === first && cursor?.next ? cursor.next : `${base}/admin/exchange/tracing/messageTraces?$filter=${encodeURIComponent(filter)}&$top=${pageSize}`;
         while (url) {
-          if (requests >= maxRequests) return { rows: keepRows(rows, { recipientDomains, statuses }), requests, complete: false };
+          if (requests >= maxRequests) {
+            return { rows: keepRows(rows, { recipientDomains, statuses }), requests, complete: false, cursor: { range: index, next: url } };
+          }
           const body = await get(url);
           requests += 1;
           for (const item of Array.isArray(body?.value) ? body.value : []) {
@@ -156,7 +195,7 @@ export function createGraphTraceSource({
           url = typeof body?.['@odata.nextLink'] === 'string' ? body['@odata.nextLink'] : null;
         }
       }
-      return { rows: keepRows(rows, { recipientDomains, statuses }), requests, complete: true };
+      return { rows: keepRows(rows, { recipientDomains, statuses }), requests, complete: true, cursor: null };
     },
     async details(row) {
       const url = `${base}/admin/exchange/tracing/messageTraces/${encodeURIComponent(row.id)}`
@@ -178,7 +217,7 @@ export function createFixtureTraceSource({ rows = [], details = {} } = {}) {
         const at = Date.parse(row.receivedDateTime);
         return at >= start && at <= end;
       });
-      return { rows: keepRows(inRange, { recipientDomains, statuses }), requests: 1, complete: true };
+      return { rows: keepRows(inRange, { recipientDomains, statuses }), requests: 1, complete: true, cursor: null };
     },
     async details(row) {
       const events = (details[`${row.id}|${lower(row.recipientAddress)}`] ?? []).map(normalizeTraceEvent).filter(Boolean);
@@ -198,8 +237,10 @@ export function setTraceSource(source) {
 // only MAIL_NODE_TRACE_URL connects one: the Graph URL shapes without a token, for the stand's
 // fake-EOP (scripts/deploy/test/fake-eop, `trace` endpoint), on a private address over plain HTTP.
 // It is a test aid set in the backend's environment by whoever runs the backend, never from the
-// panel.
-export function getTraceSource({ env = process.env } = {}) {
+// panel; with NODE_ENV=production it is refused unless MAIL_NODE_TRACE_STAND=1 says this is a test
+// stand, and it is named in the log once.
+let warned = false;
+export function getTraceSource({ env = process.env, warn = (line) => console.warn(line) } = {}) {
   if (override) return override;
   const url = String(env.MAIL_NODE_TRACE_URL ?? '').trim();
   if (!url) return null;
@@ -209,5 +250,18 @@ export function getTraceSource({ env = process.env } = {}) {
   } catch {
     return null;
   }
+  const stand = env.MAIL_NODE_TRACE_STAND === '1';
+  if (env.NODE_ENV === 'production' && !stand) {
+    if (!warned) warn('MAIL_NODE_TRACE_URL is ignored: it is a test stand aid (set MAIL_NODE_TRACE_STAND=1 on a stand)');
+    warned = true;
+    return null;
+  }
+  if (!warned) warn('Mail node trace: MAIL_NODE_TRACE_URL is set, the trace of a test stand is read without a token');
+  warned = true;
   return createGraphTraceSource({ baseUrl: url, allowPrivate: true });
+}
+
+// Tests: the next getTraceSource warns again.
+export function resetTraceSourceWarning() {
+  warned = false;
 }

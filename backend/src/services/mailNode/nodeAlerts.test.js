@@ -365,7 +365,33 @@ describe('runAlertCheck and the outage windows (R-43)', () => {
       check: { result: 'failed', signals: ['containers'], down: [{ name: 'postfix-mailcow', state: 'exited' }] }, now: NOW, userId: 'admin-1',
     });
     expect(updateEvidence).toHaveBeenCalledTimes(1);
-    expect(runOutageTrace.mock.calls[0][0]).toMatchObject({ now: NOW, source: null });
+    // No trace connected: no pass.
+    expect(runOutageTrace).not.toHaveBeenCalled();
+  });
+
+  it('starts the trace pass after the ping and does not wait for it', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    outage.source = { kind: 'fixture' };
+    let finish;
+    runOutageTrace.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const state = await runAlertCheck({ now: NOW });
+    expect(state).toBeTruthy();
+    expect(safeFetch).toHaveBeenCalledTimes(1);
+    expect(runOutageTrace).toHaveBeenCalledTimes(1);
+    expect(runOutageTrace.mock.calls[0][0]).toMatchObject({ now: NOW, source: outage.source });
+    expect(safeFetch.mock.invocationCallOrder[0]).toBeLessThan(runOutageTrace.mock.invocationCallOrder[0]);
+    finish({ connected: true, windows: [] });
+  });
+
+  it('logs a trace pass that fails, without touching the run', async () => {
+    outage.source = { kind: 'fixture' };
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    runOutageTrace.mockImplementationOnce(async () => { throw new Error('graph down'); });
+    const state = await runAlertCheck({ now: NOW });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(state.errors).toEqual([]);
+    expect(errorLog.mock.calls.some(([line]) => /outage trace failed/.test(line))).toBe(true);
+    errorLog.mockRestore();
   });
 
   it('counts an API that does not answer as a failed check', async () => {
