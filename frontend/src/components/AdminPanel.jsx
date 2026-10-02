@@ -41,12 +41,14 @@ import EopSection from './EopSection.jsx';
 import MailNodeOpsSection from './MailNodeOpsSection.jsx';
 import MailNodeOutagesSection from './MailNodeOutagesSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
+import MailNodeForeignAliases from './MailNodeForeignAliases.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
 import {
-  canDeleteAccount, isMailNodeErrorCode, mailNodeErrorKey, nodeMailboxDeleteDialog, pendingDeletion,
+  canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, mailNodeErrorKey, nodeMailboxDeleteDialog,
+  pendingDeletion,
 } from '../utils/mailNode.js';
 import MailboxDeletionNotice from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
@@ -64,10 +66,10 @@ import { formatDateTime, localeTag } from '../utils/formatDate.js';
 import { CheckIcon, PlusIcon, WarningIcon } from './UiIcons.jsx';
 
 // ─── Shared field component ───────────────────────────────────────────────────
-function Field({ label, required, children }) {
+function Field({ label, required, htmlFor, children }) {
   return (
     <div style={{ marginBottom: 14 }}>
-      <label style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 }}>
+      <label htmlFor={htmlFor} style={{ display: 'block', fontSize: 12, color: 'var(--text-secondary)', marginBottom: 5 }}>
         {label} {required && <span style={{ color: 'var(--red)' }}>*</span>}
       </label>
       {children}
@@ -801,7 +803,7 @@ export function AccountsTab() {
       setAliasFormData({ name: '', email: '', reply_to: '', signature: '' });
       setAliasFormId(null);
     } catch (err) {
-      setAliasFormError(err.message);
+      setAliasFormError(isMailNodeErrorCode(err?.code) ? t(mailNodeErrorKey(err.code)) : err.message);
     } finally {
       setAliasFormSaving(false);
     }
@@ -811,7 +813,10 @@ export function AccountsTab() {
     setAliasFormId(alias.id);
     setAliasFormData({
       name: alias.name,
-      email: alias.email,
+      // A node mailbox's aliases are names for its own address (D-16): the address is fixed. An alias
+      // with another address left from before is not edited here (no Edit button): an administrator
+      // turns it into a separate mailbox or deletes it (MailNodeForeignAliases).
+      email: isNodeMailbox(editTarget) ? editTarget.email_address : alias.email,
       reply_to: alias.reply_to || '',
       signature: alias.signature || '',
     });
@@ -891,6 +896,9 @@ export function AccountsTab() {
   }
 
   if (subview === 'aliases' && editTarget) {
+    // A mailbox on the mail node sends only from its own address (D-16): its aliases are more sender
+    // names, and another address is a separate mailbox.
+    const nodeMailbox = isNodeMailbox(editTarget);
     const backBtn = (
       <button onClick={() => { setSubview('list'); setEditTarget(null); setAliasFormMode(null); setAliasFormError(''); }} style={{
         display: 'flex', alignItems: 'center', gap: 6,
@@ -915,33 +923,44 @@ export function AccountsTab() {
             {editTarget.email_address}
           </div>
 
-          <Field label={t('admin.aliases.name')} required>
-            <input value={aliasFormData.name} onChange={e => setAliasFormData(f => ({ ...f, name: e.target.value }))}
+          <Field label={t('admin.aliases.name')} required htmlFor="alias-name">
+            <input id="alias-name" value={aliasFormData.name} onChange={e => setAliasFormData(f => ({ ...f, name: e.target.value }))}
               placeholder={t('admin.aliases.namePh')} style={inputStyle}
               onFocus={e => e.target.style.borderColor = 'var(--accent)'}
               onBlur={e => e.target.style.borderColor = 'var(--border)'} />
           </Field>
-          <Field label={t('admin.aliases.email')} required>
-            <input value={aliasFormData.email} onChange={e => setAliasFormData(f => ({ ...f, email: e.target.value }))}
-              placeholder={t('admin.aliases.emailPh')} style={inputStyle}
-              onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-              onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+          <Field label={t('admin.aliases.email')} required htmlFor="alias-email">
+            {nodeMailbox ? (
+              <>
+                <input id="alias-email" value={editTarget.email_address} readOnly aria-describedby="alias-email-hint"
+                  style={{ ...inputStyle, color: 'var(--text-secondary)', cursor: 'default' }} />
+                <div id="alias-email-hint" style={{ marginTop: 5, fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
+                  {t('admin.aliases.nodeAddressHint')}
+                </div>
+              </>
+            ) : (
+              <input id="alias-email" value={aliasFormData.email} onChange={e => setAliasFormData(f => ({ ...f, email: e.target.value }))}
+                placeholder={t('admin.aliases.emailPh')} style={inputStyle}
+                onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+                onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+            )}
           </Field>
-          <Field label={t('admin.aliases.replyTo')}>
-            <input value={aliasFormData.reply_to} onChange={e => setAliasFormData(f => ({ ...f, reply_to: e.target.value }))}
+          <Field label={t('admin.aliases.replyTo')} htmlFor="alias-reply-to">
+            <input id="alias-reply-to" value={aliasFormData.reply_to} onChange={e => setAliasFormData(f => ({ ...f, reply_to: e.target.value }))}
               placeholder={t('admin.aliases.replyToPh')} style={inputStyle}
               onFocus={e => e.target.style.borderColor = 'var(--accent)'}
               onBlur={e => e.target.style.borderColor = 'var(--border)'} />
           </Field>
 
           <div style={{ height: 1, background: 'var(--border-subtle)', margin: '16px 0' }} />
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+          <div id="alias-signature-label" style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6, fontWeight: 600, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
             {t('admin.aliases.signatureSection')}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
             {t('admin.aliases.signatureNote')}
           </div>
           <SignatureEditor
+            labelledBy="alias-signature-label"
             value={aliasFormData.signature}
             onChange={val => setAliasFormData(f => ({ ...f, signature: val }))}
           />
@@ -989,11 +1008,11 @@ export function AccountsTab() {
           {editTarget.email_address}
         </div>
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6, padding: '10px 12px', background: 'var(--bg-tertiary)', borderRadius: 8, border: '1px solid var(--border-subtle)' }}>
-          {t('admin.aliases.description')}
+          {t(nodeMailbox ? 'admin.aliases.descriptionNode' : 'admin.aliases.description')}
         </div>
 
         <button
-          onClick={() => { setAliasFormData({ name: '', email: '', reply_to: '', signature: '' }); setAliasFormMode('add'); }}
+          onClick={() => { setAliasFormData({ name: '', email: nodeMailbox ? editTarget.email_address : '', reply_to: '', signature: '' }); setAliasFormMode('add'); }}
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             padding: '7px 12px', background: 'var(--accent)',
@@ -1004,7 +1023,7 @@ export function AccountsTab() {
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
-          {t('admin.aliases.addButton')}
+          {t(nodeMailbox ? 'admin.aliases.addNameButton' : 'admin.aliases.addButton')}
         </button>
 
         {aliases.length === 0 ? (
@@ -1037,6 +1056,22 @@ export function AccountsTab() {
                 <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 1 }}>
                   {alias.email}
                 </div>
+                {isForeignNodeAlias(editTarget, alias) && (
+                  <div data-foreign-node-alias style={{ fontSize: 11, color: 'var(--amber)', marginTop: 2, lineHeight: 1.5 }}>
+                    {t('admin.aliases.foreignNodeAlias')}
+                    {isAdmin && (
+                      <>
+                        {' '}
+                        <button type="button" onClick={() => useStore.getState().setAdminTab('integrations')} style={{
+                          background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer',
+                          fontSize: 11, textDecoration: 'underline',
+                        }}>
+                          {t('admin.aliases.foreignNodeAliasOpen')}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
                 {alias.reply_to && (
                   <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
                     {t('admin.aliases.replyToLabel')} {alias.reply_to}
@@ -1044,12 +1079,14 @@ export function AccountsTab() {
                 )}
               </div>
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                <IconBtn onClick={() => handleAliasEdit(alias)} title={t('common.edit')}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                    <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                  </svg>
-                </IconBtn>
+                {!isForeignNodeAlias(editTarget, alias) && (
+                  <IconBtn onClick={() => handleAliasEdit(alias)} title={t('common.edit')}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+                      <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                  </IconBtn>
+                )}
                 <IconBtn onClick={() => handleAliasDelete(alias.id)} title={t('common.delete')} danger>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <polyline points="3 6 5 6 21 6"/>
@@ -3034,6 +3071,7 @@ function IntegrationsTab() {
 
           {isAdmin && <GoogleAppsSection />}
           {isAdmin && <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
+          {isAdmin && <MailNodeForeignAliases />}
           {isAdmin && <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
           {isAdmin && <MailNodeOpsSection />}
           {isAdmin && <MailNodeOutagesSection />}

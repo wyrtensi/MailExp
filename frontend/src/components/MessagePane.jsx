@@ -1188,6 +1188,7 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       ccAddresses: message.cc_addresses,
       fromEmail: message.from_email,
       accountEmail: myEmail,
+      mailNode: myAccount?.mail_node === true,
     });
     // The quote header speaks the language of the name the reply goes out under.
     const quoteLang = senderLanguage(identityName(myAccount, replyAliasId));

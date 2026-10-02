@@ -213,6 +213,20 @@ describe('API requests', () => {
     expect(calls().map((c) => c.method)).toEqual(['GET']);
   });
 
+  it('names an alias of the node at the address instead of passing the raw refusal on', async () => {
+    safeFetch.mockResolvedValueOnce(answer({})).mockResolvedValueOnce(answer([{ type: 'danger', msg: ['is_alias', 'orders@example.com'] }]));
+    const err = await provisionMailbox(CFG, { localPart: 'orders', domain: 'example.com', name: 'Orders' }).catch((e) => e);
+    expect(err).toBeInstanceOf(MailNodeError);
+    expect(err.code).toBe('address_is_node_alias');
+    expect(err.status).toBe(409);
+  });
+
+  it('passes another refusal of add/mailbox on as it is', async () => {
+    safeFetch.mockResolvedValueOnce(answer({})).mockResolvedValueOnce(answer([{ type: 'danger', msg: ['max_mailbox_exceeded', '500'] }]));
+    const err = await provisionMailbox(CFG, { localPart: 'orders', domain: 'example.com', name: 'Orders' }).catch((e) => e);
+    expect(err.code).toBe('mail_node_refused');
+  });
+
   it('makes a new, empty mailbox at an address deleted before: the node no longer has it', async () => {
     safeFetch
       .mockResolvedValueOnce(answer([{ type: 'success', msg: ['mailbox_removed', 'info@example.com'] }]))

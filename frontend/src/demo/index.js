@@ -64,6 +64,18 @@ let demoDeleteAfterDays = 5;
     });
   }
 }
+// One node mailbox keeps an alias with another address from before D-16 (a node mailbox sends only
+// from its own address), so the administrator's list of such aliases has a row to act on.
+{
+  const node = FLEET_ACCOUNTS.find(account => account.id === 'demo-fx-00');
+  if (node) {
+    const domain = node.email_address.split('@')[1];
+    node.aliases = [...(node.aliases || []), {
+      id: `${node.id}-alias-legacy`, account_id: node.id, name: 'Orders desk', email: `orders@${domain}`,
+      reply_to: null, signature: null,
+    }];
+  }
+}
 
 const FOLDER_FIXTURES = [
   { path: 'INBOX', name: 'Inbox', special_use: '\\Inbox' },
@@ -814,6 +826,10 @@ function sendMessage(body) {
   if (body.sendAt && !(sendAt > Date.now())) throw demoError('The scheduled time has already passed.', 'send_at_past');
   const viewer = demoViewer();
   const account = accountFor(body.accountId) || ACCOUNT_FIXTURES[0];
+  const alias = body.aliasId ? account.aliases?.find(a => a.id === body.aliasId) : null;
+  if (alias && foreignNodeAliasAddress(account, alias.email)) {
+    throw demoError('This sender address is not a mailbox: choose another From. An administrator can make it a separate mailbox.', 'node_alias_stale');
+  }
   const job = demoJob({
     accountId: account.id,
     author: { id: viewer.id, email: viewer.email },
@@ -1540,6 +1556,13 @@ function demoError(message, code) {
 }
 
 const normalizeEmail = value => String(value ?? '').trim().toLowerCase();
+// A node mailbox's aliases keep its own address (D-16), as routes/accounts.js and routes/send.js check.
+const foreignNodeAliasAddress = (account, email) => account?.mail_node === true
+  && normalizeEmail(email) !== normalizeEmail(account.email_address);
+const nodeAliasAddressError = () => demoError(
+  'A mail node mailbox sends only from its own address: another address is a separate mailbox',
+  'node_alias_address_mismatch',
+);
 const mailboxWithEmail = email => ACCOUNT_FIXTURES.find(account => normalizeEmail(account.email_address) === normalizeEmail(email));
 
 // A new mailbox is not empty in the demo: one letter says it is ready, threaded the way the
@@ -1948,9 +1971,10 @@ export async function demoRequest(method, path, body = {}) {
     const accountId = decodeURIComponent(aliasesMatch[1]);
     const account = accountFor(accountId);
     if (!account) throw demoError('Account not found');
+    if (foreignNodeAliasAddress(account, body?.email)) throw nodeAliasAddressError();
     const alias = {
       id: `${accountId}-alias-${nextAliasSequence++}`, account_id: accountId,
-      name: body?.name || '', email: body?.email || account.email_address,
+      name: body?.name || '', email: account.mail_node === true ? account.email_address : (body?.email || account.email_address),
       reply_to: body?.reply_to || null, signature: body?.signature || null,
     };
     account.aliases = [...(account.aliases || []), alias];
@@ -1961,8 +1985,11 @@ export async function demoRequest(method, path, body = {}) {
     const account = accountFor(decodeURIComponent(aliasItemMatch[1]));
     const alias = account?.aliases?.find(a => a.id === decodeURIComponent(aliasItemMatch[2]));
     if (!alias) throw demoError('Alias not found');
+    // As routes/accounts.js: a full alias each time, name and address required.
+    if (!body?.name || !body?.email) throw demoError('Name and email required');
+    if (foreignNodeAliasAddress(account, body.email)) throw nodeAliasAddressError();
     Object.assign(alias, {
-      name: body?.name ?? alias.name, email: body?.email ?? alias.email,
+      name: body.name, email: account.mail_node === true ? account.email_address : body.email,
       reply_to: body?.reply_to ?? alias.reply_to, signature: body?.signature ?? alias.signature,
     });
     return clone(alias);

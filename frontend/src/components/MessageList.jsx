@@ -1326,6 +1326,7 @@ export default function MessageList() {
       ccAddresses: message.cc_addresses,
       fromEmail: message.from_email,
       accountEmail: myEmail,
+      mailNode: myAccount?.mail_node === true,
     });
 
     const allRecipients = (() => {

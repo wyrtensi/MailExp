@@ -3,6 +3,8 @@
 // so the From selector of compose offers both. Used by the domain mailbox route and the Gmail
 // start and callback.
 
+import { domainToASCII } from 'node:url';
+
 export const SENDER_NAME_MAX = 200;
 
 const clean = (value) => (typeof value === 'string' ? value.trim().slice(0, SENDER_NAME_MAX) : '');
@@ -17,6 +19,34 @@ export function parseSenderNames(body) {
   }
   if (senderNameAlt && senderName && senderNameAlt.toLowerCase() === senderName.toLowerCase()) senderNameAlt = null;
   return { senderName, senderNameAlt };
+}
+
+// A mailbox on the mail node sends only from its own address (owner decision D-16): its aliases
+// are more sender names for that address, and another address is a separate, billed mailbox
+// created on the node. Gmail and IMAP mailboxes keep aliases with any address. `account` needs
+// email_address and mail_node.
+export function isForeignNodeAliasAddress(account, email) {
+  if (account?.mail_node !== true) return false;
+  return normalizeAddress(email) !== normalizeAddress(account.email_address);
+}
+
+// An address compared the way node mailboxes are made: lowercase, the domain in its ASCII (punycode)
+// form, which is the only form a node mailbox has (services/mailNode/mailcow.js parseHostName), so
+// `sales@пример.рф` and `sales@xn--e1afmkfd.xn--p1ai` are one address.
+export function normalizeAddress(value) {
+  const email = String(value ?? '').trim().toLowerCase();
+  const at = email.lastIndexOf('@');
+  if (at < 0) return email;
+  const domain = email.slice(at + 1);
+  return `${email.slice(0, at)}@${domainToASCII(domain) || domain}`;
+}
+
+// The address of a From header as nodemailer takes it: 'Name <address>' or a bare address.
+export function fromHeaderAddress(from) {
+  if (from && typeof from === 'object') return String(from.address ?? '');
+  const text = String(from ?? '');
+  const match = text.match(/<([^<>]*)>\s*$/);
+  return (match ? match[1] : text).trim();
 }
 
 // Adds the second name as an alias of the mailbox, inside the caller's transaction.

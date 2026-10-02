@@ -687,3 +687,33 @@ test('the demo keeps pins and the sort switch in its preferences, with the serve
   await assert.rejects(() => demoRequest('PATCH', '/auth/preferences', { sortAccountsByLatest: 'yes' }), /must be a boolean/);
   assert.equal((await demoRequest('GET', '/auth/preferences')).sortAccountsByLatest, false);
 });
+
+test('a node mailbox keeps its address on its aliases and does not send from an old foreign one (D-16)', async () => {
+  const accounts = await demoRequest('GET', '/accounts');
+  const node = accounts.find((a) => a.id === 'demo-fx-00');
+  assert.equal(node.mail_node, true);
+  const legacy = node.aliases.find((a) => a.email !== node.email_address);
+  assert.ok(legacy, 'the demo keeps one alias with another address on a node mailbox');
+
+  await assert.rejects(
+    () => demoRequest('POST', `/accounts/${node.id}/aliases`, { name: 'Other', email: `other@${node.email_address.split('@')[1]}` }),
+    { code: 'node_alias_address_mismatch' },
+  );
+  await assert.rejects(
+    () => demoRequest('PUT', `/accounts/${node.id}/aliases/${legacy.id}`, { name: 'Orders', email: legacy.email }),
+    { code: 'node_alias_address_mismatch' },
+  );
+  await assert.rejects(() => demoRequest('PUT', `/accounts/${node.id}/aliases/${legacy.id}`, { name: 'Orders' }), /Name and email required/);
+  const added = await demoRequest('POST', `/accounts/${node.id}/aliases`, { name: 'Second name', email: node.email_address.toUpperCase() });
+  assert.equal(added.name, 'Second name');
+  assert.equal(added.email, node.email_address, 'stored as the mailbox spells its address');
+
+  await assert.rejects(
+    () => demoRequest('POST', '/mail/send', { accountId: node.id, aliasId: legacy.id, to: ['you@example.com'], subject: 'Hi', body: 'Hello' }),
+    { code: 'node_alias_stale' },
+  );
+
+  const gmail = accounts.find((a) => a.mail_node !== true && a.oauth_provider === 'google');
+  const other = await demoRequest('POST', `/accounts/${gmail.id}/aliases`, { name: 'Work', email: 'work@example.org' });
+  assert.equal(other.email, 'work@example.org');
+});

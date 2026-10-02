@@ -32,13 +32,18 @@ const buttonStyle = (primary, enabled = true) => ({
 // install is refused while it is typed; the rest is confirmed on a second step before anything is
 // created. The server creates the mailbox (or enables it again) with a password only MailExpert
 // knows and connects it; `onCreated` gets the new account row, with the second name as its alias.
-export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
+// `initial` ({ localPart, domain, senderName }) starts the form from given values, as when an
+// administrator turns an alias with another address into its own mailbox (D-16); a domain the node
+// cannot take mailboxes in is not chosen, and the form says why: a node domain not ready yet, or a
+// domain that is not on the node at all (gmail.com, say). `onCancel` adds a Cancel button.
+export default function DomainMailboxAddForm({ accounts = [], onCreated, initial = null, onCancel = null }) {
   const { t } = useTranslation();
   const [domains, setDomains] = useState(null);
   const [loadError, setLoadError] = useState(null);
-  const [localPart, setLocalPart] = useState('');
+  const [localPart, setLocalPart] = useState(initial?.localPart ?? '');
   const [domain, setDomain] = useState('');
-  const [senderName, setSenderName] = useState('');
+  const [initialDomainProblem, setInitialDomainProblem] = useState(null); // null | 'notReady' | 'notNode'
+  const [senderName, setSenderName] = useState(initial?.senderName ?? '');
   const [senderNameAlt, setSenderNameAlt] = useState('');
   const [name, setName] = useState('');
   const [confirming, setConfirming] = useState(false);
@@ -58,10 +63,16 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
         }
         const list = selectableDomains(data?.domains);
         setDomains(list);
-        setDomain((current) => current || list[0] || '');
+        const wanted = initial?.domain ?? '';
+        if (wanted && !list.includes(wanted)) {
+          setInitialDomainProblem((data?.domains ?? []).some((d) => d.domain === wanted) ? 'notReady' : 'notNode');
+        }
+        setDomain((current) => current || (list.includes(wanted) ? wanted : list[0]) || '');
       })
       .catch((err) => { if (live) setLoadError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) }); });
     return () => { live = false; };
+    // The starting values count once, when the form opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const taken = domainMailboxTaken({ localPart, domain }, accounts);
@@ -166,6 +177,11 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
       {localPart && addressError && (
         <div style={{ marginTop: 6, fontSize: 11, color: taken ? 'var(--red)' : 'var(--text-tertiary)' }}>{t(addressError)}</div>
       )}
+      {initialDomainProblem && (
+        <div role="status" data-prefill-domain={initialDomainProblem} style={{ marginTop: 6, fontSize: 11, color: 'var(--amber)' }}>
+          {t(initialDomainProblem === 'notReady' ? 'admin.accounts.add.domainPrefillNotReady' : 'admin.accounts.add.domainPrefillNotNode', { domain: initial.domain })}
+        </div>
+      )}
 
       <label htmlFor="domain-add-sender" style={{ ...labelStyle, marginTop: 14 }}>{t('admin.accounts.add.senderNameLabel')}</label>
       <input
@@ -199,9 +215,16 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated }) {
         style={inputStyle}
       />
 
-      <button type="submit" disabled={!canContinue} style={{ ...buttonStyle(true, canContinue), marginTop: 16 }}>
-        {t('admin.accounts.add.domainNext')}
-      </button>
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <button type="submit" disabled={!canContinue} style={buttonStyle(true, canContinue)}>
+          {t('admin.accounts.add.domainNext')}
+        </button>
+        {onCancel && (
+          <button type="button" onClick={onCancel} disabled={busy} style={buttonStyle(false, !busy)}>
+            {t('common.cancel')}
+          </button>
+        )}
+      </div>
       {error && errorLine(error)}
     </form>
   );

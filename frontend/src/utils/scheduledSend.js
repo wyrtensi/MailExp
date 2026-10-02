@@ -83,6 +83,7 @@ const FAILURE_KEYS = Object.freeze({
   gmail_access_refused: 'compose.gmailAccessRefused',
   gmail_api_auth_failed: 'compose.gmailApiAuthFailed',
   author_disabled: 'scheduled.failure.authorDisabled',
+  node_alias_stale: 'compose.errorNodeAliasStale',
 });
 
 export function sendFailureKey(code) {
@@ -136,8 +137,10 @@ export function scheduledActions(letter) {
     case 'queued': return ['edit', 'reschedule', 'cancel'];
     case 'failed':
     case 'needs_attention':
-      // Sending again goes out as its author, which cannot work without one (Edit sends it as you).
-      return letter.errorCode === 'author_disabled' || !letter.author ? ['edit', 'discard'] : ['resend', 'edit', 'discard'];
+      // Sending again goes out as its author, which cannot work without one (Edit sends it as you),
+      // nor from an alias a mail node mailbox cannot send from (Edit lets you pick another From).
+      return letter.errorCode === 'author_disabled' || letter.errorCode === 'node_alias_stale' || !letter.author
+        ? ['edit', 'discard'] : ['resend', 'edit', 'discard'];
     default: return [];
   }
 }
