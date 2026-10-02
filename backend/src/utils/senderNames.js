@@ -19,6 +19,16 @@ export function parseSenderNames(body) {
   return { senderName, senderNameAlt };
 }
 
+// A mailbox on the mail node sends only from its own address (owner decision D-16): its aliases
+// are more sender names for that address, and another address is a separate, billed mailbox
+// created on the node. Gmail and IMAP mailboxes keep aliases with any address. `account` needs
+// email_address and mail_node.
+export function isForeignNodeAliasAddress(account, email) {
+  if (account?.mail_node !== true) return false;
+  const norm = (value) => String(value ?? '').trim().toLowerCase();
+  return norm(email) !== norm(account.email_address);
+}
+
 // Adds the second name as an alias of the mailbox, inside the caller's transaction.
 export async function addSecondSenderName(client, { accountId, email, senderNameAlt }) {
   if (!senderNameAlt) return null;

@@ -38,13 +38,15 @@ const updatedAlias = { ...insertedAlias, account_id: CHECKED_ACCOUNT_ID, name: '
 
 // Route every query the three mutation handlers issue. The checked account id deliberately
 // differs from the URL id so PUT/DELETE cannot pass by invalidating the convenient value.
-function stubQueries({ accountExists = true, checkedAccountId = CHECKED_ACCOUNT_ID, mutationError = null } = {}) {
+// `mailNode` makes the mailbox one on the mail node, whose aliases keep its own address.
+function stubQueries({ accountExists = true, checkedAccountId = CHECKED_ACCOUNT_ID, mutationError = null, mailNode = false } = {}) {
+  const owner = { email_address: 'Owner@Example.com', mail_node: mailNode };
   query.mockImplementation(async (sql) => {
     if (sql.includes('FROM account_aliases a') && sql.includes('JOIN email_accounts e')) {
-      return { rows: checkedAccountId ? [{ id: ALIAS_ID, account_id: checkedAccountId }] : [] };
+      return { rows: checkedAccountId ? [{ id: ALIAS_ID, account_id: checkedAccountId, ...owner }] : [] };
     }
-    if (sql.startsWith('SELECT id FROM email_accounts')) {
-      return { rows: accountExists ? [{ id: URL_ACCOUNT_ID }] : [] };
+    if (sql.startsWith('SELECT id, email_address, mail_node FROM email_accounts')) {
+      return { rows: accountExists ? [{ id: URL_ACCOUNT_ID, ...owner }] : [] };
     }
     if (sql.startsWith('INSERT INTO account_aliases')) {
       if (mutationError) throw mutationError;
@@ -178,5 +180,60 @@ describe('account alias mutation failures do not invalidate the cache', () => {
     expect(res.status).toBe(500);
     expect(query).toHaveBeenCalledTimes(2);
     expectNoIdentityInvalidation();
+  });
+});
+
+// D-16: a mail node mailbox has more sender names for its own address, never another address (that
+// is a separate mailbox). Gmail and IMAP mailboxes keep aliases with any address.
+describe('aliases of a mail node mailbox keep its address', () => {
+  it('refuses POST with another address before any write', async () => {
+    stubQueries({ mailNode: true });
+
+    const res = await request('POST', `${URL_ACCOUNT_ID}/aliases`, aliasBody);
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('node_alias_address_mismatch');
+    expect(query).toHaveBeenCalledTimes(1);
+    expectNoIdentityInvalidation();
+  });
+
+  it('refuses PUT with another address before any write', async () => {
+    stubQueries({ mailNode: true });
+
+    const res = await request('PUT', `${URL_ACCOUNT_ID}/aliases/${ALIAS_ID}`, aliasBody);
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('node_alias_address_mismatch');
+    expect(query).toHaveBeenCalledTimes(1);
+    expectNoIdentityInvalidation();
+  });
+
+  it('accepts a second name with the mailbox address in another case and spacing', async () => {
+    stubQueries({ mailNode: true });
+    const body = { name: 'Second name', email: ' owner@EXAMPLE.com ', reply_to: 'desk@example.com', signature: '<p>Hi</p>' };
+
+    const post = await request('POST', `${URL_ACCOUNT_ID}/aliases`, body);
+    const put = await request('PUT', `${URL_ACCOUNT_ID}/aliases/${ALIAS_ID}`, body);
+
+    expect(post.status).toBe(200);
+    expect(put.status).toBe(200);
+  });
+
+  it('keeps any address for a mailbox that is not on the mail node', async () => {
+    stubQueries({ mailNode: false });
+
+    const post = await request('POST', `${URL_ACCOUNT_ID}/aliases`, aliasBody);
+    const put = await request('PUT', `${URL_ACCOUNT_ID}/aliases/${ALIAS_ID}`, aliasBody);
+
+    expect(post.status).toBe(200);
+    expect(put.status).toBe(200);
+  });
+
+  it('still deletes an alias with another address', async () => {
+    stubQueries({ mailNode: true });
+
+    const res = await request('DELETE', `${URL_ACCOUNT_ID}/aliases/${ALIAS_ID}`);
+
+    expect(res.status).toBe(200);
   });
 });

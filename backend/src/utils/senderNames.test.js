@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SENDER_NAME_MAX, addSecondSenderName, parseSenderNames } from './senderNames.js';
+import { SENDER_NAME_MAX, addSecondSenderName, isForeignNodeAliasAddress, parseSenderNames } from './senderNames.js';
 
 describe('parseSenderNames', () => {
   it('trims both names and treats empty ones as none', () => {
@@ -29,5 +29,24 @@ describe('addSecondSenderName', () => {
     client.query.mockClear();
     expect(await addSecondSenderName(client, { accountId: 'acc-1', email: 'sales@example.com', senderNameAlt: null })).toBeNull();
     expect(client.query).not.toHaveBeenCalled();
+  });
+});
+
+describe('isForeignNodeAliasAddress', () => {
+  const node = { email_address: 'Sales@Example.com', mail_node: true };
+
+  it('is false for the mailbox address in any case and spacing', () => {
+    expect(isForeignNodeAliasAddress(node, ' sales@example.COM ')).toBe(false);
+  });
+
+  it('is true for another address of a mail node mailbox', () => {
+    expect(isForeignNodeAliasAddress(node, 'sales1@example.com')).toBe(true);
+    expect(isForeignNodeAliasAddress(node, '')).toBe(true);
+  });
+
+  it('is false for a mailbox that is not on the mail node', () => {
+    expect(isForeignNodeAliasAddress({ ...node, mail_node: false }, 'other@example.org')).toBe(false);
+    expect(isForeignNodeAliasAddress({ ...node, mail_node: null }, 'other@example.org')).toBe(false);
+    expect(isForeignNodeAliasAddress(null, 'other@example.org')).toBe(false);
   });
 });

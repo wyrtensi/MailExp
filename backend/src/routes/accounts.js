@@ -15,7 +15,7 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
-import { addSecondSenderName, parseSenderNames } from '../utils/senderNames.js';
+import { addSecondSenderName, isForeignNodeAliasAddress, parseSenderNames } from '../utils/senderNames.js';
 import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
@@ -688,6 +688,17 @@ router.post('/:id/reconnect', async (req, res) => {
 
 // ── Alias CRUD ─────────────────────────────────────────────────────────────
 
+// A node mailbox's alias is another sender name for its own address (D-16): any other address is
+// refused. Name, reply-to and signature stay free.
+function refusedNodeAliasAddress(res, account, email) {
+  if (!isForeignNodeAliasAddress(account, email)) return false;
+  res.status(400).json({
+    error: 'A mail node mailbox sends only from its own address: another address is a separate mailbox',
+    code: 'node_alias_address_mismatch',
+  });
+  return true;
+}
+
 router.get('/:id/aliases', async (req, res) => {
   const { id } = req.params;
   const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
@@ -711,8 +722,9 @@ router.post('/:id/aliases', async (req, res) => {
     return res.status(400).json({ error: 'Fields cannot contain control characters' });
   }
 
-  const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
+  const check = await query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [id]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
+  if (refusedNodeAliasAddress(res, check.rows[0], email)) return undefined;
 
   const result = await query(
     'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
@@ -731,12 +743,13 @@ router.put('/:id/aliases/:aliasId', async (req, res) => {
   }
 
   const check = await query(
-    `SELECT a.id, a.account_id FROM account_aliases a
+    `SELECT a.id, a.account_id, e.email_address, e.mail_node FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
      WHERE a.id = $1 AND e.id = $2`,
     [aliasId, id]
   );
   if (!check.rows.length) return res.status(404).json({ error: 'Alias not found' });
+  if (refusedNodeAliasAddress(res, check.rows[0], email)) return undefined;
 
   const result = await query(
     'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 RETURNING *',

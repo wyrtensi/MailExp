@@ -12,6 +12,7 @@ import { htmlToText } from '../utils/htmlToText.js';
 import { buildRawMessage } from '../services/gmailApiSender.js';
 import { imapManager } from '../index.js';
 import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
+import { isForeignNodeAliasAddress } from '../utils/senderNames.js';
 import { smtpFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
 import {
   enqueueOutgoingSend, existingSendJob, parseSendAt, pickComposeContext, sendJobResponse, sendRetryConflict,
@@ -181,6 +182,14 @@ router.post('/send', async (req, res) => {
     );
     if (aliasResult.rows.length) {
       const alias = aliasResult.rows[0];
+      // A mail node mailbox sends only from its own address (D-16); an alias with another address
+      // left from before would be refused by the node's SMTP after the undo window, so say it now.
+      if (isForeignNodeAliasAddress(account, alias.email)) {
+        return res.status(400).json({
+          error: 'This sender address is not a mailbox: choose another From. An administrator can make it a separate mailbox.',
+          code: 'node_alias_stale',
+        });
+      }
       fromName = alias.name;
       fromEmail = alias.email;
       fromReplyTo = alias.reply_to || null;
