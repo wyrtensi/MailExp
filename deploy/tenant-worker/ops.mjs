@@ -12,6 +12,10 @@
 const HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const LOCAL_PART_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// A quarantined message's Identity: GUID1\GUID2 (Get-QuarantineMessage, Release-QuarantineMessage).
+const QUARANTINE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// A page number of Get-QuarantineMessage (1 to 1000), sent as a digit string like every value.
+const PAGE_RE = /^(?:[1-9][0-9]{0,2}|1000)$/;
 
 // Values are taken as given apart from case: a value with spaces around it is refused, not trimmed,
 // so what reaches pwsh is exactly what was checked.
@@ -43,7 +47,20 @@ export function parseOrganization(value) {
   return domain && domain.endsWith('.onmicrosoft.com') ? domain : null;
 }
 
-const KINDS = { domain: parseDomain, address: parseAddress, guid: parseGuid };
+// Stage 7c (R-42).
+export function parseQuarantineId(value) {
+  if (typeof value !== 'string') return null;
+  const id = value.toLowerCase();
+  return QUARANTINE_ID_RE.test(id) ? id : null;
+}
+
+export function parsePage(value) {
+  return typeof value === 'string' && PAGE_RE.test(value) ? value : null;
+}
+
+const KINDS = {
+  domain: parseDomain, address: parseAddress, guid: parseGuid, quarantine_id: parseQuarantineId, page: parsePage,
+};
 
 // op -> { cmdlets: what Connect-ExchangeOnline -CommandName loads for it, params: { name: kind } }.
 // The cmdlet calls themselves live in runner.ps1, keyed by the same op names.
@@ -76,6 +93,14 @@ export const OPS = Object.freeze({
   set_mail_contact_external: { cmdlets: ['Set-MailContact'], params: { address: 'address', external: 'address' } },
   hide_mail_contact: { cmdlets: ['Set-MailContact'], params: { address: 'address' } },
   remove_mail_contact: { cmdlets: ['Remove-MailContact'], params: { address: 'address' } },
+  // Stage 7c, R-42 (decision D-2): the high confidence phishing EOP quarantined, released to the
+  // node's mailboxes by the panel. The list is fixed to inbound HighConfPhish not yet released, a
+  // page of 100 at a time; one message is read by its Identity (only then are its recipients
+  // shown) and released to all its original recipients. Nothing else of the quarantine (other
+  // types, -User, -AllowSender, the Tenant Allow/Block List of R-31) is reachable.
+  get_quarantine_messages: { cmdlets: ['Get-QuarantineMessage'], params: { page: 'page' } },
+  get_quarantine_message: { cmdlets: ['Get-QuarantineMessage'], params: { identity: 'quarantine_id' } },
+  release_quarantine_message: { cmdlets: ['Release-QuarantineMessage'], params: { identity: 'quarantine_id' } },
 });
 
 export const COMMAND_NAMES = Object.freeze([...new Set(Object.values(OPS).flatMap((op) => op.cmdlets))].sort());

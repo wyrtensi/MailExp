@@ -18,6 +18,9 @@ $DomainPattern = '^(?=.{1,253}\z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z
 $GuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'
 # An address: the panel's local part (letters, digits, dot, dash, underscore, no '..') and a domain.
 $AddressPattern = '^(?!.*\.\.)[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?@(?=.{1,253}\z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\z'
+# Stage 7c: a quarantined message's Identity (GUID1\GUID2) and a page number (1 to 1000) as digits.
+$QuarantineIdPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'
+$PagePattern = '^(?:[1-9][0-9]{0,2}|1000)\z'
 # What an EXO error says when the session itself is gone (an expired token, a dropped connection),
 # as opposed to the operation failing: then the runner connects again once and repeats the
 # operation. A write repeated so may find its object made already (exo_exists), which the panel
@@ -117,6 +120,25 @@ $Ops = @{
   }
   remove_mail_contact = @{
     Cmdlet = 'Remove-MailContact'; Fixed = @{ Confirm = $false }; Args = @{ address = @('Identity', $AddressPattern) }
+    Keep = @()
+  }
+  # Stage 7c, R-42 (D-2): inbound high confidence phishing not yet released, a page at a time; one
+  # message by its Identity (its recipients are shown only then); released to all its recipients.
+  get_quarantine_messages = @{
+    Cmdlet = 'Get-QuarantineMessage'
+    Fixed = @{ QuarantineTypes = 'HighConfPhish'; Direction = 'Inbound'; ReleaseStatus = 'NotReleased'; PageSize = 100 }
+    Args = @{ page = @('Page', $PagePattern) }
+    Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus', 'Direction',
+      'MessageId', 'Expires', 'RecipientCount')
+  }
+  get_quarantine_message = @{
+    Cmdlet = 'Get-QuarantineMessage'; Fixed = @{}; Args = @{ identity = @('Identity', $QuarantineIdPattern) }
+    Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'RecipientAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus',
+      'Released', 'ReleasedUser', 'Direction', 'MessageId', 'Expires')
+  }
+  release_quarantine_message = @{
+    Cmdlet = 'Release-QuarantineMessage'; Fixed = @{ ReleaseToAll = $true; Confirm = $false }
+    Args = @{ identity = @('Identity', $QuarantineIdPattern) }
     Keep = @()
   }
 }
