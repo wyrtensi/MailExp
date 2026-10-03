@@ -9,6 +9,11 @@ import {
   captureLetter, logCoverage, presentOutcome, readOutcomes, sentLetterOf,
 } from '../services/deliveryStatus.js';
 import { onOtherMailHost } from './mailNode.js';
+import { recordAudit } from '../services/auditLog.js';
+import { resolveTraceSource } from '../services/mailNode/traceSource.js';
+import {
+  presentTrace, readTrace, requestTrace, traceableLetter,
+} from '../services/tenant/messageTrace.js';
 
 // "Delivery details" of a letter (R-17; services/deliveryStatus.js), mounted at /api/mail: for
 // anyone who can open the letter (every mailbox is shared by all users of the install), what
@@ -68,7 +73,65 @@ router.get('/messages/:id/delivery', async (req, res) => {
       sentAt: sent.sentAt,
     };
   }
-  res.json({ messageId: letter.message_id, owned: true, node, log, recipients: outcomes.map((row) => presentOutcome(row)) });
+  // R-30: what Microsoft's trace said, when it was asked (or can be). Only for the node's letters.
+  let eopTrace = null;
+  if (node) {
+    const connected = !!(await resolveTraceSource().catch(() => null));
+    const traceable = traceableLetter({ sentAt: sent.sentAt });
+    eopTrace = {
+      available: connected && traceable.ok,
+      reason: !connected ? 'trace_not_connected' : (traceable.ok ? null : traceable.code),
+      trace: presentTrace(await readTrace(letter.account_id, letter.message_id)),
+    };
+  }
+  res.json({
+    messageId: letter.message_id, owned: true, node, log, recipients: outcomes.map((row) => presentOutcome(row)), eopTrace,
+  });
+});
+
+// R-30: "Ask Microsoft's message trace" for a letter the node mailbox sent. Queues the trace job
+// (services/tenant/messageTrace.js) and answers the stored trace at once (202 when a job was
+// queued); the screen asks GET .../delivery again until the trace is done or failed. A letter
+// traced less than five minutes ago answers its stored trace (200).
+const TRACE_REFUSALS = {
+  message_not_found: [404, 'Message not found'],
+  trace_not_sent: [409, 'Only a letter this mailbox sent can be traced'],
+  trace_not_node: [409, 'Only a letter of a mailbox on the mail node can be traced'],
+  trace_not_connected: [409, 'The message trace of the Microsoft tenant is not connected'],
+  trace_sent_at_unknown: [409, 'When the letter was sent is not known'],
+  trace_too_old: [409, 'Microsoft keeps the message trace for 90 days'],
+};
+const refuseTrace = (res, code) => {
+  const [status, error] = TRACE_REFUSALS[code];
+  return res.status(status).json({ error, code });
+};
+
+router.post('/messages/:id/eop-trace', async (req, res) => {
+  const { rows } = await query(
+    `SELECT m.message_id, a.id AS account_id, a.email_address, a.mail_node, a.imap_host
+       FROM messages m JOIN email_accounts a ON a.id = m.account_id
+      WHERE m.id = $1 AND m.is_deleted = false`,
+    [req.params.id],
+  );
+  const letter = rows[0];
+  if (!letter) return refuseTrace(res, 'message_not_found');
+  if (!letter.message_id) return refuseTrace(res, 'trace_not_sent');
+  const sent = await sentLetterOf(letter.account_id, letter.message_id);
+  if (!sent.owned) return refuseTrace(res, 'trace_not_sent');
+  const cfg = letter.mail_node ? await getMailNodeConfig() : null;
+  if (!cfg || onOtherMailHost(letter, cfg)) return refuseTrace(res, 'trace_not_node');
+  if (!(await resolveTraceSource())) return refuseTrace(res, 'trace_not_connected');
+  const traceable = traceableLetter({ sentAt: sent.sentAt });
+  if (!traceable.ok) return refuseTrace(res, traceable.code);
+  const { trace, queued, cooldownUntil } = await requestTrace({
+    accountId: letter.account_id, messageId: letter.message_id, sentAt: sent.sentAt, userId: req.session.userId,
+  });
+  if (queued) {
+    recordAudit({
+      actorUserId: req.session.userId, accountId: letter.account_id, action: 'tenant.message_traced', details: { messageId: letter.message_id },
+    });
+  }
+  return res.status(queued ? 202 : 200).json({ queued, cooldownUntil: cooldownUntil ?? null, trace: presentTrace(trace) });
 });
 
 export default router;

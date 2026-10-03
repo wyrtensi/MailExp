@@ -10,8 +10,8 @@ import { TenantError } from './exoRunner.js';
 //   graph.getToken()                     -> an access token, cached until 5 minutes before it ends
 //   graph.request(method, path, { body }) -> the answer's JSON (null for 204)
 //
-// Stage 7b calls request() for the domains of R-23; stage 7c hands getToken to the message trace
-// (services/mailNode/traceSource.js createGraphTraceSource({ baseUrl, getToken })).
+// Stage 7b calls request() for the domains of R-23; stage 7c hands getToken (and dropToken after a
+// 401) to the message trace (services/mailNode/traceSource.js tenantTraceSource).
 //
 // Throttling (429) is retried here up to maxRetries times, waiting what Retry-After says (at most
 // MAX_RETRY_AFTER_MS) or 1, 2, 4 seconds; short outages (503, 504) the same, but only for GET: a
@@ -179,5 +179,9 @@ export function createGraphClient({
     });
   }
 
-  return { getToken, request, limit };
+  // A token Graph refused outside request() (the message trace has its own fetch, R-43): the next
+  // getToken() asks for a new one.
+  const dropToken = () => { cached = null; };
+
+  return { getToken, dropToken, request, limit };
 }

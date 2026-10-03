@@ -5,6 +5,10 @@ vi.mock('../db.js', () => ({
   query: vi.fn(async (sql, params) => {
     if (sql.startsWith('SELECT config')) return { rows: db.configs[params[0]] ? [{ config: db.configs[params[0]] }] : [] };
     if (sql.includes('FROM mail_node_domains')) return { rows: db.waitingDomains ?? [] };
+    if (sql.includes('FROM tenant_quarantine_releases')) {
+      if (db.held instanceof Error) throw db.held;
+      return { rows: [db.held ?? { count: 0, soonest: null }] };
+    }
     if (sql.includes('INSERT INTO integration_config')) {
       const [provider, config] = params;
       db.configs[provider] = sql.includes('integration_config.config ||') ? { ...(db.configs[provider] ?? {}), ...config } : config;
@@ -60,6 +64,7 @@ vi.mock('./outageTrace.js', async (importActual) => ({
 vi.mock('./traceSource.js', async (importActual) => ({
   ...(await importActual()),
   getTraceSource: vi.fn(() => outage.source),
+  resolveTraceSource: vi.fn(async () => outage.source),
 }));
 
 import { recordAudit } from '../auditLog.js';
@@ -565,6 +570,27 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
       expect(state.alerts).toEqual([]);
       expect(state.errors).toEqual([]);
       expect(safeFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('warns while phishing the panel keeps in the quarantine is still there (R-42); a failed read keeps it', async () => {
+      db.configs.mail_node_tenant_state = pollState();
+      db.held = { count: 2, soonest: '2026-11-01T00:00:00.000Z' };
+      try {
+        let state = await runAlertCheck({ now: NOW });
+        expect(state.alerts.find((a) => a.key === 'tenant_phish_held')).toMatchObject({
+          severity: 'warning', details: { count: 2, soonestExpiresAt: '2026-11-01T00:00:00.000Z' },
+        });
+        expect(recordAudit.mock.calls.flatMap(([e]) => e).find((e) => e.details?.alert === 'tenant_phish_held').details)
+          .toMatchObject({ count: 2, soonestExpiresAt: '2026-11-01T00:00:00.000Z' });
+        db.held = new Error('database gone');
+        state = await runAlertCheck({ now: NOW + 60000 });
+        expect(keys(state.alerts)).toContain('tenant_phish_held');
+        db.held = { count: 0, soonest: null };
+        state = await runAlertCheck({ now: NOW + 120000 });
+        expect(keys(state.alerts)).not.toContain('tenant_phish_held');
+      } finally {
+        db.held = undefined;
+      }
     });
 
     it('nothing without a driver or a configured tenant', async () => {

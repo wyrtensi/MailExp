@@ -32,6 +32,9 @@ export function createTenantDriver({ kind, exo, signer = null, graphUrl = GRAPH_
     kind,
     graphUrl,
     loginUrl,
+    // The fetch Graph is reached with (the fake's for the fake driver; null: safeFetch): the
+    // message trace (R-43, R-30) reads Graph with its own reader and must go the same way.
+    graphFetch,
     exoRunner: exo,
     certificate: () => exo.certificate(),
     forTenant(tenant) {

@@ -1,4 +1,6 @@
 import { safeFetch } from '../safeFetch.js';
+import { getTenantDriver, tenantOf } from '../tenant/driver.js';
+import { getEopSettings } from './eopSettings.js';
 
 // Where the panel reads Microsoft's message trace for R-43 (letters to the node's domains that EOP
 // received while the node was down): a small interface, so the tenant driver of stage 7 (R-22,
@@ -27,8 +29,10 @@ import { safeFetch } from '../safeFetch.js';
 // - createGraphTraceSource({ baseUrl, getToken }): the Graph URL shapes. Stage 7 gives it a token
 //   provider (client credentials with the tenant app's certificate); without one it sends no
 //   Authorization header, which only the stand's fake-EOP answers (MAIL_NODE_TRACE_URL, below);
-// - createFixtureTraceSource({ rows, details }): rows in memory, for tests and the demo.
-// getTraceSource() picks one, or null: "trace not connected", the outage windows still show.
+// - createFixtureTraceSource({ rows, details }): rows in memory, for tests and the demo;
+// - tenantTraceSource(driver, tenant) (stage 7c): the Graph driver with the tenant driver's token.
+// resolveTraceSource() picks one, or null: "trace not connected", the outage windows still show.
+// getTraceSource() is its synchronous part (a test's source or MAIL_NODE_TRACE_URL only).
 
 export const TRACE_STATUSES = Object.freeze(['gettingStatus', 'pending', 'failed', 'delivered', 'expanded', 'quarantined', 'filteredAsSpam']);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -148,6 +152,7 @@ export async function readJsonCapped(res, max) {
 
 export function createGraphTraceSource({
   baseUrl, getToken = null, fetchImpl = null, pageSize = TRACE_PAGE_SIZE, allowPrivate = false, now = () => Date.now(),
+  onAuthFailure = null,
 }) {
   const base = String(baseUrl).replace(/\/+$/, '');
   const origin = new URL(base).origin;
@@ -165,7 +170,11 @@ export function createGraphTraceSource({
       throw new TraceSourceError('trace_unreachable', `The message trace is unreachable (${err?.code || err?.name || 'error'})`);
     }
     if (res.status === 429) throw new TraceSourceError('trace_throttled', 'The message trace asked to slow down (HTTP 429)');
-    if (res.status === 401 || res.status === 403) throw new TraceSourceError('trace_auth', `The message trace refused the request (HTTP ${res.status})`);
+    if (res.status === 401 || res.status === 403) {
+      // A token refused: the next request asks for a new one instead of sending it again.
+      onAuthFailure?.();
+      throw new TraceSourceError('trace_auth', `The message trace refused the request (HTTP ${res.status})`);
+    }
     if (!res.ok) throw new TraceSourceError('trace_failed', `The message trace answered HTTP ${res.status}`);
     return readJsonCapped(res, TRACE_MAX_BYTES);
   }
@@ -264,4 +273,34 @@ export function getTraceSource({ env = process.env, warn = (line) => console.war
 // Tests: the next getTraceSource warns again.
 export function resetTraceSourceWarning() {
   warned = false;
+}
+
+// Stage 7c: the tenant's own message trace through the tenant driver (R-22): Graph's URL shapes on
+// the driver's Graph base (Microsoft's, or the stand's with TENANT_DRIVER_STAND=1), a token from the
+// driver's GraphClient (client credentials, the assertion signed by the tenant worker), and the
+// driver's fetch (the fake's for TENANT_DRIVER=fake). A 401 or 403 drops the cached token so the
+// next pass asks for a new one. Graph rather than Get-MessageTraceV2: the interface already has
+// Graph's shapes; whether Graph serves an add-on tenant is experiment 19, and Get-MessageTraceV2
+// through the worker is the fallback behind the same interface if it does not.
+export function tenantTraceSource(driver, tenant) {
+  const session = driver.forTenant(tenant);
+  const source = createGraphTraceSource({
+    baseUrl: driver.graphUrl,
+    getToken: () => session.graph.getToken(),
+    fetchImpl: driver.graphFetch ?? null,
+    onAuthFailure: () => session.graph.dropToken?.(),
+  });
+  return { ...source, kind: 'tenant' };
+}
+
+// The trace a pass or a screen uses now, or null ("not connected"): a source set by a test or the
+// demo, else MAIL_NODE_TRACE_URL (a stand), else the tenant driver with a configured tenant (the
+// EOP settings are read each time: the tenant may be filled in or cleared at any moment).
+export async function resolveTraceSource({ env = process.env, warn } = {}) {
+  const set = getTraceSource({ env, ...(warn ? { warn } : {}) });
+  if (set) return set;
+  const driver = getTenantDriver();
+  if (!driver) return null;
+  const tenant = tenantOf(await getEopSettings());
+  return tenant ? tenantTraceSource(driver, tenant) : null;
 }

@@ -87,7 +87,7 @@ export function createFakeGraphFetch({ graph = {}, token = TENANT_FIXTURES.graph
       } catch {
         return json(400, { error: { code: 'BadRequest', message: 'Unreadable body' } });
       }
-      const answer = model.graph(method, path, body);
+      const answer = model.graph(method, path, body, target);
       if (answer) return answer.status === 204 ? new Response(null, { status: 204 }) : json(answer.status, answer.body);
     }
     if (route === undefined) return json(404, { error: { code: 'Request_ResourceNotFound', message: 'Not found' } });
@@ -126,6 +126,12 @@ export function createFakeTenantModel(options = {}) {
     outbound: clone(TENANT_FIXTURES.exo.get_outbound_connectors),
     dkim: new Map(),
     recipients: new Map(),
+    // Stage 7c: the quarantine by Identity (Get-QuarantineMessage -Identity rows), the releases in
+    // order, and the message trace rows (Graph shapes) with their details by '<id>|<recipient>'.
+    quarantine: new Map(),
+    released: [],
+    traces: [],
+    traceDetails: {},
   };
 
   // A recipient of another kind (a cloud mailbox, a group) holding an address: tests add them.
@@ -135,7 +141,14 @@ export function createFakeTenantModel(options = {}) {
   const notFound = () => ({ status: 404, body: { error: { code: 'Request_ResourceNotFound', message: 'Resource does not exist.' } } });
   const records = (template, fill) => ({ ...clone(template), value: fill(clone(template.value)) });
 
-  model.graph = (method, path, body) => {
+  model.graph = (method, path, body, target = null) => {
+    if (method === 'GET' && path === '/admin/exchange/tracing/messageTraces') return model.listTraces(target);
+    const detailsOf = /^\/admin\/exchange\/tracing\/messageTraces\/([^/]+)\/getDetailsByRecipient\(recipientAddress='(.*)'\)$/.exec(decodeURIComponent(path));
+    if (method === 'GET' && detailsOf) {
+      const recipient = detailsOf[2].replace(/''/g, "'").toLowerCase();
+      const events = model.traceDetails[`${detailsOf[1]}|${recipient}`];
+      return events ? { status: 200, body: { value: clone(events) } } : notFound();
+    }
     if (method === 'GET' && path === '/domains') {
       return { status: 200, body: { ...clone(TENANT_FIXTURES.graph.domains), value: [...TENANT_FIXTURES.graph.domains.value.filter((d) => d.isInitial), ...[...model.domains.values()].map(graphDomain)] } };
     }
@@ -207,7 +220,74 @@ export function createFakeTenantModel(options = {}) {
     model.outbound.push({ ...clone(TENANT_FIXTURES.exo.get_outbound_connectors[0]), RecipientDomains: [], Guid: `4b1d2c3e-5f60-4718-8a9b-0c1d2e3f4a${String(n).padStart(2, '0')}`, ...props });
   };
 
+  // --- stage 7c: the message trace (Graph) and the quarantine (EXO) ---
+
+  // GET messageTraces as Learn documents it: both receivedDateTime bounds (at most 10 days apart),
+  // $top up to 5000 (1000 by default), the next page by @odata.nextLink. Without bounds Graph
+  // answers the last 48 hours; the panel always sends both, so the fake refuses a request without.
+  model.listTraces = (target) => {
+    const params = target?.searchParams ?? new URLSearchParams();
+    const filter = params.get('$filter') ?? '';
+    const ge = /receivedDateTime ge (\S+)/.exec(filter)?.[1];
+    const le = /receivedDateTime le (\S+)/.exec(filter)?.[1];
+    const from = Date.parse(ge);
+    const to = Date.parse(le);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to - from > 10 * 24 * 3600 * 1000) {
+      return { status: 400, body: { error: { code: 'BadRequest', message: 'The time interval must not exceed 10 days.' } } };
+    }
+    const top = Math.min(5000, Math.max(1, Number(params.get('$top')) || 1000));
+    const skip = Number(params.get('$skiptoken')) || 0;
+    const rows = model.traces.filter((row) => {
+      const at = Date.parse(row.receivedDateTime);
+      return at >= from && at <= to;
+    });
+    const page = rows.slice(skip, skip + top);
+    const body = { value: clone(page) };
+    if (skip + top < rows.length) {
+      const next = new URL(target.href);
+      next.searchParams.set('$skiptoken', String(skip + top));
+      body['@odata.nextLink'] = next.href;
+    }
+    return { status: 200, body };
+  };
+
+  // A quarantined message the tests add: the row Get-QuarantineMessage -Identity answers.
+  model.addQuarantined = (row) => {
+    const full = {
+      ...clone(TENANT_FIXTURES.exo.get_quarantine_message[0]), Released: false, ReleasedUser: [], ...clone(row),
+    };
+    model.quarantine.set(String(full.Identity).toLowerCase(), full);
+    return full;
+  };
+  const quarantined = (identity) => {
+    const row = model.quarantine.get(identity);
+    if (!row) throw exoError('exo_not_found', `The operation couldn't be performed because object '${identity}' couldn't be found.`);
+    return row;
+  };
+  const isNotReleased = (row) => String(row.ReleaseStatus).toLowerCase() === 'notreleased';
+
   model.exo = {
+    // The summary: inbound high confidence phishing not released, 100 per page; no recipients.
+    get_quarantine_messages: ({ page }) => {
+      const rows = [...model.quarantine.values()].filter((row) => row.QuarantineTypes === 'HighConfPhish'
+        && row.Direction === 'Inbound' && isNotReleased(row));
+      const start = (Number(page) - 1) * 100;
+      const SUMMARY = ['Identity', 'ReceivedTime', 'SenderAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus', 'Direction', 'MessageId', 'Expires'];
+      return rows.slice(start, start + 100).map((row) => ({
+        ...Object.fromEntries(SUMMARY.map((key) => [key, clone(row[key])])), RecipientCount: (row.RecipientAddress ?? []).length,
+      }));
+    },
+    get_quarantine_message: ({ identity }) => [clone(quarantined(identity))],
+    // -ReleaseToAll. A second release of a released message: its wording is Inferred.
+    release_quarantine_message: ({ identity }) => {
+      const row = quarantined(identity);
+      if (!isNotReleased(row)) throw exoError('exo_failed', 'The message has already been released.');
+      row.ReleaseStatus = 'RELEASED';
+      row.Released = true;
+      row.ReleasedUser = [...(row.RecipientAddress ?? [])];
+      model.released.push(identity);
+      return [];
+    },
     get_accepted_domain: ({ domain }) => [acceptedRow(domain, accepted(domain))],
     set_accepted_domain_internal_relay: ({ domain }) => { accepted(domain).type = 'InternalRelay'; return []; },
     set_accepted_domain_authoritative: ({ domain }) => { accepted(domain).type = 'Authoritative'; return []; },

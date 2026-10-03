@@ -10,6 +10,9 @@ import { getTenantDriver, tenantOf, tenantProfileWithoutDriver } from '../servic
 import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState, takeConnectorReference } from '../services/tenant/tenantJobs.js';
 import { DOMAIN_SYNC_KIND, enqueueDomainSync, kickDomainSync } from '../services/tenant/tenantDomains.js';
 import { connectorDrift } from '../services/tenant/connectors.js';
+import {
+  QUARANTINE_RELEASE_KIND, getReleaseSettings, heldSummary, listReleases, setReleaseEnabled,
+} from '../services/tenant/quarantineRelease.js';
 
 // The Microsoft tenant (stage 7a: R-22, R-27, R-28), mounted at /api/mail-node next to
 // routes/mailNode.js, administrators only. Reads answer what the tenant jobs stored
@@ -46,6 +49,8 @@ const ERRORS = {
   hold_invalid: [400, 'hold must be true or false'],
   domain_authoritative: [409, 'The domain is Authoritative already: it is not held on Internal Relay'],
   internal_relay_not_needed: [409, 'The domain does not wait for this decision'],
+  enabled_invalid: [400, 'enabled must be true or false'],
+  phish_release_paused: [409, 'The release of quarantined phishing is paused'],
 };
 
 function refuse(res, code) {
@@ -53,7 +58,7 @@ function refuse(res, code) {
   return res.status(status).json({ error, code });
 }
 
-const KINDS = new Set([...Object.values(TENANT_JOB_KINDS), DOMAIN_SYNC_KIND]);
+const KINDS = new Set([...Object.values(TENANT_JOB_KINDS), DOMAIN_SYNC_KIND, QUARANTINE_RELEASE_KIND]);
 
 const jobAnswer = (job) => (job ? {
   id: String(job.id), kind: job.kind, status: job.status, errorCode: job.error_code ?? null, error: job.last_error ?? null,
@@ -149,6 +154,31 @@ router.post('/tenant/connectors/reference', async (req, res) => {
     details: { inbound: result.reference.inbound.map((c) => c.name), outbound: result.reference.outbound.map((c) => c.name) },
   });
   return res.json({ reference: result.reference });
+});
+
+// Stage 7c, R-42: the high confidence phishing the panel releases from EOP's quarantine.
+//   GET  /tenant/phish-release        { enabled, changedAt, run, held, releases, job }
+//   PUT  /tenant/phish-release        { enabled: true | false }: pause or resume the releases
+//   POST /tenant/phish-release/run    "Release now": a run of the job now (202)
+router.get('/tenant/phish-release', async (req, res) => {
+  const [settings, state, releases, held] = await Promise.all([getReleaseSettings(), getTenantState(), listReleases(), heldSummary()]);
+  const { rows: [job] } = await query('SELECT * FROM jobs WHERE kind = $1 ORDER BY id DESC LIMIT 1', [QUARANTINE_RELEASE_KIND]);
+  res.json({
+    enabled: settings.enabled, changedAt: settings.changedAt, run: state.phishRelease ?? null, held, releases, job: jobAnswer(job ?? null),
+  });
+});
+
+router.put('/tenant/phish-release', async (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') return refuse(res, 'enabled_invalid');
+  const config = await setReleaseEnabled(req.body.enabled, { userId: req.session.userId });
+  return res.json({ enabled: config.enabled, changedAt: config.changedAt });
+});
+
+router.post('/tenant/phish-release/run', async (req, res) => {
+  if (await tenantRefusal(res)) return undefined;
+  if (!(await getReleaseSettings()).enabled) return refuse(res, 'phish_release_paused');
+  const { job, created } = await enqueueTenantJob(QUARANTINE_RELEASE_KIND, { userId: req.session.userId });
+  return res.status(202).json({ job: jobAnswer(job), created });
 });
 
 router.get('/tenant/jobs/:id', async (req, res) => {
