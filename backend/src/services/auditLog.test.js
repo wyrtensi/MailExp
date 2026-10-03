@@ -31,7 +31,7 @@ describe('recordAudit', () => {
       'mail_node.quarantine_settings_applied',
       'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
       'mail_node.outage_deleted',
-      'tenant.connection_tested',
+      'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
     ]);
   });
 
