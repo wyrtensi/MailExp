@@ -285,6 +285,38 @@ describe('MailNodeDomainOnboarding — the tenant driver (stage 7b)', () => {
     assert.ok(tenant.textContent.includes('admin.mailNode.tenantQueued'));
   });
 
+  test('offers no "mark ready" with the driver, shows the hold and turns it off', async () => {
+    const held = { at, ok: true, authoritative: { ok: true, held: true, mirrorComplete: true } };
+    answers['GET /api/mail-node/domains'] = {
+      domains: [domainRow('pending.example', 'ready', { tenantSync: held, holdInternalRelay: true })], tenantDriverActive: true,
+    };
+    answers['POST /api/mail-node/tenant/domains/pending.example/hold'] = { domain: 'pending.example', holdInternalRelay: false };
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    const detail = host.querySelector('[data-domain-onboarding="pending.example"]');
+    assert.equal(buttons(detail, 'admin.mailNode.markReady').length, 0);
+    assert.equal(detail.querySelector('[data-tenant-hold]').getAttribute('data-tenant-hold'), 'on');
+    assert.ok(detail.querySelector('[data-tenant-part="held"]'));
+    await click(buttons(detail, 'admin.mailNode.tenantHoldRelease')[0]);
+    const call = calls.find((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/domains/pending.example/hold');
+    assert.deepEqual(call.body, { hold: false });
+  });
+
+  test('a domain Authoritative in the tenant before MailExpert waits for a confirmed approval', async () => {
+    const waiting = { at, ok: false, graph: { present: true, verified: true, preexisting: true }, acceptedDomain: { visible: true, type: 'Authoritative', ok: false, code: 'authoritative_in_tenant' } };
+    answers['GET /api/mail-node/domains'] = { domains: [domainRow('pending.example', 'ready', { tenantSync: waiting })], tenantDriverActive: true };
+    answers['POST /api/mail-node/tenant/domains/pending.example/internal-relay'] = { job: { id: '8', kind: 'tenant_domain_sync', status: 'queued' } };
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    const box = host.querySelector('[data-tenant-authoritative-decision]');
+    assert.ok(box.textContent.includes('admin.mailNode.tenantAuthoritativeDecision'));
+    await click(buttons(box, 'admin.mailNode.tenantApproveRelay')[0]);
+    assert.ok(!calls.some((c) => c.path.endsWith('/internal-relay')), 'a confirmation first');
+    assert.ok(host.textContent.includes('admin.mailNode.tenantApproveRelayConfirm'));
+    await click(buttons(host.querySelector('[data-tenant-authoritative-decision]'), 'admin.mailNode.tenantApproveRelay')[0]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/domains/pending.example/internal-relay'));
+  });
+
   test('shows why Microsoft has not verified the domain yet', async () => {
     const waiting = {
       at, ok: true,

@@ -87,6 +87,10 @@ const ERROR_KEYS = {
   dbeb_external_domain_invalid: 'admin.eop.errorDbebExternalDomain',
   connectors_not_read: 'admin.tenant.errorConnectorsNotRead',
   tenant_recipient_not_removed: 'admin.accounts.deletion.errorTenantRecipient',
+  mark_ready_by_tenant_driver: 'admin.mailNode.errorMarkReadyByTenantDriver',
+  hold_invalid: 'admin.mailNode.errorHoldInvalid',
+  domain_authoritative: 'admin.mailNode.errorDomainAuthoritative',
+  internal_relay_not_needed: 'admin.mailNode.errorInternalRelayNotNeeded',
   domain_not_found: 'admin.mailNode.errorDomainNotFound',
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
@@ -475,10 +479,12 @@ const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
   return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
 };
-// An Outbound connector's name in EAC (backend exoRunner.js parseConnectorName).
+// An Outbound connector's name in EAC (backend exoRunner.js parseConnectorName): only compared with
+// what the tenant answers, so any printable text up to 64 characters.
 const parseConnectorName = (value) => {
   const name = String(value).trim();
-  return /^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$/.test(name) ? name : null;
+  const control = [...name].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
+  return name.length >= 1 && name.length <= 64 && !control ? name : null;
 };
 // field: [parse, refusal code, whether it may be left empty]
 const EOP_PARSERS = {
@@ -954,6 +960,7 @@ const ALERT_TITLE_KEYS = {
   tenant_certificate: 'admin.nodeOps.alertTenantCertificate',
   tenant_poll_failing: 'admin.nodeOps.alertTenantPollFailing',
   tenant_connector_drift: 'admin.nodeOps.alertTenantConnectorDrift',
+  tenant_domain_authoritative: 'admin.nodeOps.alertTenantDomainAuthoritative',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -974,6 +981,7 @@ const ALERT_SOURCE_KEYS = {
   tenant_certificate: 'admin.nodeOps.sourceTenant',
   tenant_poll: 'admin.nodeOps.sourceTenant',
   tenant_connectors: 'admin.nodeOps.sourceTenant',
+  tenant_domains: 'admin.nodeOps.sourceTenant',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1032,6 +1040,9 @@ export function alertDetail(alert) {
         ? { key: 'admin.nodeOps.alertDetailTenantCertExpired', values: {}, at: d.notAfter ?? null }
         : { key: 'admin.nodeOps.alertDetailTenantCertExpiring', values: { days: d.daysLeft ?? '—' }, at: d.notAfter ?? null };
     // The poll failing several times in a row, or not running at all (backend nodeAlerts.js).
+    // A domain the tenant had as Authoritative waits for an administrator (stage 7b).
+    case 'tenant_domain_authoritative':
+      return { key: 'admin.nodeOps.alertDetailTenantDomainAuthoritative', values: { count: d.count ?? 0, domains: (d.domains ?? []).join(', ') || '—' } };
     // A connector changed since its reference (R-25, stage 7b).
     case 'tenant_connector_drift':
       return {
@@ -1154,6 +1165,9 @@ const TENANT_FAILURE_KEYS = {
   connector_domain_missing: 'admin.tenant.failConnectorDomainMissing',
   dkim_config_missing: 'admin.tenant.failDkimConfigMissing',
   authoritative_lost: 'admin.tenant.failAuthoritativeLost',
+  authoritative_in_tenant: 'admin.tenant.failAuthoritativeInTenant',
+  address_taken: 'admin.tenant.failAddressTaken',
+  connector_guid_missing: 'admin.tenant.failConnectorGuidMissing',
   mail_node_not_configured: 'admin.mailNode.errorNotConfigured',
   mail_node_unreachable: 'admin.mailNode.errorUnreachable',
   mail_node_auth: 'admin.mailNode.errorAuth',

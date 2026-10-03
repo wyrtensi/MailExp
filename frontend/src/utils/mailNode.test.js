@@ -165,6 +165,12 @@ describe('domain onboarding', () => {
     assert.equal(tenantFailureKey('mail_node_unreachable'), 'admin.mailNode.errorUnreachable');
     assert.equal(tenantFailureKey('something_new'), 'admin.tenant.failOther');
     assert.equal(alertTitleKey('tenant_connector_drift'), 'admin.nodeOps.alertTenantConnectorDrift');
+    assert.equal(tenantFailureKey('address_taken'), 'admin.tenant.failAddressTaken');
+    assert.equal(tenantFailureKey('authoritative_in_tenant'), 'admin.tenant.failAuthoritativeInTenant');
+    assert.equal(alertTitleKey('tenant_domain_authoritative'), 'admin.nodeOps.alertTenantDomainAuthoritative');
+    assert.deepEqual(alertDetail({ key: 'tenant_domain_authoritative', details: { count: 1, domains: ['example.com'] } }), {
+      key: 'admin.nodeOps.alertDetailTenantDomainAuthoritative', values: { count: 1, domains: 'example.com' },
+    });
     assert.deepEqual(alertDetail({ key: 'tenant_connector_drift', details: { count: 1, connectors: [{ name: 'To mail node' }], checkedAt: 'x' } }), {
       key: 'admin.nodeOps.alertDetailTenantConnectorDrift', values: { count: 1, names: 'To mail node' }, at: 'x',
     });
@@ -201,7 +207,8 @@ describe('normalizeEopSettings', () => {
     assert.deepEqual(normalizeEopSettings({ outboundConnector: ' To mail node ', dbebExternalDomain: 'Relay.Example.net' }), {
       settings: { outboundConnector: 'To mail node', dbebExternalDomain: 'relay.example.net' },
     });
-    assert.deepEqual(normalizeEopSettings({ outboundConnector: "x' -Confirm" }), { error: 'outbound_connector_invalid' });
+    assert.deepEqual(normalizeEopSettings({ outboundConnector: 'To node [EU] & co' }), { settings: { outboundConnector: 'To node [EU] & co' } });
+    assert.deepEqual(normalizeEopSettings({ outboundConnector: 'a'.repeat(65) }), { error: 'outbound_connector_invalid' });
     assert.deepEqual(normalizeEopSettings({ dbebExternalDomain: 'not a domain' }), { error: 'dbeb_external_domain_invalid' });
   });
 

@@ -184,7 +184,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged, tenantDriv
       </ol>
       {domain.state === 'authoritative' && <div style={{ ...noteStyle, marginTop: 8 }}>{t('admin.mailNode.authoritativeNote')}</div>}
       {(tenantDriver || domain.tenantSync) && <MailNodeDomainTenant domain={domain} active={tenantDriver && actionable} onChanged={onChanged} />}
-      {actionable && canMarkReady(domain) && confirming !== 'ready' && (
+      {actionable && !tenantDriver && canMarkReady(domain) && confirming !== 'ready' && (
         <div style={{ marginTop: 10 }}>
           <button type="button" onClick={() => setConfirming('ready')} disabled={busy} style={buttonStyle}>
             {t('admin.mailNode.markReady')}

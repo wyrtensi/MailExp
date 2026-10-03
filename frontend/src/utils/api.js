@@ -422,6 +422,8 @@ export const api = {
     // Stage 7b: one domain's tenant steps and mirror now, and the connectors as the reference.
     syncTenantDomain: (domain) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/sync`),
     takeTenantConnectorReference: () => request('POST', '/mail-node/tenant/connectors/reference'),
+    setTenantDomainHold: (domain, hold) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/hold`, { hold }),
+    approveTenantInternalRelay: (domain) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/internal-relay`),
     // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
     // release and delete (administrators), and whether users see it too.
     listQuarantine: () => request('GET', '/mail-node/quarantine'),

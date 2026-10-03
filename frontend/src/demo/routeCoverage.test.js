@@ -572,6 +572,9 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   const reference = await answer('/mail-node/tenant/connectors/reference', 'POST', '/mail-node/tenant/connectors/reference');
   assert.equal(reference.reference.auto, false);
   assert.deepEqual((await demoRequest('GET', '/mail-node/tenant')).connectorDrift, []);
+  const held = await answer('/mail-node/tenant/domains/:param/hold', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/hold', { hold: false });
+  assert.equal(held.holdInternalRelay, true);
+  await reject('/mail-node/tenant/domains/:param/internal-relay', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/internal-relay', {}, /does not wait/);
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {

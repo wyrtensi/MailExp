@@ -36,20 +36,25 @@ function Failure({ failure }) {
 // verification (R-23), the accepted domain type (R-24), the Outbound connector (R-25), EOP DKIM
 // when the tenant signs (R-26) and the recipient mirror with what differs between the node, the
 // panel and the tenant (R-29). "Run the tenant steps now" queues the domain's job; its result
-// shows after it ran (onChanged reloads the list). Nothing here changes the tenant by itself.
+// shows after it ran (onChanged reloads the list). The hold on Internal Relay (on by default until
+// experiment 8) keeps a complete mirror from making the domain Authoritative until an administrator
+// turns it off; a domain the tenant already had as Authoritative waits for an administrator to
+// approve Internal Relay, after a confirmation. Nothing else here changes the tenant.
 export default function MailNodeDomainTenant({ domain, active = false, onChanged }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [queued, setQueued] = useState(false);
   const [error, setError] = useState(null);
+  const [confirmRelay, setConfirmRelay] = useState(false);
   const sync = domain.tenantSync;
 
-  const run = async () => {
+  const act = (action, { queues = false } = {}) => async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.mailNode.syncTenantDomain(domain.domain);
-      setQueued(true);
+      await action();
+      if (queues) setQueued(true);
+      setConfirmRelay(false);
       await onChanged?.();
     } catch (err) {
       setError(mailNodeErrorKey(err?.code));
@@ -57,6 +62,10 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
       setBusy(false);
     }
   };
+  const run = act(() => api.mailNode.syncTenantDomain(domain.domain), { queues: true });
+  const hold = domain.holdInternalRelay !== false;
+  const toggleHold = act(() => api.mailNode.setTenantDomainHold(domain.domain, !hold));
+  const approveRelay = act(() => api.mailNode.approveTenantInternalRelay(domain.domain), { queues: true });
 
   const graph = sync?.graph;
   const accepted = sync?.acceptedDomain;
@@ -96,6 +105,25 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
                 ? t('admin.mailNode.tenantAcceptedType', { type: accepted.type ?? '—' })
                 : t('admin.mailNode.tenantAcceptedWaiting', { count: accepted.polls ?? 1 })}
               {accepted.error && <div><Failure failure={accepted.error} /></div>}
+              {accepted.code === 'authoritative_in_tenant' && (
+                <div role="status" data-tenant-authoritative-decision style={warningStyle}>
+                  <div>{t('admin.mailNode.tenantAuthoritativeDecision')}</div>
+                  {active && !confirmRelay && (
+                    <button type="button" onClick={() => setConfirmRelay(true)} disabled={busy} style={{ ...buttonStyle, marginTop: 6 }}>
+                      {t('admin.mailNode.tenantApproveRelay')}
+                    </button>
+                  )}
+                  {confirmRelay && (
+                    <div style={{ marginTop: 6 }}>
+                      <div>{t('admin.mailNode.tenantApproveRelayConfirm', { domain: domain.domain })}</div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                        <button type="button" onClick={approveRelay} disabled={busy} style={buttonStyle}>{t('admin.mailNode.tenantApproveRelay')}</button>
+                        <button type="button" onClick={() => setConfirmRelay(false)} disabled={busy} style={buttonStyle}>{t('common.cancel')}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {connector && (
@@ -118,6 +146,7 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
                 ? <Failure failure={mirror.error} />
                 : t('admin.mailNode.tenantMirror', { present: mirror.present ?? 0, desired: mirror.desired ?? 0 })}
               {mirror.complete && <span>{' · '}{t('admin.mailNode.tenantMirrorComplete')}</span>}
+              {mirror.retargeted?.length > 0 && <div>{t('admin.mailNode.tenantMirrorRetargeted')}: <span style={monoStyle}>{list(mirror.retargeted)}</span></div>}
               {mirror.left > 0 && <span>{' · '}{t('admin.mailNode.tenantMirrorLeft', { count: mirror.left })}</span>}
               {mirror.missing?.length > 0 && <div>{t('admin.mailNode.tenantMirrorMissing')}: <span style={monoStyle}>{list(mirror.missing)}</span></div>}
               {mirror.failed?.length > 0 && (
@@ -138,6 +167,9 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
               {mirror.panelOnly?.length > 0 && <div>{t('admin.mailNode.tenantPanelOnly')}: <span style={monoStyle}>{list(mirror.panelOnly)}</span></div>}
             </div>
           )}
+          {sync.authoritative?.held && (
+            <div data-tenant-part="held" role="status" style={warningStyle}>{t('admin.mailNode.tenantHeldComplete')}</div>
+          )}
           {sync.authoritative && !sync.authoritative.ok && (
             <div data-tenant-part="authoritative">
               {sync.authoritative.error ? <Failure failure={sync.authoritative.error} /> : <Failure failure={{ code: sync.authoritative.code }} />}
@@ -145,9 +177,19 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
           )}
         </div>
       )}
+      {domain.state !== 'authoritative' && (
+        <div data-tenant-hold={hold ? 'on' : 'off'} style={{ ...noteStyle, marginTop: 8 }}>
+          {hold ? t('admin.mailNode.tenantHoldOn') : t('admin.mailNode.tenantHoldOff')}
+        </div>
+      )}
       {active && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
           <button type="button" onClick={run} disabled={busy} style={buttonStyle}>{t('admin.mailNode.tenantRunNow')}</button>
+          {domain.state !== 'authoritative' && (
+            <button type="button" onClick={toggleHold} disabled={busy} style={buttonStyle}>
+              {hold ? t('admin.mailNode.tenantHoldRelease') : t('admin.mailNode.tenantHoldSet')}
+            </button>
+          )}
           {queued && <span style={noteStyle}>{t('admin.mailNode.tenantQueued')}</span>}
         </div>
       )}

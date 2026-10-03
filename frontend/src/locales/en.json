@@ -2143,11 +2143,16 @@
       "detailTenantTestFailed": "Failed: {{steps}}",
       "actionTenantRecipientsSynced": "Tenant recipients synced",
       "actionTenantConnectorReference": "Connectors taken as the reference",
-      "detailTenantRecipients": "{{domain}}: made {{created}}, removed {{removed}}",
+      "detailTenantRecipients": "{{domain}}: made {{created}}, moved {{retargeted}}, removed {{removed}}",
       "detailTenantConnectorReference": "Connectors: {{names}}",
       "detailDomainTenantDriver": "{{domain}}: {{from}} to {{to}} (tenant driver)",
       "fieldOutboundConnector": "Outbound connector",
-      "fieldDbebExternalDomain": "external domain of the DBEB contacts"
+      "fieldDbebExternalDomain": "external domain of the DBEB contacts",
+      "actionTenantDomainHold": "Internal Relay hold changed",
+      "actionTenantInternalRelayApproved": "Internal Relay approved",
+      "detailTenantHoldOn": "{{domain}}: held on Internal Relay",
+      "detailTenantHoldOff": "{{domain}}: may become Authoritative",
+      "detailTenantInternalRelayApproved": "{{domain}}: moving to Internal Relay approved"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -2248,7 +2253,7 @@
       "stateReady": "Ready",
       "stateAuthoritative": "Ready, DBEB",
       "stepNodeConfigured": "The node is set up for the domain: relayhost to the EOP host, DKIM, send limits (see the node settings of the domain below).",
-      "stepDnsOk": "DNS is published: MX to EOP, SPF, DKIM, DMARC and the tenant verification record.",
+      "stepDnsOk": "DNS is published: SPF, DKIM, DMARC and the tenant verification record. MX to EOP is switched later: the tenant gives its value after the verification, and with the tenant driver it changes after the Outbound connector step.",
       "stepTenantVerified": "The domain is added to the Microsoft tenant and verified.",
       "stepInternalRelay": "The domain is an Internal Relay accepted domain in the tenant.",
       "stepConnectorReady": "The Outbound connector lists the domain and delivers it to the node.",
@@ -2496,7 +2501,20 @@
       "tenantQueued": "Queued; the result shows here after it runs.",
       "stepStatusTenant": "MailExpert does this in the tenant",
       "stepConfirmedByTenant": "done by {{by}} in the tenant, {{at}}",
-      "errorStepByTenantDriver": "MailExpert confirms this step itself through the tenant driver."
+      "errorStepByTenantDriver": "MailExpert confirms this step itself through the tenant driver.",
+      "tenantAuthoritativeDecision": "The tenant already had this domain as Authoritative: EOP rejects unknown addresses of it. MailExpert does not change that by itself. Moving it to Internal Relay lets the mirror start; until then nothing else is done for the domain in the tenant.",
+      "tenantApproveRelay": "Move to Internal Relay",
+      "tenantApproveRelayConfirm": "Move {{domain}} to Internal Relay in the tenant? Mail to addresses without a recipient will then be relayed to the node instead of rejected by EOP.",
+      "tenantMirrorRetargeted": "Moved to the other external address",
+      "tenantHeldComplete": "All recipients are in the tenant. The domain stays on Internal Relay while it is held; turn the hold off to make it Authoritative.",
+      "tenantHoldOn": "Held on Internal Relay: MailExpert never makes this domain Authoritative while the hold is on (until experiment 8 passes on a live tenant).",
+      "tenantHoldOff": "Not held: once its recipients are complete, MailExpert makes this domain Authoritative.",
+      "tenantHoldRelease": "Let it become Authoritative",
+      "tenantHoldSet": "Hold on Internal Relay",
+      "errorMarkReadyByTenantDriver": "With the tenant driver the domain goes through the tenant steps; it cannot be marked ready by hand.",
+      "errorHoldInvalid": "The hold must be on or off.",
+      "errorDomainAuthoritative": "The domain is Authoritative already: it cannot be held on Internal Relay.",
+      "errorInternalRelayNotNeeded": "The domain does not wait for this decision."
     },
     "eop": {
       "title": "Mail through EOP",
@@ -2571,7 +2589,7 @@
       "tenantDomainPh": "contoso.onmicrosoft.com",
       "tenantDomainNote": "The tenant's initial domain, <tenant>.onmicrosoft.com: Exchange Online PowerShell connects to it.",
       "errorTenantDomain": "Tenant domain must be the tenant's initial domain, such as contoso.onmicrosoft.com.",
-      "errorOutboundConnector": "Outbound connector: its name in EAC, letters, digits, spaces, dots, dashes and underscores, up to 64 characters.",
+      "errorOutboundConnector": "Outbound connector: its name in EAC, up to 64 characters on one line.",
       "errorDbebExternalDomain": "The external domain of the contacts must be a domain name such as relay.example.com.",
       "outboundConnectorLabel": "Outbound connector to the node",
       "outboundConnectorPh": "To mail node",
@@ -2684,7 +2702,9 @@
       "alertDetailTenantPollFailing": "{{count}} polls in a row failed; last good read {{at}}. The blocked connector alert keeps its last state.",
       "alertDetailTenantPollStale": "No poll of the tenant ran lately (worker or job queue stopped); last good read {{at}}.",
       "alertTenantConnectorDrift": "A tenant connector changed",
-      "alertDetailTenantConnectorDrift": "Changed since the reference: {{count}} ({{names}}), read {{at}}."
+      "alertDetailTenantConnectorDrift": "Changed since the reference: {{count}} ({{names}}), read {{at}}.",
+      "alertTenantDomainAuthoritative": "A domain waits for a decision in the tenant",
+      "alertDetailTenantDomainAuthoritative": "Authoritative in the tenant before MailExpert: {{count}} ({{domains}}). Approve Internal Relay in the domain's details, or keep it as it is."
     },
     "quarantine": {
       "title": "Mail node quarantine",
@@ -2932,7 +2952,10 @@
       "driftMissing": "gone",
       "driftAdded": "new",
       "driftHint": "If the change was deliberate, take the connectors as the reference again.",
-      "referenceTake": "Take as the reference"
+      "referenceTake": "Take as the reference",
+      "failAuthoritativeInTenant": "The tenant already had the domain as Authoritative: waiting for an administrator",
+      "failAddressTaken": "Another recipient of the tenant holds this address",
+      "failConnectorGuidMissing": "The tenant answered the Outbound connector without its Guid"
     }
   },
   "blockList": {

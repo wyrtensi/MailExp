@@ -51,6 +51,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'tenant.connection_tested': 'admin.audit.actionTenantConnectionTested',
   'tenant.recipients_synced': 'admin.audit.actionTenantRecipientsSynced',
   'tenant.connector_reference_taken': 'admin.audit.actionTenantConnectorReference',
+  'tenant.domain_hold_changed': 'admin.audit.actionTenantDomainHold',
+  'tenant.internal_relay_approved': 'admin.audit.actionTenantInternalRelayApproved',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -315,7 +317,14 @@ export function auditDetail(entry) {
           valueKeys: { action: queueActionKey(details.action) },
         };
     case 'tenant.recipients_synced':
-      return { key: 'admin.audit.detailTenantRecipients', values: { domain: details.domain ?? '', created: details.created ?? 0, removed: details.removed ?? 0 } };
+      return {
+        key: 'admin.audit.detailTenantRecipients',
+        values: { domain: details.domain ?? '', created: details.created ?? 0, removed: details.removed ?? 0, retargeted: details.retargeted ?? 0 },
+      };
+    case 'tenant.domain_hold_changed':
+      return { key: details.hold ? 'admin.audit.detailTenantHoldOn' : 'admin.audit.detailTenantHoldOff', values: { domain: details.domain ?? '' } };
+    case 'tenant.internal_relay_approved':
+      return { key: 'admin.audit.detailTenantInternalRelayApproved', values: { domain: details.domain ?? '' } };
     case 'tenant.connector_reference_taken':
       return {
         key: 'admin.audit.detailTenantConnectorReference',

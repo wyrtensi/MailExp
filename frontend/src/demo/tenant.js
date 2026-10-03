@@ -157,6 +157,12 @@ export function demoTenantRequest(verb, pathname, settings, error) {
     }
     return clone({ job: finish(KINDS.domain, settings), created: true });
   }
+  // The demo's domains keep their manual onboarding: the hold and the approval answer, change nothing.
+  const hold = /^\/mail-node\/tenant\/domains\/([^/]+)\/hold$/.exec(pathname);
+  if (verb === 'POST' && hold) return clone({ domain: decodeURIComponent(hold[1]), holdInternalRelay: true });
+  if (verb === 'POST' && /^\/mail-node\/tenant\/domains\/[^/]+\/internal-relay$/.test(pathname)) {
+    throw error('The domain does not wait for this decision', 'internal_relay_not_needed');
+  }
   if (verb === 'POST' && pathname === '/mail-node/tenant/connectors/reference') {
     if (!state.connectors?.ok) throw error('The connectors have not been read yet: check now first', 'connectors_not_read');
     const at = iso(Date.now());
