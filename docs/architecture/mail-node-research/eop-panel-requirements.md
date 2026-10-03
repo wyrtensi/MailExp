@@ -587,6 +587,9 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   → ожидаемый MX в `mail_node_domains`. Затем опрос `Get-AcceptedDomain` с повторами: задержка не
   документирована.
 - Без EOP: да — мок, обе формы MX. Реальные задержки и формат TXT — тенант.
+- Сделано (2026-10-03, этап 7b): задание домена `tenant_domain_sync` (раздел 5.12). Отличие: домен
+  добавляется в тенант сразу (TXT нужен владельцу до шага «DNS опубликованы»), `verify` — только после этого
+  шага, который по-прежнему подтверждает человек.
 
 **R-24. Тип accepted domain.** S.
 - Зачем: новый домен, вероятно, Authoritative по умолчанию (раздел 2.8): до зеркала получателей EOP
@@ -594,6 +597,8 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
 - Как: как только домен виден в `Get-AcceptedDomain`, до смены MX — `Set-AcceptedDomain -Identity <DOMAIN>
   -DomainType InternalRelay`. `Authoritative` — только из R-29, после полного зеркала.
 - Без EOP: логика — да; поведение — тенант.
+- Сделано (2026-10-03, этап 7b): раздел 5.12; Internal Relay восстанавливается на каждом прогоне, пока
+  домен не `authoritative`.
 
 **R-25. Коннекторы: эталон, сверка, список доменов.** M.
 - Что: владелец создаёт оба коннектора мастером EAC один раз; панель снимает `Get-InboundConnector` и
@@ -607,6 +612,9 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   `Set-OutboundConnector -IsValidated $true -LastValidationTimestamp <UTC>` (сам `Validate-*` статус не
   ставит). Для Inbound connector команды проверки нет: реальная отправка и трассировка.
 - Без EOP: мок; настоящее — тенант.
+- Сделано (2026-10-03, этап 7b): добавление домена, эталон (первое чтение или кнопка), сверка и
+  оповещение `tenant_connector_drift` (раздел 5.12). Отличие: `Validate-OutboundConnector` и
+  `-IsValidated` не сделаны — оставлены эксперименту 7.
 
 **R-26. DKIM в EOP.** S-M. Если по решению D-1 подписывает EOP.
 - Зачем: значения CNAME нельзя вычислить (формат сменился в мае 2025), их надо прочитать и показать
@@ -617,6 +625,7 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   -Enabled $true` до успеха (пока CNAME не видны, команда падает с ошибкой). Ротация —
   `Rotate-DkimSigningConfig`, вступает через 96 часов.
 - Без EOP: мок; подпись релейной почты — тенант.
+- Сделано (2026-10-03, этап 7b): раздел 5.12, только в режиме DKIM `eop`. Ротации нет.
 
 **R-27. Блокировка коннектора.** S.
 - Зачем: блокировка Inbound connector останавливает исходящую почту всех ящиков узла
@@ -658,6 +667,10 @@ M — 2-4 дня, L — неделя и больше), **без EOP** — мож
   «узел / панель / тенант» (ручные ящики mailcow, ящики, перехваченные `provisionMailbox`).
 - Без EOP: да для логики — фейковые `ExoRunner` и API mailcow, тесты порядка операций, повторов и
   идемпотентности; поведение DBEB — только тенант (раздел 6, эксперимент 8).
+- Сделано (2026-10-03, этап 7b): раздел 5.12. Отличия: желаемое множество берётся с узла (ящики, которые
+  принимают почту, и псевдонимы mailcow), а не только из панели — после Authoritative EOP отклоняет всё
+  без получателя; псевдонимы — отдельные контакты, не proxy-адреса (D-16); catch-all на узле не даёт
+  перейти в Authoritative (D-6); пробное письмо `550 5.4.1` не автоматизировано (эксперимент 8).
 
 **R-30. Трассировка по запросу.** M.
 - Зачем: логи узла (R-17) заканчиваются на передаче в EOP; что EOP сделал с письмом дальше (доставил,
@@ -1607,6 +1620,50 @@ PGlite, тенант в `nodeAlerts.test.js`); frontend — `npm run lint` чи�
 эксперимент 14); фактическая политика Default (эксперимент 11); поведение сеанса за часы работы (срок токена
 EXO, переподключение после ошибки).
 
+### 5.12. Этап 7b: домены в тенанте и зеркало DBEB (2026-10-03)
+
+Драйвер тенанта сам проводит домен через шаги тенанта и держит зеркало получателей. Код —
+`backend/src/services/tenant/tenantDomains.js` (задание домена, `planMirror`, шаг удаления),
+`connectors.js` (эталон и сверка коннекторов), `fakes.js` (`createFakeTenantModel` — фейковый тенант с
+состоянием), `tenantJobs.js` (опрос читает коннекторы), `routes/mailNodeTenant.js`; исполнитель —
+`deploy/tenant-worker/` (`ops.mjs`, `runner.lib.ps1`); экраны — `MailNodeDomainTenant` в подробностях
+домена, блок «Коннекторы» в `MailNodeTenant`, два поля настроек EOP, строка «Ждёт тенант» у ящика; демо —
+`frontend/src/demo/tenant.js`. Миграция `0088_tenant_domains.sql`: `mail_node_domains.tenant_sync` (что
+увидел и сделал последний прогон) и `email_accounts.tenant_recipient_at` (когда зеркало видело получателя
+ящика). Порядок для владельца — [runbook, раздел 6е](../../operations/mail-node.md).
+
+| Что | Сделано | Отличия и оговорки |
+|---|---|---|
+| Задание домена | вид `tenant_domain_sync` в общей очереди, один на домен: сверяет, а не выполняет список шагов — сначала читает Graph и EXO, пишет только недостающее, состояние домена сдвигает только после чтения, подтвердившего шаг (`mail_node.domain_state_changed` с `how: tenant_driver`, автор MailExpert, в `steps` пометка `tenantDriver`). Ставится при добавлении, принятии и перезапуске домена, после «Сделано» и «Готов», после создания ящика в домене с зеркалом, кнопкой «Выполнить шаги тенанта сейчас» и таймером опроса (каждый слот 10 минут для незаконченных доменов, раз в час для `authoritative` с готовым DKIM). Одновременно идёт один прогон домена: второй ждёт 30 с (`domain_sync_busy`). Повтор записи, которая уже применилась (503 Graph, повтор исполнителя после переподключения), безвреден: «уже есть» и «не найден» у записи считаются выполненными | `max_attempts` 6. Троттлинг (`exo_throttled`, `graph_throttled`) сохраняет сделанное и ставит задание снова через `Retry-After` или 1, 2, 4 … минут; прочие ошибки остаются в `tenant_sync` с кодом, повторит следующий слот. Прогон пишет итог, только если состояние домена не изменилось за время прогона (перезапуск онбординга во время прогона подхватит следующий) |
+| R-23 | `POST /domains` с любого состояния (TXT верификации нужен владельцу домена сразу; `verificationDnsRecords` → `tenant.verificationTxt`, источник `tenant`); после шага «DNS опубликованы» (`dns_ok`, его по-прежнему подтверждает человек; MX на нём может ещё смотреть на прежний хост — значение MX даёт только подтверждённый домен, а сменить его можно только после Internal Relay, R-24) — `POST /verify`, `PATCH supportedServices` с `Email`, MX из `serviceConfigurationRecords` (обе формы, по `preference`) → `expected_mx`; `dns_ok` → `tenant_verified`. Отказ `verify` (400) — не ошибка: «Microsoft пока не видит TXT», следующий прогон пробует снова | Ответ Graph на уже добавленный домен (400/409) и текст отказа `verify` — **Inferred**; панель после отказа `POST` читает домен, а не полагается на текст. Значения, введённые руками, заменяются прочитанными из тенанта (источник `tenant`), и «Начать заново» их очищает |
+| R-24 | опрос `Get-AcceptedDomain`, пока тенант не покажет домен: повторные задания через 1, 2, 4 … до 10 минут; затем `Set-AcceptedDomain -DomainType InternalRelay` и чтение типа; `tenant_verified` → `internal_relay`. Пока домен не `authoritative`, каждый прогон возвращает тип в Internal Relay, если он другой (тип по умолчанию, правка руками, «Готов» без шагов тенанта) | Задержка и тип по умолчанию — эксперимент 6 |
+| R-25 | Outbound connector — указанный в настройках EOP (`outboundConnector`, имя из EAC) или единственный включённый OnPremises; иначе `outbound_connector_missing`/`_ambiguous`/`_not_found` с именами. Домена нет в `RecipientDomains` — `Set-OutboundConnector -RecipientDomains @{Add=<DOMAIN>}`, чтение; `internal_relay` → `connector_ready`. `AllAcceptedDomains $true` считается покрытием. Эталон: первое удачное чтение обоих коннекторов (опрос раз в 10 минут), «Принять как эталон» после намеренной правки (`tenant.connector_reference_taken`); сверка ключевых свойств (Inbound: `ConnectorType`, `TlsSenderCertificateName`, `RequireTls`, `RestrictDomainsToCertificate`, `SenderDomains`, … ; Outbound: `SmartHosts`, `TlsSettings`, `TlsDomain`, `UseMXRecord`, …) — на экране и оповещением `tenant_connector_drift` (предупреждение) | `Validate-OutboundConnector` и `-IsValidated` не сделаны: проверка шлёт письмо и ничего не меняет в пути почты — оставлено эксперименту 7. `RecipientDomains` не сравниваются с эталоном: задание домена само возвращает пропавший домен. Имя коннектора — буквы, цифры, пробел, `._-` (иначе операция отклоняется до pwsh). Шаг `ready` остаётся за человеком: владелец сначала переключает MX |
+| R-26 | только если подписывает EOP (режим DKIM домена или настроек `eop`, D-1): `New-DkimSigningConfig -Enabled $false -KeySize 2048` (если нет), `Get-DkimSigningConfig` → CNAME селекторов в `tenant` (их сверяет проверка DNS), затем `Set-DkimSigningConfig -Enabled $true` на каждом прогоне до успеха; ожидание CNAME — не ошибка (показывается причина) | Ротации (`Rotate-DkimSigningConfig`) нет. Формат CNAME в фикстуре и текст отказа до публикации — **Inferred** (эксперимент 9) |
+| R-29 | зеркало в `internal_relay` и дальше: желаемое — адреса, на которые узел принимает почту (ящики mailcow с `active` 1 и 2, активные псевдонимы кроме catch-all), кроме ящиков, чьё удаление уже началось; фактическое — `Get-Recipient -ResultSize Unlimited` по домену. Контакт (D-5) — `New-MailContact -Name <адрес> -PrimarySmtpAddress <адрес> -ExternalEmailAddress <внешний>` и `Set-MailContact -HiddenFromAddressListsEnabled $true`; лишний контакт — `Remove-MailContact`. Не больше 25 записей EXO за прогон, остаток — следующим заданием через 2 с. D-7: вариант А по умолчанию, вариант Б — поле `dbebExternalDomain` (`<local>@<домен>`); контакт другого варианта удаляется и создаётся заново. `ready` → `authoritative` (D-4), когда свежее чтение нашло зеркало полным: нечего создавать и удалять, нет catch-all, ответ узла не подозрителен; затем `Set-AcceptedDomain -DomainType Authoritative` и чтение. Домен `authoritative`, снова ставший Internal Relay руками, возвращается в Authoritative при полном зеркале, иначе — `authoritative_lost`. Отчёт «узел / панель / тенант»: нет получателя, лишние, адрес занят другим получателем тенанта (облачный ящик, группа — контакт не создаётся), на узле без панели, в панели без узла, catch-all; журнал `tenant.recipients_synced` | Узел не вернул ни одного ящика домена, хотя в панели они есть, — удалений нет (`suspicious`). Узел не ответил — зеркало не трогается. Псевдонимы — отдельные контакты, а не proxy-адреса (D-16 отменил proxy-адреса). Пробное письмо на несуществующий адрес (`550 5.4.1`) панель не шлёт: это эксперимент 8. `Get-Recipient` читает весь тенант на каждый прогон домена — для add-on тенанта с сотнями получателей приемлемо |
+| R-32, R-33 | создание ящика в домене с зеркалом ставит задание домена; ящик в `authoritative`-домене без получателя показывает «Ждёт тенант: почта на него пока отклоняется» (`tenant_pending` в `GET /api/accounts`, по `tenant_recipient_at`). Хук `BEFORE_NODE_DELETE` удаления ящика: `Remove-MailContact` до `delete/mailbox`, контакта нет — тоже удалён. В `authoritative`-домене без драйвера или при ошибке тенанта удаление ждёт (`tenant_driver_missing`, `tenant_not_configured`, `tenant_recipient_not_removed` у строки) и повторяется как ошибка узла; в Internal Relay домене удаление идёт дальше, лишний контакт уберёт зеркало | — |
+| «Сделано» и настройки | с драйвером и заполненным тенантом (`tenantDriverActive(settings)`) шаги `tenant_verified`, `internal_relay`, `connector_ready` подтверждает драйвер: «Сделано» на них — 409 `step_by_tenant_driver`, в списке шагов «делает MailExpert в тенанте», чек-лист раздела «EOP» скрыт, `GET /domains` отдаёт `tenantDriverActive`. Без драйвера всё как раньше. Новые поля настроек EOP: `outboundConnector`, `dbebExternalDomain` | — |
+| Исполнитель (R-36) | белый список +12 операций, в обеих таблицах (панель и `ops.mjs`, тест держит их равными) и в `runner.lib.ps1`: `set_accepted_domain_internal_relay`/`_authoritative` (тип закреплён операцией), `get_inbound_connectors`, `get_outbound_connectors`, `add_outbound_connector_domain` (значение передаётся как `@{Add=...}`), `new_`/`get_`/`enable_dkim_signing_config`, `get_recipients`, `new_mail_contact`, `hide_mail_contact`, `remove_mail_contact` (`-Confirm:$false`). Новый вид значения — имя коннектора. Ошибки `exo_exists` («already exists», «already being used») и `exo_throttled` («Micro delay», «throttl», «Server Busy») | Исполнитель после ошибки сеанса повторяет и запись: повтор `New-MailContact` даёт `exo_exists`, который панель считает созданием. Формы ответов `Get-InboundConnector`, `Get-OutboundConnector`, `Get-Recipient` в фикстуре — **Inferred** |
+| Демо | фейковый тенант: опрос читает оба коннектора (эталон — первое чтение, расхождений нет), «Принять как эталон» работает, «Выполнить шаги тенанта сейчас» завершается сразу; домены демо остаются на ручном онбординге (`tenantDriverActive: false`) | — |
+
+Проверено: backend — `npm run lint` и `lint:plugins` чисто, `vitest run` 262 файла, 4189 тестов (новые:
+`tenantDomains.test.js` — `planMirror`, MX, выбор коннектора, сверка; `tenantDomains.pglite.test.js` —
+домен от `dns_ok` до `authoritative` на фейковом тенанте с чтением после каждого шага, повторный прогон
+только читает, ожидание `verify` и `Get-AcceptedDomain`, возврат в Internal Relay, выбор коннектора, DKIM
+до и после публикации CNAME, catch-all, подозрительный ответ узла, узел недоступен, пачки по 25,
+троттлинг с повтором, `exo_exists`, вариант Б, удаление получателя перед ящиком, очередь и маршруты,
+эталон коннекторов; изменены `exoRunner.test.js`, `nodeAlerts.test.js`, `eopSettings.test.js`);
+frontend — `npm run lint` чисто, `npm test` 4401 тест (`MailNodeOnboarding.render.test.js`,
+`MailNodeTenant.render.test.js`, `mailNode.test.js`, `auditLog.test.js`, демо и покрытие маршрутов),
+`npm run build`; исполнитель — `node --test deploy/tenant-worker/worker.test.mjs` 17 тестов (на Windows
+с pwsh 7.6 — 16, тест импорта модуля пропущен): напечатанные команды каждой новой операции (закреплённые
+параметры, `@{Add=...}`, `Name` и `PrimarySmtpAddress` из одного адреса), отказ враждебных имён
+коннектора и адресов до pwsh и в `runner.ps1`, `exo_exists`/`exo_throttled`/`exo_not_found` с
+заглушками командлетов. Образ исполнителя не пересобирался и на стенде `me-stage` не запускалось.
+
+Что подтверждает только живой тенант: эксперименты 6 (тип по умолчанию, задержка до
+`Get-AcceptedDomain`, формат TXT), 7 (Outbound connector), 8 (DBEB: контакт, вариант А или Б, репликация,
+`550 5.4.1`), 9 (DKIM EOP), 16 (роли для новых командлетов) и 23 ниже.
+
 ## 6. Что требует живого тенанта
 
 Нужен платный или пробный тенант с add-on (в E5 developer Inbound connector не создать) и пробный домен
@@ -1631,6 +1688,7 @@ EXO, переподключение после ошибки).
 | 15 | Трассировка релейной почты | задержка появления, статусы, `getDetailsByRecipient`; провижининг сервис-принципала |
 | 16 | Минимальные роли EXO для кастомной группы ролей | `Get-ManagementRoleAssignment`, прогон операций R-22..R-29 под суженной ролью |
 | 22 | Драйвер этапа 7a (раздел 5.11): токен Graph по ассерции исполнителя, `Connect-ExchangeOnline` с PFX в образе, ответы `whoami`, `Get-BlockedConnector`, `Get-HostedContentFilterPolicy` | «Проверить подключение» в панели; сохранить ответы в `backend/src/services/tenant/fixtures.json` |
+| 23 | Драйвер этапа 7b (раздел 5.12): ответы Graph на повторный `POST /domains` и ранний `verify`, свойства `Get-InboundConnector`/`Get-OutboundConnector`/`Get-Recipient`/`Get-DkimSigningConfig`, тексты ошибок «уже есть» и троттлинга EXO (по ним исполнитель ставит `exo_exists` и `exo_throttled`), `Set-OutboundConnector -RecipientDomains @{Add=...}` через splatting | пробный домен шаг за шагом кнопкой «Выполнить шаги тенанта сейчас»; сохранить ответы в `fixtures.json`, тексты ошибок сверить с `runner.lib.ps1` |
 | 17 | Выпуск из карантина на локального получателя (если D-2 — карантин) | `Release-QuarantineMessage`, письмо доходит и не возвращается в карантин |
 | 18 | Лицензирование: минимум, считаются ли контакты или mail users получателями, цена | вопрос партнёру (CSP) |
 | 19 | Трассировка в add-on тенанте для R-43: работает ли Graph `messageTraces` с правом приложения `ExchangeMessageTrace.Read.All` (иначе `Get-MessageTraceV2` через `ExoRunner`); отдаёт ли `Get-MessageTraceV2` тему | запрос по окну и `getDetailsByRecipient` по одному письму; сохранить ответы как фикстуры `traceSource.fixtures.js` |

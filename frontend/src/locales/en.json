@@ -2474,7 +2474,7 @@
       "tenantRunAt": "Last run {{at}}",
       "tenantThrottled": "Microsoft asked to slow down; it goes on by itself",
       "tenantDomainVerified": "The domain is verified in the tenant.",
-      "tenantDomainAdded": "The domain is added to the tenant, not verified yet: publish the TXT below, then confirm \"DNS is right\".",
+      "tenantDomainAdded": "The domain is added to the tenant, not verified yet: publish the TXT below, then confirm the \"DNS is published\" step.",
       "tenantVerifyWaiting": "Microsoft does not see the TXT yet; the next run tries again",
       "tenantVerificationTxt": "Verification TXT",
       "tenantMx": "MX the tenant gives",

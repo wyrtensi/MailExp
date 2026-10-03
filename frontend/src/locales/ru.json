@@ -2516,7 +2516,7 @@
       "tenantRunAt": "Последний прогон {{at}}",
       "tenantThrottled": "Microsoft попросил снизить темп; продолжится само",
       "tenantDomainVerified": "Домен подтверждён в тенанте.",
-      "tenantDomainAdded": "Домен добавлен в тенант, но ещё не подтверждён: опубликуйте TXT ниже и подтвердите шаг «DNS настроен».",
+      "tenantDomainAdded": "Домен добавлен в тенант, но ещё не подтверждён: опубликуйте TXT ниже и подтвердите шаг «DNS опубликованы».",
       "tenantVerifyWaiting": "Microsoft пока не видит TXT; следующий прогон попробует снова",
       "tenantVerificationTxt": "TXT для подтверждения",
       "tenantMx": "MX от тенанта",
