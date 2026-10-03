@@ -211,6 +211,7 @@ const LOCALE_SPECIFIC_KEYS_BY_LOCALE = {
     'admin.outages.bannerWaiting_few', 'admin.outages.bannerWaiting_many',
     'admin.nodeOps.alertDetailOutageWaiting_few', 'admin.nodeOps.alertDetailOutageWaiting_many',
     'admin.nodeOps.alertDetailOutageWaitingAsOf_few', 'admin.nodeOps.alertDetailOutageWaitingAsOf_many',
+    'admin.tenant.phishHeld_few', 'admin.tenant.phishHeld_many',
   ]),
 };
 const LOCALE_SPECIFIC_KEYS = new Set(

@@ -5,6 +5,9 @@ import {
   POLICY_FIELDS,
   TENANT_STEPS,
   mailNodeErrorKey,
+  phishHeld,
+  phishReasonKey,
+  phishStateKey,
   policyConflictKey,
   policyFieldKey,
   tenantCertificateLevel,
@@ -286,6 +289,135 @@ export default function MailNodeTenant({ revision = 0 }) {
         </button>
       </div>
 
+      {error && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(error)}</div>}
+
+      {data?.driver && data?.configured && <PhishRelease canRun revision={revision} />}
+    </div>
+  );
+}
+
+const cellStyle = { padding: '4px 6px', borderTop: '1px solid var(--border)', verticalAlign: 'top', wordBreak: 'break-word' };
+
+// Stage 7c, R-42 (decision D-2): high confidence phishing EOP quarantined, released by MailExpert to
+// the node's mailboxes, where it lands in Junk and opens in the safe view. The pause switch, "Release
+// now", the last run, the messages kept in the quarantine (a guard: a recipient outside the node, an
+// outbound message, a release denied; or a release that kept failing) and the latest rows. R-31 (a
+// release by hand, the Tenant Allow/Block List) is not offered: by D-2 phishing does not stay there.
+function PhishRelease({ canRun, revision }) {
+  const { t } = useTranslation();
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+
+  const load = useCallback(async () => {
+    try {
+      const next = await api.mailNode.getPhishRelease();
+      if (alive.current) {
+        setData(next);
+        setError(null);
+      }
+    } catch (err) {
+      if (alive.current) setError(mailNodeErrorKey(err?.code));
+    }
+  }, []);
+  useEffect(() => { load(); }, [load, revision]);
+
+  const act = async (action) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const answer = await action();
+      let job = answer?.job ?? null;
+      for (let i = 0; job && tenantJobActive(job) && i < POLL_LIMIT && alive.current; i += 1) {
+        await new Promise((resolve) => { setTimeout(resolve, POLL_MS); });
+        job = (await api.mailNode.getTenantJob(job.id)).job;
+      }
+      await load();
+    } catch (err) {
+      if (alive.current) setError(mailNodeErrorKey(err?.code));
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  const run = data?.run;
+  const held = data?.held?.count ?? 0;
+  const rows = data?.releases ?? [];
+  return (
+    <div data-phish-release>
+      <div style={subTitleStyle}>{t('admin.tenant.phishTitle')}</div>
+      <span style={{ ...hintStyle, marginTop: 0, marginBottom: 6 }}>{t('admin.tenant.phishNote')}</span>
+      {data && (
+        <div style={textStyle}>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={!!data.enabled}
+              disabled={busy}
+              onChange={(e) => act(() => api.mailNode.setPhishRelease(e.target.checked))}
+              aria-describedby="phish-release-switch-hint"
+            />
+            {t('admin.tenant.phishEnabled')}
+          </label>
+          <span id="phish-release-switch-hint" style={hintStyle}>{t('admin.tenant.phishEnabledHint')}</span>
+          {!data.enabled && <div role="status" data-phish-paused style={boxStyle('warning')}>{t('admin.tenant.phishPaused')}</div>}
+          {run && (
+            <div data-phish-run style={{ marginTop: 6 }}>
+              {run.paused && t('admin.tenant.phishRunPaused', { at: when(run.at) })}
+              {run.noDomains && t('admin.tenant.phishRunNoDomains', { at: when(run.at) })}
+              {!run.paused && !run.noDomains && run.counts && t('admin.tenant.phishRunCounts', {
+                at: when(run.at), released: run.counts.released ?? 0, skipped: run.counts.skipped ?? 0, failed: run.counts.failed ?? 0,
+              })}
+              {run.left && <div>{t('admin.tenant.phishRunLeft')}</div>}
+              {run.throttled && <div><Failure failure={{ code: run.throttled.code }} /></div>}
+              {run.error && <div><Failure failure={run.error} /></div>}
+            </div>
+          )}
+          {!run && <span style={{ ...hintStyle, marginTop: 0 }}>{t('admin.tenant.phishNever')}</span>}
+          {held > 0 && (
+            <div role="status" data-phish-held style={boxStyle('warning')}>{t('admin.tenant.phishHeld', { count: held })}</div>
+          )}
+          {rows.length > 0 && (
+            <table data-phish-rows style={{ width: '100%', borderCollapse: 'collapse', marginTop: 8, fontSize: 11 }}>
+              <caption style={{ textAlign: 'left', fontWeight: 600, color: 'var(--text-primary)', paddingBottom: 4 }}>{t('admin.tenant.phishRowsTitle')}</caption>
+              <thead>
+                <tr style={{ textAlign: 'left' }}>
+                  <th scope="col" style={cellStyle}>{t('admin.tenant.phishColState')}</th>
+                  <th scope="col" style={cellStyle}>{t('admin.tenant.phishColReceived')}</th>
+                  <th scope="col" style={cellStyle}>{t('admin.tenant.phishColSender')}</th>
+                  <th scope="col" style={cellStyle}>{t('admin.tenant.phishColRecipients')}</th>
+                  <th scope="col" style={cellStyle}>{t('admin.tenant.phishColSubject')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => {
+                  const reason = phishReasonKey(row.reason);
+                  return (
+                    <tr key={row.identity} data-phish-row={row.state} data-phish-held-row={phishHeld(row) ? 'true' : undefined}>
+                      <td style={cellStyle}>
+                        {t(phishStateKey(row.state))}
+                        {reason && <div style={{ color: 'var(--text-tertiary)' }}>{t(reason)}</div>}
+                        {row.error && row.state !== 'released' && <div style={{ color: 'var(--text-tertiary)' }}>{row.error}</div>}
+                      </td>
+                      <td style={cellStyle}>{when(row.receivedAt)}</td>
+                      <td style={{ ...cellStyle, ...monoStyle, fontSize: 11 }}>{row.sender ?? '—'}</td>
+                      <td style={{ ...cellStyle, ...monoStyle, fontSize: 11 }}>{(row.recipients ?? []).join(', ') || '—'}</td>
+                      <td style={cellStyle}>{row.subject ?? '—'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          <div style={{ marginTop: 8 }}>
+            <button type="button" onClick={() => act(api.mailNode.runPhishRelease)} disabled={!canRun || busy || !data.enabled} style={buttonStyle}>
+              {busy ? t('admin.tenant.checking') : t('admin.tenant.phishRunNow')}
+            </button>
+          </div>
+        </div>
+      )}
       {error && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(error)}</div>}
     </div>
   );

@@ -20,6 +20,7 @@ describe('AUDIT_ACTIONS', () => {
       'mail_node.outage_deleted',
       'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
       'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
+      'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
     ]);
     assert.deepEqual(auditDetail({ action: 'tenant.domain_hold_changed', details: { domain: 'example.com', hold: false } }), {
       key: 'admin.audit.detailTenantHoldOff', values: { domain: 'example.com' },
@@ -35,6 +36,12 @@ describe('AUDIT_ACTIONS', () => {
     assert.deepEqual(auditDetail({ action: 'tenant.connection_tested', details: { ok: false, failed: ['exo:exo_connect_failed'] } }), {
       key: 'admin.audit.detailTenantTestFailed', values: { steps: 'exo:exo_connect_failed' },
     });
+    // Stage 7c: a release from EOP's quarantine, the pause switch, a trace asked for.
+    assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { sender: 'x@phish.example.net', recipients: ['a@example.com', 'b@example.com'], messageId: '<m@x>' } }), {
+      key: 'admin.audit.detailTenantQuarantineReleased', values: { sender: 'x@phish.example.net', recipients: 'a@example.com, b@example.com', messageId: '<m@x>' },
+    });
+    assert.deepEqual(auditDetail({ action: 'tenant.phish_release_changed', details: { enabled: false } }), { key: 'admin.audit.detailTenantPhishReleaseOff', values: {} });
+    assert.deepEqual(auditDetail({ action: 'tenant.message_traced', details: { messageId: '<m@x>' } }), { key: 'admin.audit.detailTenantMessageTraced', values: { messageId: '<m@x>' } });
     assert.equal(auditActionLabelKey('mail_node.applied'), 'admin.audit.actionMailNodeApplied');
     assert.equal(auditActionLabelKey('mailbox.rate_limit_changed'), 'admin.audit.actionMailboxRateLimitChanged');
     assert.equal(auditActionLabelKey('mail_node.domain_identity_acknowledged'), 'admin.audit.actionMailNodeDomainIdentityAcknowledged');

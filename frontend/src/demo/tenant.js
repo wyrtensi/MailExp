@@ -42,7 +42,9 @@ function conflicts(policy) {
     }));
 }
 
-const KINDS = { test: 'tenant_test_connection', poll: 'tenant_poll', antispam: 'tenant_antispam_read', domain: 'tenant_domain_sync' };
+const KINDS = {
+  test: 'tenant_test_connection', poll: 'tenant_poll', antispam: 'tenant_antispam_read', domain: 'tenant_domain_sync', phish: 'tenant_quarantine_release',
+};
 // The connectors as the backend summarizes them (services/tenant/connectors.js).
 const CONNECTORS = {
   inbound: [{
@@ -117,6 +119,34 @@ function finish(kind, settings) {
 
 const latest = (kind) => [...jobs.values()].filter((job) => job.kind === kind).at(-1) ?? null;
 
+// Stage 7c (R-42): the release of quarantined phishing, on, with a run of 8 minutes ago: one message
+// released to a demo mailbox, one kept because a recipient is not on the node (it raises the
+// tenant_phish_held alert), one that left the quarantine.
+const QID = (n) => [`c14401cf-aa9a-465b-cfd5-00000000000${n}`, `4c2ca98e-94ea-db3a-7eb8-00000000000${n}`].join('\\');
+const heldRow = (row) => (row.state === 'skipped' && row.reason !== 'gone') || (row.state === 'failed' && row.reason === 'attempts_exhausted');
+let phish = {
+  enabled: true,
+  changedAt: null,
+  run: { at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 1, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false },
+  rows: [
+    {
+      identity: QID(1), messageId: '<invoice-7781@billing.example.net>', sender: 'billing@billing.example.net', subject: 'Your invoice is overdue',
+      recipients: ['info@demo.mailexpert.local'], receivedAt: iso(STARTED - 50 * 60000), expiresAt: iso(STARTED + 29 * DAY_MS),
+      state: 'released', reason: null, error: null, attempts: 1, byPanel: true, releasedAt: iso(STARTED - 8 * 60000), updatedAt: iso(STARTED - 8 * 60000),
+    },
+    {
+      identity: QID(2), messageId: '<reset-55@login.example.org>', sender: 'security@login.example.org', subject: 'Password reset required',
+      recipients: ['info@demo.mailexpert.local', 'partner@example.org'], receivedAt: iso(STARTED - 3 * 3600000), expiresAt: iso(STARTED + 29 * DAY_MS),
+      state: 'skipped', reason: 'foreign_recipients', error: null, attempts: 0, byPanel: false, releasedAt: null, updatedAt: iso(STARTED - 3 * 3600000),
+    },
+    {
+      identity: QID(3), messageId: '<old-1@example.net>', sender: 'noreply@example.net', subject: 'Account notice',
+      recipients: ['sales@demo.mailexpert.local'], receivedAt: iso(STARTED - 31 * DAY_MS), expiresAt: iso(STARTED - DAY_MS),
+      state: 'skipped', reason: 'gone', error: null, attempts: 0, byPanel: false, releasedAt: null, updatedAt: iso(STARTED - DAY_MS),
+    },
+  ],
+};
+
 // The demo's test of three hours ago and its latest poll (job 9001), as if the tenant had been
 // connected for a while.
 runTest(DEMO_TENANT_SETTINGS, STARTED - 3 * 3600000);
@@ -125,18 +155,26 @@ finish(KINDS.poll, DEMO_TENANT_SETTINGS);
 // The alerts of the tenant for the demo's alert check (backend nodeAlerts.js tenantSignals).
 export function demoTenantAlerts(settings, now = Date.now()) {
   if (!configured(settings)) return [];
+  const alerts = [];
   const notAfter = Date.parse(CERTIFICATE.notAfter);
   const daysLeft = Math.floor((notAfter - now) / DAY_MS);
-  if (daysLeft >= 30) return [];
-  return [{
-    key: 'tenant_certificate', severity: daysLeft < 14 ? 'error' : 'warning',
-    details: { code: notAfter <= now ? 'cert_expired' : 'cert_expiring', daysLeft, notAfter: CERTIFICATE.notAfter, thumbprint: CERTIFICATE.thumbprint },
-  }];
+  if (daysLeft < 30) {
+    alerts.push({
+      key: 'tenant_certificate', severity: daysLeft < 14 ? 'error' : 'warning',
+      details: { code: notAfter <= now ? 'cert_expired' : 'cert_expiring', daysLeft, notAfter: CERTIFICATE.notAfter, thumbprint: CERTIFICATE.thumbprint },
+    });
+  }
+  // R-42: phishing kept in the quarantine and still there.
+  const held = phish.rows.filter((row) => heldRow(row) && Date.parse(row.expiresAt) > now);
+  if (held.length) {
+    alerts.push({ key: 'tenant_phish_held', severity: 'warning', details: { count: held.length, soonestExpiresAt: held.map((r) => r.expiresAt).sort()[0] } });
+  }
+  return alerts;
 }
 
 // Answers a /mail-node/tenant request, or undefined when the path is not one. error(message,
 // code) builds the demo's refusal.
-export function demoTenantRequest(verb, pathname, settings, error) {
+export function demoTenantRequest(verb, pathname, settings, error, body = null) {
   if (verb === 'GET' && pathname === '/mail-node/tenant') {
     return clone({
       driver: 'fake', profileWithoutDriver: false, configured: configured(settings), state, connectorDrift: [],
@@ -168,6 +206,25 @@ export function demoTenantRequest(verb, pathname, settings, error) {
     const at = iso(Date.now());
     state = { ...state, connectorReference: { at, readAt: state.connectors.at, by: null, auto: false, inbound: state.connectors.inbound, outbound: state.connectors.outbound } };
     return clone({ reference: state.connectorReference });
+  }
+  // Stage 7c (R-42): the phishing released from EOP's quarantine.
+  if (verb === 'GET' && pathname === '/mail-node/tenant/phish-release') {
+    return clone({
+      enabled: phish.enabled, changedAt: phish.changedAt, run: phish.run, held: { count: phish.rows.filter(heldRow).length, soonestExpiresAt: null },
+      releases: phish.rows, job: latest(KINDS.phish),
+    });
+  }
+  if (verb === 'PUT' && pathname === '/mail-node/tenant/phish-release') {
+    phish = { ...phish, enabled: !!body?.enabled, changedAt: iso(Date.now()) };
+    return clone({ enabled: phish.enabled, changedAt: phish.changedAt });
+  }
+  if (verb === 'POST' && pathname === '/mail-node/tenant/phish-release/run') {
+    if (!configured(settings)) {
+      throw error('Fill in the tenant ID, its onmicrosoft.com domain, the application ID and the certificate thumbprint first', 'tenant_not_configured');
+    }
+    if (!phish.enabled) throw error('The release of quarantined phishing is paused', 'phish_release_paused');
+    phish = { ...phish, run: { ...phish.run, at: iso(Date.now()), counts: { released: 0, skipped: 0, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false } };
+    return clone({ job: finish(KINDS.phish, settings), created: true });
   }
   const job = /^\/mail-node\/tenant\/jobs\/([^/]+)$/.exec(pathname);
   if (verb === 'GET' && job) {

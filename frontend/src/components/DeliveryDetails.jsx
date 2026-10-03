@@ -4,7 +4,8 @@ import { api } from '../utils/api.js';
 import { formatDateTime } from '../utils/formatDate.js';
 import { mailNodeErrorKey } from '../utils/mailNode.js';
 import {
-  coverageKey, deliveryMark, deliveryStateKey, deliveryTone, explanationKey, reportStateKey, tlsLevelKey,
+  coverageKey, deliveryMark, deliveryStateKey, deliveryTone, eopStatusKey, eopStatusTone, eopTraceActive, eopTraceErrorKey,
+  explanationKey, reportStateKey, tlsLevelKey,
 } from '../utils/delivery.js';
 
 const linkButtonStyle = {
@@ -13,6 +14,9 @@ const linkButtonStyle = {
 };
 const TONE_COLOR = { failed: 'var(--red)', delayed: 'var(--amber)', ok: 'var(--green, #22c55e)', neutral: 'var(--text-secondary)' };
 const quoteStyle = { fontStyle: 'normal', wordBreak: 'break-word', whiteSpace: 'pre-wrap' };
+// While Microsoft's trace is being asked (R-30), the details are read again this often, this many times.
+const TRACE_POLL_MS = 3000;
+const TRACE_POLL_LIMIT = 60;
 
 // "Delivery details" of a sent letter (R-17), under the letter in the message pane: an expander
 // that asks the server on request (GET /api/mail/messages/:id/delivery) what became of the letter
@@ -41,6 +45,19 @@ export default function DeliveryDetails({ messageId, deliveryState = null, compa
       if (current.current === asked) setState({ status: 'done', details });
     } catch (err) {
       if (current.current === asked) setState({ status: 'error', key: mailNodeErrorKey(err?.code) });
+    }
+  };
+
+  // Reads the details again without the loading line (the trace of R-30 moving on).
+  const refresh = async () => {
+    const asked = messageId;
+    try {
+      const details = await api.messageDelivery(asked);
+      if (current.current !== asked) return null;
+      setState({ status: 'done', details });
+      return details;
+    } catch {
+      return null;
     }
   };
 
@@ -91,14 +108,14 @@ export default function DeliveryDetails({ messageId, deliveryState = null, compa
               <button type="button" onClick={load} style={linkButtonStyle}>{t('message.delivery.retry')}</button>
             </div>
           )}
-          {state.status === 'done' && <DeliveryBody details={state.details} />}
+          {state.status === 'done' && <DeliveryBody details={state.details} letterId={messageId} refresh={refresh} />}
         </div>
       )}
     </section>
   );
 }
 
-function DeliveryBody({ details }) {
+function DeliveryBody({ details, letterId, refresh }) {
   const { t } = useTranslation();
   if (!details.messageId) return <div data-delivery-note="no-message-id">{t('message.delivery.noMessageId')}</div>;
   if (details.owned === false) return <div data-delivery-note="not-sent">{t('message.delivery.notSent')}</div>;
@@ -119,7 +136,104 @@ function DeliveryBody({ details }) {
           {rows.map((row) => <RecipientRow key={row.recipient} row={row} />)}
         </ul>
       )}
+      {details.eopTrace && <EopTrace eop={details.eopTrace} letterId={letterId} refresh={refresh} />}
     </>
+  );
+}
+
+// R-30: what Microsoft's message trace says about the letter after the node handed it to EOP,
+// asked on request (a job on the server; the details are read again until it is done). Shown for
+// letters of node mailboxes; without a connected trace it says nothing at all.
+function EopTrace({ eop, letterId, refresh }) {
+  const { t } = useTranslation();
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState(null);
+  const alive = useRef(true);
+  const trace = eop.trace;
+  const active = eopTraceActive(trace);
+
+  // Reads the details again until the trace is no longer being asked.
+  const follow = async () => {
+    for (let i = 0; i < TRACE_POLL_LIMIT && alive.current; i += 1) {
+      await new Promise((resolve) => { setTimeout(resolve, TRACE_POLL_MS); });
+      if (!alive.current) return;
+      const next = await refresh();
+      if (!eopTraceActive(next?.eopTrace?.trace)) return;
+    }
+  };
+  useEffect(() => {
+    alive.current = true;
+    // The details opened with a trace already being asked (by anyone): follow it.
+    if (active) follow();
+    return () => { alive.current = false; };
+    // Once, when the section appears.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!eop.available && eop.reason === 'trace_not_connected' && !trace) return null;
+
+  const ask = async () => {
+    setAsking(true);
+    setError(null);
+    try {
+      await api.messageEopTrace(letterId);
+      const next = await refresh();
+      if (eopTraceActive(next?.eopTrace?.trace)) await follow();
+    } catch (err) {
+      if (alive.current) setError(mailNodeErrorKey(err?.code));
+    } finally {
+      if (alive.current) setAsking(false);
+    }
+  };
+
+  const rows = trace?.recipients ?? [];
+  return (
+    <div data-eop-trace={trace?.state ?? 'none'} style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+      <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{t('message.delivery.eop.title')}</div>
+      <div style={{ fontSize: 11 }}>{t('message.delivery.eop.note')}</div>
+      {!eop.available && eop.reason && <div data-eop-trace-unavailable={eop.reason}>{t(eopTraceErrorKey(eop.reason))}</div>}
+      {trace && (
+        <div role="status" aria-live="polite" style={{ marginTop: 4 }}>
+          {active && t('message.delivery.eop.asking')}
+          {active && trace.error && ` ${t(eopTraceErrorKey(trace.error))}`}
+          {trace.state === 'done' && t('message.delivery.eop.checkedAt', { at: formatDateTime(trace.checkedAt) })}
+          {trace.state === 'failed' && (
+            <span style={{ color: 'var(--red)' }}>{t('message.delivery.eop.failed', { reason: t(eopTraceErrorKey(trace.error)) })}</span>
+          )}
+        </div>
+      )}
+      {trace?.state === 'done' && rows.length === 0 && <div data-eop-trace-none>{t('message.delivery.eop.none')}</div>}
+      {rows.length > 0 && (
+        <ul aria-label={t('message.delivery.eop.recipients')} style={{ listStyle: 'none', margin: '4px 0 0', padding: 0, display: 'grid', gap: 6 }}>
+          {rows.map((row) => {
+            const tone = eopStatusTone(row.status);
+            const at = row.deliveredAt || row.eventAt || row.receivedAt;
+            return (
+              <li key={`${row.recipient}|${row.receivedAt}`} data-eop-recipient={row.recipient} data-eop-status={row.status}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'baseline' }}>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 500, wordBreak: 'break-all' }}>{row.recipient}</span>
+                  <span style={{ fontWeight: 600, color: TONE_COLOR[tone] }}>
+                    {t(eopStatusKey(row.status))}{row.statusCode && tone !== 'ok' ? ` (${row.statusCode})` : ''}
+                  </span>
+                  {at && <span style={{ fontSize: 11 }}>{formatDateTime(at)}</span>}
+                </div>
+                {row.detail && tone !== 'ok' && (
+                  <dl style={dlStyle}><RemoteWords text={row.detail} label={t('message.delivery.eop.words')} /></dl>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {eop.available && (
+        <div style={{ marginTop: 6 }}>
+          <button type="button" onClick={ask} disabled={asking || active} style={linkButtonStyle}>
+            {trace ? t('message.delivery.eop.askAgain') : t('message.delivery.eop.ask')}
+          </button>
+        </div>
+      )}
+      {error && <div role="alert" style={{ color: 'var(--red)' }}>{t(error)}</div>}
+    </div>
   );
 }
 

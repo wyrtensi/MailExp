@@ -424,6 +424,10 @@ export const api = {
     takeTenantConnectorReference: () => request('POST', '/mail-node/tenant/connectors/reference'),
     setTenantDomainHold: (domain, hold) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/hold`, { hold }),
     approveTenantInternalRelay: (domain) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/internal-relay`),
+    // Stage 7c (R-42): the phishing released from EOP's quarantine, the pause switch, a run now.
+    getPhishRelease: () => request('GET', '/mail-node/tenant/phish-release'),
+    setPhishRelease: (enabled) => request('PUT', '/mail-node/tenant/phish-release', { enabled }),
+    runPhishRelease: () => request('POST', '/mail-node/tenant/phish-release/run'),
     // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
     // release and delete (administrators), and whether users see it too.
     listQuarantine: () => request('GET', '/mail-node/quarantine'),
@@ -478,6 +482,8 @@ export const api = {
   getMessageThreading: (id) => request('GET', `/mail/messages/${id}/threading`),
   // What became of a sent letter, per recipient (R-17): the node's log and delivery reports.
   messageDelivery: (id) => request('GET', `/mail/messages/${encodeURIComponent(id)}/delivery`),
+  // R-30: ask Microsoft's message trace about the letter (a job; GET .../delivery follows it).
+  messageEopTrace: (id) => request('POST', `/mail/messages/${encodeURIComponent(id)}/eop-trace`),
   // Resolve a deep-link reference (stable Message-ID header, or a legacy UUID) to the
   // current message row — durable across folder moves (#270).
   resolveMessage: (ref, accountId) => {

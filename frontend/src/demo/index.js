@@ -1831,7 +1831,35 @@ function demoDelivery(id) {
       coverage: recipients.length ? 'found' : (sentAt < DEMO_LOG_OLDEST ? 'gone' : 'not_found'), error: null, oldestAt: DEMO_LOG_OLDEST, sentAt,
     } : null,
     recipients,
+    // R-30: the fake tenant's trace is connected; a letter older than 90 days cannot be asked.
+    eopTrace: node ? {
+      available: Date.parse(sentAt) > Date.now() - 90 * 86400000,
+      reason: Date.parse(sentAt) > Date.now() - 90 * 86400000 ? null : 'trace_too_old',
+      trace: demoEopTraces.get(id) ?? null,
+    } : null,
   };
+}
+
+// Microsoft's trace of a demo letter (backend services/tenant/messageTrace.js), answered at once:
+// what the node handed over was delivered, what EOP refused failed with its code, and a letter the
+// node still holds is not in the trace yet.
+const demoEopTraces = new Map();
+function demoEopTrace(id) {
+  const details = demoDelivery(id);
+  if (!details.owned) throw demoError('Only a letter this mailbox sent can be traced', 'trace_not_sent');
+  if (!details.node) throw demoError('Only a letter of a mailbox on the mail node can be traced', 'trace_not_node');
+  if (!details.eopTrace.available) throw demoError('Microsoft keeps the message trace for 90 days', 'trace_too_old');
+  const now = new Date().toISOString();
+  const recipients = details.recipients.flatMap((r) => {
+    if (r.state === 'sent') return [{ recipient: r.recipient, status: 'delivered', receivedAt: r.at, statusCode: null, detail: null, eventAt: r.at, deliveredAt: r.at, detailsRead: true }];
+    if (r.state === 'bounced') {
+      return [{ recipient: r.recipient, status: 'failed', receivedAt: r.at, statusCode: r.statusCode, detail: r.diagnostic, eventAt: r.at, deliveredAt: null, detailsRead: true }];
+    }
+    return [];
+  });
+  const trace = { state: 'done', requestedAt: now, checkedAt: now, error: null, recipients };
+  demoEopTraces.set(id, trace);
+  return { queued: true, cooldownUntil: null, trace };
 }
 
 // Per-message threading diagnostics (GET /mail/messages/:id/threading), same shape the server
@@ -2197,6 +2225,8 @@ export async function demoRequest(method, path, body = {}) {
 
   const deliveryMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/delivery$/);
   if (verb === 'GET' && deliveryMatch) return clone(demoDelivery(decodeURIComponent(deliveryMatch[1])));
+  const eopTraceMatch = pathname.match(/^\/mail\/messages\/([^/]+)\/eop-trace$/);
+  if (verb === 'POST' && eopTraceMatch) return clone(demoEopTrace(decodeURIComponent(eopTraceMatch[1])));
 
   // No demo letter carries a stored Bcc, so a reopened demo draft always answers "known empty"
   // rather than going through the real route's unknown-Bcc/read-only-open path.
@@ -2705,7 +2735,7 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'GET' && pathname === '/mail-node/eop/budget') return clone(demoTerrlBudget());
   if (pathname.startsWith('/mail-node/tenant')) {
-    const tenantAnswer = demoTenantRequest(verb, pathname, demoEopSettings, demoError);
+    const tenantAnswer = demoTenantRequest(verb, pathname, demoEopSettings, demoError, body);
     if (tenantAnswer !== undefined) return tenantAnswer;
   }
   const quarantineAnswer = demoQuarantineRequest(verb, pathname, body);

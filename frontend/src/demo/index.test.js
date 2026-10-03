@@ -32,10 +32,28 @@ test('sent letters carry delivery marks and details like the server answers them
   assert.ok(failed.recipients.length > 0);
   assert.ok(failed.recipients.every((r) => ['bounced', 'failed'].includes(r.state) && r.explanation?.key));
   assert.deepEqual(await demoRequest('GET', '/mail/messages/demo-005/delivery'), {
-    messageId: (await demoRequest('GET', '/mail/messages/demo-005')).message_id, owned: true, node: false, log: null, recipients: [],
+    messageId: (await demoRequest('GET', '/mail/messages/demo-005')).message_id, owned: true, node: false, log: null, recipients: [], eopTrace: null,
   });
   // A received letter has none.
   assert.equal((await demoRequest('GET', '/mail/messages/demo-001/delivery')).owned, false);
+
+  // R-30: a letter of a node mailbox can ask Microsoft's trace; the demo answers at once.
+  let nodeLetter = null;
+  for (const m of marked) {
+    const details = await demoRequest('GET', `/mail/messages/${m.id}/delivery`);
+    if (details.node && details.recipients.some((r) => r.state === 'bounced')) {
+      nodeLetter = m;
+      assert.deepEqual(details.eopTrace, { available: true, reason: null, trace: null });
+      break;
+    }
+  }
+  assert.ok(nodeLetter, 'a demo letter of a node mailbox that EOP refused');
+  const asked = await demoRequest('POST', `/mail/messages/${nodeLetter.id}/eop-trace`);
+  assert.equal(asked.trace.state, 'done');
+  assert.ok(asked.trace.recipients.every((r) => r.status === 'failed' && r.statusCode));
+  assert.equal((await demoRequest('GET', `/mail/messages/${nodeLetter.id}/delivery`)).eopTrace.trace.state, 'done');
+  await assert.rejects(demoRequest('POST', '/mail/messages/demo-005/eop-trace'), { code: 'trace_not_node' });
+  await assert.rejects(demoRequest('POST', '/mail/messages/demo-001/eop-trace'), { code: 'trace_not_sent' });
 });
 
 test('advertised demo attachments expose pane fields and resolve to local content', async () => {

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DELIVERY_CODE_KEYS, coverageKey, deliveryMark, deliveryStateKey, deliveryTone, explanationKey,
+  DELIVERY_CODE_KEYS, EOP_TRACE_STATUSES, coverageKey, deliveryMark, deliveryStateKey, deliveryTone, eopStatusKey, eopStatusTone,
+  eopTraceActive, eopTraceErrorKey, explanationKey,
 } from './delivery.js';
 
 test('the list marks only failed and delayed letters', () => {
@@ -49,4 +50,21 @@ test('the log note: nothing when the log shows the letter or there is no log loo
   assert.equal(coverageKey({ coverage: 'found' }), null);
   assert.equal(coverageKey({ coverage: 'gone' }), 'message.delivery.coverage.gone');
   assert.equal(coverageKey({ coverage: 'unavailable' }), 'message.delivery.coverage.unavailable');
+});
+
+test('R-30: Microsoft\'s trace statuses in words and tones, its errors, and when it is still asked', () => {
+  assert.deepEqual(EOP_TRACE_STATUSES, ['delivered', 'failed', 'pending', 'quarantined', 'filteredAsSpam', 'expanded', 'gettingStatus']);
+  assert.equal(eopStatusKey('quarantined'), 'message.delivery.eop.status.quarantined');
+  assert.equal(eopStatusKey('newStatus'), 'message.delivery.eop.status.other');
+  assert.equal(eopStatusKey('__proto__'), 'message.delivery.eop.status.other');
+  assert.equal(eopStatusTone('delivered'), 'ok');
+  assert.equal(eopStatusTone('filteredAsSpam'), 'failed');
+  assert.equal(eopStatusTone('pending'), 'delayed');
+  assert.equal(eopStatusTone('newStatus'), 'neutral');
+  assert.equal(eopTraceErrorKey('graph_throttled'), 'message.delivery.eop.errorThrottled');
+  assert.equal(eopTraceErrorKey('trace_auth'), 'message.delivery.eop.errorAuth');
+  assert.equal(eopTraceErrorKey('something'), 'message.delivery.eop.errorFailed');
+  assert.equal(eopTraceActive({ state: 'running' }), true);
+  assert.equal(eopTraceActive({ state: 'done' }), false);
+  assert.equal(eopTraceActive(null), false);
 });
