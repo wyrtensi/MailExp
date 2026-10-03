@@ -93,7 +93,8 @@
         "CloudServicesMailEnabled": false,
         "IsValidated": false,
         "LastValidationTimestamp": null,
-        "WhenChanged": "2026-09-20T10:00:00.0000000Z"
+        "WhenChanged": "2026-09-20T10:00:00.0000000Z",
+        "Guid": "4b1d2c3e-5f60-4718-8a9b-0c1d2e3f4a5b"
       }
     ],
     "get_dkim_signing_config": [

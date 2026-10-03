@@ -128,6 +128,7 @@ const ERRORS = {
   step_invalid: [400, 'No such onboarding step'],
   step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
   step_by_tenant_driver: [409, 'MailExpert confirms this step itself through the tenant driver'],
+  mark_ready_by_tenant_driver: [409, 'With the tenant driver the domain goes through the tenant steps; it cannot be marked ready by hand'],
   outbound_connector_invalid: [400, 'Outbound connector must be its name in EAC: letters, digits, spaces, dots, dashes and underscores, up to 64 characters'],
   dbeb_external_domain_invalid: [400, 'The external domain of the DBEB contacts must be a domain name such as relay.example.com'],
   eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
@@ -416,6 +417,9 @@ router.post('/domains/:domain/steps/:step', requireAdmin, async (req, res) => {
 router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
+  // With the tenant driver, "ready" without the tenant steps would skip Internal Relay and the
+  // connector (I3 of the 7b review).
+  if (tenantDriverActive(await getEopSettings())) return refuse(res, 'mark_ready_by_tenant_driver');
   if (await refusedByNode(res, domain)) return undefined;
   const result = await markReady({ domain, userId: req.session.userId });
   return stateChanged(req, res, domain, result, 'marked_ready');

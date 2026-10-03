@@ -20,12 +20,16 @@ describe('checkExoOp (R-36)', () => {
   });
 
   it('checks connector names and addresses of the stage 7b operations', () => {
-    expect(checkExoOp('add_outbound_connector_domain', { connector: ' To mail node ', domain: 'Example.com' }))
-      .toEqual({ connector: 'To mail node', domain: 'example.com' });
-    for (const connector of ["x' -Confirm", 'a;b', 'Node$(x)', 'a'.repeat(65), '', null]) {
+    // The connector goes to the worker by its Guid; its name is only compared in the panel.
+    expect(checkExoOp('add_outbound_connector_domain', { connector: ' 4B1D2C3E-5F60-4718-8A9B-0C1D2E3F4A5B ', domain: 'Example.com' }))
+      .toEqual({ connector: '4b1d2c3e-5f60-4718-8a9b-0c1d2e3f4a5b', domain: 'example.com' });
+    for (const connector of ["x' -Confirm", 'To mail node', '4b1d2c3e-5f60-4718-8a9b-0c1d2e3f4a5b;x', '', null]) {
       expect(() => checkExoOp('add_outbound_connector_domain', { connector, domain: 'example.com' })).toThrow(TenantError);
-      expect(parseConnectorName(connector)).toBeNull();
     }
+    expect(parseConnectorName(' To node [EU] & co ')).toBe('To node [EU] & co');
+    for (const name of ['', 'a'.repeat(65), 'To\tnode', null]) expect(parseConnectorName(name)).toBeNull();
+    expect(checkExoOp('set_mail_contact_external', { address: 'Info@example.com', external: 'info@relay.example.net' }))
+      .toEqual({ address: 'info@example.com', external: 'info@relay.example.net' });
     expect(checkExoOp('new_mail_contact', { address: 'Info@Example.com', external: 'info@relay.example.net' }))
       .toEqual({ address: 'info@example.com', external: 'info@relay.example.net' });
     expect(() => checkExoOp('new_mail_contact', { address: 'info@example.com' })).toThrow(TenantError);

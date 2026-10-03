@@ -32,6 +32,7 @@ describe('recordAudit', () => {
       'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
       'mail_node.outage_deleted',
       'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
+      'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
     ]);
   });
 

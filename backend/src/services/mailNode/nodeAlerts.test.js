@@ -4,6 +4,7 @@ const db = vi.hoisted(() => ({ configs: {} }));
 vi.mock('../db.js', () => ({
   query: vi.fn(async (sql, params) => {
     if (sql.startsWith('SELECT config')) return { rows: db.configs[params[0]] ? [{ config: db.configs[params[0]] }] : [] };
+    if (sql.includes('FROM mail_node_domains')) return { rows: db.waitingDomains ?? [] };
     if (sql.includes('INSERT INTO integration_config')) {
       const [provider, config] = params;
       db.configs[provider] = sql.includes('integration_config.config ||') ? { ...(db.configs[provider] ?? {}), ...config } : config;

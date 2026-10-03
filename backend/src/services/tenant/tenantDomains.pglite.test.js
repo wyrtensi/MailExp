@@ -171,7 +171,16 @@ describe('a domain through its tenant steps', () => {
     expect(r.accepted_domain_type).not.toBe('Authoritative');
 
     await db.query("UPDATE mail_node_domains SET state = 'ready' WHERE domain = $1", [D]);
+    await sync();
+    // Held on Internal Relay by default (Q1): the mirror is complete, the switch waits.
+    r = await row();
+    expect(r.state).toBe('ready');
+    expect(r.hold_internal_relay).toBe(true);
+    expect(r.tenant_sync.authoritative).toMatchObject({ ok: true, held: true, mirrorComplete: true });
+    expect(model.accepted.get(D).type).toBe('InternalRelay');
     driver.fake.exo.calls.length = 0;
+    const released = await post('/tenant/domains/example.com/hold', { hold: false });
+    expect(released.status).toBe(200);
     await sync();
     r = await row();
     expect(r.state).toBe('authoritative');
@@ -180,7 +189,7 @@ describe('a domain through its tenant steps', () => {
     expect(writes().map((c) => c.op)).toEqual(['set_accepted_domain_authoritative']);
     const entries = (await audit()).filter((e) => e.action === 'mail_node.domain_state_changed').map((e) => `${e.details.from}>${e.details.to}`);
     expect(entries).toEqual(['dns_ok>tenant_verified', 'tenant_verified>internal_relay', 'internal_relay>connector_ready', 'ready>authoritative']);
-    expect((await audit()).find((e) => e.action === 'tenant.recipients_synced').details).toEqual({ domain: D, created: 2, removed: 0 });
+    expect((await audit()).find((e) => e.action === 'tenant.recipients_synced').details).toEqual({ domain: D, created: 2, removed: 0, retargeted: 0 });
   });
 
   it('a second run only reads (idempotent)', async () => {
@@ -227,32 +236,56 @@ describe('a domain through its tenant steps', () => {
     expect(r.tenant_sync.acceptedDomain).toMatchObject({ visible: true, type: 'InternalRelay', polls: 0 });
   });
 
-  it('puts an Authoritative accepted domain back to Internal Relay before the mirror is complete (R-24)', async () => {
+  it('leaves a domain the tenant already had as Authoritative alone until an administrator approves Internal Relay (Q2)', async () => {
     await addDomain('ready');
     model.domains.set(D, { id: D, isVerified: true, supportedServices: ['Email'] });
     model.accepted.set(D, { type: 'Authoritative', misses: 0 });
-    // A mailbox whose contact cannot be made keeps the mirror incomplete.
     setMailboxes('a@example.com');
-    driver.fake.exo.answers.new_mail_contact = new TenantError('exo_failed', 'Something else');
     await sync();
-    const r = await row();
+    let r = await row();
+    expect(model.accepted.get(D).type).toBe('Authoritative');
+    expect(writes()).toEqual([]);
+    expect(r.tenant_sync.acceptedDomain).toMatchObject({ ok: false, code: 'authoritative_in_tenant' });
+    expect(r.tenant_sync.graph.preexisting).toBe(true);
+    expect(r.accepted_domain_type).toBe('Authoritative');
+    // The decision is an administrator's explicit action.
+    auth.admin = false;
+    expect((await post('/tenant/domains/example.com/internal-relay')).status).toBe(403);
+    auth.admin = true;
+    expect((await post('/tenant/domains/example.com/internal-relay')).status).toBe(202);
+    await sync();
+    r = await row();
     expect(model.accepted.get(D).type).toBe('InternalRelay');
-    expect(r.state).toBe('ready');
-    expect(r.tenant_sync.mirror).toMatchObject({ ok: false, failed: [expect.objectContaining({ address: 'a@example.com', code: 'exo_failed' })] });
+    expect(r.tenant_sync.acceptedDomain).toMatchObject({ visible: true, type: 'InternalRelay' });
+    expect((await audit()).map((e) => e.action)).toContain('tenant.internal_relay_approved');
+    expect((await post('/tenant/domains/example.com/internal-relay')).status).toBe(409);
+  });
+
+  it('puts an Authoritative type it set itself back to Internal Relay before the mirror is complete (R-24)', async () => {
+    // A domain the driver added: the tenant's default type (Authoritative) is not a decision.
+    await addDomain('dns_ok');
+    await sync();
+    model.accepted.get(D).type = 'Authoritative';
+    await db.query("UPDATE mail_node_domains SET state = 'ready' WHERE domain = $1", [D]);
+    await sync();
+    expect(model.accepted.get(D).type).toBe('InternalRelay');
+    expect((await row()).state).toBe('ready');
   });
 
   it('names the problem when no Outbound connector can be chosen (R-25)', async () => {
     await addDomain('dns_ok');
-    model.outbound.push({ ...model.outbound[0], Name: 'Second', Identity: 'Second', RecipientDomains: [] });
+    // An EAC name with brackets and '&': the worker gets the Guid, so it works (M2).
+    model.addOutbound({ Name: 'To node [EU] & backup', Identity: 'To node [EU] & backup' });
     await sync();
     let r = await row();
     expect(r.state).toBe('internal_relay');
-    expect(r.tenant_sync.connector).toMatchObject({ ok: false, code: 'outbound_connector_ambiguous', names: ['To mail node', 'Second'] });
-    await saveEopSettings({ outboundConnector: 'Second' });
+    expect(r.tenant_sync.connector).toMatchObject({ ok: false, code: 'outbound_connector_ambiguous', names: ['To mail node', 'To node [EU] & backup'] });
+    await saveEopSettings({ outboundConnector: 'To node [EU] & backup' });
     await sync();
     r = await row();
     expect(r.state).toBe('connector_ready');
     expect(model.outbound[1].RecipientDomains).toEqual([D]);
+    expect(driver.fake.exo.calls.find((c) => c.op === 'add_outbound_connector_domain').args.connector).toBe(model.outbound[1].Guid);
   });
 });
 
@@ -294,7 +327,7 @@ describe('the recipient mirror (R-29)', () => {
     model.recipients.set('old@example.com', { ...TENANT_FIXTURES.exo.get_recipients[0], Identity: 'old@example.com', PrimarySmtpAddress: 'old@example.com', ExternalEmailAddress: 'SMTP:old@example.com' });
     setMailboxes('a@example.com');
     node.aliases = [{ address: 'sales@example.com', targets: ['a@example.com'], active: true }, { address: '@example.com', targets: ['a@example.com'], active: true }];
-    await db.query("UPDATE mail_node_domains SET state = 'ready' WHERE domain = $1", [D]);
+    await db.query("UPDATE mail_node_domains SET state = 'ready', hold_internal_relay = false WHERE domain = $1", [D]);
     await sync();
     await sync();
     const r = await row();
@@ -435,14 +468,51 @@ describe('the queue and the routes', () => {
     expect(await enqueueDueDomainSyncs(now + 3600000)).toEqual([]);
   });
 
-  it('runs one sync of a domain at a time', async () => {
+  it('runs one sync of a domain at a time, without spending attempts (M1)', async () => {
     await addDomain('dns_ok');
+    // Another live run holds the domain.
+    await db.query('UPDATE mail_node_domains SET sync_lock_job = 999999, sync_locked_at = NOW() WHERE domain = $1', [D]);
     const { job } = await enqueueDomainSync(D);
-    await db.query("UPDATE jobs SET status = 'running', claim_token = 'other' WHERE id = $1", [job.id]);
-    await enqueueDomainSync(D);
     await runDue();
-    const second = (await jobs()).find((j) => j.id !== job.id);
-    expect(second).toMatchObject({ status: 'queued', error_code: 'domain_sync_busy' });
+    const all = await jobs();
+    expect(all.find((j) => j.id === job.id)).toMatchObject({ status: 'done', attempts: 1 });
+    const next = all.find((j) => j.id !== job.id);
+    expect(next).toMatchObject({ status: 'queued', attempts: 0 });
+    expect(new Date(next.run_at) - Date.now()).toBeGreaterThan(20000);
+    expect(driver.fake.graph.requests.filter((r) => r.kind === 'graph')).toEqual([]);
+    // A lock left by a run that died is taken over; a finished run releases it.
+    await db.query("UPDATE mail_node_domains SET sync_locked_at = NOW() - interval '31 minutes' WHERE domain = $1", [D]);
+    await sync();
+    const r = await row();
+    expect(r.state).toBe('connector_ready');
+    expect(r.sync_lock_job).toBeNull();
+  });
+
+  it('refuses the tenant buttons to anyone but administrators', async () => {
+    await addDomain('dns_ok');
+    auth.admin = false;
+    expect((await post('/tenant/domains/example.com/sync')).status).toBe(403);
+    expect((await post('/tenant/connectors/reference')).status).toBe(403);
+    expect((await post('/tenant/domains/example.com/hold', { hold: false })).status).toBe(403);
+  });
+
+  it('holds a domain on Internal Relay until turned off, never an Authoritative one (Q1)', async () => {
+    await addDomain('dns_ok');
+    expect((await post('/tenant/domains/example.com/hold', { hold: 'no' })).status).toBe(400);
+    expect((await post('/tenant/domains/nope.example/hold', { hold: true })).status).toBe(404);
+    expect((await post('/tenant/domains/example.com/hold', { hold: false })).status).toBe(200);
+    expect((await row()).hold_internal_relay).toBe(false);
+    expect((await audit()).find((e) => e.action === 'tenant.domain_hold_changed').details).toEqual({ domain: D, hold: false });
+    await db.query("UPDATE mail_node_domains SET state = 'authoritative' WHERE domain = $1", [D]);
+    expect((await post('/tenant/domains/example.com/hold', { hold: true })).status).toBe(409);
+  });
+
+  it('refuses "mark ready" while the driver runs the tenant steps (I3)', async () => {
+    await addDomain('dns_ok');
+    const res = await post('/domains/example.com/ready');
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('mark_ready_by_tenant_driver');
+    expect((await row()).state).toBe('dns_ok');
   });
 
   it('POST /tenant/domains/:domain/sync queues the job; "Done" on a driver step is refused', async () => {
@@ -466,6 +536,136 @@ describe('the queue and the routes', () => {
     await addDomain('node_configured');
     expect((await post('/domains/example.com/steps/dns_ok')).status).toBe(200);
     expect((await jobs()).map((j) => j.payload.domain)).toEqual([D]);
+  });
+});
+
+describe('the fixes of the 7b review', () => {
+  const ready = async () => {
+    await addDomain('dns_ok');
+    await sync();
+    await db.query("UPDATE mail_node_domains SET state = 'ready', hold_internal_relay = false WHERE domain = $1", [D]);
+    driver.fake.exo.calls.length = 0;
+  };
+
+  it('C1: a write that keeps failing is shown and not retried every two seconds', async () => {
+    await ready();
+    setMailboxes('a@example.com');
+    driver.fake.exo.answers.new_mail_contact = new TenantError('exo_failed', 'The name is too long');
+    await sync();
+    const r = await row();
+    expect(r.tenant_sync.mirror).toMatchObject({ ok: false, left: 0, failed: [expect.objectContaining({ address: 'a@example.com', code: 'exo_failed' })] });
+    expect((await jobs()).filter((j) => j.status === 'queued')).toEqual([]);
+    expect(r.state).toBe('ready');
+  });
+
+  it('C1: what the budget left goes on at once, a failure among it does not count', async () => {
+    await ready();
+    setMailboxes(...Array.from({ length: 14 }, (_, i) => `u${String(i).padStart(2, '0')}@example.com`));
+    driver.fake.exo.answers.new_mail_contact = (args) => {
+      if (args.address === 'u00@example.com') throw new TenantError('exo_failed', 'refused');
+      return model.exo.new_mail_contact(args);
+    };
+    await sync();
+    const mirror = (await row()).tenant_sync.mirror;
+    // 25 writes: u00 failed (1), 12 made and hidden (24): u13 is left.
+    expect(mirror.left).toBe(1);
+    expect((await jobs()).filter((j) => j.status === 'queued')).toHaveLength(1);
+  });
+
+  it('I1: an empty node answer never wipes contacts the panel does not know', async () => {
+    await ready();
+    model.recipients.set('manual@example.com', { ...TENANT_FIXTURES.exo.get_recipients[0], Identity: 'manual@example.com', PrimarySmtpAddress: 'manual@example.com', ExternalEmailAddress: 'SMTP:manual@example.com' });
+    setMailboxes();
+    await sync();
+    expect(model.recipients.has('manual@example.com')).toBe(true);
+    expect((await row()).tenant_sync.mirror).toMatchObject({ suspicious: true, complete: false });
+    expect((await row()).state).toBe('ready');
+  });
+
+  it('I2: "exists" from New-MailContact counts only once a read shows the contact; else address_taken', async () => {
+    await ready();
+    setMailboxes('a@example.com');
+    const id = await addAccount('a@example.com');
+    // Held by a recipient Get-Recipient does not show.
+    driver.fake.exo.answers.new_mail_contact = new TenantError('exo_exists', 'The proxy address "SMTP:a@example.com" is already being used');
+    await sync();
+    let r = await row();
+    expect(r.tenant_sync.mirror).toMatchObject({ ok: false, created: [], present: 0, failed: [expect.objectContaining({ address: 'a@example.com', code: 'address_taken' })] });
+    expect(r.state).toBe('ready');
+    expect((await db.query('SELECT tenant_recipient_at FROM email_accounts WHERE id = $1', [id])).rows[0].tenant_recipient_at).toBeNull();
+    expect((await audit()).filter((e) => e.action === 'tenant.recipients_synced')).toEqual([]);
+    // Made by a run whose answer was lost: the read finds it.
+    driver.fake.exo.answers.new_mail_contact = (args) => {
+      model.exo.new_mail_contact(args);
+      throw new TenantError('exo_exists', 'already exists');
+    };
+    await sync();
+    r = await row();
+    expect(r.tenant_sync.mirror).toMatchObject({ ok: true, created: ['a@example.com'] });
+  });
+
+  it('M3: a mailbox whose address another tenant recipient holds does not wait for the tenant', async () => {
+    await ready();
+    setMailboxes('team@example.com');
+    const id = await addAccount('team@example.com');
+    model.addRecipient({ PrimarySmtpAddress: 'team@example.com', EmailAddresses: ['SMTP:team@example.com'], RecipientTypeDetails: 'UserMailbox' });
+    await sync();
+    expect((await row()).tenant_sync.mirror.conflicts).toEqual(['team@example.com']);
+    expect((await db.query('SELECT tenant_recipient_at FROM email_accounts WHERE id = $1', [id])).rows[0].tenant_recipient_at).not.toBeNull();
+  });
+
+  it('I3: no Authoritative while the Outbound connector does not hold the domain', async () => {
+    await ready();
+    setMailboxes('a@example.com');
+    model.outbound[0].RecipientDomains = [];
+    driver.fake.exo.answers.add_outbound_connector_domain = new TenantError('exo_failed', 'Access denied');
+    await sync();
+    await sync();
+    const r = await row();
+    expect(r.tenant_sync.mirror.complete).toBe(true);
+    expect(r.tenant_sync.connector).toMatchObject({ ok: false });
+    expect(r.state).toBe('ready');
+    expect(model.accepted.get(D).type).toBe('InternalRelay');
+    expect(ops()).not.toContain('set_accepted_domain_authoritative');
+  });
+
+  it('I5: variant B on an Authoritative domain moves the contacts in place, never removes them', async () => {
+    await ready();
+    setMailboxes('a@example.com');
+    await sync();
+    await sync();
+    expect((await row()).state).toBe('authoritative');
+    driver.fake.exo.calls.length = 0;
+    await saveEopSettings({ dbebExternalDomain: 'relay.example.net' });
+    await sync();
+    expect(ops()).not.toContain('remove_mail_contact');
+    expect(ops()).not.toContain('new_mail_contact');
+    expect(ops()).toContain('set_mail_contact_external');
+    expect(model.recipients.get('a@example.com')).toMatchObject({ ExternalEmailAddress: 'SMTP:a@relay.example.net' });
+    const r = await row();
+    expect(r.state).toBe('authoritative');
+    expect(r.tenant_sync.mirror).toMatchObject({ retargeted: ['a@example.com'], present: 1, variant: 'B' });
+  });
+
+  it('I4: an onboarding started over keeps the domain on Internal Relay and its contacts removed before the mailbox', async () => {
+    await ready();
+    setMailboxes('a@example.com');
+    await sync();
+    await sync();
+    expect((await row()).state).toBe('authoritative');
+    expect((await post('/domains/example.com/restart')).status).toBe(200);
+    let r = await row();
+    expect(r.state).toBe('node_created');
+    expect(r.accepted_domain_type).toBe('Authoritative');
+    // The mailbox deleted now still loses its contact first: the domain is Authoritative in the tenant.
+    await removeRecipientBeforeDelete({ email_address: 'a@example.com' });
+    expect(model.recipients.has('a@example.com')).toBe(false);
+    // The next run moves the domain to Internal Relay (the restart approved it) without waiting.
+    await sync();
+    r = await row();
+    expect(model.accepted.get(D).type).toBe('InternalRelay');
+    expect(r.accepted_domain_type).toBe('InternalRelay');
+    expect(r.state).toBe('node_created');
   });
 });
 

@@ -43,14 +43,7 @@ export function parseOrganization(value) {
   return domain && domain.endsWith('.onmicrosoft.com') ? domain : null;
 }
 
-// A connector's name as the owner gave it in EAC (Set-OutboundConnector -Identity): letters, digits,
-// space, dot, dash and underscore, up to 64 characters, case kept.
-const NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$/;
-export function parseName(value) {
-  return typeof value === 'string' && NAME_RE.test(value) ? value : null;
-}
-
-const KINDS = { domain: parseDomain, address: parseAddress, name: parseName };
+const KINDS = { domain: parseDomain, address: parseAddress, guid: parseGuid };
 
 // op -> { cmdlets: what Connect-ExchangeOnline -CommandName loads for it, params: { name: kind } }.
 // The cmdlet calls themselves live in runner.ps1, keyed by the same op names.
@@ -67,10 +60,11 @@ export const OPS = Object.freeze({
   set_accepted_domain_internal_relay: { cmdlets: ['Set-AcceptedDomain'], params: { domain: 'domain' } },
   set_accepted_domain_authoritative: { cmdlets: ['Set-AcceptedDomain'], params: { domain: 'domain' } },
   // R-25: the connectors, read for the reference and the comparison; a domain added to the
-  // Outbound connector's RecipientDomains (@{Add=...}, the others stay).
+  // Outbound connector's RecipientDomains (@{Add=...}, the others stay), the connector named by its
+  // Guid (an EAC name may hold any character).
   get_inbound_connectors: { cmdlets: ['Get-InboundConnector'], params: {} },
   get_outbound_connectors: { cmdlets: ['Get-OutboundConnector'], params: {} },
-  add_outbound_connector_domain: { cmdlets: ['Set-OutboundConnector'], params: { connector: 'name', domain: 'domain' } },
+  add_outbound_connector_domain: { cmdlets: ['Set-OutboundConnector'], params: { connector: 'guid', domain: 'domain' } },
   // R-26: EOP DKIM of a domain: made disabled with a 2048-bit key, read, enabled.
   new_dkim_signing_config: { cmdlets: ['New-DkimSigningConfig'], params: { domain: 'domain' } },
   get_dkim_signing_config: { cmdlets: ['Get-DkimSigningConfig'], params: { domain: 'domain' } },
@@ -79,6 +73,7 @@ export const OPS = Object.freeze({
   // (named by their address), hidden from the address lists and removed.
   get_recipients: { cmdlets: ['Get-Recipient'], params: {} },
   new_mail_contact: { cmdlets: ['New-MailContact'], params: { address: 'address', external: 'address' } },
+  set_mail_contact_external: { cmdlets: ['Set-MailContact'], params: { address: 'address', external: 'address' } },
   hide_mail_contact: { cmdlets: ['Set-MailContact'], params: { address: 'address' } },
   remove_mail_contact: { cmdlets: ['Remove-MailContact'], params: { address: 'address' } },
 });

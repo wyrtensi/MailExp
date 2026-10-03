@@ -65,15 +65,18 @@ describe('planMirror (R-29)', () => {
     expect(plan.remove).toEqual([]);
   });
 
-  it('hides a visible contact and makes again one of the other D-7 variant', () => {
+  it('hides a visible contact and moves one of the other D-7 variant in place', () => {
     const plan = planMirror({
       ...base,
       mailboxes: [mailbox('a@example.com'), mailbox('b@example.com')],
       recipients: [contact('a@example.com', { hidden: false }), contact('b@example.com')],
       externalDomain: 'relay.example.net',
     });
-    expect(plan.remove).toEqual(['a@example.com', 'b@example.com']);
-    expect(plan.create).toEqual(['a@example.com', 'b@example.com']);
+    // Never removed and made again: on an Authoritative domain the address would be rejected between.
+    expect(plan.retarget).toEqual(['a@example.com', 'b@example.com']);
+    expect(plan.remove).toEqual([]);
+    expect(plan.create).toEqual([]);
+    expect(plan.hide).toEqual(['a@example.com']);
     expect(plan.present).toEqual([]);
     const same = planMirror({
       ...base, mailboxes: [mailbox('a@example.com')], recipients: [contact('a@example.com', { hidden: false })],
@@ -85,6 +88,18 @@ describe('planMirror (R-29)', () => {
     const plan = planMirror({ ...base, mailboxes: [], panel: [{ email: 'a@example.com', deleting: false }], recipients: [contact('a@example.com')] });
     expect(plan.suspicious).toBe(true);
     expect(plan.remove).toEqual([]);
+  });
+
+  it('removes nothing when the node lists no mailbox while the tenant has contacts of the domain, the panel none', () => {
+    const plan = planMirror({ ...base, mailboxes: [], recipients: [contact('manual@example.com')] });
+    expect(plan.suspicious).toBe(true);
+    expect(plan.remove).toEqual([]);
+    expect(planMirror({ ...base, mailboxes: [] }).suspicious).toBe(false);
+  });
+
+  it('lets a disabled catch-all pass (D-6 is about mail it takes)', () => {
+    const plan = planMirror({ ...base, mailboxes: [mailbox('a@example.com')], aliases: [{ address: '@example.com', active: false }] });
+    expect(plan.catchAll).toBeNull();
   });
 });
 

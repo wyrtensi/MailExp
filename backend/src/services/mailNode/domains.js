@@ -50,6 +50,10 @@ function toDomain(row) {
     dns: dnsOf(row),
     expected: expectedOf(row),
     tenantSync: row.tenant_sync ?? null,
+    // Stage 7b: the domain stays on Internal Relay (Q1), and when an administrator approved moving a
+    // domain that was Authoritative in the tenant to Internal Relay (Q2).
+    holdInternalRelay: row.hold_internal_relay !== false,
+    internalRelayApprovedAt: row.internal_relay_approved_at ?? null,
   };
 }
 
@@ -91,6 +95,7 @@ export async function listDomainRows() {
   const { rows } = await query(`
     SELECT d.domain, d.state, d.origin, d.added_at, d.state_changed_at, d.steps, d.max_mailboxes, d.node_created,
            d.apply_result, d.applied_at, d.dns_check, d.dns_checked_at, d.expected_mx, d.tenant, d.tenant_sync,
+           d.hold_internal_relay, d.internal_relay_approved_at,
            COALESCE(NULLIF(u.email, ''), u.username) AS added_by_email
       FROM mail_node_domains d
       LEFT JOIN users u ON u.id = d.added_by
@@ -144,11 +149,12 @@ export function mergeDomains(nodeDomains, rows) {
     ? {
       state: row.state, origin: row.origin, addedAt: row.addedAt, addedBy: row.addedBy, stateChangedAt: row.stateChangedAt,
       steps: row.steps, apply: row.apply ?? null, dns: row.dns ?? null, expected: row.expected ?? null,
-      tenantSync: row.tenantSync ?? null,
+      tenantSync: row.tenantSync ?? null, holdInternalRelay: row.holdInternalRelay ?? true,
+      internalRelayApprovedAt: row.internalRelayApprovedAt ?? null,
     }
     : {
       state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, dns: null,
-      expected: null, tenantSync: null,
+      expected: null, tenantSync: null, holdInternalRelay: true, internalRelayApprovedAt: null,
     });
   const listed = nodeDomains ?? [];
   const merged = listed.map((d) => {
@@ -181,13 +187,18 @@ export function mergeDomains(nodeDomains, rows) {
 // lists the domains). What the owner chose or typed stays: the domain's DKIM mode and send limit
 // (applied again to the node domain) and the values it must publish (the expected MX, and the
 // verification TXT and selector CNAMEs entered by hand, `tenant` with source 'manual'; owner's
-// decision 2026-10-01). Mailboxes on the domain are not touched.
+// decision 2026-10-01). Mailboxes on the domain are not touched. Stage 7b: the accepted domain type
+// stays (the domain is still in the tenant, and the mailbox deletion reads it), and a domain the panel
+// had in the tenant gets Internal Relay approved, so the next run moves it there instead of waiting.
+// The hold on Internal Relay stays as the owner set it.
 // row: how the statement names the row being changed.
 const restartSet = (row) => `
   state = 'node_created', steps = '{}', state_changed_by = $2, state_changed_at = NOW(), updated_at = NOW(),
   relayhost_id = NULL, apply_result = NULL, applied_at = NULL, dns_check = NULL, dns_checked_at = NULL,
   tenant = CASE WHEN ${row}.tenant->>'source' = 'manual' THEN ${row}.tenant END,
-  accepted_domain_type = NULL, node_created = NULL, tenant_sync = NULL`;
+  internal_relay_approved_at = CASE WHEN ${row}.tenant_sync IS NOT NULL OR ${row}.accepted_domain_type IS NOT NULL
+    THEN NOW() ELSE ${row}.internal_relay_approved_at END,
+  node_created = NULL, tenant_sync = NULL`;
 
 // A domain the panel just created on the node. Adding a domain again after it was removed from the
 // node starts its onboarding over: the node lost its settings with it. The node identity is bound
@@ -304,11 +315,10 @@ export async function adoptDomain({ domain, userId, nodeCreated = null }) {
 }
 
 // A row at the first step with nothing confirmed and nothing recorded about the node or the tenant
-// (the values typed by hand stay through a restart, so they do not count): restarting it would
-// change nothing.
+// (the values typed by hand and the accepted domain type stay through a restart, so they do not
+// count): restarting it would change nothing.
 const PRISTINE = `state = 'node_created' AND steps = '{}'::jsonb AND relayhost_id IS NULL AND dns_check IS NULL
-  AND dns_checked_at IS NULL AND (tenant IS NULL OR tenant->>'source' = 'manual') AND accepted_domain_type IS NULL
-  AND tenant_sync IS NULL`;
+  AND dns_checked_at IS NULL AND (tenant IS NULL OR tenant->>'source' = 'manual') AND tenant_sync IS NULL`;
 
 // "Restart onboarding": an administrator starts a domain's onboarding over, from any state. Where
 // the domain came from, who added it and its mailbox limit stay. Answers { from, to, steps } with

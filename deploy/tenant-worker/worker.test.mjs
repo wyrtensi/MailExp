@@ -15,7 +15,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain, parseName } from './ops.mjs';
+import { COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain, parseGuid } from './ops.mjs';
 import { MARKER, certificateFrom, certificateInfo, createHandler, createRunner, runnerEnv, signAssertion, startProblem } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -51,7 +51,7 @@ test('the whitelist: every op loads only its own cmdlets', () => {
     'add_outbound_connector_domain', 'enable_dkim_signing_config', 'get_accepted_domain', 'get_blocked_connector',
     'get_content_filter_policy', 'get_dkim_signing_config', 'get_inbound_connectors', 'get_outbound_connectors', 'get_recipients',
     'hide_mail_contact', 'new_dkim_signing_config', 'new_mail_contact', 'remove_mail_contact', 'set_accepted_domain_authoritative',
-    'set_accepted_domain_internal_relay', 'whoami',
+    'set_accepted_domain_internal_relay', 'set_mail_contact_external', 'whoami',
   ]);
   assert.deepEqual(COMMAND_NAMES, [
     'Get-AcceptedDomain', 'Get-BlockedConnector', 'Get-DkimSigningConfig', 'Get-HostedContentFilterPolicy', 'Get-InboundConnector',
@@ -85,13 +85,13 @@ test('R-36: unknown operations and hostile values are refused before pwsh', () =
   for (const value of ['a;b@example.com', '$(x)@example.com', "o'brien@example.com", '"a"@example.com', 'a..b@example.com']) {
     assert.equal(parseAddress(value), null, value);
   }
-  // A connector name may hold spaces, nothing else of the hostile values.
-  const hostileNames = [...HOSTILE.filter((v) => v !== 'example .com'), 'From mail node;', "From 'node'", 'a'.repeat(65), ' From node', 'From node ', 'From\nnode', 'Node$(x)'];
-  for (const value of hostileNames) {
+  // The connector is named by its Guid: an EAC name may hold any character.
+  for (const value of [...HOSTILE, 'To mail node', '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a;whoami', '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a\n']) {
     assert.throws(() => checkOp('add_outbound_connector_domain', { connector: value, domain: 'example.com' }), { code: 'invalid_args' }, JSON.stringify(value));
-    assert.equal(parseName(value), null, JSON.stringify(value));
+    assert.equal(parseGuid(value), null, JSON.stringify(value));
   }
-  assert.deepEqual(checkOp('add_outbound_connector_domain', { connector: 'To mail_node-1.x', domain: 'Example.com' }), { connector: 'To mail_node-1.x', domain: 'example.com' });
+  assert.deepEqual(checkOp('add_outbound_connector_domain', { connector: '9F8E7D6C-5B4A-4392-8170-6F5E4D3C2B1A', domain: 'Example.com' }), { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', domain: 'example.com' });
+  assert.throws(() => checkOp('set_mail_contact_external', { address: 'a@example.com', external: 'a@relay.example.net;x' }), { code: 'invalid_args' });
   assert.throws(() => checkOp('new_mail_contact', { address: 'a@example.com' }), { code: 'invalid_args' });
   assert.throws(() => checkOp('new_mail_contact', { address: 'a@example.com', external: "x'@example.com" }), { code: 'invalid_args' });
   assert.deepEqual(checkOp('new_mail_contact', { address: 'A@example.com', external: 'a@relay.example.net' }), { address: 'a@example.com', external: 'a@relay.example.net' });
@@ -352,8 +352,10 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
       [{ cmdlet: 'Set-AcceptedDomain', parameters: { DomainType: 'Authoritative', Identity: 'example.com' } }]);
     assert.deepEqual(await printed('get_outbound_connectors', {}), [{ cmdlet: 'Get-OutboundConnector', parameters: {} }]);
     assert.deepEqual(await printed('get_inbound_connectors', {}), [{ cmdlet: 'Get-InboundConnector', parameters: {} }]);
-    assert.deepEqual(await printed('add_outbound_connector_domain', { connector: 'To mail node', domain: 'example.com' }),
-      [{ cmdlet: 'Set-OutboundConnector', parameters: { Identity: 'To mail node', RecipientDomains: { Add: 'example.com' } } }]);
+    assert.deepEqual(await printed('add_outbound_connector_domain', { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', domain: 'example.com' }),
+      [{ cmdlet: 'Set-OutboundConnector', parameters: { Identity: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', RecipientDomains: { Add: 'example.com' } } }]);
+    assert.deepEqual(await printed('set_mail_contact_external', { address: 'info@example.com', external: 'info@relay.example.net' }),
+      [{ cmdlet: 'Set-MailContact', parameters: { Identity: 'info@example.com', ExternalEmailAddress: 'info@relay.example.net' } }]);
     assert.deepEqual(await printed('new_dkim_signing_config', { domain: 'example.com' }),
       [{ cmdlet: 'New-DkimSigningConfig', parameters: { Enabled: false, KeySize: 2048, DomainName: 'example.com' } }]);
     assert.deepEqual(await printed('get_dkim_signing_config', { domain: 'example.com' }),
@@ -369,6 +371,8 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
     assert.deepEqual(await printed('remove_mail_contact', { address: 'info@example.com' }),
       [{ cmdlet: 'Remove-MailContact', parameters: { Confirm: false, Identity: 'info@example.com' } }]);
     res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: "x' -Confirm", domain: 'example.com' } });
+    assert.equal(res.status, 400);
+    res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: 'To mail node', domain: 'example.com' } });
     assert.equal(res.status, 400);
 
     for (const domain of HOSTILE) {
@@ -401,7 +405,7 @@ test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not
     { id: 3, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com', extra: 'x' } },
     { id: 4, op: 'whoami', tenant: { appId: 'not-a-guid', organization: ORG }, args: {} },
     { id: 5, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com' } },
-    { id: 7, op: 'add_outbound_connector_domain', tenant: { appId: APP_ID, organization: ORG }, args: { connector: 'To node;whoami', domain: 'example.com' } },
+    { id: 7, op: 'add_outbound_connector_domain', tenant: { appId: APP_ID, organization: ORG }, args: { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a;whoami', domain: 'example.com' } },
     { id: 8, op: 'new_mail_contact', tenant: { appId: APP_ID, organization: ORG }, args: { address: 'a..b@example.com', external: 'a@example.com' } },
     { id: 9, op: 'remove_mail_contact', tenant: { appId: APP_ID, organization: ORG }, args: { address: 'Info@example.com' } },
   ].map((l) => JSON.stringify(l)).join('\n');
@@ -462,7 +466,7 @@ $global:ContactFail = 'Micro delay applied. Actual delay: 30000 msecs. Throttlin
 function Remove-MailContact { param($Identity, $Confirm) throw "The operation couldn't be performed because object 'info@example.com' couldn't be found." }
 AskArgs 'gone' 'remove_mail_contact' ([pscustomobject]@{ address = 'info@example.com' })
 function Set-OutboundConnector { param($Identity, $RecipientDomains) $global:Seen = $RecipientDomains }
-AskArgs 'add' 'add_outbound_connector_domain' ([pscustomobject]@{ connector = 'To mail node'; domain = 'example.com' })
+AskArgs 'add' 'add_outbound_connector_domain' ([pscustomobject]@{ connector = '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a'; domain = 'example.com' })
 Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; type = $global:Seen.GetType().Name } }
 `;
   fs.writeFileSync(file('lib.test.ps1'), script);

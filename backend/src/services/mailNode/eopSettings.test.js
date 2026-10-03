@@ -156,7 +156,10 @@ describe('the stage 7b fields', () => {
     expect(parseEopSettings({ outboundConnector: ' To mail node ', dbebExternalDomain: 'Relay.Example.net' }))
       .toEqual({ settings: { outboundConnector: 'To mail node', dbebExternalDomain: 'relay.example.net' } });
     expect(parseEopSettings({ outboundConnector: '', dbebExternalDomain: '' })).toEqual({ settings: { outboundConnector: null, dbebExternalDomain: null } });
-    expect(parseEopSettings({ outboundConnector: "x' -Confirm" })).toEqual({ error: 'outbound_connector_invalid' });
+    // Only compared with what the tenant answers (the worker gets the Guid): any printable name.
+    expect(parseEopSettings({ outboundConnector: 'To node [EU] & backup' })).toEqual({ settings: { outboundConnector: 'To node [EU] & backup' } });
+    expect(parseEopSettings({ outboundConnector: 'To\nnode' })).toEqual({ error: 'outbound_connector_invalid' });
+    expect(parseEopSettings({ outboundConnector: 'a'.repeat(65) })).toEqual({ error: 'outbound_connector_invalid' });
     expect(parseEopSettings({ dbebExternalDomain: 'not a domain' })).toEqual({ error: 'dbeb_external_domain_invalid' });
   });
 });

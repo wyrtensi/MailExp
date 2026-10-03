@@ -8,7 +8,7 @@ import { parseHostName } from '../services/mailNode/mailcow.js';
 import { recordAudit } from '../services/auditLog.js';
 import { getTenantDriver, tenantOf, tenantProfileWithoutDriver } from '../services/tenant/driver.js';
 import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState, takeConnectorReference } from '../services/tenant/tenantJobs.js';
-import { DOMAIN_SYNC_KIND, enqueueDomainSync } from '../services/tenant/tenantDomains.js';
+import { DOMAIN_SYNC_KIND, enqueueDomainSync, kickDomainSync } from '../services/tenant/tenantDomains.js';
 import { connectorDrift } from '../services/tenant/connectors.js';
 
 // The Microsoft tenant (stage 7a: R-22, R-27, R-28), mounted at /api/mail-node next to
@@ -29,6 +29,10 @@ import { connectorDrift } from '../services/tenant/connectors.js';
 //                                        comes with GET /api/mail-node/domains, tenantSync)
 //   POST /tenant/connectors/reference    the last read of the connectors becomes the reference
 //                                        (R-25); GET /tenant answers the drift from it
+//   POST /tenant/domains/:domain/hold    { hold: true | false }: keep the domain on Internal Relay
+//                                        (default) or let a complete mirror make it Authoritative
+//   POST /tenant/domains/:domain/internal-relay   approve moving a domain the tenant already had as
+//                                        Authoritative to Internal Relay
 const router = Router();
 router.use('/tenant', requireAuth, requireAdmin);
 
@@ -39,6 +43,9 @@ const ERRORS = {
   domain_invalid: [400, 'Domain must be a domain name such as example.com'],
   domain_not_found: [404, 'The panel does not know this domain'],
   connectors_not_read: [409, 'The connectors have not been read yet: check now first'],
+  hold_invalid: [400, 'hold must be true or false'],
+  domain_authoritative: [409, 'The domain is Authoritative already: it is not held on Internal Relay'],
+  internal_relay_not_needed: [409, 'The domain does not wait for this decision'],
 };
 
 function refuse(res, code) {
@@ -103,6 +110,35 @@ router.post('/tenant/domains/:domain/sync', async (req, res) => {
   if (!(await getDomainRow(domain))) return refuse(res, 'domain_not_found');
   const { job, created } = await enqueueDomainSync(domain, { userId: req.session.userId });
   return res.status(202).json({ job: jobAnswer(job), created });
+});
+
+router.post('/tenant/domains/:domain/hold', async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  if (typeof req.body?.hold !== 'boolean') return refuse(res, 'hold_invalid');
+  const { rows: [row] } = await query('SELECT state, hold_internal_relay FROM mail_node_domains WHERE domain = $1', [domain]);
+  if (!row) return refuse(res, 'domain_not_found');
+  if (row.state === 'authoritative') return refuse(res, 'domain_authoritative');
+  await query('UPDATE mail_node_domains SET hold_internal_relay = $2, updated_at = NOW() WHERE domain = $1', [domain, req.body.hold]);
+  if (row.hold_internal_relay !== req.body.hold) {
+    recordAudit({ actorUserId: req.session.userId, action: 'tenant.domain_hold_changed', details: { domain, hold: req.body.hold } });
+  }
+  // Released: the next run may make the domain Authoritative.
+  if (!req.body.hold) await kickDomainSync(domain, { userId: req.session.userId });
+  return res.json({ domain, holdInternalRelay: req.body.hold });
+});
+
+router.post('/tenant/domains/:domain/internal-relay', async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  if (await tenantRefusal(res)) return undefined;
+  const { rows: [row] } = await query('SELECT tenant_sync FROM mail_node_domains WHERE domain = $1', [domain]);
+  if (!row) return refuse(res, 'domain_not_found');
+  if (row.tenant_sync?.acceptedDomain?.code !== 'authoritative_in_tenant') return refuse(res, 'internal_relay_not_needed');
+  await query('UPDATE mail_node_domains SET internal_relay_approved_at = NOW(), updated_at = NOW() WHERE domain = $1', [domain]);
+  recordAudit({ actorUserId: req.session.userId, action: 'tenant.internal_relay_approved', details: { domain } });
+  const { job } = await enqueueDomainSync(domain, { userId: req.session.userId });
+  return res.status(202).json({ job: jobAnswer(job) });
 });
 
 router.post('/tenant/connectors/reference', async (req, res) => {

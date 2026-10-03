@@ -90,6 +90,7 @@ export const ALERTS = Object.freeze({
   tenant_certificate: ['tenant_certificate', 'warning'],
   tenant_poll_failing: ['tenant_poll', 'warning'],
   tenant_connector_drift: ['tenant_connectors', 'warning'],
+  tenant_domain_authoritative: ['tenant_domains', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -469,7 +470,20 @@ async function tenantStep({ eop, now, fresh, failed }) {
     if (connectorsStale) failed.push('tenant_connectors');
   } catch (err) {
     console.error(`Mail node tenant alerts were not read: ${err?.code || err?.message || 'error'}`);
-    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors');
+    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors', 'tenant_domains');
+    return;
+  }
+  // Stage 7b: a domain the tenant had as Authoritative waits for an administrator's decision. Its
+  // own source: a failed read keeps only this alert as it was.
+  try {
+    const { rows } = await query(`SELECT domain FROM mail_node_domains
+      WHERE tenant_sync->'acceptedDomain'->>'code' = 'authoritative_in_tenant' ORDER BY domain`);
+    if (rows.length) {
+      fresh.push({ key: 'tenant_domain_authoritative', severity: 'warning', details: { count: rows.length, domains: rows.slice(0, 5).map((r) => r.domain) } });
+    }
+  } catch (err) {
+    console.error(`Mail node tenant domain alerts were not read: ${err?.code || err?.message || 'error'}`);
+    failed.push('tenant_domains');
   }
 }
 

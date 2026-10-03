@@ -23,14 +23,20 @@ import { failureOf, tenantContext } from './tenantJobs.js';
 //         Email service (PATCH) and the MX of serviceConfigurationRecords: dns_ok -> tenant_verified
 //   R-24  Get-AcceptedDomain until the tenant shows the domain (follow-up runs 1, 2, 4 ... 10
 //         minutes apart), then Set-AcceptedDomain InternalRelay while the domain is not
-//         'authoritative': tenant_verified -> internal_relay
+//         'authoritative': tenant_verified -> internal_relay. A domain verified in the tenant is
+//         kept on Internal Relay whatever the panel's state (a restarted onboarding included). One
+//         that was in the tenant before the driver found it and is Authoritative there is left
+//         alone with a warning until an administrator approves Internal Relay
+//         (internal_relay_approved_at)
 //   R-25  the domain in the Outbound connector's RecipientDomains (D-9): internal_relay ->
 //         connector_ready. 'ready' stays a person's step: the owner switches the MX first
 //   R-26  EOP DKIM when the domain's DKIM mode is 'eop' (D-1): the config made disabled, its
 //         selector CNAMEs kept for the DNS check, enabling tried on every run until it succeeds
 //   R-29  the recipient mirror in internal_relay and later: a mail contact (D-5) for every address
 //         the node takes mail for, at most CONTACT_BATCH writes a run; a run that finds the mirror
-//         complete on a 'ready' domain makes it Authoritative (D-4): ready -> authoritative
+//         complete on a 'ready' domain whose connector holds it makes it Authoritative (D-4): ready
+//         -> authoritative, unless the domain is held on Internal Relay (hold_internal_relay, on by
+//         default until experiment 8 passes)
 //
 // Throttling (exo_throttled, graph_throttled) keeps what the run did and queues the job again
 // later (JobError retry with the wait, the queue's backoff otherwise). Other failures are kept in
@@ -50,8 +56,10 @@ const ACCEPTED_MAX_WAIT_MS = 10 * 60 * 1000;
 const SETTLE_MS = 60 * 1000;
 // A batch with more left goes on at once.
 const NEXT_BATCH_MS = 2000;
-// Another run of the same domain still going: this one waits.
+// Another run of the same domain still going: this one ends and a new one is queued this much later.
 const BUSY_RETRY_MS = 30 * 1000;
+// A run's hold on its domain older than this is a run that died.
+const LOCK_STALE_MINUTES = 30;
 const LIST_MAX = 50;
 const THROTTLED = new Set(['exo_throttled', 'graph_throttled']);
 
@@ -111,6 +119,9 @@ async function syncGraph({ session }, row, out) {
   delete part.error;
   delete part.verifyError;
   let found = await graphDomain(graph, domain);
+  // A domain the tenant had before this panel's runs knew it (made by hand, another panel, or an
+  // onboarding started over): its accepted domain type is not ours to change without approval.
+  if (found && !out.previous.graph) part.preexisting = true;
   if (!found) {
     try {
       found = await graph.request('POST', '/domains', { body: { id: domain } });
@@ -178,6 +189,13 @@ async function syncAccepted({ session }, row, out) {
     return null;
   }
   let type = found.DomainType ?? null;
+  // A domain the tenant already had as Authoritative is never moved by itself: mail to it may rely
+  // on that. It waits, with a warning, for an administrator's approval (Q2 of stage 7b).
+  if (type === 'Authoritative' && row.state !== 'authoritative' && out.sync.graph?.preexisting && !row.internal_relay_approved_at) {
+    out.sync.acceptedDomain = { at: out.at, visible: true, type, polls: 0, ok: false, code: 'authoritative_in_tenant' };
+    out.acceptedType = type;
+    return null;
+  }
   // Never Authoritative before the mirror is complete (R-24): a domain made Authoritative by
   // default, by hand, or marked ready without the tenant steps goes to Internal Relay.
   if (row.state !== 'authoritative' && type !== 'InternalRelay') {
@@ -210,6 +228,10 @@ export function pickOutboundConnector(rows, name) {
 }
 
 const connectorHas = (connector, domain) => connector.AllAcceptedDomains === true || listOf(connector.RecipientDomains).includes(domain);
+const guidOf = (connector) => {
+  const id = lower(connector?.Guid);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id) ? id : null;
+};
 
 async function syncConnector({ session, settings }, row, out) {
   const { exo } = session;
@@ -221,11 +243,17 @@ async function syncConnector({ session, settings }, row, out) {
   }
   let connector = picked.connector;
   const name = String(connector.Name ?? connector.Identity);
+  // The worker is given the connector's Guid: its EAC name may hold any character.
+  const id = guidOf(connector);
   let added = false;
   if (!connectorHas(connector, domain)) {
-    await exo.run('add_outbound_connector_domain', { connector: name, domain });
+    if (!id) {
+      out.sync.connector = { at: out.at, ok: false, name, code: 'connector_guid_missing' };
+      return false;
+    }
+    await exo.run('add_outbound_connector_domain', { connector: id, domain });
     added = true;
-    connector = pickOutboundConnector(await exo.run('get_outbound_connectors'), name).connector ?? connector;
+    connector = asRows(await exo.run('get_outbound_connectors')).find((c) => guidOf(c) === id) ?? connector;
   }
   const ok = connectorHas(connector, domain);
   out.sync.connector = { at: out.at, ok, name, ...(added ? { addedAt: out.at } : {}), ...(ok ? {} : { code: 'connector_domain_missing' }) };
@@ -301,15 +329,18 @@ export function externalOf(address, externalDomain) {
 // tenant's recipients. Pure, so it is tested on its own.
 //   mailboxes: the node's mailboxes of the domain ({ email, state }); aliases: its aliases
 //   ({ address, active }); panel: the panel's mailboxes there ({ email, deleting }); recipients:
-//   the tenant's (Get-Recipient rows). Returns { desired, create, remove, hide, present, conflicts,
-//   catchAll, nodeOnly, panelOnly, suspicious }.
+//   the tenant's (Get-Recipient rows). Returns { desired, create, retarget, remove, hide, present,
+//   conflicts, catchAll, nodeOnly, panelOnly, suspicious }. retarget: contacts of the other D-7
+//   variant, changed in place (Set-MailContact -ExternalEmailAddress), never removed and made again:
+//   on an Authoritative domain that would reject the address in between.
 export function planMirror({ domain, mailboxes, aliases, panel, recipients, externalDomain = null }) {
   const deleting = new Set(panel.filter((p) => p.deleting).map((p) => p.email));
   const desired = new Set();
   // Every mailbox that takes mail (active, or receiving without login) and every active alias but a
   // catch-all, except a mailbox being deleted: its contact goes first (BEFORE_NODE_DELETE).
   for (const m of mailboxes) if (m.state !== 0 && domainOf(m.email) === domain && !deleting.has(m.email)) desired.add(m.email);
-  const catchAll = aliases.find((a) => a.address.startsWith('@'))?.address ?? null;
+  // An active catch-all only: a disabled one takes no mail (D-6).
+  const catchAll = aliases.find((a) => a.active && a.address.startsWith('@'))?.address ?? null;
   for (const a of aliases) if (a.active && !a.address.startsWith('@') && !deleting.has(a.address)) desired.add(a.address);
   const contacts = new Map();
   const taken = new Set();
@@ -320,6 +351,7 @@ export function planMirror({ domain, mailboxes, aliases, panel, recipients, exte
     else own.forEach((a) => taken.add(a));
   }
   const create = [];
+  const retarget = [];
   const remove = [];
   const hide = [];
   const present = [];
@@ -332,9 +364,9 @@ export function planMirror({ domain, mailboxes, aliases, panel, recipients, exte
       continue;
     }
     if (smtp(contact.ExternalEmailAddress) !== externalOf(address, externalDomain)) {
-      // Made for the other variant of D-7: made again.
-      remove.push(address);
-      create.push(address);
+      // Made for the other variant of D-7: changed in place, it keeps taking mail meanwhile.
+      retarget.push(address);
+      if (contact.HiddenFromAddressListsEnabled !== true) hide.push(address);
       continue;
     }
     present.push(address);
@@ -343,11 +375,14 @@ export function planMirror({ domain, mailboxes, aliases, panel, recipients, exte
   for (const address of [...contacts.keys()].sort()) if (!desired.has(address)) remove.push(address);
   const onNode = new Set(mailboxes.map((m) => m.email));
   const inPanel = new Set(panel.map((p) => p.email));
-  // The node listed no mailbox while the panel has some there: an answer not to remove by.
-  const suspicious = mailboxes.length === 0 && panel.some((p) => !p.deleting);
+  // The node listed no mailbox while the panel has some there, or the tenant has contacts of the
+  // domain: an answer not to remove by (an empty answer would wipe the mirror, and on an
+  // Authoritative domain reject every address).
+  const suspicious = mailboxes.length === 0 && (panel.some((p) => !p.deleting) || contacts.size > 0);
   return {
     desired: [...desired].sort(),
     create,
+    retarget,
     remove: suspicious ? [] : remove,
     hide,
     present,
@@ -392,71 +427,103 @@ async function syncMirror({ session, settings }, row, out) {
   const plan = planMirror({
     domain, mailboxes: node.mailboxes, aliases: node.aliases, panel, recipients, externalDomain: settings.dbebExternalDomain ?? null,
   });
-  // Complete on a fresh read: nothing to make or remove, no catch-all (D-6), a node answer to trust.
-  const complete = !plan.create.length && !plan.remove.length && !plan.catchAll && !plan.suspicious;
+  // Complete on a fresh read: nothing to make, move or remove, no active catch-all (D-6), a node
+  // answer to trust.
+  const complete = !plan.create.length && !plan.retarget.length && !plan.remove.length && !plan.catchAll && !plan.suspicious;
+  const external = (address) => externalOf(address, settings.dbebExternalDomain ?? null);
   const created = [];
+  const retargeted = [];
   const removed = [];
   const failed = [];
+  // Made by New-MailContact that answered "exists": a contact made by a run whose answer was lost,
+  // or the address held by a recipient Get-Recipient did not show. A read decides which.
+  const unconfirmed = [];
+  // The addresses a write was tried for: the rest of a plan is what the budget left for later.
+  const attempted = new Set();
   let budget = CONTACT_BATCH;
   const present = new Set(plan.present);
-  // Removals of a contact made for the other variant come right before it is made again.
-  const recreate = new Set(plan.remove.filter((a) => plan.create.includes(a)));
   const write = async (op, address, args, okCodes) => {
     budget -= 1;
+    attempted.add(`${op === 'remove_mail_contact' ? 'remove' : 'make'}:${address}`);
     try {
       await exo.run(op, args);
-      return true;
+      return 'ok';
     } catch (err) {
       rethrowThrottled(err);
-      if (isTenant(err, ...okCodes)) return true;
+      if (isTenant(err, ...okCodes)) return err.code;
       if (!isTenant(err)) throw err;
       failed.push({ address, op, ...failureOf(err) });
-      return false;
+      return null;
     }
   };
   try {
     for (const address of plan.create) {
       if (budget <= 0) break;
-      if (recreate.has(address)) {
-        if (!(await write('remove_mail_contact', address, { address }, ['exo_not_found']))) continue;
-        removed.push(address);
+      const done = await write('new_mail_contact', address, { address, external: external(address) }, ['exo_exists']);
+      if (done === 'exo_exists') {
+        unconfirmed.push(address);
+        continue;
       }
-      if (budget <= 0) break;
-      const external = externalOf(address, settings.dbebExternalDomain ?? null);
-      if (!(await write('new_mail_contact', address, { address, external }, ['exo_exists']))) continue;
+      if (!done) continue;
       created.push(address);
       present.add(address);
       // Hidden from the address lists right away; a failure here is retried by the next run.
       if (budget > 0) await write('hide_mail_contact', address, { address }, []);
     }
+    for (const address of plan.retarget) {
+      if (budget <= 0) break;
+      if (await write('set_mail_contact_external', address, { address, external: external(address) }, [])) {
+        retargeted.push(address);
+        present.add(address);
+      }
+    }
     for (const address of plan.remove) {
       if (budget <= 0) break;
-      if (recreate.has(address)) continue;
       if (await write('remove_mail_contact', address, { address }, ['exo_not_found'])) removed.push(address);
     }
     for (const address of plan.hide) {
       if (budget <= 0) break;
       await write('hide_mail_contact', address, { address }, []);
     }
+    if (unconfirmed.length) {
+      const contacts = new Set(asRows(await exo.run('get_recipients'))
+        .filter((r) => lower(r.RecipientTypeDetails) === 'mailcontact').map((r) => smtp(r.PrimarySmtpAddress)));
+      for (const address of unconfirmed) {
+        if (contacts.has(address)) {
+          created.push(address);
+          present.add(address);
+        } else {
+          failed.push({ address, op: 'new_mail_contact', code: 'address_taken', message: 'Another recipient of the tenant holds this address' });
+        }
+      }
+    }
   } finally {
-    // What was done stays recorded even when throttling ends the run.
-    const left = plan.create.filter((a) => !created.includes(a)).length + plan.remove.filter((a) => !removed.includes(a) && !recreate.has(a)).length;
+    // What was done stays recorded even when throttling ends the run. Left: only what the budget
+    // (or throttling) kept for later; a write that failed is not retried at once.
+    const left = plan.create.filter((a) => !attempted.has(`make:${a}`)).length
+      + plan.retarget.filter((a) => !attempted.has(`make:${a}`)).length
+      + plan.remove.filter((a) => !attempted.has(`remove:${a}`)).length;
     out.sync.mirror = {
       at: out.at, ok: !failed.length, complete,
       desired: plan.desired.length, present: present.size,
-      created: created.slice(0, LIST_MAX), removed: removed.slice(0, LIST_MAX), failed: failed.slice(0, LIST_MAX),
+      created: created.slice(0, LIST_MAX), retargeted: retargeted.slice(0, LIST_MAX), removed: removed.slice(0, LIST_MAX),
+      failed: failed.slice(0, LIST_MAX),
       missing: plan.desired.filter((a) => !present.has(a) && !plan.conflicts.includes(a)).slice(0, LIST_MAX),
-      extra: plan.remove.filter((a) => !removed.includes(a) && !recreate.has(a)).slice(0, LIST_MAX),
+      extra: plan.remove.filter((a) => !removed.includes(a)).slice(0, LIST_MAX),
       conflicts: plan.conflicts.slice(0, LIST_MAX), catchAll: plan.catchAll, suspicious: plan.suspicious,
       nodeOnly: plan.nodeOnly.slice(0, LIST_MAX), panelOnly: plan.panelOnly.slice(0, LIST_MAX),
       variant: settings.dbebExternalDomain ? 'B' : 'A', left,
     };
-    out.presentAddresses = [...present];
+    // An address another recipient holds takes mail in the tenant: its mailbox does not wait.
+    out.presentAddresses = [...present, ...plan.conflicts];
     out.panelAddresses = panel.map((p) => p.email);
-    if (created.length || removed.length) out.audit.push({ action: 'tenant.recipients_synced', details: { domain, created: created.length, removed: removed.length } });
+    if (created.length || removed.length || retargeted.length) {
+      out.audit.push({ action: 'tenant.recipients_synced', details: { domain, created: created.length, removed: removed.length, retargeted: retargeted.length } });
+    }
   }
+  // More in the plan than the budget took: on at once. A failure waits for the next slot.
   if (out.sync.mirror.left > 0) out.followUp(NEXT_BATCH_MS);
-  else if ((created.length || removed.length) && row.state === 'ready') out.followUp(SETTLE_MS);
+  else if ((created.length || removed.length || retargeted.length) && row.state === 'ready') out.followUp(SETTLE_MS);
   return { complete: complete && !failed.length };
 }
 
@@ -466,8 +533,17 @@ async function syncMirror({ session, settings }, row, out) {
 async function syncAuthoritative({ session }, row, out, mirror, type) {
   const { exo } = session;
   const { domain } = row;
-  if (!mirror?.complete || out.sync.mirror?.failed?.length) {
+  // Authoritative only with the whole path in place: the tenant shows the domain and the Outbound
+  // connector delivers it to the node, the mirror is complete.
+  const pathOk = out.sync.acceptedDomain?.visible === true && out.sync.connector?.ok === true;
+  if (!mirror?.complete || out.sync.mirror?.failed?.length || !pathOk) {
     if (out.state === 'authoritative' && type !== 'Authoritative') out.sync.authoritative = { at: out.at, ok: false, code: 'authoritative_lost' };
+    return;
+  }
+  // Held on Internal Relay (on by default until experiment 8): the mirror is complete, the switch
+  // waits for an administrator to turn the hold off. An 'authoritative' domain is never held.
+  if (out.state === 'ready' && row.hold_internal_relay !== false) {
+    out.sync.authoritative = { at: out.at, ok: true, held: true, mirrorComplete: true };
     return;
   }
   if (out.state !== 'ready' && !(out.state === 'authoritative' && type !== 'Authoritative')) return;
@@ -517,9 +593,11 @@ export async function syncDomain(context, row, { now = Date.now() } = {}) {
   };
   try {
     const verified = await step('graph', syncGraph);
-    if (!verified || !reached(out.state, 'tenant_verified')) return out;
+    if (!verified) return out;
+    // A domain verified in the tenant is an accepted domain there whatever the panel's state (an
+    // onboarding started over keeps it in the tenant): its type is kept on Internal Relay.
     const type = await step('acceptedDomain', syncAccepted);
-    if (!type) return out;
+    if (!type || !reached(out.state, 'tenant_verified')) return out;
     const dkimMode = row.dkim_mode ?? context.settings.dkimMode;
     if (dkimMode === 'eop') await step('dkim', syncDkim);
     if (!reached(out.state, 'internal_relay')) return out;
@@ -617,19 +695,44 @@ async function journal(entries) {
   await withTransaction((tx) => insertAuditEntries(tx, entries)).catch((err) => console.error('Tenant sync journal failed:', err?.message));
 }
 
+// Takes the domain for this run, atomically (one run of a domain at a time): the row with what the
+// run needs, null when another live run holds it, undefined when the panel has no such domain.
+async function lockDomain(domain, jobId) {
+  const { rows: [row] } = await query(`
+    UPDATE mail_node_domains SET sync_lock_job = $2, sync_locked_at = NOW()
+     WHERE domain = $1
+       AND (sync_lock_job IS NULL OR sync_lock_job = $2 OR sync_locked_at < NOW() - make_interval(mins => $3::int))
+    RETURNING domain, state, dkim_mode, tenant_sync, hold_internal_relay, internal_relay_approved_at, accepted_domain_type
+  `, [domain, jobId, LOCK_STALE_MINUTES]);
+  if (row) return row;
+  const { rows: [known] } = await query('SELECT 1 FROM mail_node_domains WHERE domain = $1', [domain]);
+  return known ? null : undefined;
+}
+
+const unlockDomain = (domain, jobId) => query(
+  'UPDATE mail_node_domains SET sync_lock_job = NULL, sync_locked_at = NULL WHERE domain = $1 AND sync_lock_job = $2', [domain, jobId],
+).catch((err) => console.error(`Tenant sync of ${domain}: the lock was not released: ${err?.message}`));
+
 export async function handleDomainSync(job, { now = Date.now() } = {}) {
   const domain = parseHostName(job.payload?.domain);
   if (!domain) throw new JobError('The job names no domain', { outcome: 'fail', code: 'domain_invalid' });
-  // One run of a domain at a time: another one still going makes this one wait.
-  const { rows: [other] } = await query(
-    `SELECT id FROM jobs WHERE kind = $1 AND status = 'running' AND payload->>'domain' = $2 AND id <> $3 LIMIT 1`,
-    [DOMAIN_SYNC_KIND, domain, job.id],
-  );
-  if (other) throw new JobError('Another run of this domain is going', { outcome: 'retry', code: 'domain_sync_busy', delayMs: BUSY_RETRY_MS });
   const context = await tenantContext();
-  const { rows: [row] } = await query('SELECT domain, state, dkim_mode, tenant_sync FROM mail_node_domains WHERE domain = $1', [domain]);
+  const row = await lockDomain(domain, job.id);
   // A domain the panel no longer knows: nothing to do.
-  if (!row) return { skipped: 'domain_not_found' };
+  if (row === undefined) return { skipped: 'domain_not_found' };
+  // Another run of this domain is going: this one ends (no attempt spent) and one more is queued.
+  if (row === null) {
+    await enqueueDomainSync(domain, { delayMs: BUSY_RETRY_MS });
+    return { skipped: 'domain_sync_busy' };
+  }
+  try {
+    return await runLocked(context, job, domain, row, now);
+  } finally {
+    await unlockDomain(domain, job.id);
+  }
+}
+
+async function runLocked(context, job, domain, row, now) {
   const result = await syncDomain(context, row, { now });
   const written = await persistSync(domain, result);
   if (written) {
@@ -663,9 +766,10 @@ export async function handleDomainSync(job, { now = Date.now() } = {}) {
 export async function removeRecipientBeforeDelete(row) {
   const address = lower(row.email_address);
   const domain = domainOf(address);
-  const { rows: [d] } = await query('SELECT state FROM mail_node_domains WHERE domain = $1', [domain]);
-  if (!d || !MIRRORED_STATES.includes(d.state)) return;
-  const must = d.state === 'authoritative';
+  // By the tenant's facts too: an onboarding started over keeps the domain in the tenant.
+  const { rows: [d] } = await query('SELECT state, accepted_domain_type FROM mail_node_domains WHERE domain = $1', [domain]);
+  if (!d || !(MIRRORED_STATES.includes(d.state) || d.accepted_domain_type)) return;
+  const must = d.state === 'authoritative' || d.accepted_domain_type === 'Authoritative';
   const fail = (code, err) => {
     if (!must) {
       console.warn(`Mailbox deletion: the tenant recipient of ${redactEmail(address)} was not removed (${code}), the mirror removes it later`);

@@ -200,7 +200,12 @@ export function createFakeTenantModel(options = {}) {
     Selector1CNAME: `selector1-${dashed(domain)}._domainkey.contoso.n-v1.dkim.mail.microsoft`,
     Selector2CNAME: `selector2-${dashed(domain)}._domainkey.contoso.n-v1.dkim.mail.microsoft`,
   });
-  const byConnector = (name) => model.outbound.find((c) => c.Name.toLowerCase() === name.toLowerCase() || c.Identity.toLowerCase() === name.toLowerCase());
+  const byConnector = (id) => model.outbound.find((c) => String(c.Guid ?? '').toLowerCase() === id.toLowerCase());
+  // A connector the tests add: a Guid of its own.
+  model.addOutbound = (props) => {
+    const n = model.outbound.length + 1;
+    model.outbound.push({ ...clone(TENANT_FIXTURES.exo.get_outbound_connectors[0]), RecipientDomains: [], Guid: `4b1d2c3e-5f60-4718-8a9b-0c1d2e3f4a${String(n).padStart(2, '0')}`, ...props });
+  };
 
   model.exo = {
     get_accepted_domain: ({ domain }) => [acceptedRow(domain, accepted(domain))],
@@ -244,6 +249,12 @@ export function createFakeTenantModel(options = {}) {
       };
       model.recipients.set(address, row);
       return [{ Identity: address, Name: address, PrimarySmtpAddress: address, ExternalEmailAddress: row.ExternalEmailAddress }];
+    },
+    set_mail_contact_external: ({ address, external }) => {
+      const row = model.recipients.get(address);
+      if (!row || row.RecipientTypeDetails !== 'MailContact') throw exoError('exo_not_found', `The operation couldn't be performed because object '${address}' couldn't be found.`);
+      row.ExternalEmailAddress = `SMTP:${external}`;
+      return [];
     },
     hide_mail_contact: ({ address }) => {
       const row = model.recipients.get(address);

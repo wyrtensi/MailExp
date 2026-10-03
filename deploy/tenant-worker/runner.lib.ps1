@@ -18,8 +18,6 @@ $DomainPattern = '^(?=.{1,253}\z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z
 $GuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'
 # An address: the panel's local part (letters, digits, dot, dash, underscore, no '..') and a domain.
 $AddressPattern = '^(?!.*\.\.)[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?@(?=.{1,253}\z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\z'
-# A connector's name as the owner gave it in EAC: letters, digits, space, dot, dash, underscore.
-$NamePattern = '^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?\z'
 # What an EXO error says when the session itself is gone (an expired token, a dropped connection),
 # as opposed to the operation failing: then the runner connects again once and repeats the
 # operation. A write repeated so may find its object made already (exo_exists), which the panel
@@ -76,11 +74,11 @@ $Ops = @{
     Cmdlet = 'Get-OutboundConnector'; Fixed = @{}; Args = @{}
     Keep = @('Identity', 'Name', 'Enabled', 'ConnectorType', 'ConnectorSource', 'RecipientDomains', 'SmartHosts', 'UseMXRecord',
       'TlsSettings', 'TlsDomain', 'AllAcceptedDomains', 'IsTransportRuleScoped', 'CloudServicesMailEnabled', 'IsValidated',
-      'LastValidationTimestamp', 'WhenChanged')
+      'LastValidationTimestamp', 'WhenChanged', 'Guid')
   }
   add_outbound_connector_domain = @{
     Cmdlet = 'Set-OutboundConnector'; Fixed = @{}
-    Args = @{ connector = @('Identity', $NamePattern); domain = @('RecipientDomains', $DomainPattern, 'add') }
+    Args = @{ connector = @('Identity', $GuidPattern); domain = @('RecipientDomains', $DomainPattern, 'add') }
     Keep = @()
   }
   # R-26: the EOP DKIM signing config of a domain, made disabled, read, then enabled.
@@ -106,6 +104,12 @@ $Ops = @{
     Cmdlet = 'New-MailContact'; Fixed = @{}
     Args = @{ address = @(@('Name', 'PrimarySmtpAddress'), $AddressPattern); external = @('ExternalEmailAddress', $AddressPattern) }
     Keep = @('Identity', 'Name', 'PrimarySmtpAddress', 'ExternalEmailAddress')
+  }
+  # D-7: a contact moved to the other variant in place, never removed and made again.
+  set_mail_contact_external = @{
+    Cmdlet = 'Set-MailContact'; Fixed = @{}
+    Args = @{ address = @('Identity', $AddressPattern); external = @('ExternalEmailAddress', $AddressPattern) }
+    Keep = @()
   }
   hide_mail_contact = @{
     Cmdlet = 'Set-MailContact'; Fixed = @{ HiddenFromAddressListsEnabled = $true }; Args = @{ address = @('Identity', $AddressPattern) }
