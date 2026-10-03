@@ -13,9 +13,9 @@ import { parseHostName, parseWholeNumber } from './mailcow.js';
 // The next hop, its TLS, DKIM and the send limit are applied to the node through the mailcow API
 // (services/mailNode/nodeApply.js); the tenant fields and the node address are only kept.
 //
-// None of these is a secret: the tenant and application ids and the certificate thumbprint only
-// name things, and the application's certificate with its password stays in the tenant worker's
-// volume. A secret added here later is stored with encrypt() and sent back redacted, like the node's
+// None of these is a secret: the tenant id, its initial domain, the application id and the
+// certificate thumbprint only name things, and the application's certificate with its password
+// stays in the tenant worker's volume (R-35). A secret added here later is stored with encrypt() and sent back redacted, like the node's
 // API key.
 
 export const EOP_PROVIDER = 'mail_node_eop';
@@ -58,6 +58,8 @@ export const EOP_DEFAULTS = Object.freeze({
   licenses: null,
   tenantCreatedOn: null,
   tenantId: null,
+  // The tenant's initial domain, <TENANT>.onmicrosoft.com: Connect-ExchangeOnline -Organization.
+  tenantDomain: null,
   appId: null,
   certThumbprint: null,
   nodeIp: null,
@@ -100,6 +102,12 @@ export function parseDay(value, now = Date.now()) {
   return at <= now + 24 * 60 * 60 * 1000 ? text : null;
 }
 
+// The organization EXO PowerShell connects to: the tenant's initial domain, <TENANT>.onmicrosoft.com.
+export function parseTenantDomain(value) {
+  const domain = parseHostName(value);
+  return domain && domain.endsWith('.onmicrosoft.com') ? domain : null;
+}
+
 function parseGuid(value) {
   const id = typeof value === 'string' ? value.trim().toLowerCase() : '';
   return isUuid(id) ? id : null;
@@ -117,6 +125,7 @@ const PARSERS = {
   licenses: [(v) => parseWholeNumber(v, 1, MAX_LICENSES), 'licenses_invalid', true],
   tenantCreatedOn: [parseDay, 'tenant_created_invalid', true],
   tenantId: [parseGuid, 'tenant_id_invalid', true],
+  tenantDomain: [parseTenantDomain, 'tenant_domain_invalid', true],
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
   nodeIp: [parseIpv4, 'node_ip_invalid', true],
@@ -181,14 +190,17 @@ export async function saveEopSettings(settings) {
   `, [EOP_PROVIDER, settings]);
 }
 
-// The panel may reach the tenant once all three are set; it does not yet.
+// The panel may reach the tenant once all four are set (services/tenant/driver.js tenantOf): the
+// tenant driver then tests the connection, polls the blocked connectors and reads the anti-spam
+// policy (stage 7a, services/tenant/tenantJobs.js).
 export function tenantConfigured(settings) {
-  return !!(settings.tenantId && settings.appId && settings.certThumbprint);
+  return !!(settings.tenantId && settings.tenantDomain && settings.appId && settings.certThumbprint);
 }
 
-// Whether the panel works with the tenant itself (the tenant driver of a later stage). Until it
-// does, every onboarding step is confirmed by hand, whatever is filled in above, and the EOP screen
-// keeps the checklist. The tenant driver replaces this with its own status.
+// Whether the tenant driver runs the domains' onboarding itself. Stage 7a connects the tenant and
+// reads from it, but the onboarding steps (domain in the tenant, accepted domain type, connector,
+// DKIM, recipients) come with stage 7b: until then every step is confirmed by hand, whatever is
+// filled in above, and the EOP screen keeps the checklist.
 export function tenantDriverActive() {
   return false;
 }

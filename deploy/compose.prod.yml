@@ -28,6 +28,13 @@ services:
     environment:
       NODE_OPTIONS: --max-old-space-size=1024
 
+  # Optional (profile "tenant", docker-compose.yml): pulled and started only with
+  # COMPOSE_PROFILES=tenant.
+  tenant-worker:
+    image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-tenant-worker:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
+    build: !reset null
+    mem_limit: 768m
+
   postgres:
     mem_limit: 2g
     command:

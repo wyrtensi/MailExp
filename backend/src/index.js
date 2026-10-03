@@ -14,6 +14,8 @@ import draftRoutes from './routes/draft.js';
 import scheduledRoutes from './routes/scheduled.js';
 import { startJobWorker, stopJobWorker } from './services/jobQueue.js';
 import { registerSendJobKind } from './services/sendQueue.js';
+import { registerTenantJobKinds, startTenantPoll } from './services/tenant/tenantJobs.js';
+import { tenantProfileWithoutDriver } from './services/tenant/driver.js';
 import oauthRoutes from './routes/oauth.js';
 import authGoogleRoutes from './routes/authGoogle.js';
 import integrationsRoutes, { loadIntegrationConfigs } from './routes/integrations.js';
@@ -23,6 +25,7 @@ import accountRoutes from './routes/accounts.js';
 import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
+import mailNodeTenantRoutes from './routes/mailNodeTenant.js';
 import deliveryRoutes from './routes/delivery.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
 import { startDnsCheckJob } from './services/mailNode/dnsCheckJob.js';
@@ -208,6 +211,7 @@ app.use('/api/accounts', accountRoutes);
 app.use('/api/mail-node', mailNodeRoutes);
 app.use('/api/mail-node', mailNodeQuarantineRoutes);
 app.use('/api/mail-node', mailNodeOutageRoutes);
+app.use('/api/mail-node', mailNodeTenantRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/mail', deliveryRoutes);
 app.use('/api/mail', sendRoutes);
@@ -274,6 +278,9 @@ if (resumedMoves) console.log(`Move queue: resumed ${resumedMoves} pending move(
 // (services/sendQueue.js). Its jobs live in the database, so the ones queued before a restart run
 // now; a send whose worker died mid-delivery is left for its author, never sent again by itself.
 registerSendJobKind({ imapManager });
+// Registered whether or not a tenant driver is configured: a tenant job left queued then fails at
+// once with tenant_driver_missing instead of waiting forever (services/tenant/tenantJobs.js).
+registerTenantJobKinds();
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.
@@ -326,6 +333,10 @@ startDnsCheckJob();
 // Check the mail node's alerts (EOP refusals and bypass in its log, the queue, the certificate, the
 // containers, the TERRL budget) every five minutes; the first run comes a little after the start.
 startNodeAlertJob();
+startTenantPoll();
+if (tenantProfileWithoutDriver()) {
+  console.warn('Tenant worker: COMPOSE_PROFILES has "tenant" but the panel has no tenant driver; set TENANT_WORKER_URL and TENANT_WORKER_TOKEN (32+ characters)');
+}
 
 // Delete, on the node and here, the mail node mailboxes whose asked-for deletion date has come.
 startMailboxDeletionJob({ disconnect: (accountId) => imapManager.disconnectAccount(accountId) });

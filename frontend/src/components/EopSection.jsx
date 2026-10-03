@@ -4,6 +4,7 @@ import { api } from '../utils/api.js';
 import MailNodeApplyResult from './MailNodeApplyResult.jsx';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
 import MailNodeTerrlBudget from './MailNodeTerrlBudget.jsx';
+import MailNodeTenant from './MailNodeTenant.jsx';
 import {
   DEFAULT_SEND_LIMIT_PER_HOUR,
   MAILBOX_READY_STATES,
@@ -46,7 +47,7 @@ const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primar
 
 // What the TERRL limit is made of: a save that changes one of them recounts the budget.
 const BUDGET_FIELDS = ['terrl', 'licenses', 'tenantCreatedOn'];
-const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'licenses', 'tenantCreatedOn', 'tenantId', 'appId', 'certThumbprint'];
+const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'licenses', 'tenantCreatedOn', 'tenantId', 'tenantDomain', 'appId', 'certThumbprint'];
 
 // The stored settings as the form edits them: every field a string.
 function toForm(settings) {
@@ -84,6 +85,8 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   const [confirmPrefilter, setConfirmPrefilter] = useState(false);
   // The TERRL budget now (R-21); null while it loads or when it could not be read.
   const [budget, setBudget] = useState(null);
+  // Bumped by every save, so the tenant part reads what the new settings allow.
+  const [saves, setSaves] = useState(0);
 
   const loadBudget = useCallback(async () => {
     try {
@@ -149,6 +152,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       });
       setStored(saved);
       setForm(toForm(saved));
+      setSaves((n) => n + 1);
       if (BUDGET_FIELDS.some((field) => saved[field] !== stored?.[field])) loadBudget();
       // A change the node gets is applied after the answer: its result shows on the next load.
       setNotice(applying ? 'admin.eop.savedApplying' : 'admin.eop.saved');
@@ -280,6 +284,11 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             {textField('tenantId', { placeholder: t('admin.eop.guidPh') })}
           </label>
           <label>
+            <span style={labelStyle}>{t('admin.eop.tenantDomainLabel')}</span>
+            {textField('tenantDomain', { placeholder: t('admin.eop.tenantDomainPh') })}
+            <span style={hintStyle}>{t('admin.eop.tenantDomainNote')}</span>
+          </label>
+          <label>
             <span style={labelStyle}>{t('admin.eop.appIdLabel')}</span>
             {textField('appId', { placeholder: t('admin.eop.guidPh') })}
           </label>
@@ -303,6 +312,13 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
         </div>
       )}
       {notice && <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>{t(notice)}</div>}
+
+      {stored && (
+        <div data-eop-tenant>
+          <div style={subTitleStyle}>{t('admin.tenant.title')}</div>
+          <MailNodeTenant revision={saves} />
+        </div>
+      )}
 
       {stored && (
         <div data-node-apply>

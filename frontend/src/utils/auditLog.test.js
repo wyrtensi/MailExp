@@ -18,7 +18,13 @@ describe('AUDIT_ACTIONS', () => {
       'mail_node.quarantine_settings_applied',
       'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
       'mail_node.outage_deleted',
+      'tenant.connection_tested',
     ]);
+    assert.equal(auditActionLabelKey('tenant.connection_tested'), 'admin.audit.actionTenantConnectionTested');
+    assert.deepEqual(auditDetail({ action: 'tenant.connection_tested', details: { ok: true, failed: [] } }), { key: 'admin.audit.detailTenantTestOk', values: {} });
+    assert.deepEqual(auditDetail({ action: 'tenant.connection_tested', details: { ok: false, failed: ['exo:exo_connect_failed'] } }), {
+      key: 'admin.audit.detailTenantTestFailed', values: { steps: 'exo:exo_connect_failed' },
+    });
     assert.equal(auditActionLabelKey('mail_node.applied'), 'admin.audit.actionMailNodeApplied');
     assert.equal(auditActionLabelKey('mailbox.rate_limit_changed'), 'admin.audit.actionMailboxRateLimitChanged');
     assert.equal(auditActionLabelKey('mail_node.domain_identity_acknowledged'), 'admin.audit.actionMailNodeDomainIdentityAcknowledged');

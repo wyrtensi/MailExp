@@ -108,6 +108,11 @@ const ERROR_KEYS = {
   send_limit_invalid: 'admin.eop.errorSendLimit',
   terrl_invalid: 'admin.eop.errorTerrl',
   tenant_id_invalid: 'admin.eop.errorTenantId',
+  tenant_domain_invalid: 'admin.eop.errorTenantDomain',
+  // The Microsoft tenant's routes (backend routes/mailNodeTenant.js).
+  tenant_driver_missing: 'admin.tenant.errorDriverMissing',
+  tenant_not_configured: 'admin.tenant.errorNotConfigured',
+  tenant_job_not_found: 'admin.tenant.errorJobNotFound',
   app_id_invalid: 'admin.eop.errorAppId',
   thumbprint_invalid: 'admin.eop.errorThumbprint',
   tls_policy_invalid: 'admin.eop.errorTlsPolicy',
@@ -442,6 +447,11 @@ export function parseDay(value, now = Date.now()) {
   const today = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`;
   return text <= today ? text : null;
 }
+// The tenant's initial domain, <TENANT>.onmicrosoft.com (backend eopSettings.js parseTenantDomain).
+const parseTenantDomain = (value) => {
+  const domain = parseHost(value);
+  return domain && domain.endsWith('.onmicrosoft.com') ? domain : null;
+};
 const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
   return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
@@ -458,6 +468,7 @@ const EOP_PARSERS = {
   licenses: [(v) => parseWholeNumber(v, 1, MAX_LICENSES), 'licenses_invalid', true],
   tenantCreatedOn: [(v) => parseDay(v), 'tenant_created_invalid', true],
   tenantId: [parseGuid, 'tenant_id_invalid', true],
+  tenantDomain: [parseTenantDomain, 'tenant_domain_invalid', true],
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
   nodeIp: [parseIpv4, 'node_ip_invalid', true],
@@ -913,6 +924,9 @@ const ALERT_TITLE_KEYS = {
   containers: 'admin.nodeOps.alertContainers',
   terrl_budget: 'admin.nodeOps.alertTerrlBudget',
   outage_letters_waiting: 'admin.nodeOps.alertOutageLettersWaiting',
+  connector_blocked_tenant: 'admin.nodeOps.alertConnectorBlockedTenant',
+  tenant_certificate: 'admin.nodeOps.alertTenantCertificate',
+  tenant_poll_failing: 'admin.nodeOps.alertTenantPollFailing',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -929,6 +943,9 @@ const ALERT_SOURCE_KEYS = {
   containers: 'admin.nodeOps.sourceContainers',
   terrl: 'admin.nodeOps.sourceTerrl',
   trace: 'admin.nodeOps.sourceTrace',
+  tenant: 'admin.nodeOps.sourceTenant',
+  tenant_certificate: 'admin.nodeOps.sourceTenant',
+  tenant_poll: 'admin.nodeOps.sourceTenant',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -975,6 +992,22 @@ export function alertDetail(alert) {
         values: { count: d.waiting ?? 0, asOf: d.asOf ? new Date(d.asOf).toLocaleString() : '' },
         at: d.soonestExpiresAt ?? null,
       };
+    // The tenant poll (backend services/tenant/tenantJobs.js): Get-BlockedConnector, R-27.
+    case 'connector_blocked_tenant':
+      return {
+        key: 'admin.nodeOps.alertDetailConnectorBlockedTenant',
+        values: { count: d.count ?? 0, names: (d.connectors ?? []).map((c) => c.connectorName || c.connectorId).filter(Boolean).join(', ') || '—' },
+        at: d.checkedAt ?? null,
+      };
+    case 'tenant_certificate':
+      return d.code === 'cert_expired'
+        ? { key: 'admin.nodeOps.alertDetailTenantCertExpired', values: {}, at: d.notAfter ?? null }
+        : { key: 'admin.nodeOps.alertDetailTenantCertExpiring', values: { days: d.daysLeft ?? '—' }, at: d.notAfter ?? null };
+    // The poll failing several times in a row, or not running at all (backend nodeAlerts.js).
+    case 'tenant_poll_failing':
+      return d.failures
+        ? { key: 'admin.nodeOps.alertDetailTenantPollFailing', values: { count: d.failures }, at: d.lastReadAt ?? null }
+        : { key: 'admin.nodeOps.alertDetailTenantPollStale', values: {}, at: d.lastReadAt ?? null };
     default:
       return null;
   }
@@ -1021,4 +1054,88 @@ export function terrlBudget({ settings = {}, used = 0, now = Date.now() } = {}) 
     warn: used * 100 >= limit * TERRL_WARN_PERCENT,
     exceeded: used >= limit,
   };
+}
+
+// ── The Microsoft tenant (stage 7a; backend routes/mailNodeTenant.js) ───────────────────────────
+
+// Whether a tenant job still runs: the screen follows it until it ends.
+export function tenantJobActive(job) {
+  return job?.status === 'queued' || job?.status === 'running';
+}
+
+// The application certificate in the worker against the alert's thresholds (backend nodeAlerts.js
+// tenantSignals): { daysLeft, level } with level null, 'warning' (under 30 days) or 'error' (under
+// 14, or expired); null without a date.
+export const TENANT_CERT_WARN_DAYS = 30;
+export const TENANT_CERT_ERROR_DAYS = 14;
+export function tenantCertificateLevel(notAfter, now = Date.now()) {
+  const at = Date.parse(notAfter ?? '');
+  if (!Number.isFinite(at)) return null;
+  const daysLeft = Math.floor((at - now) / DAY_MS);
+  let level = null;
+  if (daysLeft < TENANT_CERT_ERROR_DAYS) level = 'error';
+  else if (daysLeft < TENANT_CERT_WARN_DAYS) level = 'warning';
+  return { daysLeft, level, expired: at <= now };
+}
+
+// Spelled out literally so the i18n coverage test finds them.
+const TENANT_STEP_KEYS = {
+  certificate: 'admin.tenant.stepCertificate',
+  graph: 'admin.tenant.stepGraph',
+  exo: 'admin.tenant.stepExo',
+};
+export const TENANT_STEPS = Object.keys(TENANT_STEP_KEYS);
+export function tenantStepKey(step) {
+  return TENANT_STEP_KEYS[step] ?? 'admin.tenant.stepUnknown';
+}
+
+// What a failed step or read says (codes of backend services/tenant/*.js and the worker).
+const TENANT_FAILURE_KEYS = {
+  certificate_mismatch: 'admin.tenant.failCertificateMismatch',
+  tenant_domain_mismatch: 'admin.tenant.failTenantDomainMismatch',
+  worker_unreachable: 'admin.tenant.failWorkerUnreachable',
+  worker_timeout: 'admin.tenant.failWorkerTimeout',
+  worker_unauthorized: 'admin.tenant.failWorkerUnauthorized',
+  exo_timeout: 'admin.tenant.failWorkerTimeout',
+  busy: 'admin.tenant.failWorkerBusy',
+  exo_connect_failed: 'admin.tenant.failExoConnect',
+  exo_failed: 'admin.tenant.failExo',
+  exo_not_found: 'admin.tenant.failExo',
+  graph_token_failed: 'admin.tenant.failGraphToken',
+  graph_forbidden: 'admin.tenant.failGraphForbidden',
+  graph_throttled: 'admin.tenant.failGraphThrottled',
+  graph_unreachable: 'admin.tenant.failGraphUnreachable',
+  graph_failed: 'admin.tenant.failGraph',
+  policy_missing: 'admin.tenant.failPolicyMissing',
+  tenant_driver_missing: 'admin.tenant.errorDriverMissing',
+  tenant_not_configured: 'admin.tenant.errorNotConfigured',
+};
+export function tenantFailureKey(code) {
+  return TENANT_FAILURE_KEYS[code] ?? 'admin.tenant.failOther';
+}
+
+// A conflict of the anti-spam policy with the filing layout (backend services/tenant/antispam.js).
+const POLICY_CONFLICT_KEYS = {
+  quarantined: 'admin.tenant.conflictQuarantined',
+  deleted: 'admin.tenant.conflictDeleted',
+  redirected: 'admin.tenant.conflictRedirected',
+  redirect_not_decided: 'admin.tenant.conflictRedirectNotDecided',
+  subject_only: 'admin.tenant.conflictSubjectOnly',
+  no_action: 'admin.tenant.conflictNoAction',
+  unexpected: 'admin.tenant.conflictUnexpected',
+};
+export function policyConflictKey(code) {
+  return POLICY_CONFLICT_KEYS[code] ?? 'admin.tenant.conflictUnexpected';
+}
+
+const POLICY_FIELD_KEYS = {
+  SpamAction: 'admin.tenant.policySpam',
+  HighConfidenceSpamAction: 'admin.tenant.policyHighSpam',
+  BulkSpamAction: 'admin.tenant.policyBulk',
+  PhishSpamAction: 'admin.tenant.policyPhish',
+  HighConfidencePhishAction: 'admin.tenant.policyHighPhish',
+};
+export const POLICY_FIELDS = Object.keys(POLICY_FIELD_KEYS);
+export function policyFieldKey(field) {
+  return POLICY_FIELD_KEYS[field] ?? 'admin.tenant.policyOther';
 }

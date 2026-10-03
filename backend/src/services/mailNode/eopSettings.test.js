@@ -143,8 +143,19 @@ describe('tenantDriverActive', () => {
 });
 
 describe('tenantConfigured', () => {
-  it('needs the tenant, the application and the certificate', () => {
-    expect(tenantConfigured({ tenantId: TENANT, appId: APP, certThumbprint: 'A'.repeat(40) })).toBe(true);
-    expect(tenantConfigured({ tenantId: TENANT, appId: APP, certThumbprint: null })).toBe(false);
+  it('needs the tenant, its initial domain, the application and the certificate', () => {
+    const all = { tenantId: TENANT, tenantDomain: 'contoso.onmicrosoft.com', appId: APP, certThumbprint: 'A'.repeat(40) };
+    expect(tenantConfigured(all)).toBe(true);
+    for (const field of Object.keys(all)) expect(tenantConfigured({ ...all, [field]: null })).toBe(false);
+  });
+});
+
+describe('the tenant domain', () => {
+  it('is the onmicrosoft.com domain, lower case', () => {
+    expect(parseEopSettings({ tenantDomain: ' Contoso.OnMicrosoft.com ' })).toEqual({ settings: { tenantDomain: 'contoso.onmicrosoft.com' } });
+    expect(parseEopSettings({ tenantDomain: 'contoso.com' })).toEqual({ error: 'tenant_domain_invalid' });
+    expect(parseEopSettings({ tenantDomain: 'contoso.onmicrosoft.com;x' })).toEqual({ error: 'tenant_domain_invalid' });
+    expect(parseEopSettings({ tenantDomain: '' })).toEqual({ settings: { tenantDomain: null } });
+    expect(EOP_DEFAULTS.tenantDomain).toBeNull();
   });
 });

@@ -15,6 +15,9 @@ frontend/packages/release/
 
 # TLS certs (generated locally or via Let's Encrypt)
 certs/
+# The Microsoft tenant application certificate (PFX) and its password: never committed
+tenant-cert/
+tenant-secrets/
 
 # Logs
 *.log

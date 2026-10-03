@@ -412,6 +412,13 @@ export const api = {
     checkAlerts: () => request('POST', '/mail-node/alerts/check'),
     saveAlertSettings: (data) => request('PUT', '/mail-node/alerts/settings', data),
     getTerrlBudget: () => request('GET', '/mail-node/eop/budget'),
+    // The Microsoft tenant (stage 7a): what the tenant jobs stored, the buttons that queue a job
+    // (202 with { job }), and one job followed until it ends.
+    getTenant: () => request('GET', '/mail-node/tenant'),
+    testTenant: () => request('POST', '/mail-node/tenant/test'),
+    pollTenant: () => request('POST', '/mail-node/tenant/poll'),
+    readTenantAntispam: () => request('POST', '/mail-node/tenant/antispam'),
+    getTenantJob: (id) => request('GET', `/mail-node/tenant/jobs/${encodeURIComponent(id)}`),
     // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
     // release and delete (administrators), and whether users see it too.
     listQuarantine: () => request('GET', '/mail-node/quarantine'),

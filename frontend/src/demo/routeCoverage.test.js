@@ -74,6 +74,8 @@ const CONCRETE_PATH = {
   '/mail-node/queue/:param:param': '/mail-node/queue/D3A1F2B4C5',
   '/mail-node/alerts': '/mail-node/alerts',
   '/mail-node/eop/budget': '/mail-node/eop/budget',
+  '/mail-node/tenant': '/mail-node/tenant',
+  '/mail-node/tenant/jobs/:param': '/mail-node/tenant/jobs/9001',
   '/mail-node/quarantine': '/mail-node/quarantine',
   '/mail-node/quarantine/:param': '/mail-node/quarantine/41',
   '/mail-node/quarantine/settings': '/mail-node/quarantine/settings',
@@ -550,6 +552,20 @@ test('the outage windows answer: by hand, closed, changed, deleted, the trace, t
   const settings = await answer('/mail-node/outage-settings', 'PUT', '/mail-node/outage-settings', { retentionDays: 14 });
   assert.equal(settings.settings.retentionDays, 14);
   await reject('/mail-node/outage-settings', 'PUT', '/mail-node/outage-settings', { retentionDays: 0 }, /1 to 90/);
+});
+
+test('the Microsoft tenant answers: test, poll and the anti-spam policy finish at once (stage 7a)', async () => {
+  const tested = await answer('/mail-node/tenant/test', 'POST', '/mail-node/tenant/test');
+  assert.equal(tested.job.status, 'done');
+  const polled = await answer('/mail-node/tenant/poll', 'POST', '/mail-node/tenant/poll');
+  assert.equal(polled.job.kind, 'tenant_poll');
+  const read = await answer('/mail-node/tenant/antispam', 'POST', '/mail-node/tenant/antispam');
+  assert.equal(read.job.kind, 'tenant_antispam_read');
+  const tenant = await demoRequest('GET', '/mail-node/tenant');
+  assert.equal(tenant.driver, 'fake');
+  assert.equal(tenant.state.connection.ok, true);
+  assert.deepEqual(tenant.state.antispam.conflicts.map(c => c.field), ['PhishSpamAction']);
+  assert.equal((await demoRequest('GET', `/mail-node/tenant/jobs/${tested.job.id}`)).job.id, tested.job.id);
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {
