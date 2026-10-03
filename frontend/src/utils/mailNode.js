@@ -50,6 +50,9 @@ const DOMAIN_STATE_KEYS = {
   authoritative: 'admin.mailNode.stateAuthoritative',
 };
 // What a person does to finish each step, the line of the onboarding checklist.
+// The steps the tenant driver confirms itself (stage 7b, backend tenantDomains.js DRIVER_STEPS):
+// with the driver, they have no "Done".
+export const TENANT_DRIVER_STEPS = ['tenant_verified', 'internal_relay', 'connector_ready'];
 const STEP_KEYS = {
   node_configured: 'admin.mailNode.stepNodeConfigured',
   dns_ok: 'admin.mailNode.stepDnsOk',
@@ -78,6 +81,12 @@ const ERROR_KEYS = {
   sender_name_invalid: 'admin.accounts.add.senderNameInvalid',
   domain_not_ready: 'admin.accounts.add.domainErrorNotReady',
   domain_not_on_node: 'admin.mailNode.errorDomainNotOnNode',
+  // Stage 7b (backend routes/mailNode.js, routes/mailNodeTenant.js, the mailbox deletion's steps).
+  step_by_tenant_driver: 'admin.mailNode.errorStepByTenantDriver',
+  outbound_connector_invalid: 'admin.eop.errorOutboundConnector',
+  dbeb_external_domain_invalid: 'admin.eop.errorDbebExternalDomain',
+  connectors_not_read: 'admin.tenant.errorConnectorsNotRead',
+  tenant_recipient_not_removed: 'admin.accounts.deletion.errorTenantRecipient',
   domain_not_found: 'admin.mailNode.errorDomainNotFound',
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
@@ -306,19 +315,29 @@ export function domainStateKey(state) {
 // The checklist of a domain the panel knows: each manual step up to 'ready' with its status:
 // 'confirmed' (someone pressed Done; `by` and `at` say who and when), 'skipped' (the domain was
 // marked ready past it), 'next' (the one Done confirms now) or 'pending'.
-export function onboardingSteps(domain) {
+// tenantDriver: the tenant driver runs the tenant steps (stage 7b): the next of them is 'tenant'
+// (MailExpert does it) instead of 'next' (a person's "Done").
+export function onboardingSteps(domain, { tenantDriver = false } = {}) {
   const reached = DOMAIN_STATES.indexOf(domain?.state);
   return DOMAIN_STATES.slice(1, READY_INDEX + 1).map((state) => {
     const confirmed = domain?.steps?.[state] ?? null;
     let status = 'pending';
     if (confirmed && !(state === 'ready' && confirmed.markedReady)) status = 'confirmed';
     else if (DOMAIN_STATES.indexOf(state) <= reached) status = state === 'ready' ? 'confirmed' : 'skipped';
-    else if (domain?.nextStep === state) status = 'next';
+    else if (domain?.nextStep === state) status = tenantDriver && TENANT_DRIVER_STEPS.includes(state) ? 'tenant' : 'next';
     return {
       state, labelKey: STEP_KEYS[state], status,
       by: confirmed?.email ?? null, at: confirmed?.at ?? null, markedReady: !!confirmed?.markedReady,
+      byTenantDriver: !!confirmed?.tenantDriver,
     };
   });
+}
+
+// A mail node mailbox whose domain is Authoritative while the tenant has no recipient for it yet:
+// EOP rejects mail to it until the mirror makes one (R-32, stage 7b; GET /api/accounts
+// tenant_pending).
+export function tenantPending(account) {
+  return account?.mail_node === true && account?.tenant_pending === true;
 }
 
 // Whether only administrators may delete a mail node mailbox, which takes its mail with it. Off:
@@ -456,6 +475,11 @@ const parseThumbprint = (value) => {
   const hex = String(value).replace(/[\s:]/g, '').toUpperCase();
   return /^[0-9A-F]{40}$/.test(hex) ? hex : null;
 };
+// An Outbound connector's name in EAC (backend exoRunner.js parseConnectorName).
+const parseConnectorName = (value) => {
+  const name = String(value).trim();
+  return /^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$/.test(name) ? name : null;
+};
 // field: [parse, refusal code, whether it may be left empty]
 const EOP_PARSERS = {
   eopHost: [parseHost, 'eop_host_invalid', true],
@@ -472,6 +496,8 @@ const EOP_PARSERS = {
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
   nodeIp: [parseIpv4, 'node_ip_invalid', true],
+  outboundConnector: [parseConnectorName, 'outbound_connector_invalid', true],
+  dbebExternalDomain: [parseHost, 'dbeb_external_domain_invalid', true],
 };
 
 export function normalizeEopSettings(body) {
@@ -927,6 +953,7 @@ const ALERT_TITLE_KEYS = {
   connector_blocked_tenant: 'admin.nodeOps.alertConnectorBlockedTenant',
   tenant_certificate: 'admin.nodeOps.alertTenantCertificate',
   tenant_poll_failing: 'admin.nodeOps.alertTenantPollFailing',
+  tenant_connector_drift: 'admin.nodeOps.alertTenantConnectorDrift',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -946,6 +973,7 @@ const ALERT_SOURCE_KEYS = {
   tenant: 'admin.nodeOps.sourceTenant',
   tenant_certificate: 'admin.nodeOps.sourceTenant',
   tenant_poll: 'admin.nodeOps.sourceTenant',
+  tenant_connectors: 'admin.nodeOps.sourceTenant',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1004,6 +1032,13 @@ export function alertDetail(alert) {
         ? { key: 'admin.nodeOps.alertDetailTenantCertExpired', values: {}, at: d.notAfter ?? null }
         : { key: 'admin.nodeOps.alertDetailTenantCertExpiring', values: { days: d.daysLeft ?? '—' }, at: d.notAfter ?? null };
     // The poll failing several times in a row, or not running at all (backend nodeAlerts.js).
+    // A connector changed since its reference (R-25, stage 7b).
+    case 'tenant_connector_drift':
+      return {
+        key: 'admin.nodeOps.alertDetailTenantConnectorDrift',
+        values: { count: d.count ?? 0, names: (d.connectors ?? []).map((c) => c.name).filter(Boolean).join(', ') || '—' },
+        at: d.checkedAt ?? null,
+      };
     case 'tenant_poll_failing':
       return d.failures
         ? { key: 'admin.nodeOps.alertDetailTenantPollFailing', values: { count: d.failures }, at: d.lastReadAt ?? null }
@@ -1109,6 +1144,21 @@ const TENANT_FAILURE_KEYS = {
   policy_missing: 'admin.tenant.failPolicyMissing',
   tenant_driver_missing: 'admin.tenant.errorDriverMissing',
   tenant_not_configured: 'admin.tenant.errorNotConfigured',
+  // Stage 7b: the domain's tenant steps and the mirror (backend services/tenant/tenantDomains.js).
+  exo_throttled: 'admin.tenant.failThrottled',
+  exo_exists: 'admin.tenant.failExo',
+  domain_not_verified: 'admin.tenant.failDomainNotVerified',
+  outbound_connector_missing: 'admin.tenant.failOutboundMissing',
+  outbound_connector_ambiguous: 'admin.tenant.failOutboundAmbiguous',
+  outbound_connector_not_found: 'admin.tenant.failOutboundNotFound',
+  connector_domain_missing: 'admin.tenant.failConnectorDomainMissing',
+  dkim_config_missing: 'admin.tenant.failDkimConfigMissing',
+  authoritative_lost: 'admin.tenant.failAuthoritativeLost',
+  mail_node_not_configured: 'admin.mailNode.errorNotConfigured',
+  mail_node_unreachable: 'admin.mailNode.errorUnreachable',
+  mail_node_auth: 'admin.mailNode.errorAuth',
+  mail_node_refused: 'admin.mailNode.errorRefused',
+  mail_node_failed: 'admin.mailNode.errorFailed',
 };
 export function tenantFailureKey(code) {
   return TENANT_FAILURE_KEYS[code] ?? 'admin.tenant.failOther';

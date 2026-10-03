@@ -419,6 +419,9 @@ export const api = {
     pollTenant: () => request('POST', '/mail-node/tenant/poll'),
     readTenantAntispam: () => request('POST', '/mail-node/tenant/antispam'),
     getTenantJob: (id) => request('GET', `/mail-node/tenant/jobs/${encodeURIComponent(id)}`),
+    // Stage 7b: one domain's tenant steps and mirror now, and the connectors as the reference.
+    syncTenantDomain: (domain) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/sync`),
+    takeTenantConnectorReference: () => request('POST', '/mail-node/tenant/connectors/reference'),
     // The node's quarantine (R-20): the entries, one with its letter parsed for the safe view,
     // release and delete (administrators), and whether users see it too.
     listQuarantine: () => request('GET', '/mail-node/quarantine'),

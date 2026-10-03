@@ -253,6 +253,49 @@ describe('MailNodeDomainOnboarding — node trouble never hides or resets a doma
   });
 });
 
+describe('MailNodeDomainOnboarding — the tenant driver (stage 7b)', () => {
+  const SYNC = {
+    at, ok: false,
+    graph: { present: true, verified: true, mx: ['pending-example.mail.protection.outlook.com'] },
+    acceptedDomain: { visible: true, type: 'InternalRelay' },
+    connector: { ok: false, code: 'outbound_connector_ambiguous', names: ['A', 'B'] },
+    mirror: {
+      ok: true, desired: 3, present: 2, missing: ['c@pending.example'], catchAll: '@pending.example', complete: false, left: 0,
+      nodeOnly: ['manual@pending.example'], panelOnly: [], conflicts: [], failed: [],
+    },
+  };
+
+  test('has no "Done" on the tenant steps, shows the last run and queues a new one', async () => {
+    answers['GET /api/mail-node/domains'] = {
+      domains: [domainRow('pending.example', 'dns_ok', { nextStep: 'tenant_verified', tenantSync: SYNC })], tenantDriverActive: true,
+    };
+    answers['POST /api/mail-node/tenant/domains/pending.example/sync'] = { job: { id: '7', kind: 'tenant_domain_sync', status: 'queued' }, created: true };
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    const detail = host.querySelector('[data-domain-onboarding="pending.example"]');
+    assert.equal(detail.querySelector('[data-step="tenant_verified"]').getAttribute('data-status'), 'tenant');
+    assert.equal(buttons(detail, 'admin.mailNode.stepDone').length, 0);
+    const tenant = detail.querySelector('[data-domain-tenant="pending.example"]');
+    assert.match(tenant.querySelector('[data-tenant-part="graph"]').textContent, /pending-example\.mail\.protection\.outlook\.com/);
+    assert.match(tenant.querySelector('[data-tenant-part="connector"]').textContent, /admin\.tenant\.failOutboundAmbiguous.*A, B/);
+    assert.match(tenant.querySelector('[data-tenant-part="mirror"]').textContent, /c@pending\.example/);
+    assert.ok(tenant.querySelector('[data-tenant-catch-all]'));
+    await click(buttons(tenant, 'admin.mailNode.tenantRunNow')[0]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/domains/pending.example/sync'));
+    assert.ok(tenant.textContent.includes('admin.mailNode.tenantQueued'));
+  });
+
+  test('without the driver the checklist is a person\'s, and a past run still shows', async () => {
+    answers['GET /api/mail-node/domains'] = { domains: [domainRow('pending.example', 'dns_ok', { nextStep: 'tenant_verified', tenantSync: SYNC })] };
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    const detail = host.querySelector('[data-domain-onboarding="pending.example"]');
+    assert.equal(buttons(detail, 'admin.mailNode.stepDone').length, 1);
+    assert.ok(detail.querySelector('[data-domain-tenant]'));
+    assert.equal(buttons(detail, 'admin.mailNode.tenantRunNow').length, 0);
+  });
+});
+
 describe('MailNodeDomainOnboarding — restart onboarding', () => {
   test('restarts a domain only after a second confirmation', async () => {
     let changed = 0;
@@ -303,7 +346,8 @@ describe('EopSection', () => {
 
   test('saves the settings it checked, and keeps a bad value from being sent', async () => {
     const host = await mount(React.createElement(EopSection));
-    const thumbprint = [...host.querySelectorAll('input')].at(-1);
+    // The thumbprint, before the two stage 7b fields (Outbound connector, DBEB external domain).
+    const thumbprint = [...host.querySelectorAll('input')].at(-3);
     await type(thumbprint, 'not-hex');
     assert.ok(host.textContent.includes('admin.eop.errorThumbprint'));
     assert.equal(buttons(host, 'common.save')[0].disabled, true);

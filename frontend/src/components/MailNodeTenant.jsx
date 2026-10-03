@@ -49,8 +49,10 @@ function Failure({ failure }) {
 // the PFX itself never enters the panel, R-35), "Test connection" (a Graph token and EXO whoami
 // through the job queue, its result step by step), the blocked inbound connectors the poll found
 // (R-27; removing a block stays in the Microsoft portal for now), and the anti-spam policy read
-// only, with what does not fit the spam filing layout (R-28). Every button queues a job and the
-// section follows it until it ends. `revision` changes when the EOP settings were saved.
+// only, with what does not fit the spam filing layout (R-28), and (stage 7b, R-25) the connectors
+// compared with their reference, with "Take as the reference" after a deliberate change. Every
+// job button queues a job and the section follows it until it ends. `revision` changes when the
+// EOP settings were saved.
 export default function MailNodeTenant({ revision = 0 }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
@@ -107,6 +109,9 @@ export default function MailNodeTenant({ revision = 0 }) {
   const certificate = state.certificate;
   const blocked = state.blockedConnectors;
   const antispam = state.antispam;
+  const connectors = state.connectors;
+  const reference = state.connectorReference;
+  const drift = data?.connectorDrift ?? [];
   const cert = tenantCertificateLevel(certificate?.notAfter);
   const canRun = !!data?.driver && !!data?.configured && !busy;
   const testRunning = busy === 'test' || tenantJobActive(data?.jobs?.test);
@@ -224,6 +229,60 @@ export default function MailNodeTenant({ revision = 0 }) {
       <div style={{ marginTop: 8 }}>
         <button type="button" onClick={start('antispam', api.mailNode.readTenantAntispam)} disabled={!canRun} style={buttonStyle}>
           {busy === 'antispam' ? t('admin.tenant.checking') : t('admin.tenant.policyRefresh')}
+        </button>
+      </div>
+
+      <div style={subTitleStyle}>{t('admin.tenant.connectorsTitle')}</div>
+      <span style={{ ...hintStyle, marginTop: 0, marginBottom: 6 }}>{t('admin.tenant.connectorsNote')}</span>
+      {!connectors && <span style={{ ...hintStyle, marginTop: 0 }}>{t('admin.tenant.connectorsNever')}</span>}
+      {connectors && (
+        <div data-tenant-connectors style={textStyle}>
+          {connectors.ok !== false && (
+            <div>
+              {t('admin.tenant.connectorsRead', { at: when(connectors.at) })}
+              {': '}
+              <span style={monoStyle}>{[...(connectors.inbound ?? []), ...(connectors.outbound ?? [])].map((c) => c.name).join(', ') || '—'}</span>
+            </div>
+          )}
+          {connectors.error && <div><Failure failure={connectors.error} />{` · ${when(connectors.errorAt)}`}</div>}
+          {reference && (
+            <div style={{ color: 'var(--text-tertiary)' }}>
+              {reference.auto ? t('admin.tenant.referenceAuto', { at: when(reference.at) }) : t('admin.tenant.referenceTaken', { at: when(reference.at) })}
+            </div>
+          )}
+          {drift.length === 0 && reference && connectors.ok !== false && <div>{t('admin.tenant.driftNone')}</div>}
+          {drift.length > 0 && (
+            <div role="status" data-tenant-drift style={boxStyle('warning')}>
+              <div style={{ fontWeight: 600 }}>{t('admin.tenant.driftSome', { count: drift.length })}</div>
+              {drift.map((d) => (
+                <div key={`${d.direction}:${d.name}:${d.kind}`} data-drift={d.kind}>
+                  <span style={monoStyle}>{d.name}</span>{' — '}
+                  {d.kind === 'missing' && t('admin.tenant.driftMissing')}
+                  {d.kind === 'added' && t('admin.tenant.driftAdded')}
+                  {d.kind === 'changed' && (d.changes ?? []).map((c) => `${c.property}: ${JSON.stringify(c.was)} → ${JSON.stringify(c.now)}`).join('; ')}
+                </div>
+              ))}
+              <div style={{ marginTop: 6 }}>{t('admin.tenant.driftHint')}</div>
+            </div>
+          )}
+        </div>
+      )}
+      <div style={{ marginTop: 8 }}>
+        <button
+          type="button"
+          onClick={async () => {
+            setError(null);
+            try {
+              await api.mailNode.takeTenantConnectorReference();
+              await load();
+            } catch (err) {
+              setError(mailNodeErrorKey(err?.code));
+            }
+          }}
+          disabled={!canRun || !connectors?.ok}
+          style={buttonStyle}
+        >
+          {t('admin.tenant.referenceTake')}
         </button>
       </div>
 

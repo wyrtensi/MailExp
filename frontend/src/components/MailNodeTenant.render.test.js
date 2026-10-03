@@ -119,6 +119,23 @@ async function click(element) {
   await flush();
 }
 
+describe('MailNodeTenant — the connectors (R-25, stage 7b)', () => {
+  const connectors = { at: '2026-10-03T08:10:00.000Z', ok: true, inbound: [{ name: 'From mail node', properties: {} }], outbound: [{ name: 'To mail node', properties: {} }] };
+  test('shows what changed since the reference and takes the connectors as the reference again', async () => {
+    answers['GET /api/mail-node/tenant'] = {
+      driver: 'worker', configured: true, jobs: {},
+      state: { ...STATE, connectors, connectorReference: { at: '2026-10-01T08:00:00.000Z', auto: true } },
+      connectorDrift: [{ direction: 'outbound', name: 'To mail node', kind: 'changed', changes: [{ property: 'TlsSettings', was: 'domainvalidation', now: 'encryptiononly' }] }],
+    };
+    answers['POST /api/mail-node/tenant/connectors/reference'] = { reference: { at: '2026-10-03T09:00:00.000Z', auto: false } };
+    const root = await mount(React.createElement(MailNodeTenant));
+    assert.match(root.querySelector('[data-tenant-connectors]').textContent, /From mail node, To mail node/);
+    assert.match(root.querySelector('[data-tenant-drift]').textContent, /TlsSettings: "domainvalidation" → "encryptiononly"/);
+    await click(buttons(root, 'admin.tenant.referenceTake')[0]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/connectors/reference'));
+  });
+});
+
 describe('MailNodeTenant', () => {
   test('shows the certificate with its warning, the steps, the blocked connector and the policy conflict', async () => {
     const root = await mount(React.createElement(MailNodeTenant));

@@ -278,12 +278,18 @@ router.get('/domains', async (req, res) => {
     if (!(err instanceof MailNodeError)) throw err;
     nodeError = err;
   }
+  // Administrators: whether the tenant driver runs the tenant steps (stage 7b), so the onboarding
+  // shows those steps as MailExpert's instead of offering "Done".
+  const driverActive = async () => tenantDriverActive(await getEopSettings());
   if (nodeError) {
     if (!(await isAdmin(req))) return mailNodeFailure(res, nodeError);
-    return res.json({ domains: mergeDomains(null, await listDomainRows()), node: { error: nodeError.message, code: nodeError.code } });
+    return res.json({
+      domains: mergeDomains(null, await listDomainRows()), node: { error: nodeError.message, code: nodeError.code },
+      tenantDriverActive: await driverActive(),
+    });
   }
   const domains = mergeDomains(onNode, await bindNodeIdentities(onNode, await listDomainRows()));
-  if (await isAdmin(req)) return res.json({ domains });
+  if (await isAdmin(req)) return res.json({ domains, tenantDriverActive: await driverActive() });
   res.json({
     domains: domains
       .filter((d) => d.onNode && d.active && canCreateMailboxes(d.state))

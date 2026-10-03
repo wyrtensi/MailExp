@@ -25,7 +25,7 @@ import LogoMark from './LogoMark.jsx';
 import ProfileModal from './ProfileModal.jsx';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
 import { CheckIcon, CloseIcon, PinIcon } from './UiIcons.jsx';
-import { PendingDeletionLine } from './MailboxDeletionNotice.jsx';
+import { PendingDeletionLine, TenantPendingLine } from './MailboxDeletionNotice.jsx';
 
 const ICONS = {
   inbox: (
@@ -1545,6 +1545,7 @@ export default function Sidebar() {
                       )}
                       {/* A mail node mailbox someone asked to delete keeps working until its date. */}
                       <PendingDeletionLine account={account} />
+                      <TenantPendingLine account={account} />
                       {hasProblem && (
                         <div style={{
                           fontSize: 11, color: 'var(--red)',

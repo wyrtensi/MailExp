@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeApplyResult from './MailNodeApplyResult.jsx';
 import MailNodeDnsResult, { CopyButton } from './MailNodeDnsResult.jsx';
+import MailNodeDomainTenant from './MailNodeDomainTenant.jsx';
 import {
   DNS_STATUS_COLORS,
   canMarkReady,
@@ -31,6 +32,7 @@ const warningBoxStyle = {
 };
 const STATUS_COLORS = {
   confirmed: 'var(--text-primary)', skipped: 'var(--text-tertiary)', next: 'var(--text-primary)', pending: 'var(--text-tertiary)',
+  tenant: 'var(--text-primary)',
 };
 // Spelled out literally so the i18n coverage test finds them.
 const STATUS_KEYS = {
@@ -38,6 +40,7 @@ const STATUS_KEYS = {
   skipped: 'admin.mailNode.stepStatusSkipped',
   next: 'admin.mailNode.stepStatusNext',
   pending: 'admin.mailNode.stepStatusPending',
+  tenant: 'admin.mailNode.stepStatusTenant',
 };
 const ORIGIN_KEYS = {
   created: 'admin.mailNode.originCreated',
@@ -84,12 +87,14 @@ function DkimRecord({ dkim }) {
 // to accept it. Below, the domain's DNS: the last check (R-14) item by item with the records to
 // publish, "Check now", and the values the domain must publish that the panel cannot read yet (its
 // MX, the tenant's verification TXT, the EOP DKIM selector CNAMEs); the "DNS is right" step shows
-// the latest result next to its "Done", which stays a person's confirmation. Then the domain's node
+// the latest result next to its "Done", which stays a person's confirmation. With the tenant driver
+// (tenantDriver, stage 7b) the tenant steps have no "Done": MailExpert confirms them from what the
+// tenant answers, and the domain's tenant part (MailNodeDomainTenant) shows its last run. Then the domain's node
 // settings: the last apply (relayhost, DKIM, the send limits of its mailboxes) with the DKIM record
 // to publish, "Apply settings", and, when the tenant signs and mailcow still has a key, deleting
 // that key after a confirmation. The server journals each. `onChanged` runs after any of them so
 // the lists reload. Nothing here ever hides the domain or changes its state on its own.
-export default function MailNodeDomainOnboarding({ domain, onChanged }) {
+export default function MailNodeDomainOnboarding({ domain, onChanged, tenantDriver = false }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -130,7 +135,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
     );
   }
 
-  const steps = onboardingSteps(domain);
+  const steps = onboardingSteps(domain, { tenantDriver });
   // A row whose domain the node does not list (onNode false), or that the node could not be asked
   // about (null), only shows its history: the server refuses to move it then.
   const actionable = domain.onNode === true;
@@ -161,7 +166,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
             {' '}
             <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
               {step.status === 'confirmed' && step.by
-                ? t(step.markedReady ? 'admin.mailNode.stepMarkedReadyBy' : 'admin.mailNode.stepConfirmedBy', { by: step.by, at: when(step.at) })
+                ? t(step.markedReady ? 'admin.mailNode.stepMarkedReadyBy' : (step.byTenantDriver ? 'admin.mailNode.stepConfirmedByTenant' : 'admin.mailNode.stepConfirmedBy'), { by: step.by, at: when(step.at) })
                 : t(STATUS_KEYS[step.status])}
             </span>
             {step.status === 'next' && step.state === 'dns_ok' && (
@@ -178,6 +183,7 @@ export default function MailNodeDomainOnboarding({ domain, onChanged }) {
         ))}
       </ol>
       {domain.state === 'authoritative' && <div style={{ ...noteStyle, marginTop: 8 }}>{t('admin.mailNode.authoritativeNote')}</div>}
+      {(tenantDriver || domain.tenantSync) && <MailNodeDomainTenant domain={domain} active={tenantDriver && actionable} onChanged={onChanged} />}
       {actionable && canMarkReady(domain) && confirming !== 'ready' && (
         <div style={{ marginTop: 10 }}>
           <button type="button" onClick={() => setConfirming('ready')} disabled={busy} style={buttonStyle}>

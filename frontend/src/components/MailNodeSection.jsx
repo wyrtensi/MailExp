@@ -81,6 +81,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   // A send limit being edited per mailbox: { value, frame }.
   const [limitEdits, setLimitEdits] = useState({});
   const [openDomain, setOpenDomain] = useState(null);
+  // The tenant driver runs the domains' tenant steps (stage 7b): GET /domains says so.
+  const [tenantDriver, setTenantDriver] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -94,6 +96,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     if (d.status === 'fulfilled') {
       setDomains(d.value?.domains ?? []);
       setDomainsNodeError(d.value?.node ?? null);
+      setTenantDriver(d.value?.tenantDriverActive === true);
     } else {
       setDomainsNodeError(null);
     }
@@ -350,7 +353,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                     {openDomain === d.domain && (
                       <tr>
                         <td colSpan={3} style={{ ...cellStyle, background: 'var(--bg-secondary)' }}>
-                          <MailNodeDomainOnboarding domain={d} onChanged={refreshDomains} />
+                          <MailNodeDomainOnboarding domain={d} onChanged={refreshDomains} tenantDriver={tenantDriver} />
                         </td>
                       </tr>
                     )}

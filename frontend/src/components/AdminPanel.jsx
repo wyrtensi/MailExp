@@ -50,7 +50,7 @@ import {
   canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, mailNodeErrorKey, nodeMailboxDeleteDialog,
   pendingDeletion,
 } from '../utils/mailNode.js';
-import MailboxDeletionNotice from './MailboxDeletionNotice.jsx';
+import MailboxDeletionNotice, { TenantPendingLine } from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
@@ -1352,6 +1352,7 @@ export function AccountsTab() {
           </div>
 
           <MailboxDeletionNotice account={account} onCancel={handleCancelDeletion} busy={cancellingDeletion === account.id} />
+          <TenantPendingLine account={account} style={{ padding: '6px 14px', borderTop: '1px solid var(--border-subtle)', whiteSpace: 'normal', fontSize: 12 }} />
 
           {/* Connection details bar */}
           <div style={{

@@ -749,7 +749,8 @@
     "backToAccounts": "Назад к аккаунтам",
     "pinned": "Закреплён",
     "updateAvailable": "Доступно обновление: v{{version}}",
-    "pendingDeletion": "Будет удалён {{date}}"
+    "pendingDeletion": "Будет удалён {{date}}",
+    "tenantPending": "Ждёт тенант: почта на него пока отклоняется"
   },
   "contextMenu": {
     "find": "Найти",
@@ -1242,7 +1243,8 @@
         "errorRequestRequired": "Ящик почтового узла удаляется после срока ожидания: запланируйте его удаление.",
         "errorAccountNotFound": "Этого ящика больше нет в MailExpert.",
         "errorStepFailed": "не удался шаг перед удалением на почтовом узле",
-        "errorRowKept": "ящик удалён на почтовом узле, но его запись здесь осталась: обратитесь к администратору"
+        "errorRowKept": "ящик удалён на почтовом узле, но его запись здесь осталась: обратитесь к администратору",
+        "errorTenantRecipient": "не удалось убрать его получателя из тенанта Microsoft"
       }
     },
     "folderMappings": {
@@ -2180,7 +2182,14 @@
       "fieldOutageReason": "причина",
       "actionTenantConnectionTested": "Проверено подключение к тенанту",
       "detailTenantTestOk": "Подключено",
-      "detailTenantTestFailed": "Не удалось: {{steps}}"
+      "detailTenantTestFailed": "Не удалось: {{steps}}",
+      "actionTenantRecipientsSynced": "Синхронизированы получатели тенанта",
+      "actionTenantConnectorReference": "Коннекторы приняты как эталон",
+      "detailTenantRecipients": "{{domain}}: создано {{created}}, удалено {{removed}}",
+      "detailTenantConnectorReference": "Коннекторы: {{names}}",
+      "detailDomainTenantDriver": "{{domain}}: {{from}} → {{to}} (драйвер тенанта)",
+      "fieldOutboundConnector": "Outbound connector",
+      "fieldDbebExternalDomain": "внешний домен контактов DBEB"
     },
     "accessSync": {
       "tab": "Синхронизация с Access",
@@ -2501,7 +2510,35 @@
       "dnsCheckRunning": "Проверка DNS узла и всех доменов уже идёт: перезагрузите страницу через минуту, чтобы увидеть результаты.",
       "nodeIpLabel": "Адрес узла (IPv4)",
       "nodeIpPh": "203.0.113.10",
-      "nodeIpNote": "Публичный адрес узла. Нужен только проверке DNS (A и PTR имени узла; SPF не должен его содержать); панель по-прежнему подключается по имени. При переезде узла меняйте вместе с хостом. Необязательно."
+      "nodeIpNote": "Публичный адрес узла. Нужен только проверке DNS (A и PTR имени узла; SPF не должен его содержать); панель по-прежнему подключается по имени. При переезде узла меняйте вместе с хостом. Необязательно.",
+      "tenantTitle": "В тенанте Microsoft",
+      "tenantNever": "Драйвер тенанта для этого домена ещё не запускался.",
+      "tenantRunAt": "Последний прогон {{at}}",
+      "tenantThrottled": "Microsoft попросил снизить темп; продолжится само",
+      "tenantDomainVerified": "Домен подтверждён в тенанте.",
+      "tenantDomainAdded": "Домен добавлен в тенант, но ещё не подтверждён: опубликуйте TXT ниже и подтвердите шаг «DNS настроен».",
+      "tenantVerifyWaiting": "Microsoft пока не видит TXT; следующий прогон попробует снова",
+      "tenantVerificationTxt": "TXT для подтверждения",
+      "tenantMx": "MX от тенанта",
+      "tenantAcceptedType": "Тип accepted domain: {{type}}",
+      "tenantAcceptedWaiting": "Exchange Online пока не показывает домен (попытка {{count}}); MailExpert проверит снова через несколько минут.",
+      "tenantConnectorOk": "Домен в Outbound connector «{{name}}».",
+      "tenantDkimEnabled": "DKIM EOP включён.",
+      "tenantDkimWaiting": "DKIM EOP создан, но ещё не включён: опубликуйте обе CNAME селекторов; MailExpert включит его, как только Microsoft их увидит.",
+      "tenantMirror": "Получатели в тенанте: {{present}} из {{desired}}",
+      "tenantMirrorComplete": "полностью",
+      "tenantMirrorLeft": "осталось: {{count}}, продолжается",
+      "tenantMirrorMissing": "Пока без получателя",
+      "tenantCatchAll": "На узле есть catch-all {{address}}: пока он есть, домен не переводится в Authoritative (решение D-6). Удалите его в mailcow.",
+      "tenantMirrorSuspicious": "Узел не вернул ни одного ящика домена, хотя в панели они есть: MailExpert ничего не удалил из тенанта.",
+      "tenantMirrorConflicts": "Адреса {{addresses}} заняты другим получателем тенанта (не контактом): почта на них уходит туда, а не на узел.",
+      "tenantNodeOnly": "Есть на узле, нет в панели",
+      "tenantPanelOnly": "Есть в панели, нет на узле",
+      "tenantRunNow": "Выполнить шаги тенанта сейчас",
+      "tenantQueued": "Поставлено в очередь; результат появится здесь после прогона.",
+      "stepStatusTenant": "делает MailExpert в тенанте",
+      "stepConfirmedByTenant": "сделал {{by}} в тенанте, {{at}}",
+      "errorStepByTenantDriver": "Этот шаг MailExpert подтверждает сам через драйвер тенанта."
     },
     "eop": {
       "title": "Почта через EOP",
@@ -2575,7 +2612,15 @@
       "tenantDomainLabel": "Домен тенанта",
       "tenantDomainPh": "contoso.onmicrosoft.com",
       "tenantDomainNote": "Начальный домен тенанта, <тенант>.onmicrosoft.com: к нему подключается Exchange Online PowerShell.",
-      "errorTenantDomain": "Домен тенанта — начальный домен вида contoso.onmicrosoft.com."
+      "errorTenantDomain": "Домен тенанта — начальный домен вида contoso.onmicrosoft.com.",
+      "errorOutboundConnector": "Outbound connector: имя из EAC — буквы, цифры, пробелы, точки, дефисы и подчёркивания, до 64 символов.",
+      "errorDbebExternalDomain": "Внешний домен контактов должен быть именем домена, например relay.example.com.",
+      "outboundConnectorLabel": "Outbound connector к узлу",
+      "outboundConnectorPh": "To mail node",
+      "outboundConnectorNote": "Имя из EAC. Пусто — единственный OnPremises Outbound connector тенанта. MailExpert добавляет в него каждый новый домен.",
+      "dbebExternalDomainLabel": "Внешний домен контактов DBEB",
+      "dbebExternalDomainPh": "relay.example.com",
+      "dbebExternalDomainNote": "Пусто — контакт ведёт на свой же адрес (вариант А). Заполнять, только если вариант А даёт петлю (5.4.14); узел должен принимать почту этого домена."
     },
     "nodeOps": {
       "title": "Эксплуатация узла",
@@ -2687,7 +2732,9 @@
       "sourceTenant": "опрос тенанта",
       "alertTenantPollFailing": "Опрос тенанта не проходит",
       "alertDetailTenantPollFailing": "Подряд не прошло опросов: {{count}}; последнее удачное чтение {{at}}. Оповещение о заблокированном коннекторе сохраняет прежнее состояние.",
-      "alertDetailTenantPollStale": "Тенант давно не опрашивался (остановлен исполнитель или очередь заданий); последнее удачное чтение {{at}}."
+      "alertDetailTenantPollStale": "Тенант давно не опрашивался (остановлен исполнитель или очередь заданий); последнее удачное чтение {{at}}.",
+      "alertTenantConnectorDrift": "Коннектор тенанта изменён",
+      "alertDetailTenantConnectorDrift": "Изменилось с эталона: {{count}} ({{names}}), прочитано {{at}}."
     },
     "quarantine": {
       "title": "Карантин почтового узла",
@@ -2916,7 +2963,28 @@
       "errorDriverMissing": "Исполнитель тенанта к панели не подключён.",
       "errorNotConfigured": "Сначала заполните и сохраните id тенанта, домен тенанта, id приложения и отпечаток сертификата.",
       "errorJobNotFound": "Задание тенанта больше не существует.",
-      "profileWithoutDriver": "Профиль compose исполнителя тенанта включён, но у backend нет TENANT_WORKER_URL (или TENANT_WORKER_TOKEN короче 32 символов): исполнитель никто не использует."
+      "profileWithoutDriver": "Профиль compose исполнителя тенанта включён, но у backend нет TENANT_WORKER_URL (или TENANT_WORKER_TOKEN короче 32 символов): исполнитель никто не использует.",
+      "errorConnectorsNotRead": "Коннекторы ещё не прочитаны: сначала «Проверить сейчас».",
+      "failThrottled": "Exchange Online попросил снизить темп",
+      "failDomainNotVerified": "Microsoft пока не видит TXT для подтверждения",
+      "failOutboundMissing": "В тенанте нет включённого OnPremises Outbound connector",
+      "failOutboundAmbiguous": "В тенанте несколько OnPremises Outbound connector: укажите нужный в настройках выше",
+      "failOutboundNotFound": "В тенанте нет Outbound connector с именем из настроек",
+      "failConnectorDomainMissing": "Домена по-прежнему нет в Outbound connector",
+      "failDkimConfigMissing": "Тенант не показывает настройку DKIM для домена",
+      "failAuthoritativeLost": "Домен в тенанте снова Internal Relay, а получатели неполные",
+      "connectorsTitle": "Коннекторы",
+      "connectorsNote": "Ключевые свойства обоих коннекторов при каждом опросе сравниваются с эталоном; правка в EAC видна здесь и как оповещение. Домены Outbound connector не сравниваются: их MailExpert ведёт сам.",
+      "connectorsNever": "Ещё не прочитаны.",
+      "connectorsRead": "Прочитаны {{at}}",
+      "referenceAuto": "Эталон — первое чтение, {{at}}",
+      "referenceTaken": "Эталон принят {{at}}",
+      "driftNone": "С эталона ничего не изменилось.",
+      "driftSome": "Изменилось с эталона: {{count}}",
+      "driftMissing": "пропал",
+      "driftAdded": "новый",
+      "driftHint": "Если изменение намеренное, примите коннекторы эталоном снова.",
+      "referenceTake": "Принять как эталон"
     }
   },
   "blockList": {

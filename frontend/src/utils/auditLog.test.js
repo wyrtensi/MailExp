@@ -18,8 +18,14 @@ describe('AUDIT_ACTIONS', () => {
       'mail_node.quarantine_settings_applied',
       'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
       'mail_node.outage_deleted',
-      'tenant.connection_tested',
+      'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
     ]);
+    assert.deepEqual(auditDetail({ action: 'tenant.recipients_synced', details: { domain: 'example.com', created: 2, removed: 1 } }), {
+      key: 'admin.audit.detailTenantRecipients', values: { domain: 'example.com', created: 2, removed: 1 },
+    });
+    assert.deepEqual(auditDetail({ action: 'tenant.connector_reference_taken', details: { inbound: ['From mail node'], outbound: ['To mail node'] } }), {
+      key: 'admin.audit.detailTenantConnectorReference', values: { names: 'From mail node, To mail node' },
+    });
     assert.equal(auditActionLabelKey('tenant.connection_tested'), 'admin.audit.actionTenantConnectionTested');
     assert.deepEqual(auditDetail({ action: 'tenant.connection_tested', details: { ok: true, failed: [] } }), { key: 'admin.audit.detailTenantTestOk', values: {} });
     assert.deepEqual(auditDetail({ action: 'tenant.connection_tested', details: { ok: false, failed: ['exo:exo_connect_failed'] } }), {
