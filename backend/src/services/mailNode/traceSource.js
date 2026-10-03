@@ -289,6 +289,7 @@ export function tenantTraceSource(driver, tenant) {
     getToken: () => session.graph.getToken(),
     fetchImpl: driver.graphFetch ?? null,
     onAuthFailure: () => session.graph.dropToken?.(),
+    // HTTPS to a public address only, like the driver's GraphClient (a stand's TENANT_GRAPH_URL too).
   });
   return { ...source, kind: 'tenant' };
 }
