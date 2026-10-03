@@ -15,7 +15,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain } from './ops.mjs';
+import { COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain, parseGuid } from './ops.mjs';
 import { MARKER, certificateFrom, certificateInfo, createHandler, createRunner, runnerEnv, signAssertion, startProblem } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -47,11 +47,26 @@ const HOSTILE = [
 ];
 
 test('the whitelist: every op loads only its own cmdlets', () => {
-  assert.deepEqual(Object.keys(OPS).sort(), ['get_accepted_domain', 'get_blocked_connector', 'get_content_filter_policy', 'whoami']);
-  assert.deepEqual(COMMAND_NAMES, ['Get-AcceptedDomain', 'Get-BlockedConnector', 'Get-HostedContentFilterPolicy', 'Get-OrganizationConfig']);
+  assert.deepEqual(Object.keys(OPS).sort(), [
+    'add_outbound_connector_domain', 'enable_dkim_signing_config', 'get_accepted_domain', 'get_blocked_connector',
+    'get_content_filter_policy', 'get_dkim_signing_config', 'get_inbound_connectors', 'get_outbound_connectors', 'get_recipients',
+    'hide_mail_contact', 'new_dkim_signing_config', 'new_mail_contact', 'remove_mail_contact', 'set_accepted_domain_authoritative',
+    'set_accepted_domain_internal_relay', 'set_mail_contact_external', 'whoami',
+  ]);
+  assert.deepEqual(COMMAND_NAMES, [
+    'Get-AcceptedDomain', 'Get-BlockedConnector', 'Get-DkimSigningConfig', 'Get-HostedContentFilterPolicy', 'Get-InboundConnector',
+    'Get-OrganizationConfig', 'Get-OutboundConnector', 'Get-Recipient', 'New-DkimSigningConfig', 'New-MailContact',
+    'Remove-MailContact', 'Set-AcceptedDomain', 'Set-DkimSigningConfig', 'Set-MailContact', 'Set-OutboundConnector',
+  ]);
   const runner = fs.readFileSync(path.join(HERE, 'runner.lib.ps1'), 'utf8');
   for (const [op, spec] of Object.entries(OPS)) {
     assert.match(runner, new RegExp(`\\b${op} = @\\{\\s*Cmdlet = '${spec.cmdlets[0]}'`), `${op} in runner.ps1`);
+    // The runner takes the same arguments: each one is named in the op's Args table.
+    const start = runner.indexOf(`  ${op} = @{`);
+    const block = runner.slice(start, runner.indexOf('\n  }', start));
+    const argsLine = /Args = @\{([^\n]*)\}/.exec(block)?.[1] ?? '';
+    const named = [...argsLine.matchAll(/\b(\w+) = @\(/g)].map((m) => m[1]).sort();
+    assert.deepEqual(named, Object.keys(spec.params).sort(), `${op} arguments in runner.ps1`);
   }
 });
 
@@ -70,6 +85,16 @@ test('R-36: unknown operations and hostile values are refused before pwsh', () =
   for (const value of ['a;b@example.com', '$(x)@example.com', "o'brien@example.com", '"a"@example.com', 'a..b@example.com']) {
     assert.equal(parseAddress(value), null, value);
   }
+  // The connector is named by its Guid: an EAC name may hold any character.
+  for (const value of [...HOSTILE, 'To mail node', '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a;whoami', '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a\n']) {
+    assert.throws(() => checkOp('add_outbound_connector_domain', { connector: value, domain: 'example.com' }), { code: 'invalid_args' }, JSON.stringify(value));
+    assert.equal(parseGuid(value), null, JSON.stringify(value));
+  }
+  assert.deepEqual(checkOp('add_outbound_connector_domain', { connector: '9F8E7D6C-5B4A-4392-8170-6F5E4D3C2B1A', domain: 'Example.com' }), { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', domain: 'example.com' });
+  assert.throws(() => checkOp('set_mail_contact_external', { address: 'a@example.com', external: 'a@relay.example.net;x' }), { code: 'invalid_args' });
+  assert.throws(() => checkOp('new_mail_contact', { address: 'a@example.com' }), { code: 'invalid_args' });
+  assert.throws(() => checkOp('new_mail_contact', { address: 'a@example.com', external: "x'@example.com" }), { code: 'invalid_args' });
+  assert.deepEqual(checkOp('new_mail_contact', { address: 'A@example.com', external: 'a@relay.example.net' }), { address: 'a@example.com', external: 'a@relay.example.net' });
   assert.deepEqual(checkOp('get_accepted_domain', { domain: 'Example.COM' }), { domain: 'example.com' });
   assert.deepEqual(checkOp('whoami', undefined), {});
   assert.equal(parseAddress('Info.Desk@Example.com'), 'info.desk@example.com');
@@ -315,6 +340,41 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
     body = await (await post(base, '/ops/get_accepted_domain', { tenant, args: { domain: 'Example.com' } })).json();
     assert.deepEqual(body.result.commands, [{ cmdlet: 'Get-AcceptedDomain', parameters: { Identity: 'example.com' } }]);
 
+    // Stage 7b: what each operation prints, fixed parameters and shapes included.
+    const printed = async (op, args) => {
+      const answer = await (await post(base, `/ops/${op}`, { tenant, args })).json();
+      assert.equal(answer.ok, true, JSON.stringify(answer));
+      return answer.result.commands;
+    };
+    assert.deepEqual(await printed('set_accepted_domain_internal_relay', { domain: 'example.com' }),
+      [{ cmdlet: 'Set-AcceptedDomain', parameters: { DomainType: 'InternalRelay', Identity: 'example.com' } }]);
+    assert.deepEqual(await printed('set_accepted_domain_authoritative', { domain: 'example.com' }),
+      [{ cmdlet: 'Set-AcceptedDomain', parameters: { DomainType: 'Authoritative', Identity: 'example.com' } }]);
+    assert.deepEqual(await printed('get_outbound_connectors', {}), [{ cmdlet: 'Get-OutboundConnector', parameters: {} }]);
+    assert.deepEqual(await printed('get_inbound_connectors', {}), [{ cmdlet: 'Get-InboundConnector', parameters: {} }]);
+    assert.deepEqual(await printed('add_outbound_connector_domain', { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', domain: 'example.com' }),
+      [{ cmdlet: 'Set-OutboundConnector', parameters: { Identity: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', RecipientDomains: { Add: 'example.com' } } }]);
+    assert.deepEqual(await printed('set_mail_contact_external', { address: 'info@example.com', external: 'info@relay.example.net' }),
+      [{ cmdlet: 'Set-MailContact', parameters: { Identity: 'info@example.com', ExternalEmailAddress: 'info@relay.example.net' } }]);
+    assert.deepEqual(await printed('new_dkim_signing_config', { domain: 'example.com' }),
+      [{ cmdlet: 'New-DkimSigningConfig', parameters: { Enabled: false, KeySize: 2048, DomainName: 'example.com' } }]);
+    assert.deepEqual(await printed('get_dkim_signing_config', { domain: 'example.com' }),
+      [{ cmdlet: 'Get-DkimSigningConfig', parameters: { Identity: 'example.com' } }]);
+    assert.deepEqual(await printed('enable_dkim_signing_config', { domain: 'example.com' }),
+      [{ cmdlet: 'Set-DkimSigningConfig', parameters: { Enabled: true, Identity: 'example.com' } }]);
+    assert.deepEqual(await printed('get_recipients', {}), [{ cmdlet: 'Get-Recipient', parameters: { ResultSize: 'Unlimited' } }]);
+    const [contact] = await printed('new_mail_contact', { address: 'info@example.com', external: 'info@example.com' });
+    assert.equal(contact.cmdlet, 'New-MailContact');
+    assert.deepEqual(contact.parameters, { Name: 'info@example.com', PrimarySmtpAddress: 'info@example.com', ExternalEmailAddress: 'info@example.com' });
+    assert.deepEqual(await printed('hide_mail_contact', { address: 'info@example.com' }),
+      [{ cmdlet: 'Set-MailContact', parameters: { HiddenFromAddressListsEnabled: true, Identity: 'info@example.com' } }]);
+    assert.deepEqual(await printed('remove_mail_contact', { address: 'info@example.com' }),
+      [{ cmdlet: 'Remove-MailContact', parameters: { Confirm: false, Identity: 'info@example.com' } }]);
+    res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: "x' -Confirm", domain: 'example.com' } });
+    assert.equal(res.status, 400);
+    res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: 'To mail node', domain: 'example.com' } });
+    assert.equal(res.status, 400);
+
     for (const domain of HOSTILE) {
       res = await post(base, '/ops/get_accepted_domain', { tenant, args: { domain } });
       assert.equal(res.status, 400, JSON.stringify(domain));
@@ -345,6 +405,9 @@ test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not
     { id: 3, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com', extra: 'x' } },
     { id: 4, op: 'whoami', tenant: { appId: 'not-a-guid', organization: ORG }, args: {} },
     { id: 5, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com' } },
+    { id: 7, op: 'add_outbound_connector_domain', tenant: { appId: APP_ID, organization: ORG }, args: { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a;whoami', domain: 'example.com' } },
+    { id: 8, op: 'new_mail_contact', tenant: { appId: APP_ID, organization: ORG }, args: { address: 'a..b@example.com', external: 'a@example.com' } },
+    { id: 9, op: 'remove_mail_contact', tenant: { appId: APP_ID, organization: ORG }, args: { address: 'Info@example.com' } },
   ].map((l) => JSON.stringify(l)).join('\n');
   const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'runner.ps1'), '-DryRun'], {
     input: `${lines}\n`, encoding: 'utf8',
@@ -357,6 +420,10 @@ test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not
   assert.equal(byId[4].error.code, 'invalid_tenant');
   assert.equal(byId[5].ok, true);
   assert.equal(byId[5].result.commands.at(-1).parameters.Identity, 'example.com');
+  assert.equal(byId[7].error.code, 'invalid_args');
+  assert.equal(byId[8].error.code, 'invalid_args');
+  // The server lower-cases addresses before they reach the runner; one that is not is refused here.
+  assert.equal(byId[9].error.code, 'invalid_args');
   // \z, not $: a value with a trailing line break is refused too.
   const trailing = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'runner.ps1'), '-DryRun'], {
     input: `${JSON.stringify({ id: 6, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com\n' } })}\n`, encoding: 'utf8',
@@ -391,6 +458,16 @@ $global:Redirect = [System.Collections.Generic.List[string]]::new(); Ask 'r0' 'g
 $global:Redirect.Add('spam@example.com'); Ask 'r1' 'get_content_filter_policy'
 $global:Fail = 'Get-BlockedConnector failed for connector From mail node'; Ask 'fail' 'get_blocked_connector'
 $global:Fail = 'The session has expired'; Ask 'expired' 'get_blocked_connector'
+function New-MailContact { param($Name, $PrimarySmtpAddress, $ExternalEmailAddress) throw $global:ContactFail }
+function AskArgs($id, $op, $a) { $r = Invoke-Op ([pscustomobject]@{ op = $op; tenant = $tenant; args = $a }); $r.id = $id; Write-Answer $r }
+$contact = [pscustomobject]@{ address = 'info@example.com'; external = 'info@example.com' }
+$global:ContactFail = 'The proxy address "SMTP:info@example.com" is already being used by the proxy addresses or LegacyExchangeDN.'; AskArgs 'exists' 'new_mail_contact' $contact
+$global:ContactFail = 'Micro delay applied. Actual delay: 30000 msecs. Throttling policy...'; AskArgs 'throttled' 'new_mail_contact' $contact
+function Remove-MailContact { param($Identity, $Confirm) throw "The operation couldn't be performed because object 'info@example.com' couldn't be found." }
+AskArgs 'gone' 'remove_mail_contact' ([pscustomobject]@{ address = 'info@example.com' })
+function Set-OutboundConnector { param($Identity, $RecipientDomains) $global:Seen = $RecipientDomains }
+AskArgs 'add' 'add_outbound_connector_domain' ([pscustomobject]@{ connector = '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a'; domain = 'example.com' })
+Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; type = $global:Seen.GetType().Name } }
 `;
   fs.writeFileSync(file('lib.test.ps1'), script);
   const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', file('lib.test.ps1')], { encoding: 'utf8' });
@@ -406,6 +483,12 @@ $global:Fail = 'The session has expired'; Ask 'expired' 'get_blocked_connector'
   assert.equal(answers.fail.error.code, 'exo_failed');
   assert.equal(answers.expired.connects, 2);
   assert.equal(answers.expired.error.code, 'exo_failed');
+  // Stage 7b: a write that finds its object made, throttling and an object already gone.
+  assert.equal(answers.exists.error.code, 'exo_exists');
+  assert.equal(answers.throttled.error.code, 'exo_throttled');
+  assert.equal(answers.gone.error.code, 'exo_not_found');
+  assert.deepEqual(answers.add.result, []);
+  assert.deepEqual(answers.seen.result, { add: 'example.com', type: 'Hashtable' });
 });
 
 test('the runner gets no token, and a pinned tenant is the only one served', async () => {

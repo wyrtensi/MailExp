@@ -84,7 +84,12 @@ describe('the fake driver', () => {
     await a.graph.request('GET', '/domains');
     expect(driver.fake.graph.requests.filter((r) => r.kind === 'token')).toHaveLength(1);
     expect(driver.forTenant({ ...tenant, appId: '77777777-7777-4888-9999-aaaaaaaaaaaa' }).graph).not.toBe(a.graph);
-    expect(await a.exo.run('get_accepted_domain', { domain: 'example.com' })).toEqual(TENANT_FIXTURES.exo.get_accepted_domain);
+    // The fake tenant knows no domain until it is added and verified through Graph.
+    await expect(a.exo.run('get_accepted_domain', { domain: 'example.com' })).rejects.toMatchObject({ code: 'exo_not_found' });
+    await a.graph.request('POST', '/domains', { body: { id: 'example.com' } });
+    await a.graph.request('POST', '/domains/example.com/verify');
+    expect(await a.exo.run('get_accepted_domain', { domain: 'example.com' }))
+      .toEqual([{ DomainName: 'example.com', DomainType: 'Authoritative', Default: false, Identity: 'example.com' }]);
     expect(await driver.certificate()).toEqual(TENANT_FIXTURES.worker.certificate);
   });
 });

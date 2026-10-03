@@ -294,13 +294,13 @@ describe('the values entered by hand', () => {
     expect(await setExpectedValues({ domain: 'a.example', values: { dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' } }))
       .toEqual({ fields: ['dkimSelector1Cname', 'dkimSelector2Cname'] });
     const [row] = (await listDomainRows()).filter((d) => d.domain === 'a.example');
-    expect(row.expected).toEqual({ mx: [MX], tenantTxt: 'MS=ms11111111', dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' });
+    expect(row.expected).toEqual({ source: 'manual', mx: [MX], tenantTxt: 'MS=ms11111111', dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' });
     expect((await db.query("SELECT tenant FROM mail_node_domains WHERE domain = 'a.example'")).rows[0].tenant).toMatchObject({ source: 'manual' });
     expect(await setExpectedValues({ domain: 'gone.example', values: { mx: [] } })).toEqual({ error: 'domain_not_found' });
     await checkDomainNow({ domain: 'a.example', userId: ADMIN });
     await restartOnboarding({ domain: 'a.example', userId: ADMIN });
     const [after] = (await listDomainRows()).filter((d) => d.domain === 'a.example');
-    expect(after.expected).toEqual({ mx: [MX], tenantTxt: 'MS=ms11111111', dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' });
+    expect(after.expected).toEqual({ source: 'manual', mx: [MX], tenantTxt: 'MS=ms11111111', dkimSelector1Cname: 's1.example', dkimSelector2Cname: 's2.example' });
     expect(after.dns).toBeNull();
   });
 });

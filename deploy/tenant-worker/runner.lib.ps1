@@ -16,10 +16,19 @@ $Marker = '@@TW@@'
 # \z, not $: in .NET $ also matches before a trailing line break.
 $DomainPattern = '^(?=.{1,253}\z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\z'
 $GuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'
+# An address: the panel's local part (letters, digits, dot, dash, underscore, no '..') and a domain.
+$AddressPattern = '^(?!.*\.\.)[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?@(?=.{1,253}\z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\z'
 # What an EXO error says when the session itself is gone (an expired token, a dropped connection),
-# as opposed to the operation failing: then the runner connects again once and repeats the read.
+# as opposed to the operation failing: then the runner connects again once and repeats the
+# operation. A write repeated so may find its object made already (exo_exists), which the panel
+# reads as done after reading it back.
 # Word-bounded, so "connector" in an error of Get-BlockedConnector is not a session error.
 $SessionErrorPattern = '\bsession\b|\btoken\b|\bnot connected\b|\bconnection\b|\bunauthori[sz]ed\b|\b401\b'
+# A write that finds its object made already (repeated after a reconnect, or two syncs at once):
+# the panel reads again instead of failing. EXO throttling: the panel waits and tries again later.
+# Checked after "not found" and the session errors, in this order.
+$ThrottledPattern = 'throttl|micro delay|server ?busy|exceeded the budget|too many concurrent'
+$ExistsPattern = 'already exists|already being used|is already used|already present'
 
 # op -> the cmdlet, its fixed parameters, the request arguments it takes (argument -> parameter and
 # pattern), and the properties kept in the answer.
@@ -41,6 +50,74 @@ $Ops = @{
   get_accepted_domain = @{
     Cmdlet = 'Get-AcceptedDomain'; Fixed = @{}; Args = @{ domain = @('Identity', $DomainPattern) }
     Keep = @('DomainName', 'DomainType', 'Default', 'Identity')
+  }
+  # Stage 7b. Args: argument -> @(parameter or parameters, pattern[, 'add']); 'add' passes the value
+  # as @{ Add = <value> } (a multi-valued property gains one value, the others stay).
+  # R-24 and R-29: the accepted domain's type.
+  set_accepted_domain_internal_relay = @{
+    Cmdlet = 'Set-AcceptedDomain'; Fixed = @{ DomainType = 'InternalRelay' }; Args = @{ domain = @('Identity', $DomainPattern) }
+    Keep = @()
+  }
+  set_accepted_domain_authoritative = @{
+    Cmdlet = 'Set-AcceptedDomain'; Fixed = @{ DomainType = 'Authoritative' }; Args = @{ domain = @('Identity', $DomainPattern) }
+    Keep = @()
+  }
+  # R-25: the connectors as the reference and the comparison read them, and a domain added to the
+  # Outbound connector's RecipientDomains.
+  get_inbound_connectors = @{
+    Cmdlet = 'Get-InboundConnector'; Fixed = @{}; Args = @{}
+    Keep = @('Identity', 'Name', 'Enabled', 'ConnectorType', 'ConnectorSource', 'SenderDomains', 'SenderIPAddresses',
+      'RequireTls', 'RestrictDomainsToCertificate', 'RestrictDomainsToIPAddresses', 'TlsSenderCertificateName',
+      'CloudServicesMailEnabled', 'TreatMessagesAsInternal', 'WhenChanged')
+  }
+  get_outbound_connectors = @{
+    Cmdlet = 'Get-OutboundConnector'; Fixed = @{}; Args = @{}
+    Keep = @('Identity', 'Name', 'Enabled', 'ConnectorType', 'ConnectorSource', 'RecipientDomains', 'SmartHosts', 'UseMXRecord',
+      'TlsSettings', 'TlsDomain', 'AllAcceptedDomains', 'IsTransportRuleScoped', 'CloudServicesMailEnabled', 'IsValidated',
+      'LastValidationTimestamp', 'WhenChanged', 'Guid')
+  }
+  add_outbound_connector_domain = @{
+    Cmdlet = 'Set-OutboundConnector'; Fixed = @{}
+    Args = @{ connector = @('Identity', $GuidPattern); domain = @('RecipientDomains', $DomainPattern, 'add') }
+    Keep = @()
+  }
+  # R-26: the EOP DKIM signing config of a domain, made disabled, read, then enabled.
+  new_dkim_signing_config = @{
+    Cmdlet = 'New-DkimSigningConfig'; Fixed = @{ Enabled = $false; KeySize = 2048 }; Args = @{ domain = @('DomainName', $DomainPattern) }
+    Keep = @('Identity', 'Domain', 'Enabled', 'Status', 'Selector1CNAME', 'Selector2CNAME')
+  }
+  get_dkim_signing_config = @{
+    Cmdlet = 'Get-DkimSigningConfig'; Fixed = @{}; Args = @{ domain = @('Identity', $DomainPattern) }
+    Keep = @('Identity', 'Domain', 'Enabled', 'Status', 'Selector1CNAME', 'Selector2CNAME')
+  }
+  enable_dkim_signing_config = @{
+    Cmdlet = 'Set-DkimSigningConfig'; Fixed = @{ Enabled = $true }; Args = @{ domain = @('Identity', $DomainPattern) }
+    Keep = @()
+  }
+  # R-29: the recipient mirror. The contact's name is its address (unique in the tenant).
+  get_recipients = @{
+    Cmdlet = 'Get-Recipient'; Fixed = @{ ResultSize = 'Unlimited' }; Args = @{}
+    Keep = @('Identity', 'Name', 'PrimarySmtpAddress', 'ExternalEmailAddress', 'EmailAddresses', 'RecipientTypeDetails',
+      'HiddenFromAddressListsEnabled')
+  }
+  new_mail_contact = @{
+    Cmdlet = 'New-MailContact'; Fixed = @{}
+    Args = @{ address = @(@('Name', 'PrimarySmtpAddress'), $AddressPattern); external = @('ExternalEmailAddress', $AddressPattern) }
+    Keep = @('Identity', 'Name', 'PrimarySmtpAddress', 'ExternalEmailAddress')
+  }
+  # D-7: a contact moved to the other variant in place, never removed and made again.
+  set_mail_contact_external = @{
+    Cmdlet = 'Set-MailContact'; Fixed = @{}
+    Args = @{ address = @('Identity', $AddressPattern); external = @('ExternalEmailAddress', $AddressPattern) }
+    Keep = @()
+  }
+  hide_mail_contact = @{
+    Cmdlet = 'Set-MailContact'; Fixed = @{ HiddenFromAddressListsEnabled = $true }; Args = @{ address = @('Identity', $AddressPattern) }
+    Keep = @()
+  }
+  remove_mail_contact = @{
+    Cmdlet = 'Remove-MailContact'; Fixed = @{ Confirm = $false }; Args = @{ address = @('Identity', $AddressPattern) }
+    Keep = @()
   }
 }
 $CommandNames = @($Ops.Values | ForEach-Object { $_.Cmdlet } | Sort-Object -Unique)
@@ -133,7 +210,8 @@ function Invoke-Op($request) {
     if ($value -isnot [string] -or $value -cnotmatch $entry.Value[1]) {
       return @{ ok = $false; error = (Get-Failure 'invalid_args' "Argument $($entry.Key) is invalid") }
     }
-    $parameters[$entry.Value[0]] = $value
+    $shaped = if ($entry.Value.Count -gt 2 -and $entry.Value[2] -eq 'add') { @{ Add = $value } } else { $value }
+    foreach ($name in @($entry.Value[0])) { $parameters[$name] = $shaped }
   }
   $commands = [System.Collections.Generic.List[object]]::new()
   try {
@@ -160,7 +238,10 @@ function Invoke-Op($request) {
         try { Connect-Tenant $request.tenant $commands } catch { return @{ ok = $false; error = (Get-Failure 'exo_connect_failed' $_.Exception.Message) } }
         continue
       }
-      $code = if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -or $message -match "couldn't be found|not found") { 'exo_not_found' } else { 'exo_failed' }
+      $code = if ($_.CategoryInfo.Category -eq 'ObjectNotFound' -or $message -match "couldn't be found|not found") { 'exo_not_found' }
+        elseif ($message -match $ThrottledPattern) { 'exo_throttled' }
+        elseif ($message -match $ExistsPattern) { 'exo_exists' }
+        else { 'exo_failed' }
       return @{ ok = $false; error = (Get-Failure $code $message) }
     }
   }

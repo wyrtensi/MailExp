@@ -2,6 +2,8 @@ import { query } from '../db.js';
 import { isIP } from 'node:net';
 import { isUuid } from '../../utils/uuid.js';
 import { parseHostName, parseWholeNumber } from './mailcow.js';
+import { parseConnectorName } from '../tenant/exoRunner.js';
+import { getTenantDriver } from '../tenant/driver.js';
 
 // The mail path through Microsoft EOP, set next to the mail node settings (integration_config row
 // 'mail_node_eop'): the next hop of the node (<EOP_HOST>) with the TLS Postfix must use toward it,
@@ -63,6 +65,12 @@ export const EOP_DEFAULTS = Object.freeze({
   appId: null,
   certThumbprint: null,
   nodeIp: null,
+  // Stage 7b. The Outbound connector new domains are added to (R-25, D-9), by its name in EAC; empty
+  // when the tenant has exactly one OnPremises Outbound connector, which is then taken.
+  outboundConnector: null,
+  // DBEB variant B (D-7): the mail contacts' external address is <local>@<this domain> instead of
+  // the address itself (variant A, empty). The node must take mail for it (an alias domain).
+  dbebExternalDomain: null,
 });
 export const EOP_FIELDS = Object.freeze(Object.keys(EOP_DEFAULTS));
 
@@ -129,6 +137,8 @@ const PARSERS = {
   appId: [parseGuid, 'app_id_invalid', true],
   certThumbprint: [parseThumbprint, 'thumbprint_invalid', true],
   nodeIp: [parseIpv4, 'node_ip_invalid', true],
+  outboundConnector: [parseConnectorName, 'outbound_connector_invalid', true],
+  dbebExternalDomain: [parseHostName, 'dbeb_external_domain_invalid', true],
 };
 
 const isBlank = (value) => value === null || (typeof value === 'string' && value.trim() === '');
@@ -197,10 +207,11 @@ export function tenantConfigured(settings) {
   return !!(settings.tenantId && settings.tenantDomain && settings.appId && settings.certThumbprint);
 }
 
-// Whether the tenant driver runs the domains' onboarding itself. Stage 7a connects the tenant and
-// reads from it, but the onboarding steps (domain in the tenant, accepted domain type, connector,
-// DKIM, recipients) come with stage 7b: until then every step is confirmed by hand, whatever is
-// filled in above, and the EOP screen keeps the checklist.
-export function tenantDriverActive() {
-  return false;
+// Whether the tenant driver runs the domains' tenant steps itself (stage 7b,
+// services/tenant/tenantDomains.js): the panel has a driver and the four tenant fields are set. Then
+// the tenant steps (tenant_verified, internal_relay, connector_ready) and 'authoritative' are the
+// driver's, never a person's "Done", and the EOP screen drops its manual checklist; without it every
+// step is confirmed by hand as before.
+export function tenantDriverActive(settings) {
+  return !!getTenantDriver() && tenantConfigured(settings ?? {});
 }

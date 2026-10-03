@@ -130,8 +130,9 @@ describe('the onboarding state machine', () => {
       expected_mx, dkim_mode, mailbox_send_limit FROM mail_node_domains WHERE domain = 'again.example'`);
     // The owner's choices and typed values for the domain stay; what described it on the node and in
     // the tenant goes.
+    // Stage 7b: the accepted domain type stays (the domain is still in the tenant).
     expect(raw).toEqual({
-      relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: null,
+      relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: 'InternalRelay',
       expected_mx: ['mx.example'], dkim_mode: 'eop', mailbox_send_limit: 20,
     });
   });
@@ -279,10 +280,14 @@ describe('restartOnboarding', () => {
     });
     const { rows: [raw] } = await db.query(`SELECT relayhost_id, dns_check, dns_checked_at, tenant, accepted_domain_type,
       expected_mx, dkim_mode, mailbox_send_limit, state_changed_by FROM mail_node_domains WHERE domain = 'again.example'`);
+    // Stage 7b: the domain stays in the tenant with its type, and moving it to Internal Relay is
+    // approved by the restart itself (the next run does it instead of waiting for a decision).
     expect(raw).toEqual({
-      relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: null,
+      relayhost_id: null, dns_check: null, dns_checked_at: null, tenant: null, accepted_domain_type: 'Authoritative',
       expected_mx: ['mx.example'], dkim_mode: 'eop', mailbox_send_limit: 20, state_changed_by: OTHER,
     });
+    const { rows: [approval] } = await db.query("SELECT internal_relay_approved_at FROM mail_node_domains WHERE domain = 'again.example'");
+    expect(approval.internal_relay_approved_at).not.toBeNull();
     expect(await restartOnboarding({ domain: 'missing.example', userId: ADMIN })).toEqual({ error: 'domain_not_found' });
     // Now at the first step with nothing to clear: refused, nothing changes.
     expect(await restartOnboarding({ domain: 'again.example', userId: ADMIN })).toEqual({ error: 'domain_nothing_to_restart' });
@@ -378,17 +383,17 @@ describe('mergeDomains', () => {
     expect(mergeDomains(node, rows)).toEqual([
       {
         domain: 'a.example', active: true, maxMailboxes: 500, mailboxes: 0, onNode: true,
-        state: 'unknown', origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, dns: null, expected: null, nextStep: null,
+        state: 'unknown', origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, dns: null, expected: null, tenantSync: null, holdInternalRelay: true, internalRelayApprovedAt: null, nextStep: null,
       },
       {
         domain: 'b.example', active: true, maxMailboxes: 500, mailboxes: 2, onNode: true,
         state: 'dns_ok', origin: 'created', addedAt: 't1', addedBy: 'admin@example.com', stateChangedAt: 't2', steps: { dns_ok: {} }, apply: null,
-        dns: null, expected: null, nextStep: 'tenant_verified',
+        dns: null, expected: null, tenantSync: null, holdInternalRelay: true, internalRelayApprovedAt: null, nextStep: 'tenant_verified',
       },
       {
         domain: 'gone.example', active: false, maxMailboxes: 0, mailboxes: 0, onNode: false,
         state: 'ready', origin: 'existing_mailboxes', addedAt: 't3', addedBy: null, stateChangedAt: 't3', steps: {}, apply: null, dns: null,
-        expected: null, nextStep: null,
+        expected: null, tenantSync: null, holdInternalRelay: true, internalRelayApprovedAt: null, nextStep: null,
       },
     ]);
   });
@@ -415,11 +420,11 @@ describe('mergeDomains', () => {
     expect(mergeDomains(null, rows)).toEqual([
       {
         domain: 'a.example', active: null, maxMailboxes: null, mailboxes: null, onNode: null,
-        state: 'dns_ok', origin: 'adopted', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, dns: null, expected: null, nextStep: 'tenant_verified',
+        state: 'dns_ok', origin: 'adopted', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, dns: null, expected: null, tenantSync: null, holdInternalRelay: true, internalRelayApprovedAt: null, nextStep: 'tenant_verified',
       },
       {
         domain: 'b.example', active: null, maxMailboxes: 500, mailboxes: null, onNode: null,
-        state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, dns: null, expected: null, nextStep: null,
+        state: 'ready', origin: 'created', addedAt: 't1', addedBy: 'a', stateChangedAt: 't2', steps: {}, apply: null, dns: null, expected: null, tenantSync: null, holdInternalRelay: true, internalRelayApprovedAt: null, nextStep: null,
       },
     ]);
   });

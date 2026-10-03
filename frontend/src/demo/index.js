@@ -1021,6 +1021,8 @@ let demoEopSettings = {
   tenantCreatedOn: null,
   ...DEMO_TENANT_SETTINGS,
   nodeIp: '203.0.113.10',
+  outboundConnector: null,
+  dbebExternalDomain: null,
 };
 
 function eopSettingsAnswer() {

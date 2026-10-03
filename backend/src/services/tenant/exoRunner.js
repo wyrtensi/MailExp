@@ -36,14 +36,41 @@ const parseAddress = (value) => {
   const domain = parseHostName(text.slice(at + 1));
   return local && domain ? `${local}@${domain}` : null;
 };
-const KINDS = { domain: parseHostName, address: parseAddress };
+// A connector's name as the owner gave it in EAC, kept in the EOP settings and only compared with
+// what Get-OutboundConnector answers (the worker is given the connector's Guid): any printable text
+// up to 64 characters, spaces around it dropped.
+export function parseConnectorName(value) {
+  if (typeof value !== 'string') return null;
+  const name = value.trim();
+  const control = [...name].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
+  return name.length >= 1 && name.length <= 64 && !control ? name : null;
+}
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const parseGuid = (value) => (typeof value === 'string' && GUID_RE.test(value.trim().toLowerCase()) ? value.trim().toLowerCase() : null);
+const KINDS = { domain: parseHostName, address: parseAddress, guid: parseGuid };
 
-// The operations of the worker, by stage. 7b and 7c add theirs to both tables.
+// The operations of the worker, by stage (the same table as deploy/tenant-worker/ops.mjs OPS; a
+// test keeps them equal). 7c adds its own to both.
 export const EXO_OPS = Object.freeze({
   whoami: { params: {} },
   get_blocked_connector: { params: {} },
   get_content_filter_policy: { params: {} },
   get_accepted_domain: { params: { domain: 'domain' } },
+  // Stage 7b: R-24 and R-29 (the accepted domain's type), R-25 (connectors), R-26 (EOP DKIM), R-29
+  // (the DBEB mail contacts).
+  set_accepted_domain_internal_relay: { params: { domain: 'domain' } },
+  set_accepted_domain_authoritative: { params: { domain: 'domain' } },
+  get_inbound_connectors: { params: {} },
+  get_outbound_connectors: { params: {} },
+  add_outbound_connector_domain: { params: { connector: 'guid', domain: 'domain' } },
+  new_dkim_signing_config: { params: { domain: 'domain' } },
+  get_dkim_signing_config: { params: { domain: 'domain' } },
+  enable_dkim_signing_config: { params: { domain: 'domain' } },
+  get_recipients: { params: {} },
+  new_mail_contact: { params: { address: 'address', external: 'address' } },
+  set_mail_contact_external: { params: { address: 'address', external: 'address' } },
+  hide_mail_contact: { params: { address: 'address' } },
+  remove_mail_contact: { params: { address: 'address' } },
 });
 
 // The checked arguments of an operation; throws a TenantError (exo_op_unknown, exo_args_invalid).

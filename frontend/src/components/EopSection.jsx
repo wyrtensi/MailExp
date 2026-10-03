@@ -47,7 +47,10 @@ const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primar
 
 // What the TERRL limit is made of: a save that changes one of them recounts the budget.
 const BUDGET_FIELDS = ['terrl', 'licenses', 'tenantCreatedOn'];
-const TEXT_FIELDS = ['eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'licenses', 'tenantCreatedOn', 'tenantId', 'tenantDomain', 'appId', 'certThumbprint'];
+const TEXT_FIELDS = [
+  'eopHost', 'tlsPolicyParameters', 'certificateHost', 'terrl', 'licenses', 'tenantCreatedOn', 'tenantId', 'tenantDomain', 'appId', 'certThumbprint',
+  'outboundConnector', 'dbebExternalDomain',
+];
 
 // The stored settings as the form edits them: every field a string.
 function toForm(settings) {
@@ -296,6 +299,16 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
             <span style={labelStyle}>{t('admin.eop.thumbprintLabel')}</span>
             {textField('certThumbprint')}
             <span style={hintStyle}>{t('admin.eop.thumbprintNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.eop.outboundConnectorLabel')}</span>
+            {textField('outboundConnector', { placeholder: t('admin.eop.outboundConnectorPh') })}
+            <span style={hintStyle}>{t('admin.eop.outboundConnectorNote')}</span>
+          </label>
+          <label>
+            <span style={labelStyle}>{t('admin.eop.dbebExternalDomainLabel')}</span>
+            {textField('dbebExternalDomain', { placeholder: t('admin.eop.dbebExternalDomainPh') })}
+            <span style={hintStyle}>{t('admin.eop.dbebExternalDomainNote')}</span>
           </label>
           <div>
             <button type="button" onClick={save} disabled={busy || !!formErrorKey} style={primaryButtonStyle}>

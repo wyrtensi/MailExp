@@ -2,7 +2,10 @@
 // services/tenant/*): a fake tenant driver that is connected. The jobs finish at once; the
 // answers are the backend fakes' recorded examples (services/tenant/fixtures.json): the Default
 // anti-spam policy quarantines phishing (one conflict), no connector is blocked, and the
-// application certificate expires in 25 days, so the warning and its alert show.
+// application certificate expires in 25 days, so the warning and its alert show. Stage 7b: the
+// poll reads both connectors (the first read is the reference, nothing drifted), "Take as the
+// reference" works, and a domain's "Run the tenant steps now" finishes at once without changing
+// it: the demo's domains keep their manual onboarding.
 
 const DAY_MS = 86400000;
 const STARTED = Date.now();
@@ -39,7 +42,26 @@ function conflicts(policy) {
     }));
 }
 
-const KINDS = { test: 'tenant_test_connection', poll: 'tenant_poll', antispam: 'tenant_antispam_read' };
+const KINDS = { test: 'tenant_test_connection', poll: 'tenant_poll', antispam: 'tenant_antispam_read', domain: 'tenant_domain_sync' };
+// The connectors as the backend summarizes them (services/tenant/connectors.js).
+const CONNECTORS = {
+  inbound: [{
+    name: 'From mail node',
+    properties: {
+      Enabled: true, ConnectorType: 'onpremises', RequireTls: true, RestrictDomainsToCertificate: false, RestrictDomainsToIPAddresses: false,
+      TlsSenderCertificateName: 'mail.demo.mailexpert.local', SenderDomains: ['smtp:*;1'], SenderIPAddresses: [], TreatMessagesAsInternal: false,
+      CloudServicesMailEnabled: false,
+    },
+  }],
+  outbound: [{
+    name: 'To mail node',
+    properties: {
+      Enabled: true, ConnectorType: 'onpremises', SmartHosts: ['mail.demo.mailexpert.local'], UseMXRecord: false, TlsSettings: 'domainvalidation',
+      TlsDomain: 'mail.demo.mailexpert.local', AllAcceptedDomains: false, IsTransportRuleScoped: false, CloudServicesMailEnabled: false,
+    },
+    recipientDomains: ['demo.mailexpert.local'],
+  }],
+};
 let nextJobId = 9001;
 const jobs = new Map();
 let state = {};
@@ -75,7 +97,11 @@ function readPolicy(now) {
 
 function runPoll(now) {
   const at = iso(now);
-  state = { ...state, certificate: { at, ...CERTIFICATE }, blockedConnectors: { at, ok: true, items: [] } };
+  const connectors = { at, ok: true, ...clone(CONNECTORS) };
+  state = {
+    ...state, certificate: { at, ...CERTIFICATE }, blockedConnectors: { at, ok: true, items: [] }, connectors,
+    ...(state.connectorReference ? {} : { connectorReference: { at, by: null, auto: true, inbound: connectors.inbound, outbound: connectors.outbound } }),
+  };
   if (!state.antispam) state.antispam = readPolicy(now);
 }
 
@@ -113,7 +139,7 @@ export function demoTenantAlerts(settings, now = Date.now()) {
 export function demoTenantRequest(verb, pathname, settings, error) {
   if (verb === 'GET' && pathname === '/mail-node/tenant') {
     return clone({
-      driver: 'fake', profileWithoutDriver: false, configured: configured(settings), state,
+      driver: 'fake', profileWithoutDriver: false, configured: configured(settings), state, connectorDrift: [],
       jobs: { test: latest(KINDS.test), antispam: latest(KINDS.antispam), poll: latest(KINDS.poll) },
     });
   }
@@ -123,6 +149,25 @@ export function demoTenantRequest(verb, pathname, settings, error) {
       throw error('Fill in the tenant ID, its onmicrosoft.com domain, the application ID and the certificate thumbprint first', 'tenant_not_configured');
     }
     return clone({ job: finish(KINDS[button[1]], settings), created: true });
+  }
+  const domainSync = /^\/mail-node\/tenant\/domains\/([^/]+)\/sync$/.exec(pathname);
+  if (verb === 'POST' && domainSync) {
+    if (!configured(settings)) {
+      throw error('Fill in the tenant ID, its onmicrosoft.com domain, the application ID and the certificate thumbprint first', 'tenant_not_configured');
+    }
+    return clone({ job: finish(KINDS.domain, settings), created: true });
+  }
+  // The demo's domains keep their manual onboarding: the hold and the approval answer, change nothing.
+  const hold = /^\/mail-node\/tenant\/domains\/([^/]+)\/hold$/.exec(pathname);
+  if (verb === 'POST' && hold) return clone({ domain: decodeURIComponent(hold[1]), holdInternalRelay: true });
+  if (verb === 'POST' && /^\/mail-node\/tenant\/domains\/[^/]+\/internal-relay$/.test(pathname)) {
+    throw error('The domain does not wait for this decision', 'internal_relay_not_needed');
+  }
+  if (verb === 'POST' && pathname === '/mail-node/tenant/connectors/reference') {
+    if (!state.connectors?.ok) throw error('The connectors have not been read yet: check now first', 'connectors_not_read');
+    const at = iso(Date.now());
+    state = { ...state, connectorReference: { at, readAt: state.connectors.at, by: null, auto: false, inbound: state.connectors.inbound, outbound: state.connectors.outbound } };
+    return clone({ reference: state.connectorReference });
   }
   const job = /^\/mail-node\/tenant\/jobs\/([^/]+)$/.exec(pathname);
   if (verb === 'GET' && job) {

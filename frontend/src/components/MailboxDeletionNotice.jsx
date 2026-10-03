@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { mailNodeErrorKey, pendingDeletion } from '../utils/mailNode.js';
+import { mailNodeErrorKey, pendingDeletion, tenantPending } from '../utils/mailNode.js';
 import { formatDateTime } from '../utils/formatDate.js';
 
 // A mail node mailbox someone asked to delete keeps working until its date (owner decision
@@ -14,6 +14,18 @@ export function PendingDeletionLine({ account, style }) {
   return (
     <div data-pending-deletion-line style={{ fontSize: 11, color: 'var(--red)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', ...style }}>
       {t('sidebar.pendingDeletion', { date: formatDateTime(pending.deleteAfter) })}
+    </div>
+  );
+}
+
+// R-32 with DBEB (stage 7b): the mailbox's domain is Authoritative and the tenant has no recipient
+// for it yet, so mail to it is still rejected; the mirror makes the recipient within minutes.
+export function TenantPendingLine({ account, style }) {
+  const { t } = useTranslation();
+  if (!tenantPending(account)) return null;
+  return (
+    <div data-tenant-pending-line style={{ fontSize: 11, color: '#b45309', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', ...style }}>
+      {t('sidebar.tenantPending')}
     </div>
   );
 }

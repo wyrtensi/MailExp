@@ -49,6 +49,10 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.outage_changed': 'admin.audit.actionMailNodeOutageChanged',
   'mail_node.outage_deleted': 'admin.audit.actionMailNodeOutageDeleted',
   'tenant.connection_tested': 'admin.audit.actionTenantConnectionTested',
+  'tenant.recipients_synced': 'admin.audit.actionTenantRecipientsSynced',
+  'tenant.connector_reference_taken': 'admin.audit.actionTenantConnectorReference',
+  'tenant.domain_hold_changed': 'admin.audit.actionTenantDomainHold',
+  'tenant.internal_relay_approved': 'admin.audit.actionTenantInternalRelayApproved',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -69,12 +73,14 @@ const SEND_CANCEL_DETAIL_KEYS = Object.freeze({
   discard: 'admin.audit.detailSendCancelledDiscard',
 });
 
-// How a mail_node.domain_state_changed entry moved the domain: "Done", "Mark ready" or "Restart
-// onboarding".
+// How a mail_node.domain_state_changed entry moved the domain: "Done", "Mark ready", "Restart
+// onboarding" or the tenant driver.
 const DOMAIN_STATE_CHANGE_KEYS = Object.freeze({
   step_confirmed: 'admin.audit.detailDomainStepConfirmed',
   marked_ready: 'admin.audit.detailDomainMarkedReady',
   restarted: 'admin.audit.detailDomainRestarted',
+  // Stage 7b: the tenant driver confirmed a tenant step, or made the domain Authoritative.
+  tenant_driver: 'admin.audit.detailDomainTenantDriver',
 });
 
 // The settings fields a mail_node.config_changed entry names, as the journal shows them.
@@ -95,6 +101,8 @@ const SETTINGS_FIELD_KEYS = Object.freeze({
   tenantId: 'admin.audit.fieldTenantId',
   appId: 'admin.audit.fieldAppId',
   certThumbprint: 'admin.audit.fieldThumbprint',
+  outboundConnector: 'admin.audit.fieldOutboundConnector',
+  dbebExternalDomain: 'admin.audit.fieldDbebExternalDomain',
   nodeIp: 'admin.audit.fieldNodeIp',
   licenses: 'admin.audit.fieldLicenses',
   tenantCreatedOn: 'admin.audit.fieldTenantCreated',
@@ -308,6 +316,20 @@ export function auditDetail(entry) {
           },
           valueKeys: { action: queueActionKey(details.action) },
         };
+    case 'tenant.recipients_synced':
+      return {
+        key: 'admin.audit.detailTenantRecipients',
+        values: { domain: details.domain ?? '', created: details.created ?? 0, removed: details.removed ?? 0, retargeted: details.retargeted ?? 0 },
+      };
+    case 'tenant.domain_hold_changed':
+      return { key: details.hold ? 'admin.audit.detailTenantHoldOn' : 'admin.audit.detailTenantHoldOff', values: { domain: details.domain ?? '' } };
+    case 'tenant.internal_relay_approved':
+      return { key: 'admin.audit.detailTenantInternalRelayApproved', values: { domain: details.domain ?? '' } };
+    case 'tenant.connector_reference_taken':
+      return {
+        key: 'admin.audit.detailTenantConnectorReference',
+        values: { names: [...(details.inbound ?? []), ...(details.outbound ?? [])].join(', ') || '—' },
+      };
     case 'tenant.connection_tested':
       return details.ok
         ? { key: 'admin.audit.detailTenantTestOk', values: {} }

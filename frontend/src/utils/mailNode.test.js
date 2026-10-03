@@ -6,6 +6,10 @@ import {
   eopSettingsError,
   normalizeEopSettings,
   onboardingSteps,
+  tenantPending,
+  tenantFailureKey,
+  alertDetail,
+  alertTitleKey,
   domainMailboxFormError,
   canDeleteAccount,
   deletionDate,
@@ -132,6 +136,46 @@ describe('domain onboarding', () => {
     assert.equal(steps[5].by, 'b@example.com');
   });
 
+  it('with the tenant driver, the next tenant step is MailExpert\'s, not a person\'s (stage 7b)', () => {
+    const domain = {
+      state: 'dns_ok', nextStep: 'tenant_verified',
+      steps: { dns_ok: { email: 'ops@example.com' } },
+    };
+    assert.equal(onboardingSteps(domain, { tenantDriver: true })[2].status, 'tenant');
+    assert.equal(onboardingSteps(domain)[2].status, 'next');
+    const later = onboardingSteps({
+      state: 'connector_ready', nextStep: 'ready',
+      steps: { tenant_verified: { email: 'MailExpert', tenantDriver: true } },
+    }, { tenantDriver: true });
+    assert.equal(later[2].byTenantDriver, true);
+    // 'ready' stays a person's step: the owner switches the MX.
+    assert.equal(later[5].status, 'next');
+  });
+
+  it('says a mailbox waits for the tenant only when the server says so', () => {
+    assert.equal(tenantPending({ mail_node: true, tenant_pending: true }), true);
+    assert.equal(tenantPending({ mail_node: true, tenant_pending: false }), false);
+    assert.equal(tenantPending({ mail_node: false, tenant_pending: true }), false);
+    assert.equal(tenantPending(null), false);
+  });
+
+  it('names the stage 7b failures and the connector drift alert', () => {
+    assert.equal(tenantFailureKey('outbound_connector_ambiguous'), 'admin.tenant.failOutboundAmbiguous');
+    assert.equal(tenantFailureKey('exo_throttled'), 'admin.tenant.failThrottled');
+    assert.equal(tenantFailureKey('mail_node_unreachable'), 'admin.mailNode.errorUnreachable');
+    assert.equal(tenantFailureKey('something_new'), 'admin.tenant.failOther');
+    assert.equal(alertTitleKey('tenant_connector_drift'), 'admin.nodeOps.alertTenantConnectorDrift');
+    assert.equal(tenantFailureKey('address_taken'), 'admin.tenant.failAddressTaken');
+    assert.equal(tenantFailureKey('authoritative_in_tenant'), 'admin.tenant.failAuthoritativeInTenant');
+    assert.equal(alertTitleKey('tenant_domain_authoritative'), 'admin.nodeOps.alertTenantDomainAuthoritative');
+    assert.deepEqual(alertDetail({ key: 'tenant_domain_authoritative', details: { count: 1, domains: ['example.com'] } }), {
+      key: 'admin.nodeOps.alertDetailTenantDomainAuthoritative', values: { count: 1, domains: 'example.com' },
+    });
+    assert.deepEqual(alertDetail({ key: 'tenant_connector_drift', details: { count: 1, connectors: [{ name: 'To mail node' }], checkedAt: 'x' } }), {
+      key: 'admin.nodeOps.alertDetailTenantConnectorDrift', values: { count: 1, names: 'To mail node' }, at: 'x',
+    });
+  });
+
   it('lets an administrator mark ready only a known domain before ready', () => {
     assert.equal(canMarkReady({ state: 'node_created' }), true);
     assert.equal(canMarkReady({ state: 'connector_ready' }), true);
@@ -159,6 +203,13 @@ describe('normalizeEopSettings', () => {
     assert.deepEqual(normalizeEopSettings({ sendLimitPerHour: null }), { error: 'send_limit_invalid' });
     assert.deepEqual(normalizeEopSettings({ certThumbprint: 'xyz' }), { error: 'thumbprint_invalid' });
     assert.deepEqual(normalizeEopSettings({}), { settings: {} });
+    // Stage 7b: the Outbound connector and DBEB variant B, checked as the server does.
+    assert.deepEqual(normalizeEopSettings({ outboundConnector: ' To mail node ', dbebExternalDomain: 'Relay.Example.net' }), {
+      settings: { outboundConnector: 'To mail node', dbebExternalDomain: 'relay.example.net' },
+    });
+    assert.deepEqual(normalizeEopSettings({ outboundConnector: 'To node [EU] & co' }), { settings: { outboundConnector: 'To node [EU] & co' } });
+    assert.deepEqual(normalizeEopSettings({ outboundConnector: 'a'.repeat(65) }), { error: 'outbound_connector_invalid' });
+    assert.deepEqual(normalizeEopSettings({ dbebExternalDomain: 'not a domain' }), { error: 'dbeb_external_domain_invalid' });
   });
 
   it('keeps the node address as an IPv4 address only, and lets it be cleared', () => {

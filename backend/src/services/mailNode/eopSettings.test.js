@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../db.js', () => ({ query: vi.fn() }));
 
@@ -6,6 +6,7 @@ import {
   EOP_DEFAULTS, TLS_POLICIES, eopSettingsConflict, parseDay, parseEopSettings, parseTlsParameters, tenantConfigured, tenantDriverActive,
   tlsParametersFit,
 } from './eopSettings.js';
+import { createFakeTenantDriver, setTenantDriver } from '../tenant/driver.js';
 
 const TENANT = '11111111-2222-4333-8444-555555555555';
 const APP = 'AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE';
@@ -137,8 +138,29 @@ describe('the TLS policy for the next hop', () => {
 });
 
 describe('tenantDriverActive', () => {
-  it('is off in this stage: the panel never talks to the tenant yet', () => {
+  afterEach(() => setTenantDriver(undefined));
+  const all = { tenantId: TENANT, tenantDomain: 'contoso.onmicrosoft.com', appId: APP, certThumbprint: 'A'.repeat(40) };
+
+  it('needs a tenant driver and the four tenant fields (stage 7b)', () => {
+    setTenantDriver(null);
+    expect(tenantDriverActive(all)).toBe(false);
+    setTenantDriver(createFakeTenantDriver());
+    expect(tenantDriverActive(all)).toBe(true);
+    expect(tenantDriverActive({ ...all, appId: null })).toBe(false);
     expect(tenantDriverActive()).toBe(false);
+  });
+});
+
+describe('the stage 7b fields', () => {
+  it('take an Outbound connector name and the external domain of DBEB variant B', () => {
+    expect(parseEopSettings({ outboundConnector: ' To mail node ', dbebExternalDomain: 'Relay.Example.net' }))
+      .toEqual({ settings: { outboundConnector: 'To mail node', dbebExternalDomain: 'relay.example.net' } });
+    expect(parseEopSettings({ outboundConnector: '', dbebExternalDomain: '' })).toEqual({ settings: { outboundConnector: null, dbebExternalDomain: null } });
+    // Only compared with what the tenant answers (the worker gets the Guid): any printable name.
+    expect(parseEopSettings({ outboundConnector: 'To node [EU] & backup' })).toEqual({ settings: { outboundConnector: 'To node [EU] & backup' } });
+    expect(parseEopSettings({ outboundConnector: 'To\nnode' })).toEqual({ error: 'outbound_connector_invalid' });
+    expect(parseEopSettings({ outboundConnector: 'a'.repeat(65) })).toEqual({ error: 'outbound_connector_invalid' });
+    expect(parseEopSettings({ dbebExternalDomain: 'not a domain' })).toEqual({ error: 'dbeb_external_domain_invalid' });
   });
 });
 

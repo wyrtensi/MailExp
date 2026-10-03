@@ -15,6 +15,7 @@ import scheduledRoutes from './routes/scheduled.js';
 import { startJobWorker, stopJobWorker } from './services/jobQueue.js';
 import { registerSendJobKind } from './services/sendQueue.js';
 import { registerTenantJobKinds, startTenantPoll } from './services/tenant/tenantJobs.js';
+import { registerTenantDomainJobKind } from './services/tenant/tenantDomains.js';
 import { tenantProfileWithoutDriver } from './services/tenant/driver.js';
 import oauthRoutes from './routes/oauth.js';
 import authGoogleRoutes from './routes/authGoogle.js';
@@ -30,7 +31,7 @@ import deliveryRoutes from './routes/delivery.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
 import { startDnsCheckJob } from './services/mailNode/dnsCheckJob.js';
 import { startNodeAlertJob } from './services/mailNode/nodeAlerts.js';
-import { startMailboxDeletionJob } from './services/mailNode/mailboxDeletion.js';
+import { BEFORE_NODE_DELETE, startMailboxDeletionJob } from './services/mailNode/mailboxDeletion.js';
 import { adoptDomainsWithMailboxes } from './services/mailNode/domains.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
@@ -281,6 +282,9 @@ registerSendJobKind({ imapManager });
 // Registered whether or not a tenant driver is configured: a tenant job left queued then fails at
 // once with tenant_driver_missing instead of waiting forever (services/tenant/tenantJobs.js).
 registerTenantJobKinds();
+// Stage 7b: the domains' tenant steps and the DBEB mirror, and the recipient removed before a node
+// mailbox is deleted (R-29 with R-33).
+registerTenantDomainJobKind({ beforeNodeDelete: BEFORE_NODE_DELETE });
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.

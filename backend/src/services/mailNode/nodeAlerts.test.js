@@ -4,6 +4,7 @@ const db = vi.hoisted(() => ({ configs: {} }));
 vi.mock('../db.js', () => ({
   query: vi.fn(async (sql, params) => {
     if (sql.startsWith('SELECT config')) return { rows: db.configs[params[0]] ? [{ config: db.configs[params[0]] }] : [] };
+    if (sql.includes('FROM mail_node_domains')) return { rows: db.waitingDomains ?? [] };
     if (sql.includes('INSERT INTO integration_config')) {
       const [provider, config] = params;
       db.configs[provider] = sql.includes('integration_config.config ||') ? { ...(db.configs[provider] ?? {}), ...config } : config;
@@ -474,7 +475,7 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
   const BLOCKED = [{ connectorId: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', connectorName: 'From mail node', reason: 'Suspicious', createdTime: null }];
 
   it('tenantSignals: a blocked connector, and the certificate at 30 and 14 days', () => {
-    expect(tenantSignals(pollState(), NOW)).toEqual({ alerts: [], stale: false });
+    expect(tenantSignals(pollState(), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: true });
     const blocked = tenantSignals(pollState({ items: BLOCKED }), NOW);
     expect(blocked.alerts).toEqual([{
       key: 'connector_blocked_tenant', severity: 'error', details: { count: 1, connectors: BLOCKED, checkedAt: at(NOW - 60000) },
@@ -488,11 +489,27 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
   });
 
   it('tenantSignals: a failed or old poll is stale and raises no connector alert of its own', () => {
-    expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true });
+    expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true });
     const old = tenantSignals(pollState({ readAt: NOW - TENANT_STALE_MS - 1000 }), NOW);
     expect(old.stale).toBe(true);
     expect(old.alerts.map((a) => a.key)).toEqual(['tenant_poll_failing']);
-    expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true });
+    expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true });
+  });
+
+  it('tenantSignals: a connector changed since its reference warns (R-25, stage 7b)', () => {
+    const connector = (tls) => ({ name: 'To mail node', properties: { TlsSettings: tls, SmartHosts: ['mail.example.com'] } });
+    const reference = { at: at(NOW - DAY), inbound: [], outbound: [connector('domainvalidation')] };
+    const read = (tls, { ok = true, readAt = NOW - 60000 } = {}) => ({
+      ...pollState(), connectorReference: reference, connectors: { at: at(readAt), ok, inbound: [], outbound: [connector(tls)] },
+    });
+    expect(tenantSignals(read('domainvalidation'), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: false });
+    expect(tenantSignals(read('encryptiononly'), NOW).alerts).toEqual([{
+      key: 'tenant_connector_drift', severity: 'warning',
+      details: { count: 1, connectors: [{ direction: 'outbound', name: 'To mail node', kind: 'changed' }], checkedAt: at(NOW - 60000) },
+    }]);
+    // A failed or old read of the connectors keeps the alert as it was (the source is not read).
+    expect(tenantSignals(read('encryptiononly', { ok: false }), NOW)).toMatchObject({ alerts: [], connectorsStale: true });
+    expect(tenantSignals(read('encryptiononly', { readAt: NOW - TENANT_STALE_MS - 1000 }), NOW).connectorsStale).toBe(true);
   });
 
   describe('in the run', () => {

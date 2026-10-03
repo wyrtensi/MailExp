@@ -1,5 +1,5 @@
 {
-  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6).",
+  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6). Stage 7b: the shapes of the domain, connector, DKIM and recipient answers; the fake tenant (fakes.js createFakeTenantModel) answers in them. Shapes marked Inferred in eop-panel-requirements.md section 5.12 wait for a live tenant.",
   "worker": {
     "certificate": {
       "thumbprint": "3F2A9C4D5E6B7A8C9D0E1F2A3B4C5D6E7F8A9B0C",
@@ -11,7 +11,12 @@
   },
   "exo": {
     "whoami": [
-      { "Name": "contoso.onmicrosoft.com", "DisplayName": "Contoso", "Identity": "contoso.onmicrosoft.com", "Guid": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f" }
+      {
+        "Name": "contoso.onmicrosoft.com",
+        "DisplayName": "Contoso",
+        "Identity": "contoso.onmicrosoft.com",
+        "Guid": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f"
+      }
     ],
     "get_blocked_connector": [],
     "get_blocked_connector.blocked": [
@@ -40,17 +45,182 @@
       }
     ],
     "get_accepted_domain": [
-      { "DomainName": "example.com", "DomainType": "InternalRelay", "Default": false, "Identity": "example.com" }
+      {
+        "DomainName": "example.com",
+        "DomainType": "InternalRelay",
+        "Default": false,
+        "Identity": "example.com"
+      }
+    ],
+    "get_inbound_connectors": [
+      {
+        "Identity": "From mail node",
+        "Name": "From mail node",
+        "Enabled": true,
+        "ConnectorType": "OnPremises",
+        "ConnectorSource": "Default",
+        "SenderDomains": [
+          "smtp:*;1"
+        ],
+        "SenderIPAddresses": [],
+        "RequireTls": true,
+        "RestrictDomainsToCertificate": false,
+        "RestrictDomainsToIPAddresses": false,
+        "TlsSenderCertificateName": "mail.example.com",
+        "CloudServicesMailEnabled": false,
+        "TreatMessagesAsInternal": false,
+        "WhenChanged": "2026-09-20T10:00:00.0000000Z"
+      }
+    ],
+    "get_outbound_connectors": [
+      {
+        "Identity": "To mail node",
+        "Name": "To mail node",
+        "Enabled": true,
+        "ConnectorType": "OnPremises",
+        "ConnectorSource": "Default",
+        "RecipientDomains": [
+          "example.org"
+        ],
+        "SmartHosts": [
+          "mail.example.com"
+        ],
+        "UseMXRecord": false,
+        "TlsSettings": "DomainValidation",
+        "TlsDomain": "mail.example.com",
+        "AllAcceptedDomains": false,
+        "IsTransportRuleScoped": false,
+        "CloudServicesMailEnabled": false,
+        "IsValidated": false,
+        "LastValidationTimestamp": null,
+        "WhenChanged": "2026-09-20T10:00:00.0000000Z",
+        "Guid": "4b1d2c3e-5f60-4718-8a9b-0c1d2e3f4a5b"
+      }
+    ],
+    "get_dkim_signing_config": [
+      {
+        "Identity": "example.com",
+        "Domain": "example.com",
+        "Enabled": false,
+        "Status": "CnameMissing",
+        "Selector1CNAME": "selector1-example-com._domainkey.contoso.n-v1.dkim.mail.microsoft",
+        "Selector2CNAME": "selector2-example-com._domainkey.contoso.n-v1.dkim.mail.microsoft"
+      }
+    ],
+    "get_recipients": [
+      {
+        "Identity": "info@example.com",
+        "Name": "info@example.com",
+        "PrimarySmtpAddress": "info@example.com",
+        "ExternalEmailAddress": "SMTP:info@example.com",
+        "EmailAddresses": [
+          "SMTP:info@example.com"
+        ],
+        "RecipientTypeDetails": "MailContact",
+        "HiddenFromAddressListsEnabled": true
+      }
     ]
   },
   "graph": {
-    "token": { "token_type": "Bearer", "expires_in": 3599, "ext_expires_in": 3599, "access_token": "fake-graph-access-token" },
+    "token": {
+      "token_type": "Bearer",
+      "expires_in": 3599,
+      "ext_expires_in": 3599,
+      "access_token": "fake-graph-access-token"
+    },
     "domains": {
       "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#domains(id,isInitial,isVerified,supportedServices)",
       "value": [
-        { "id": "contoso.onmicrosoft.com", "isInitial": true, "isVerified": true, "supportedServices": ["Email", "OfficeCommunicationsOnline"] },
-        { "id": "example.com", "isInitial": false, "isVerified": true, "supportedServices": ["Email"] }
+        {
+          "id": "contoso.onmicrosoft.com",
+          "isInitial": true,
+          "isVerified": true,
+          "supportedServices": [
+            "Email",
+            "OfficeCommunicationsOnline"
+          ]
+        },
+        {
+          "id": "example.com",
+          "isInitial": false,
+          "isVerified": true,
+          "supportedServices": [
+            "Email"
+          ]
+        }
       ]
-    }
+    },
+    "domain": {
+      "id": "example.com",
+      "authenticationType": "Managed",
+      "isDefault": false,
+      "isInitial": false,
+      "isRoot": true,
+      "isVerified": false,
+      "supportedServices": []
+    },
+    "verificationDnsRecords": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#domains('example.com')/verificationDnsRecords",
+      "value": [
+        {
+          "@odata.type": "#microsoft.graph.domainDnsTxtRecord",
+          "id": "aceff52c-06a5-447f-ac5f-256ad243cc5c",
+          "isOptional": false,
+          "label": "example.com",
+          "recordType": "Txt",
+          "supportedService": "Email",
+          "ttl": 3600,
+          "text": "MS=ms12345678"
+        },
+        {
+          "@odata.type": "#microsoft.graph.domainDnsMxRecord",
+          "id": "5fbde38c-0865-497f-82b1-126f596bcee9",
+          "isOptional": false,
+          "label": "example.com",
+          "recordType": "Mx",
+          "supportedService": "Email",
+          "ttl": 3600,
+          "mailExchange": "ms12345678.msv1.invalid",
+          "preference": 32767
+        }
+      ]
+    },
+    "serviceConfigurationRecords": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#domains('example.com')/serviceConfigurationRecords",
+      "value": [
+        {
+          "@odata.type": "#microsoft.graph.domainDnsMxRecord",
+          "id": "0b8c52a1-6dd1-4f7a-9b44-3b1a2f8c9d01",
+          "isOptional": false,
+          "label": "example.com",
+          "recordType": "Mx",
+          "supportedService": "Email",
+          "ttl": 3600,
+          "mailExchange": "example-com.mail.protection.outlook.com",
+          "preference": 0
+        },
+        {
+          "@odata.type": "#microsoft.graph.domainDnsTxtRecord",
+          "id": "2c1f43d8-8e1b-4f0e-a6b3-5d2e1c7b9a02",
+          "isOptional": false,
+          "label": "example.com",
+          "recordType": "Txt",
+          "supportedService": "Email",
+          "ttl": 3600,
+          "text": "v=spf1 include:spf.protection.outlook.com -all"
+        },
+        {
+          "@odata.type": "#microsoft.graph.domainDnsCnameRecord",
+          "id": "7d3e21f0-5a4c-4b8e-9c1d-2f6a8b0e4c03",
+          "isOptional": false,
+          "label": "autodiscover.example.com",
+          "recordType": "CName",
+          "supportedService": "Email",
+          "ttl": 3600,
+          "canonicalName": "autodiscover.outlook.com"
+        }
+      ]
+    },
+    "mxNewForm": "example-com.n-v1.mx.microsoft"
   }
 }
