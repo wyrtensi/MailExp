@@ -4,7 +4,7 @@ import { recordAudit } from '../auditLog.js';
 import { getEopSettings } from '../mailNode/eopSettings.js';
 import { SYSTEM_ACTOR } from '../mailNode/domains.js';
 import { getTenantDriver, tenantOf } from './driver.js';
-import { TenantError } from './exoRunner.js';
+import { TenantError, asRows } from './exoRunner.js';
 import { policyConflicts, summarizePolicy } from './antispam.js';
 
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
@@ -33,6 +33,8 @@ export const TENANT_JOB_KINDS = Object.freeze({
 });
 export const POLL_INTERVAL_MS = 10 * 60 * 1000;
 export const ANTISPAM_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+// Polls failed in a row before the alerts warn that the tenant poll is failing.
+export const TENANT_FAILING_POLLS = 3;
 const FIRST_POLL_DELAY_MS = 60 * 1000;
 const MESSAGE_MAX = 300;
 
@@ -102,7 +104,7 @@ export async function testConnection({ driver, tenant, session }, now = Date.now
       steps.graph = { ok: false, ...failureOf(err) };
     }
     try {
-      const [org] = await session.exo.run('whoami');
+      const [org] = asRows(await session.exo.run('whoami'));
       steps.exo = { ok: true, organization: org?.Name ?? null, displayName: org?.DisplayName ?? null };
     } catch (err) {
       steps.exo = { ok: false, ...failureOf(err) };
@@ -112,8 +114,9 @@ export async function testConnection({ driver, tenant, session }, now = Date.now
   return { connection: { at, ok, steps }, certificate };
 }
 
+// A row without a connector id and name (an empty object) is no connector.
 export function blockedConnectorsOf(rows) {
-  return (Array.isArray(rows) ? rows : []).map((row) => ({
+  return asRows(rows).filter((row) => row.ConnectorId || row.ConnectorName).map((row) => ({
     connectorId: row.ConnectorId ? String(row.ConnectorId) : null,
     connectorName: row.ConnectorName ? String(row.ConnectorName) : null,
     reason: row.Reason ? String(row.Reason).slice(0, MESSAGE_MAX) : null,
@@ -124,7 +127,7 @@ export function blockedConnectorsOf(rows) {
 export async function readAntispam(session, now = Date.now()) {
   const at = new Date(now).toISOString();
   try {
-    const [row] = await session.exo.run('get_content_filter_policy');
+    const [row] = asRows(await session.exo.run('get_content_filter_policy'));
     const policy = summarizePolicy(row);
     if (!policy) return { at, ok: false, code: 'policy_missing', message: 'The tenant answered no Default policy' };
     return { at, ok: true, policy, conflicts: policyConflicts(policy) };
@@ -146,9 +149,13 @@ export async function poll(context, { previous = {}, now = Date.now() } = {}) {
   }
   try {
     const items = blockedConnectorsOf(await context.session.exo.run('get_blocked_connector'));
-    patch.blockedConnectors = { at, ok: true, items };
+    patch.blockedConnectors = { at, ok: true, items, failures: 0 };
   } catch (err) {
-    patch.blockedConnectors = { ...(previous.blockedConnectors ?? { items: [] }), ok: false, error: failureOf(err), errorAt: at };
+    // failures: polls failed in a row; from TENANT_FAILING_POLLS the alerts warn (nodeAlerts.js).
+    const before = previous.blockedConnectors ?? { items: [] };
+    patch.blockedConnectors = {
+      ...before, ok: false, error: failureOf(err), errorAt: at, failures: (Number(before.failures) || 0) + 1,
+    };
   }
   const antispamAt = Date.parse(previous.antispam?.at ?? '');
   if (!Number.isFinite(antispamAt) || now - antispamAt >= ANTISPAM_MAX_AGE_MS) patch.antispam = await readAntispam(context.session, now);
@@ -208,6 +215,15 @@ export async function enqueueTenantJob(kind, { userId = null } = {}) {
 export async function enqueuePoll(now = Date.now()) {
   if (!getTenantDriver()) return null;
   if (!tenantOf(await getEopSettings())) return null;
+  // A poll queued or running, or one that ended within half an interval ("Check now" a minute
+  // ago), makes this slot's poll unnecessary.
+  const { rows: [recent] } = await query(
+    `SELECT id FROM jobs WHERE kind = $1
+        AND (status IN ('queued', 'running') OR updated_at > to_timestamp($2::double precision / 1000))
+      LIMIT 1`,
+    [TENANT_JOB_KINDS.poll, now - POLL_INTERVAL_MS / 2],
+  );
+  if (recent) return null;
   const { job } = await enqueueJob({ kind: TENANT_JOB_KINDS.poll, dedupeKey: `slot-${Math.floor(now / POLL_INTERVAL_MS)}` });
   return job;
 }

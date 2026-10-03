@@ -17,6 +17,7 @@ frontend/packages/release/
 certs/
 # The Microsoft tenant application certificate (PFX) and its password: never committed
 tenant-cert/
+tenant-secrets/
 
 # Logs
 *.log

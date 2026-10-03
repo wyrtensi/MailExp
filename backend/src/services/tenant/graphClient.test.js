@@ -58,6 +58,17 @@ describe('the token', () => {
     expect(form.client_secret).toBeUndefined();
   });
 
+  it('a short-lived token is cached for half its life', async () => {
+    let now = 0;
+    let issued = 0;
+    const { graph } = client({ fake: { token: () => ({ access_token: `t${++issued}`, expires_in: 240 }) }, client: { now: () => now } });
+    expect(await graph.getToken()).toBe('t1');
+    now = 100 * 1000;
+    expect(await graph.getToken()).toBe('t1');
+    now = 121 * 1000;
+    expect(await graph.getToken()).toBe('t2');
+  });
+
   it('is asked again once it is about to end', async () => {
     let now = 0;
     let issued = 0;
@@ -115,6 +126,27 @@ describe('requests', () => {
     const long = client({ fake: { graph: { 'GET /domains': () => new Response('{}', { status: 429, headers: { 'Retry-After': '600' } }) } } });
     await expect(long.graph.request('GET', '/domains')).rejects.toMatchObject({ code: 'graph_throttled', retryAfterMs: 600000 });
     expect(long.slept).toEqual([]);
+  });
+
+  it('a 401 gets one new token and one more try', async () => {
+    let calls = 0;
+    const { graph, fake } = client({
+      fake: { graph: { 'GET /domains': () => (++calls === 1 ? new Response('{}', { status: 401 }) : { value: [] }) } },
+    });
+    expect(await graph.request('GET', '/domains')).toEqual({ value: [] });
+    expect(fake.requests.filter((r) => r.kind === 'token')).toHaveLength(2);
+  });
+
+  it('a write that met 503 is not repeated; a throttled one (429) is', async () => {
+    let posts = 0;
+    const { graph, slept } = client({ fake: { graph: { 'POST /domains': () => { posts += 1; return new Response('{}', { status: 503 }); } } } });
+    await expect(graph.request('POST', '/domains', { body: { id: 'example.com' } })).rejects.toMatchObject({ code: 'graph_unavailable', status: 503 });
+    expect(posts).toBe(1);
+    expect(slept).toEqual([]);
+    let throttled = 0;
+    const t = client({ fake: { graph: { 'POST /domains': () => (++throttled === 1 ? new Response('{}', { status: 429, headers: { 'Retry-After': '1' } }) : { id: 'example.com' }) } } });
+    expect(await t.graph.request('POST', '/domains', { body: { id: 'example.com' } })).toEqual({ id: 'example.com' });
+    expect(throttled).toBe(2);
   });
 
   it('names a refusal', async () => {

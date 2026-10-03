@@ -156,6 +156,13 @@ describe('MailNodeTenant', () => {
     assert.equal(buttons(root, 'admin.tenant.checkNow')[0].disabled, true);
     assert.match(root.textContent, /admin\.tenant\.certificateUnknown/);
     assert.match(root.textContent, /admin\.tenant\.connectionNever/);
+    assert.equal(root.querySelector('[data-tenant-profile-warning]'), null);
+  });
+
+  test('the worker profile on without a driver is told', async () => {
+    answers['GET /api/mail-node/tenant'] = { driver: null, profileWithoutDriver: true, configured: true, state: {}, jobs: {} };
+    const root = await mount(React.createElement(MailNodeTenant));
+    assert.match(root.querySelector('[data-tenant-profile-warning]').textContent, /admin\.tenant\.profileWithoutDriver/);
   });
 
   test('a refusal of a button is shown', async () => {

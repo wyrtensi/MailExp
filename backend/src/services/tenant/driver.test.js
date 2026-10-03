@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createFakeTenantDriver, getTenantDriver, resetTenantDriver, setTenantDriver, tenantOf } from './driver.js';
+import { createFakeTenantDriver, getTenantDriver, resetTenantDriver, setTenantDriver, tenantOf, tenantProfileWithoutDriver } from './driver.js';
 import { TENANT_FIXTURES } from './fakes.js';
 
 // Which tenant driver the panel runs with, and the tenant of the settings.
@@ -47,6 +47,30 @@ describe('getTenantDriver', () => {
     expect(pick({ TENANT_DRIVER: 'fake' })).toBeNull();
     setTenantDriver(undefined);
     expect(pick({})).toBeNull();
+  });
+});
+
+describe('stand overrides and the compose profile', () => {
+  const WORKER = { TENANT_WORKER_URL: 'http://tenant-worker:8080', TENANT_WORKER_TOKEN: 'x'.repeat(32) };
+  it('Graph and login URLs are taken outside production, in production only on a stand', () => {
+    for (const [env, login, graph] of [
+      [{ ...WORKER, TENANT_LOGIN_URL: 'http://login.stand', TENANT_GRAPH_URL: 'http://graph.stand/v1.0' }, 'http://login.stand', 'http://graph.stand/v1.0'],
+      [{ ...WORKER, TENANT_LOGIN_URL: 'http://login.stand', TENANT_GRAPH_URL: 'http://graph.stand/v1.0', NODE_ENV: 'production' }, 'https://login.microsoftonline.com', 'https://graph.microsoft.com/v1.0'],
+      [{ ...WORKER, TENANT_LOGIN_URL: 'http://login.stand', NODE_ENV: 'production', TENANT_DRIVER_STAND: '1' }, 'http://login.stand', 'https://graph.microsoft.com/v1.0'],
+    ]) {
+      resetTenantDriver();
+      const driver = pick(env);
+      expect([driver.loginUrl, driver.graphUrl]).toEqual([login, graph]);
+    }
+    expect(warnings.some((w) => /ignored/.test(w))).toBe(true);
+  });
+
+  it('the profile without a driver is told', () => {
+    expect(tenantProfileWithoutDriver({ COMPOSE_PROFILES: 'tenant' })).toBe(true);
+    resetTenantDriver();
+    expect(tenantProfileWithoutDriver({ COMPOSE_PROFILES: 'other,tenant', ...WORKER })).toBe(false);
+    resetTenantDriver();
+    expect(tenantProfileWithoutDriver({})).toBe(false);
   });
 });
 

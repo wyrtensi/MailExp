@@ -36,7 +36,9 @@ export function summarizePolicy(row) {
   const policy = { identity: String(row.Identity ?? 'Default') };
   for (const field of POLICY_ACTION_FIELDS) policy[field] = row[field] == null ? null : String(row[field]);
   policy.BulkThreshold = Number.isFinite(Number(row.BulkThreshold)) ? Number(row.BulkThreshold) : null;
-  policy.RedirectToRecipients = Array.isArray(row.RedirectToRecipients) ? row.RedirectToRecipients.map(String).slice(0, 20) : [];
+  const redirect = row.RedirectToRecipients;
+  // One address may come as a string rather than a list of one.
+  policy.RedirectToRecipients = (Array.isArray(redirect) ? redirect : (redirect ? [redirect] : [])).map(String).slice(0, 20);
   policy.WhenChanged = row.WhenChanged ? String(row.WhenChanged) : null;
   return policy;
 }

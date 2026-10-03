@@ -21,7 +21,8 @@
 //
 // Environment: TENANT_WORKER_TOKEN (required, 32+ characters), TENANT_PFX_PATH (/certs/app.pfx),
 // TENANT_PFX_PASSWORD_FILE (/run/secrets/tenant_pfx_password), TENANT_WORKER_PORT (8080),
-// TENANT_WORKER_OP_TIMEOUT_MS (120000), TENANT_WORKER_DRY_RUN=1 (print commands, never connect).
+// TENANT_WORKER_OP_TIMEOUT_MS (120000), TENANT_WORKER_DRY_RUN=1 (print commands, never connect),
+// and optionally TENANT_ID, TENANT_APP_ID, TENANT_ORGANIZATION: the only tenant it serves.
 // Without the PFX or its password file the worker refuses to start (R-35).
 import { spawn } from 'node:child_process';
 import { X509Certificate, createHash, createPrivateKey, randomUUID, sign, timingSafeEqual } from 'node:crypto';
@@ -29,7 +30,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OpError, checkOp, checkTenant } from './ops.mjs';
+import { OpError, checkOp, checkTenant, parseGuid, parseOrganization } from './ops.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const MARKER = '@@TW@@';
@@ -40,7 +41,7 @@ const MAX_LOG_LINE = 300;
 
 const STATUS = {
   unauthorized: 401, unknown_op: 404, invalid_args: 400, invalid_tenant: 400, invalid_json: 400, body_too_large: 413,
-  certificate_mismatch: 409, exo_not_found: 422, busy: 503, exo_timeout: 504, exo_connect_failed: 502, exo_failed: 502,
+  certificate_mismatch: 409, tenant_not_allowed: 403, exo_not_found: 422, busy: 503, exo_timeout: 504, exo_connect_failed: 502, exo_failed: 502,
   runner_failed: 502, runner_exited: 502, not_found: 404,
 };
 
@@ -92,10 +93,18 @@ export function signAssertion(certificate, { tenantId, appId }, now = Date.now()
 
 const clip = (text) => String(text ?? '').replace(/\s+/g, ' ').slice(0, MAX_LOG_LINE);
 
+// The environment pwsh gets: the worker's own, without the panel's shared secret (pwsh never needs
+// it, and a cmdlet or module could read it).
+export function runnerEnv(env = process.env, extra = {}) {
+  const rest = { ...env };
+  delete rest.TENANT_WORKER_TOKEN;
+  return { ...rest, ...extra };
+}
+
 function defaultSpawnRunner({ dryRun }) {
   const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'runner.ps1')];
   if (dryRun) args.push('-DryRun');
-  return spawn('pwsh', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  return spawn('pwsh', args, { stdio: ['pipe', 'pipe', 'pipe'], env: runnerEnv() });
 }
 
 // The pwsh runner: started on the first call, one request at a time, killed on a timeout (the
@@ -147,11 +156,16 @@ export function createRunner({ spawnRunner = defaultSpawnRunner, dryRun = false,
     });
     c.stderr?.setEncoding?.('utf8');
     c.stderr?.on('data', (chunk) => log(`runner stderr: ${clip(chunk)}`));
+    // A runner already replaced (stopped after a timeout) must not fail the call of its successor.
     const gone = () => {
-      if (child === c) { child = null; ready = null; }
+      const mine = child === c;
+      if (mine) { child = null; ready = null; }
       failReady(new OpError('runner_exited', 'The pwsh runner exited', 502));
-      if (current) current.reject(new OpError('runner_exited', 'The pwsh runner exited', 502));
+      if (current && mine) current.reject(new OpError('runner_exited', 'The pwsh runner exited', 502));
     };
+    // Writing to a runner that just died fails with EPIPE: its exit answers the call, the error must
+    // not crash the worker.
+    c.stdin.on('error', (err) => log(`runner stdin: ${clip(err?.code || err?.message)}`));
     c.on('exit', gone);
     c.on('error', gone);
   }
@@ -232,12 +246,21 @@ function readBody(req) {
 }
 
 // The request handler. certificate: certificateFrom(...); runner: createRunner(...).
-export function createHandler({ token, certificate, runner, dryRun = false, log = () => {}, now = () => Date.now() }) {
+// pinned: { tenantId, appId, organization } from the worker's own environment (TENANT_ID,
+// TENANT_APP_ID, TENANT_ORGANIZATION), each optional; a request for another tenant or application
+// is refused (tenant_not_allowed), so the worker signs assertions and runs operations only for the
+// tenant it was set up for, whatever the panel sends.
+export function createHandler({ token, certificate, runner, pinned = {}, dryRun = false, log = () => {}, now = () => Date.now() }) {
   if (typeof token !== 'string' || token.length < 32) throw new Error('TENANT_WORKER_TOKEN must be at least 32 characters');
   const expected = digest(`Bearer ${token}`);
   const authorized = (req) => timingSafeEqual(digest(req.headers.authorization ?? ''), expected);
   const tenantOf = (body) => {
     const tenant = checkTenant(body.tenant);
+    for (const field of ['tenantId', 'appId', 'organization']) {
+      if (pinned[field] && pinned[field] !== tenant[field]) {
+        throw new OpError('tenant_not_allowed', `The worker is set up for another ${field}`, 403);
+      }
+    }
     if (tenant.thumbprint !== certificate.thumbprint) {
       throw new OpError('certificate_mismatch', 'The thumbprint in the panel is not the worker certificate\'s', 409);
     }
@@ -281,7 +304,7 @@ export function createHandler({ token, certificate, runner, dryRun = false, log 
 function loadCertificateWithPwsh({ pfxPath, passwordFile }) {
   return new Promise((resolve, reject) => {
     const c = spawn('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'cert.ps1')], {
-      env: { ...process.env, TENANT_PFX_PATH: pfxPath, TENANT_PFX_PASSWORD_FILE: passwordFile },
+      env: runnerEnv(process.env, { TENANT_PFX_PATH: pfxPath, TENANT_PFX_PASSWORD_FILE: passwordFile }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let out = '';
@@ -323,6 +346,11 @@ export async function main(env = process.env) {
     dryRun: env.TENANT_WORKER_DRY_RUN === '1',
     port: Number(env.TENANT_WORKER_PORT) || 8080,
     timeoutMs: Number(env.TENANT_WORKER_OP_TIMEOUT_MS) || 120000,
+    pinned: {
+      tenantId: parseGuid(env.TENANT_ID ?? ''),
+      appId: parseGuid(env.TENANT_APP_ID ?? ''),
+      organization: parseOrganization(env.TENANT_ORGANIZATION ?? ''),
+    },
   };
   const problem = startProblem(config);
   if (problem) {
@@ -339,7 +367,7 @@ export async function main(env = process.env) {
   const info = certificateInfo(certificate);
   log(`certificate ${info.thumbprint}, valid until ${info.notAfter}${config.dryRun ? '; dry run: commands are printed, nothing connects' : ''}`);
   const runner = createRunner({ dryRun: config.dryRun, timeoutMs: config.timeoutMs, log });
-  const handle = createHandler({ token: config.token, certificate, runner, dryRun: config.dryRun, log });
+  const handle = createHandler({ token: config.token, certificate, runner, pinned: config.pinned, dryRun: config.dryRun, log });
   const server = http.createServer((req, res) => { handle(req, res); });
   server.requestTimeout = config.timeoutMs + 30000;
   server.listen(config.port, () => log(`listening on ${config.port}`));

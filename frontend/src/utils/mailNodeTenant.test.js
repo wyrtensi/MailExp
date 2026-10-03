@@ -45,6 +45,12 @@ describe('the tenant alerts', () => {
       key: 'admin.nodeOps.alertDetailTenantCertExpiring', values: { days: 20 }, at: 'x',
     });
     assert.equal(alertDetail({ key: 'tenant_certificate', details: { code: 'cert_expired' } }).key, 'admin.nodeOps.alertDetailTenantCertExpired');
+    assert.equal(alertTitleKey('tenant_poll_failing'), 'admin.nodeOps.alertTenantPollFailing');
+    assert.deepEqual(alertDetail({ key: 'tenant_poll_failing', details: { failures: 3, lastReadAt: 'x' } }), {
+      key: 'admin.nodeOps.alertDetailTenantPollFailing', values: { count: 3 }, at: 'x',
+    });
+    assert.equal(alertDetail({ key: 'tenant_poll_failing', details: { failures: 0, code: 'tenant_poll_stale' } }).key, 'admin.nodeOps.alertDetailTenantPollStale');
+    assert.equal(alertSourceKey('tenant_poll'), 'admin.nodeOps.sourceTenant');
   });
 });
 

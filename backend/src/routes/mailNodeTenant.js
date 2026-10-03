@@ -3,7 +3,7 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { query } from '../services/db.js';
 import { getJob } from '../services/jobQueue.js';
 import { getEopSettings } from '../services/mailNode/eopSettings.js';
-import { getTenantDriver, tenantOf } from '../services/tenant/driver.js';
+import { getTenantDriver, tenantOf, tenantProfileWithoutDriver } from '../services/tenant/driver.js';
 import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState } from '../services/tenant/tenantJobs.js';
 
 // The Microsoft tenant (stage 7a: R-22, R-27, R-28), mounted at /api/mail-node next to
@@ -12,7 +12,8 @@ import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState } from '../services/
 // (202), and the screen follows it through GET /tenant/jobs/:id. Nothing here calls the tenant on
 // the request's path.
 //
-//   GET  /tenant              { driver, configured, state, jobs }: driver 'worker' | 'fake' | null
+//   GET  /tenant              { driver, profileWithoutDriver, configured, state, jobs }: driver
+//                             'worker' | 'fake' | null
 //   POST /tenant/test         "Test connection"
 //   POST /tenant/poll         "Check now" of the blocked connectors and the certificate
 //   POST /tenant/antispam     read the anti-spam policy again
@@ -51,6 +52,8 @@ router.get('/tenant', async (req, res) => {
   ]);
   res.json({
     driver: driver?.kind ?? null,
+    // The worker's compose profile is on but the backend has no driver (TENANT_WORKER_URL unset).
+    profileWithoutDriver: tenantProfileWithoutDriver(),
     configured: !!tenantOf(settings),
     state,
     jobs: { test, antispam, poll },

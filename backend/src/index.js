@@ -15,6 +15,7 @@ import scheduledRoutes from './routes/scheduled.js';
 import { startJobWorker, stopJobWorker } from './services/jobQueue.js';
 import { registerSendJobKind } from './services/sendQueue.js';
 import { registerTenantJobKinds, startTenantPoll } from './services/tenant/tenantJobs.js';
+import { tenantProfileWithoutDriver } from './services/tenant/driver.js';
 import oauthRoutes from './routes/oauth.js';
 import authGoogleRoutes from './routes/authGoogle.js';
 import integrationsRoutes, { loadIntegrationConfigs } from './routes/integrations.js';
@@ -333,6 +334,9 @@ startDnsCheckJob();
 // containers, the TERRL budget) every five minutes; the first run comes a little after the start.
 startNodeAlertJob();
 startTenantPoll();
+if (tenantProfileWithoutDriver()) {
+  console.warn('Tenant worker: COMPOSE_PROFILES has "tenant" but the panel has no tenant driver; set TENANT_WORKER_URL and TENANT_WORKER_TOKEN (32+ characters)');
+}
 
 // Delete, on the node and here, the mail node mailboxes whose asked-for deletion date has come.
 startMailboxDeletionJob({ disconnect: (accountId) => imapManager.disconnectAccount(accountId) });

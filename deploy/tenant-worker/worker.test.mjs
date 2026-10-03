@@ -16,7 +16,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain } from './ops.mjs';
-import { MARKER, certificateFrom, certificateInfo, createHandler, createRunner, signAssertion, startProblem } from './server.mjs';
+import { MARKER, certificateFrom, certificateInfo, createHandler, createRunner, runnerEnv, signAssertion, startProblem } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tenant-worker-'));
@@ -49,7 +49,7 @@ const HOSTILE = [
 test('the whitelist: every op loads only its own cmdlets', () => {
   assert.deepEqual(Object.keys(OPS).sort(), ['get_accepted_domain', 'get_blocked_connector', 'get_content_filter_policy', 'whoami']);
   assert.deepEqual(COMMAND_NAMES, ['Get-AcceptedDomain', 'Get-BlockedConnector', 'Get-HostedContentFilterPolicy', 'Get-OrganizationConfig']);
-  const runner = fs.readFileSync(path.join(HERE, 'runner.ps1'), 'utf8');
+  const runner = fs.readFileSync(path.join(HERE, 'runner.lib.ps1'), 'utf8');
   for (const [op, spec] of Object.entries(OPS)) {
     assert.match(runner, new RegExp(`\\b${op} = @\\{\\s*Cmdlet = '${spec.cmdlets[0]}'`), `${op} in runner.ps1`);
   }
@@ -120,7 +120,7 @@ test('the client assertion follows the certificate credentials format', () => {
 });
 
 // A runner that answers like runner.ps1 -DryRun, or as told.
-function fakeRunnerProcess({ answer = null, hang = false, silent = false } = {}) {
+function fakeRunnerProcess({ answer = null, hang = false, silent = false, delayMs = 0 } = {}) {
   const c = new EventEmitter();
   c.stdout = new PassThrough();
   c.stderr = new PassThrough();
@@ -134,7 +134,9 @@ function fakeRunnerProcess({ answer = null, hang = false, silent = false } = {})
       c.requests.push(request);
       if (hang) continue;
       const reply = answer ? answer(request) : { ok: true, result: { op: request.op, args: request.args } };
-      c.stdout.write(`some module warning\n${MARKER}${JSON.stringify({ ...reply, id: request.id })}\n`);
+      const send = () => c.stdout.write(`some module warning\n${MARKER}${JSON.stringify({ ...reply, id: request.id })}\n`);
+      if (delayMs) setTimeout(send, delayMs);
+      else send();
     }
   });
   c.kill = () => { c.killed = true; setImmediate(() => c.emit('exit', null)); };
@@ -355,4 +357,100 @@ test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not
   assert.equal(byId[4].error.code, 'invalid_tenant');
   assert.equal(byId[5].ok, true);
   assert.equal(byId[5].result.commands.at(-1).parameters.Identity, 'example.com');
+  // \z, not $: a value with a trailing line break is refused too.
+  const trailing = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'runner.ps1'), '-DryRun'], {
+    input: `${JSON.stringify({ id: 6, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com\n' } })}\n`, encoding: 'utf8',
+  });
+  const [answer6] = trailing.stdout.split('\n').filter((l) => l.startsWith(MARKER) && !l.includes('"id":0')).map((l) => JSON.parse(l.slice(MARKER.length)));
+  assert.equal(answer6.error.code, 'invalid_args');
+});
+
+// The live path of runner.lib.ps1 with the EXO cmdlets stubbed (no module needed): a cmdlet's
+// answer is a JSON array for 0, 1 and 2 items, a multi-valued property stays an array, and only a
+// session error connects again.
+test('runner.lib.ps1: arrays for 0, 1 and 2 items, and reconnects only on session errors', { skip: !hasPwsh && 'pwsh is not on PATH', timeout: 60000 }, () => {
+  fs.writeFileSync(file('lib.password'), 'Pw-1\n');
+  const lib = path.join(HERE, 'runner.lib.ps1').replace(/'/g, "''");
+  const script = `
+$script:DryRun = $false
+. '${lib}'
+$env:TENANT_PFX_PASSWORD_FILE = '${file('lib.password').replace(/'/g, "''")}'
+$global:Connects = 0
+$global:Fail = $null
+function Connect-ExchangeOnline { $global:Connects++ }
+function Disconnect-ExchangeOnline { }
+function Make($n) { for ($i = 1; $i -le $n; $i++) { [pscustomobject]@{ ConnectorId = "id$i"; ConnectorName = "c$i"; Reason = 'r'; CreatedTime = [datetime]::new(2026, 10, 3, 8, 0, 0, [DateTimeKind]::Utc) } } }
+function Get-BlockedConnector { if ($global:Fail) { throw $global:Fail }; Make $global:N }
+function Get-OrganizationConfig { [pscustomobject]@{ Name = 'contoso.onmicrosoft.com'; DisplayName = 'Contoso' } }
+function Get-HostedContentFilterPolicy { [pscustomobject]@{ Identity = 'Default'; SpamAction = 'MoveToJmf'; RedirectToRecipients = $global:Redirect } }
+$tenant = [pscustomobject]@{ appId = '${APP_ID}'; organization = '${ORG}' }
+function Ask($id, $op) { $a = Invoke-Op ([pscustomobject]@{ op = $op; tenant = $tenant; args = $null }); $a.id = $id; $a.connects = $global:Connects; Write-Answer $a }
+foreach ($n in 0, 1, 2) { $global:N = $n; Ask "bc$n" 'get_blocked_connector' }
+Ask 'who' 'whoami'
+$global:Redirect = [System.Collections.Generic.List[string]]::new(); Ask 'r0' 'get_content_filter_policy'
+$global:Redirect.Add('spam@example.com'); Ask 'r1' 'get_content_filter_policy'
+$global:Fail = 'Get-BlockedConnector failed for connector From mail node'; Ask 'fail' 'get_blocked_connector'
+$global:Fail = 'The session has expired'; Ask 'expired' 'get_blocked_connector'
+`;
+  fs.writeFileSync(file('lib.test.ps1'), script);
+  const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', file('lib.test.ps1')], { encoding: 'utf8' });
+  const answers = Object.fromEntries(run.stdout.split('\n').filter((l) => l.startsWith(MARKER)).map((l) => JSON.parse(l.slice(MARKER.length))).map((a) => [a.id, a]));
+  assert.deepEqual(answers.bc0.result, [], run.stderr);
+  assert.deepEqual(answers.bc1.result, [{ ConnectorId: 'id1', ConnectorName: 'c1', Reason: 'r', CreatedTime: '2026-10-03T08:00:00.0000000Z' }]);
+  assert.deepEqual(answers.bc2.result.map((r) => r.ConnectorId), ['id1', 'id2']);
+  assert.deepEqual(answers.who.result, [{ Name: 'contoso.onmicrosoft.com', DisplayName: 'Contoso' }]);
+  assert.deepEqual(answers.r0.result[0].RedirectToRecipients, []);
+  assert.deepEqual(answers.r1.result[0].RedirectToRecipients, ['spam@example.com']);
+  // One connect for the session; an error naming the connector is no session error.
+  assert.equal(answers.fail.connects, 1);
+  assert.equal(answers.fail.error.code, 'exo_failed');
+  assert.equal(answers.expired.connects, 2);
+  assert.equal(answers.expired.error.code, 'exo_failed');
+});
+
+test('the runner gets no token, and a pinned tenant is the only one served', async () => {
+  assert.equal(runnerEnv({ TENANT_WORKER_TOKEN: TOKEN, PATH: '/bin' }, { X: '1' }).TENANT_WORKER_TOKEN, undefined);
+  assert.deepEqual(runnerEnv({ TENANT_WORKER_TOKEN: TOKEN, PATH: '/bin' }, { X: '1' }), { PATH: '/bin', X: '1' });
+  const runner = createRunner({ spawnRunner: () => fakeRunnerProcess() });
+  const { base, close } = await serve(createHandler({ token: TOKEN, certificate, runner, pinned: { tenantId: TENANT_ID, appId: APP_ID } }));
+  try {
+    let res = await post(base, '/assertion', { tenant: { ...tenant, appId: '77777777-7777-4888-9999-aaaaaaaaaaaa' } });
+    assert.equal(res.status, 403);
+    assert.equal((await res.json()).error.code, 'tenant_not_allowed');
+    res = await post(base, '/ops/whoami', { tenant: { ...tenant, tenantId: '22222222-2222-4333-8444-555555555555' } });
+    assert.equal(res.status, 403);
+    assert.equal((await post(base, '/assertion', { tenant })).status, 200);
+  } finally {
+    await close();
+  }
+});
+
+test('a dead runner: EPIPE on its stdin does not crash, a replaced one does not fail its successor', async () => {
+  const lines = [];
+  const runner = createRunner({
+    timeoutMs: 1000, log: (l) => lines.push(l),
+    spawnRunner: () => {
+      const c = fakeRunnerProcess({ silent: true });
+      c.stdin.write = () => { setImmediate(() => { c.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); c.emit('exit', 1); }); return false; };
+      setImmediate(() => c.stdout.write(`${MARKER}{"id":0,"ok":true}\n`));
+      return c;
+    },
+  });
+  await assert.rejects(runner.call({ op: 'whoami', tenant: {}, args: {} }), { code: 'runner_exited' });
+  assert.ok(lines.some((l) => l.includes('EPIPE')));
+
+  const spawned = [];
+  const replaced = createRunner({
+    timeoutMs: 400,
+    spawnRunner: () => {
+      // The first hangs and exits 50 ms after it was killed, while the second is still answering.
+      const c = fakeRunnerProcess({ hang: spawned.length === 0, delayMs: spawned.length === 0 ? 0 : 150 });
+      if (spawned.length === 0) c.kill = () => { c.killed = true; setTimeout(() => c.emit('exit', null), 50); };
+      spawned.push(c);
+      return c;
+    },
+  });
+  await assert.rejects(replaced.call({ op: 'whoami', tenant: {}, args: {} }), { code: 'exo_timeout' });
+  const answer = await replaced.call({ op: 'whoami', tenant: {}, args: {} });
+  assert.equal(answer.ok, true);
 });

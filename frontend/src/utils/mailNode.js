@@ -926,6 +926,7 @@ const ALERT_TITLE_KEYS = {
   outage_letters_waiting: 'admin.nodeOps.alertOutageLettersWaiting',
   connector_blocked_tenant: 'admin.nodeOps.alertConnectorBlockedTenant',
   tenant_certificate: 'admin.nodeOps.alertTenantCertificate',
+  tenant_poll_failing: 'admin.nodeOps.alertTenantPollFailing',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -943,6 +944,8 @@ const ALERT_SOURCE_KEYS = {
   terrl: 'admin.nodeOps.sourceTerrl',
   trace: 'admin.nodeOps.sourceTrace',
   tenant: 'admin.nodeOps.sourceTenant',
+  tenant_certificate: 'admin.nodeOps.sourceTenant',
+  tenant_poll: 'admin.nodeOps.sourceTenant',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1000,6 +1003,11 @@ export function alertDetail(alert) {
       return d.code === 'cert_expired'
         ? { key: 'admin.nodeOps.alertDetailTenantCertExpired', values: {}, at: d.notAfter ?? null }
         : { key: 'admin.nodeOps.alertDetailTenantCertExpiring', values: { days: d.daysLeft ?? '—' }, at: d.notAfter ?? null };
+    // The poll failing several times in a row, or not running at all (backend nodeAlerts.js).
+    case 'tenant_poll_failing':
+      return d.failures
+        ? { key: 'admin.nodeOps.alertDetailTenantPollFailing', values: { count: d.failures }, at: d.lastReadAt ?? null }
+        : { key: 'admin.nodeOps.alertDetailTenantPollStale', values: {}, at: d.lastReadAt ?? null };
     default:
       return null;
   }

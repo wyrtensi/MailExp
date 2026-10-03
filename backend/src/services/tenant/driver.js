@@ -17,7 +17,8 @@ import { createFakeExoRunner, createFakeGraphFetch } from './fakes.js';
 // Which driver (getTenantDriver):
 // - TENANT_WORKER_URL and TENANT_WORKER_TOKEN: the worker on the internal network (compose profile
 //   "tenant"); TENANT_GRAPH_URL and TENANT_LOGIN_URL change Graph's and the login endpoint's base
-//   (tests, a stand), defaulting to Microsoft's;
+//   for a stand, defaulting to Microsoft's. The token and the assertion would go there, so with
+//   NODE_ENV=production they are ignored unless TENANT_DRIVER_STAND=1 says this is a stand;
 // - TENANT_DRIVER=fake: the recorded answers of services/tenant/fixtures.json (tests, the stand,
 //   a demo backend). With NODE_ENV=production it is refused unless TENANT_DRIVER_STAND=1 says this
 //   is a test stand, like MAIL_NODE_TRACE_URL (services/mailNode/traceSource.js);
@@ -29,6 +30,8 @@ export function createTenantDriver({ kind, exo, signer = null, graphUrl = GRAPH_
   let graph = null;
   return {
     kind,
+    graphUrl,
+    loginUrl,
     exoRunner: exo,
     certificate: () => exo.certificate(),
     forTenant(tenant) {
@@ -100,10 +103,24 @@ function driverFromEnv(env, warn) {
     warned = true;
     return null;
   }
+  const graphUrl = String(env.TENANT_GRAPH_URL ?? '').trim();
+  const loginUrl = String(env.TENANT_LOGIN_URL ?? '').trim();
+  const overrides = !!(graphUrl || loginUrl);
+  const allowed = env.NODE_ENV !== 'production' || env.TENANT_DRIVER_STAND === '1';
+  if (overrides && !allowed) warn('TENANT_GRAPH_URL and TENANT_LOGIN_URL are ignored: they are test stand aids (set TENANT_DRIVER_STAND=1 on a stand)');
+  else if (overrides) warn('Tenant driver: Graph or the login endpoint is not Microsoft\'s (TENANT_GRAPH_URL, TENANT_LOGIN_URL)');
   return createTenantDriver({
     kind: 'worker',
     exo: createExoRunner({ url, token }),
-    graphUrl: String(env.TENANT_GRAPH_URL ?? '').trim() || GRAPH_URL,
-    loginUrl: String(env.TENANT_LOGIN_URL ?? '').trim() || LOGIN_URL,
+    graphUrl: (allowed && graphUrl) || GRAPH_URL,
+    loginUrl: (allowed && loginUrl) || LOGIN_URL,
   });
+}
+
+// The compose profile "tenant" is on (COMPOSE_PROFILES, passed to the backend) but the panel has no
+// tenant driver: the worker runs and nothing uses it, usually a missing TENANT_WORKER_URL or a
+// short token. The start log and the settings screen say so.
+export function tenantProfileWithoutDriver(env = process.env) {
+  const profiles = String(env.COMPOSE_PROFILES ?? '').split(',').map((p) => p.trim());
+  return profiles.includes('tenant') && !getTenantDriver({ env });
 }

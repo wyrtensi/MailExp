@@ -118,6 +118,9 @@ export default function MailNodeTenant({ revision = 0 }) {
         {data?.driver === 'fake' && t('admin.tenant.fakeDriver')}
         {data?.driver === 'worker' && t('admin.tenant.workerDriver')}
         {data?.driver && !data.configured && <div>{t('admin.tenant.notConfigured')}</div>}
+        {data?.profileWithoutDriver && (
+          <div role="status" data-tenant-profile-warning style={boxStyle('warning')}>{t('admin.tenant.profileWithoutDriver')}</div>
+        )}
       </div>
 
       <div style={subTitleStyle}>{t('admin.tenant.certificateTitle')}</div>

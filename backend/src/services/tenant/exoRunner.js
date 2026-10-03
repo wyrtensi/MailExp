@@ -63,6 +63,14 @@ export function checkExoOp(op, args = {}) {
   return checked;
 }
 
+// What a list operation answered, always as an array: the worker sends arrays, but a single object
+// (one item unrolled by PowerShell) or nothing must not be read as something else.
+export function asRows(value) {
+  if (Array.isArray(value)) return value.filter((row) => row && typeof row === 'object');
+  if (value && typeof value === 'object') return [value];
+  return [];
+}
+
 export const WORKER_TIMEOUT_MS = 150000;
 const QUICK_TIMEOUT_MS = 15000;
 

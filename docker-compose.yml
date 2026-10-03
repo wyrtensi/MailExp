@@ -79,6 +79,8 @@ services:
       # docs/operations/mail-node.md, "Microsoft tenant".
       TENANT_WORKER_URL: ${TENANT_WORKER_URL:-}
       TENANT_WORKER_TOKEN: ${TENANT_WORKER_TOKEN:-}
+      # Only read: the backend warns when the profile "tenant" is on without TENANT_WORKER_URL.
+      COMPOSE_PROFILES: ${COMPOSE_PROFILES:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,7 +99,9 @@ services:
   # EXO PowerShell behind a whitelist of typed operations (deploy/tenant-worker). Only with
   # COMPOSE_PROFILES=tenant; installs without a tenant never start or pull it. The application
   # certificate (PFX) is mounted read-only from TENANT_CERT_DIR (app.pfx), its password is a
-  # compose secret from TENANT_PFX_PASSWORD_FILE; the worker refuses to start without either.
+  # compose secret from TENANT_PFX_PASSWORD_FILE, kept outside that directory so the password is
+  # not visible next to the PFX; the worker refuses to start without either. TENANT_ID,
+  # TENANT_APP_ID and TENANT_ORGANIZATION, when set, are the only tenant the worker serves.
   # No host port: the backend reaches it as http://tenant-worker:8080 (TENANT_WORKER_URL).
   tenant-worker:
     profiles: ["tenant"]
@@ -107,6 +111,9 @@ services:
     restart: unless-stopped
     environment:
       TENANT_WORKER_TOKEN: ${TENANT_WORKER_TOKEN:-}
+      TENANT_ID: ${TENANT_ID:-}
+      TENANT_APP_ID: ${TENANT_APP_ID:-}
+      TENANT_ORGANIZATION: ${TENANT_ORGANIZATION:-}
     volumes:
       - ${TENANT_CERT_DIR:-./tenant-cert}:/certs:ro
     secrets:
@@ -192,7 +199,7 @@ secrets:
   # Read only by the tenant worker (profile "tenant"); compose resolves the file only for the
   # services that start.
   tenant_pfx_password:
-    file: ${TENANT_PFX_PASSWORD_FILE:-./tenant-cert/app.pfx.password}
+    file: ${TENANT_PFX_PASSWORD_FILE:-./tenant-secrets/app.pfx.password}
 
 volumes:
   postgres_data:

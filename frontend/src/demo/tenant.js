@@ -113,7 +113,7 @@ export function demoTenantAlerts(settings, now = Date.now()) {
 export function demoTenantRequest(verb, pathname, settings, error) {
   if (verb === 'GET' && pathname === '/mail-node/tenant') {
     return clone({
-      driver: 'fake', configured: configured(settings), state,
+      driver: 'fake', profileWithoutDriver: false, configured: configured(settings), state,
       jobs: { test: latest(KINDS.test), antispam: latest(KINDS.antispam), poll: latest(KINDS.poll) },
     });
   }

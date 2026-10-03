@@ -489,7 +489,9 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
 
   it('tenantSignals: a failed or old poll is stale and raises no connector alert of its own', () => {
     expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true });
-    expect(tenantSignals(pollState({ readAt: NOW - TENANT_STALE_MS - 1000 }), NOW).stale).toBe(true);
+    const old = tenantSignals(pollState({ readAt: NOW - TENANT_STALE_MS - 1000 }), NOW);
+    expect(old.stale).toBe(true);
+    expect(old.alerts.map((a) => a.key)).toEqual(['tenant_poll_failing']);
     expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true });
   });
 
@@ -500,7 +502,7 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
     });
     afterEach(() => { setTenantDriver(undefined); });
 
-    it('raises, journals and pings /fail for a blocked connector; a stale poll keeps it and sends no ping', async () => {
+    it('raises, journals and pings /fail for a blocked connector; a failed poll keeps it and still pings', async () => {
       db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
       db.configs.mail_node_tenant_state = pollState({ items: BLOCKED });
       let state = await runAlertCheck({ now: NOW });
@@ -510,16 +512,42 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
       });
       expect(safeFetch.mock.calls[0][0]).toBe(`${PING}/fail`);
 
-      db.configs.mail_node_tenant_state = pollState({ items: [], ok: false });
+      // One failed poll: the alert stays, the node's ping is not withheld, no warning yet.
+      db.configs.mail_node_tenant_state = { ...pollState({ items: [], ok: false }), blockedConnectors: { ...pollState().blockedConnectors, ok: false, failures: 1, errorAt: at(NOW) } };
       state = await runAlertCheck({ now: NOW + 60000 });
       expect(keys(state.alerts)).toEqual(['connector_blocked_tenant']);
-      expect(state.errors).toEqual([{ source: 'tenant', code: 'tenant_poll_stale', message: 'The tenant poll has no recent answer' }]);
-      expect(safeFetch).toHaveBeenCalledTimes(1);
+      expect(state.errors).toEqual([]);
+      expect(safeFetch).toHaveBeenCalledTimes(2);
 
       db.configs.mail_node_tenant_state = pollState({ readAt: NOW + 120000 });
       state = await runAlertCheck({ now: NOW + 180000 });
       expect(keys(state.alerts)).toEqual([]);
-      expect(safeFetch.mock.calls[1][0]).toBe(PING);
+      expect(safeFetch.mock.calls[2][0]).toBe(PING);
+    });
+
+    it('warns after three failed polls, or when no poll ran lately, and still pings success', async () => {
+      db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+      db.configs.mail_node_tenant_state = {
+        ...pollState(), blockedConnectors: { ...pollState().blockedConnectors, ok: false, failures: 3, errorAt: at(NOW), error: { code: 'exo_timeout' } },
+      };
+      let state = await runAlertCheck({ now: NOW });
+      expect(state.alerts.map((a) => [a.key, a.severity])).toEqual([['tenant_poll_failing', 'warning']]);
+      expect(state.alerts[0].details).toMatchObject({ failures: 3, code: 'exo_timeout' });
+      expect(state.errors).toEqual([]);
+      expect(safeFetch.mock.calls[0][0]).toBe(PING);
+      expect(safeFetch.mock.calls[0][1].body).toBe('mail node alerts: tenant_poll_failing (warning)');
+
+      db.configs.mail_node_tenant_state = pollState({ readAt: NOW - TENANT_STALE_MS - 60000 });
+      state = await runAlertCheck({ now: NOW });
+      expect(state.alerts[0]).toMatchObject({ key: 'tenant_poll_failing', details: { failures: 0, code: 'tenant_poll_stale' } });
+    });
+
+    it('before the first poll: nothing raised, the ping goes', async () => {
+      db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+      const state = await runAlertCheck({ now: NOW });
+      expect(state.alerts).toEqual([]);
+      expect(state.errors).toEqual([]);
+      expect(safeFetch).toHaveBeenCalledTimes(1);
     });
 
     it('nothing without a driver or a configured tenant', async () => {

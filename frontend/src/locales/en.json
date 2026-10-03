@@ -2634,7 +2634,10 @@
       "alertDetailConnectorBlockedTenant": "{{count}} blocked: {{names}}. Checked {{at}}.",
       "alertDetailTenantCertExpired": "Expired {{at}}.",
       "alertDetailTenantCertExpiring": "Expires in {{days}} days, {{at}}.",
-      "sourceTenant": "the tenant poll"
+      "sourceTenant": "the tenant poll",
+      "alertTenantPollFailing": "The tenant poll is failing",
+      "alertDetailTenantPollFailing": "{{count}} polls in a row failed; last good read {{at}}. The blocked connector alert keeps its last state.",
+      "alertDetailTenantPollStale": "No poll of the tenant ran lately (worker or job queue stopped); last good read {{at}}."
     },
     "quarantine": {
       "title": "Mail node quarantine",
@@ -2817,7 +2820,7 @@
       "testButton": "Test connection",
       "testRunning": "Testing...",
       "blockedTitle": "Blocked connectors",
-      "blockedNote": "Checked every 10 minutes (Get-BlockedConnector). A blocked inbound connector stops the outgoing mail of every mailbox of the node.",
+      "blockedNote": "Checked every 10 minutes (Get-BlockedConnector). A blocked inbound connector stops the outgoing mail of every mailbox of the node. After three failed checks in a row the alerts warn.",
       "blockedNever": "Not checked yet.",
       "blockedNone": "None blocked (checked {{at}}).",
       "blockedSome": "Blocked connectors: {{count}}",
@@ -2860,7 +2863,8 @@
       "failOther": "The step failed",
       "errorDriverMissing": "No tenant worker is connected to the panel.",
       "errorNotConfigured": "Fill in and save the tenant ID, the tenant domain, the application ID and the certificate thumbprint first.",
-      "errorJobNotFound": "The tenant job is gone."
+      "errorJobNotFound": "The tenant job is gone.",
+      "profileWithoutDriver": "The tenant worker's compose profile is on, but the backend has no TENANT_WORKER_URL (or its TENANT_WORKER_TOKEN is shorter than 32 characters): nothing uses the worker."
     }
   },
   "blockList": {

@@ -13,10 +13,13 @@ import { TenantError } from './exoRunner.js';
 // Stage 7b calls request() for the domains of R-23; stage 7c hands getToken to the message trace
 // (services/mailNode/traceSource.js createGraphTraceSource({ baseUrl, getToken })).
 //
-// Throttling and short outages (429, 503, 504) are retried here up to maxRetries times, waiting
-// what Retry-After says (at most MAX_RETRY_AFTER_MS) or 1, 2, 4 seconds; then a TenantError
-// graph_throttled with retryAfterMs, which a tenant job turns into a later retry. At most
-// maxConcurrent requests of this process are in flight (R-38).
+// Throttling (429) is retried here up to maxRetries times, waiting what Retry-After says (at most
+// MAX_RETRY_AFTER_MS) or 1, 2, 4 seconds; short outages (503, 504) the same, but only for GET: a
+// POST, PATCH or DELETE that met a 503 may have been applied, so it is never repeated by itself
+// (stage 7b writes domains and must check before it repeats). Then a TenantError graph_throttled
+// with retryAfterMs: the tenant jobs keep it in their result and do not retry by themselves (one
+// attempt each); the next poll or a click asks again. A 401 asks for a new token once and repeats
+// the request. At most maxConcurrent requests of this process are in flight (R-38).
 
 export const GRAPH_URL = 'https://graph.microsoft.com/v1.0';
 export const LOGIN_URL = 'https://login.microsoftonline.com';
@@ -102,7 +105,8 @@ export function createGraphClient({
     const body = await res.json().catch(() => null);
     if (!res.ok || typeof body?.access_token !== 'string') throw tokenFailure(res.status, body);
     const lifetime = Number(body.expires_in) > 0 ? Number(body.expires_in) * 1000 : 3600 * 1000;
-    cached = { token: body.access_token, until: now() + lifetime - TOKEN_EARLY_MS };
+    // Renewed 5 minutes before the end, or at half its life when it lives less than 10 minutes.
+    cached = { token: body.access_token, until: now() + Math.max(lifetime - TOKEN_EARLY_MS, lifetime / 2) };
     return cached.token;
   }
 
@@ -137,9 +141,16 @@ export function createGraphClient({
     // A next page or any absolute URL must stay on Graph: the token is never sent anywhere else.
     if (new URL(url).origin !== graphOrigin) throw new TenantError('graph_failed', 'Refused a Graph URL on another host');
     return limit(async () => {
+      let renewed = false;
       for (let attempt = 0; ; attempt += 1) {
         const res = await once(method, url, body);
-        if (RETRIED.has(res.status)) {
+        if (res.status === 401 && !renewed) {
+          // A token revoked or expired early: one new token, one more try.
+          renewed = true;
+          cached = null;
+          continue;
+        }
+        if (res.status === 429 || (RETRIED.has(res.status) && method === 'GET')) {
           const wait = retryAfterMs(res.headers?.get?.('retry-after'), now()) ?? 1000 * 2 ** attempt;
           if (attempt < maxRetries && wait <= MAX_RETRY_AFTER_MS) {
             await sleep(wait);
@@ -148,6 +159,9 @@ export function createGraphClient({
           throw new TenantError('graph_throttled', `Graph asked to slow down (HTTP ${res.status})`, { status: res.status, retryAfterMs: wait });
         }
         if (res.status === 401) cached = null;
+        if (RETRIED.has(res.status)) {
+          throw new TenantError('graph_unavailable', `Graph answered HTTP ${res.status}; the request may have been applied, not repeated`, { status: res.status });
+        }
         if (res.status === 204) return null;
         const text = await res.text();
         if (Buffer.byteLength(text) > MAX_ANSWER_BYTES) throw new TenantError('graph_failed', 'Graph answered too much');

@@ -168,11 +168,20 @@ describe('Test connection', () => {
 });
 
 describe('the poll (R-27)', () => {
-  it('is queued once per ten-minute slot, and not without a tenant', async () => {
-    const now = Date.UTC(2026, 9, 3, 12, 1);
+  it('is queued once per slot, not next to another poll, and not without a tenant', async () => {
+    const now = Date.now();
     const first = await enqueuePoll(now);
-    expect((await enqueuePoll(now + 60000)).id).toBe(first.id);
-    expect((await enqueuePoll(now + POLL_INTERVAL_MS)).id).not.toBe(first.id);
+    expect(first.kind).toBe('tenant_poll');
+    // Queued already: neither the same slot nor the next queues another.
+    expect(await enqueuePoll(now + 60000)).toBeNull();
+    expect(await enqueuePoll(now + POLL_INTERVAL_MS)).toBeNull();
+    await runDue();
+    // Just ended ("Check now" a minute ago counts the same): the slot is skipped.
+    expect(await enqueuePoll(now + 60000)).toBeNull();
+    // Half an interval later the next slot runs.
+    const next = await enqueuePoll(now + POLL_INTERVAL_MS);
+    expect(next.id).not.toBe(first.id);
+    await db.exec('DELETE FROM jobs');
     await saveEopSettings({ appId: null });
     expect(await enqueuePoll(now)).toBeNull();
     setTenantDriver(null);
@@ -206,10 +215,37 @@ describe('the poll (R-27)', () => {
     driver.fake.exo.certificateInfo = new TenantError('worker_unreachable', 'The tenant worker is unreachable');
     await post('/tenant/poll');
     await runDue();
+    await post('/tenant/poll');
+    await runDue();
     const state = await getTenantState();
-    expect(state.blockedConnectors).toMatchObject({ ok: false, error: { code: 'worker_unreachable' } });
+    expect(state.blockedConnectors).toMatchObject({ ok: false, error: { code: 'worker_unreachable' }, failures: 2 });
     expect(state.blockedConnectors.items).toHaveLength(1);
     expect(state.certificate).toMatchObject({ notAfter: '2027-09-01T00:00:00.000Z', error: { code: 'worker_unreachable' } });
+  });
+});
+
+describe('answers that are not arrays (one item unrolled, nothing)', () => {
+  it('one object, an empty object and nothing read right', async () => {
+    const [one] = TENANT_FIXTURES.exo['get_blocked_connector.blocked'];
+    driver.fake.exo.answers.get_blocked_connector = one;
+    driver.fake.exo.answers.whoami = TENANT_FIXTURES.exo.whoami[0];
+    driver.fake.exo.answers.get_content_filter_policy = { ...TENANT_FIXTURES.exo.get_content_filter_policy[0], RedirectToRecipients: 'spam@example.com' };
+    await post('/tenant/poll');
+    await runDue();
+    await post('/tenant/test');
+    await runDue();
+    let state = await getTenantState();
+    expect(state.blockedConnectors.items.map((c) => c.connectorId)).toEqual([one.ConnectorId]);
+    expect(state.connection.steps.exo).toMatchObject({ ok: true, displayName: 'Contoso' });
+    expect(state.antispam.policy.RedirectToRecipients).toEqual(['spam@example.com']);
+    // What the runner before the fix sent for none: [{}] or null. Neither is a connector.
+    for (const answer of [[{}], null, {}]) {
+      driver.fake.exo.answers.get_blocked_connector = answer;
+      await post('/tenant/poll');
+      await runDue();
+      state = await getTenantState();
+      expect(state.blockedConnectors.items).toEqual([]);
+    }
   });
 });
 
