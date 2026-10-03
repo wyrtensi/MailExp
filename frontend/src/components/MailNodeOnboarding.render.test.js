@@ -285,6 +285,21 @@ describe('MailNodeDomainOnboarding — the tenant driver (stage 7b)', () => {
     assert.ok(tenant.textContent.includes('admin.mailNode.tenantQueued'));
   });
 
+  test('shows why Microsoft has not verified the domain yet', async () => {
+    const waiting = {
+      at, ok: true,
+      graph: { present: true, verified: false, verificationTxt: 'MS=ms12345678', verifyError: { code: 'domain_not_verified', message: 'Graph answered HTTP 400 (Request_BadRequest)' } },
+    };
+    answers['GET /api/mail-node/domains'] = {
+      domains: [domainRow('pending.example', 'dns_ok', { nextStep: 'tenant_verified', tenantSync: waiting })], tenantDriverActive: true,
+    };
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    const part = host.querySelector('[data-tenant-part="graph"]');
+    assert.match(part.querySelector('[data-tenant-verify-error]').textContent, /admin\.mailNode\.tenantVerifyWaiting.*Request_BadRequest/);
+    assert.match(part.textContent, /MS=ms12345678/);
+  });
+
   test('without the driver the checklist is a person\'s, and a past run still shows', async () => {
     answers['GET /api/mail-node/domains'] = { domains: [domainRow('pending.example', 'dns_ok', { nextStep: 'tenant_verified', tenantSync: SYNC })] };
     const host = await mount(React.createElement(MailNodeSection));

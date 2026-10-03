@@ -76,7 +76,13 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
           {graph && (
             <div data-tenant-part="graph">
               {t(graph.verified ? 'admin.mailNode.tenantDomainVerified' : 'admin.mailNode.tenantDomainAdded')}
-              {graph.verifyError && <span>{' — '}{t('admin.mailNode.tenantVerifyWaiting')}</span>}
+              {/* Any 400 of verify reads as "not yet"; the message tells a lasting refusal apart. */}
+              {graph.verifyError && (
+                <span data-tenant-verify-error>
+                  {' — '}{t('admin.mailNode.tenantVerifyWaiting')}
+                  {graph.verifyError.message && <span style={{ color: 'var(--text-tertiary)' }}>{` (${graph.verifyError.message})`}</span>}
+                </span>
+              )}
               {!graph.verified && graph.verificationTxt && (
                 <div>{t('admin.mailNode.tenantVerificationTxt')}: <span style={monoStyle}>{graph.verificationTxt}</span></div>
               )}

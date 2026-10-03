@@ -1652,7 +1652,7 @@ EXO, переподключение после ошибки).
 до и после публикации CNAME, catch-all, подозрительный ответ узла, узел недоступен, пачки по 25,
 троттлинг с повтором, `exo_exists`, вариант Б, удаление получателя перед ящиком, очередь и маршруты,
 эталон коннекторов; изменены `exoRunner.test.js`, `nodeAlerts.test.js`, `eopSettings.test.js`);
-frontend — `npm run lint` чисто, `npm test` 4401 тест (`MailNodeOnboarding.render.test.js`,
+frontend — `npm run lint` чисто, `npm test` 4402 теста (`MailNodeOnboarding.render.test.js`,
 `MailNodeTenant.render.test.js`, `mailNode.test.js`, `auditLog.test.js`, демо и покрытие маршрутов),
 `npm run build`; исполнитель — `node --test deploy/tenant-worker/worker.test.mjs` 17 тестов (на Windows
 с pwsh 7.6 — 16, тест импорта модуля пропущен): напечатанные команды каждой новой операции (закреплённые
