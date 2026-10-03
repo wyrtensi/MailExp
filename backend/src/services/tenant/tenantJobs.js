@@ -6,6 +6,8 @@ import { SYSTEM_ACTOR } from '../mailNode/domains.js';
 import { getTenantDriver, tenantOf } from './driver.js';
 import { TenantError, asRows } from './exoRunner.js';
 import { policyConflicts, summarizePolicy } from './antispam.js';
+import { readConnectors } from './connectors.js';
+import { enqueueDueDomainSyncs } from './tenantDomains.js';
 
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
 // docs/architecture/job-queue.md) instead of a table of their own (R-22 planned `tenant_jobs`):
@@ -15,12 +17,17 @@ import { policyConflicts, summarizePolicy } from './antispam.js';
 //   tenant_test_connection  "Test connection": the worker's certificate against the thumbprint in
 //                           the settings, a Graph token and GET /domains, EXO whoami
 //   tenant_poll             every POLL_INTERVAL_MS while the tenant is configured: the certificate
-//                           (its expiry, for the alerts) and Get-BlockedConnector (R-27); the
-//                           anti-spam policy too when the last read is older than ANTISPAM_MAX_AGE_MS
+//                           (its expiry, for the alerts), Get-BlockedConnector (R-27) and the
+//                           connectors against their reference (R-25, stage 7b); the anti-spam
+//                           policy too when the last read is older than ANTISPAM_MAX_AGE_MS
+//
+// The domains' tenant steps and the recipient mirror (stage 7b) are jobs of their own, one per
+// domain (services/tenant/tenantDomains.js); the poll's timer queues them in the same slot.
 //   tenant_antispam_read    Get-HostedContentFilterPolicy -Identity Default (R-28), on demand
 //
 // What they learn is kept in integration_config 'mail_node_tenant_state', one key per part
-// ({ certificate, connection, blockedConnectors, antispam }), written together with the job's end.
+// ({ certificate, connection, blockedConnectors, antispam, connectors, connectorReference }), written
+// together with the job's end.
 // The mail node alerts read it (services/mailNode/nodeAlerts.js, source 'tenant'); nothing on a
 // request's path calls the tenant. Errors keep a code and a short message, never a token, an
 // assertion or a password.
@@ -157,6 +164,16 @@ export async function poll(context, { previous = {}, now = Date.now() } = {}) {
       ...before, ok: false, error: failureOf(err), errorAt: at, failures: (Number(before.failures) || 0) + 1,
     };
   }
+  // R-25: a failed read keeps the last good one with the error beside it; the first good read is
+  // the reference when there is none yet.
+  try {
+    patch.connectors = await readConnectors(context.session, at);
+    if (!previous.connectorReference) {
+      patch.connectorReference = { at, by: null, auto: true, inbound: patch.connectors.inbound, outbound: patch.connectors.outbound };
+    }
+  } catch (err) {
+    patch.connectors = { ...(previous.connectors ?? {}), ok: false, error: failureOf(err), errorAt: at };
+  }
   const antispamAt = Date.parse(previous.antispam?.at ?? '');
   if (!Number.isFinite(antispamAt) || now - antispamAt >= ANTISPAM_MAX_AGE_MS) patch.antispam = await readAntispam(context.session, now);
   return patch;
@@ -231,9 +248,25 @@ export async function enqueuePoll(now = Date.now()) {
 let firstPoll = null;
 let pollTimer = null;
 
+// "Take as the reference" (R-25): the last good read of the connectors becomes the reference.
+// Answers { reference } or { error: 'connectors_not_read' }.
+export async function takeConnectorReference({ userId = null, now = Date.now() } = {}) {
+  const state = await getTenantState();
+  if (!state.connectors?.ok || !state.connectors.inbound) return { error: 'connectors_not_read' };
+  const reference = {
+    at: new Date(now).toISOString(), readAt: state.connectors.at, by: userId, auto: false,
+    inbound: state.connectors.inbound, outbound: state.connectors.outbound,
+  };
+  await saveTenantState({ connectorReference: reference });
+  return { reference };
+}
+
 export function startTenantPoll() {
   if (pollTimer) return;
-  const run = () => enqueuePoll().catch((err) => console.error('Tenant poll could not be queued:', err?.code || err?.message));
+  const run = () => {
+    enqueuePoll().catch((err) => console.error('Tenant poll could not be queued:', err?.code || err?.message));
+    enqueueDueDomainSyncs().catch((err) => console.error('Tenant domain syncs could not be queued:', err?.code || err?.message));
+  };
   firstPoll = setTimeout(run, FIRST_POLL_DELAY_MS);
   firstPoll.unref?.();
   pollTimer = setInterval(run, POLL_INTERVAL_MS);

@@ -31,9 +31,10 @@ let timer = null;
 
 // Steps run for a due mailbox before it is deleted on the node, each given (row, cfg); a step that
 // throws keeps the mailbox pending and is retried like a node failure, so every step must be
-// idempotent (a retry, or a stale claim taken again after a crash, runs it again). Empty for now:
-// when the tenant driver exists, removing the mailbox's recipient (the DBEB mail contact, R-29)
-// from the tenant goes here, so EOP rejects the address at the edge before the node forgets it.
+// idempotent (a retry, or a stale claim taken again after a crash, runs it again). Stage 7b puts
+// removing the mailbox's recipient (the DBEB mail contact, R-29) here
+// (services/tenant/tenantDomains.js removeRecipientBeforeDelete), so EOP rejects the address at the
+// edge before the node forgets it. A step's error may carry deletionCode: the reason the row shows.
 export const BEFORE_NODE_DELETE = [];
 
 export function retryDelaySeconds(attempts) {
@@ -145,7 +146,7 @@ async function deleteDue(id, cfg, disconnect) {
     for (const step of BEFORE_NODE_DELETE) await step(row, cfg);
     node = await deleteOnNode(cfg, row.email_address);
   } catch (err) {
-    const code = err instanceof MailNodeError ? err.code : STEP_FAILED;
+    const code = err instanceof MailNodeError ? err.code : (err?.deletionCode ?? STEP_FAILED);
     console.error(`Mailbox deletion of ${redactEmail(row.email_address)} failed, retried later: ${err?.code || ''} ${err?.message || 'error'}`);
     await recordFailure(row, code).catch((e) => console.error('Mailbox deletion: could not record the failure:', e.message));
     return false;

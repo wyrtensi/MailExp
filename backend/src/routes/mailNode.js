@@ -48,6 +48,7 @@ import {
 } from '../services/mailNode/domains.js';
 import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
 import { getTenantDriver } from '../services/tenant/driver.js';
+import { DRIVER_STEPS, kickDomainSync } from '../services/tenant/tenantDomains.js';
 import {
   EOP_FIELDS,
   MAX_LICENSES,
@@ -126,6 +127,9 @@ const ERRORS = {
   mail_node_host_mismatch: [409, 'The mailbox is on another mail host than the one in the mail node settings'],
   step_invalid: [400, 'No such onboarding step'],
   step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
+  step_by_tenant_driver: [409, 'MailExpert confirms this step itself through the tenant driver'],
+  outbound_connector_invalid: [400, 'Outbound connector must be its name in EAC: letters, digits, spaces, dots, dashes and underscores, up to 64 characters'],
+  dbeb_external_domain_invalid: [400, 'The external domain of the DBEB contacts must be a domain name such as relay.example.com'],
   eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
   certificate_host_invalid: [400, 'Certificate host must be a host name such as mail.example.com'],
   dkim_mode_invalid: [400, 'DKIM mode must be mailcow or eop'],
@@ -315,6 +319,8 @@ router.post('/domains', requireAdmin, async (req, res) => {
     details: { domain, mailboxes, ...(before?.from ? { from: before.from, steps: before.steps ?? {} } : {}) },
   });
   const apply = await applyDomainQuietly(req, domain, 'domain_added');
+  // With the tenant driver, the domain goes into the tenant now (its verification TXT, R-23).
+  kickDomainSync(domain, { userId: req.session.userId });
   res.json({ ok: true, domain, state: 'node_created', ...(apply ? { apply } : {}) });
 });
 
@@ -338,6 +344,7 @@ router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
     details: { domain, state: 'node_created', origin: 'adopted' },
   });
   const apply = await applyDomainQuietly(req, domain, 'domain_adopted');
+  kickDomainSync(domain, { userId: req.session.userId });
   res.json({ ok: true, domain, state: 'node_created', ...(apply ? { apply } : {}) });
 });
 
@@ -382,6 +389,8 @@ function stateChanged(req, res, domain, result, how) {
     actorUserId: req.session.userId, action: 'mail_node.domain_state_changed',
     details: { domain, from: result.from, to: result.to, how, ...(result.steps ? { steps: result.steps } : {}) },
   });
+  // The tenant driver takes it on from here (verify after dns_ok, the mirror after ready).
+  kickDomainSync(domain, { userId: req.session.userId });
   return res.json({ ok: true, domain, state: result.to });
 }
 
@@ -389,6 +398,9 @@ function stateChanged(req, res, domain, result, how) {
 router.post('/domains/:domain/steps/:step', requireAdmin, async (req, res) => {
   const domain = parseHostName(req.params.domain);
   if (!domain) return refuse(res, 'domain_invalid');
+  // With the tenant driver, its steps are confirmed by what the tenant answers, not by a person: a
+  // "Done" could skip Set-AcceptedDomain InternalRelay (R-24).
+  if (DRIVER_STEPS.includes(req.params.step) && tenantDriverActive(await getEopSettings())) return refuse(res, 'step_by_tenant_driver');
   if (await refusedByNode(res, domain)) return undefined;
   const result = await confirmStep({ domain, step: req.params.step, userId: req.session.userId });
   return stateChanged(req, res, domain, result, 'step_confirmed');
@@ -418,6 +430,7 @@ router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
     details: { domain, from: result.from, to: result.to, how: 'restarted', ...(result.steps ? { steps: result.steps } : {}) },
   });
   const apply = await applyDomainQuietly(req, domain, 'onboarding_restarted');
+  kickDomainSync(domain, { userId: req.session.userId });
   return res.json({ ok: true, domain, state: result.to, ...(apply ? { apply } : {}) });
 });
 
@@ -537,7 +550,7 @@ router.post('/domains/:domain/acknowledge', requireAdmin, async (req, res) => {
 // "Microsoft tenant" part of the screen (routes/mailNodeTenant.js).
 function eopAnswer(settings) {
   return {
-    ...settings, tenantConfigured: tenantConfigured(settings), tenantDriverActive: tenantDriverActive(),
+    ...settings, tenantConfigured: tenantConfigured(settings), tenantDriverActive: tenantDriverActive(settings),
     tenantDriver: getTenantDriver()?.kind ?? null,
   };
 }

@@ -49,6 +49,7 @@ function toDomain(row) {
     apply: applyOf(row),
     dns: dnsOf(row),
     expected: expectedOf(row),
+    tenantSync: row.tenant_sync ?? null,
   };
 }
 
@@ -64,12 +65,14 @@ function dnsOf(row) {
   };
 }
 
-// What the domain must publish that the panel cannot read yet: the MX the tenant gives it, the
-// tenant's verification TXT and the EOP DKIM selector CNAMEs, entered by hand until the tenant
-// driver reads them (kept in `tenant` with source 'manual').
+// What the domain must publish that the panel cannot always read: the MX the tenant gives it, the
+// tenant's verification TXT and the EOP DKIM selector CNAMEs, entered by hand (kept in `tenant`
+// with source 'manual') or read by the tenant driver (stage 7b, source 'tenant'; it replaces values
+// typed by hand once it reads them).
 function expectedOf(row) {
   const tenant = row.tenant ?? {};
   return {
+    source: tenant.source ?? null,
     mx: row.expected_mx ?? [],
     tenantTxt: tenant.verificationTxt ?? null,
     dkimSelector1Cname: tenant.dkimSelector1Cname ?? null,
@@ -87,7 +90,7 @@ function applyOf(row) {
 export async function listDomainRows() {
   const { rows } = await query(`
     SELECT d.domain, d.state, d.origin, d.added_at, d.state_changed_at, d.steps, d.max_mailboxes, d.node_created,
-           d.apply_result, d.applied_at, d.dns_check, d.dns_checked_at, d.expected_mx, d.tenant,
+           d.apply_result, d.applied_at, d.dns_check, d.dns_checked_at, d.expected_mx, d.tenant, d.tenant_sync,
            COALESCE(NULLIF(u.email, ''), u.username) AS added_by_email
       FROM mail_node_domains d
       LEFT JOIN users u ON u.id = d.added_by
@@ -141,10 +144,11 @@ export function mergeDomains(nodeDomains, rows) {
     ? {
       state: row.state, origin: row.origin, addedAt: row.addedAt, addedBy: row.addedBy, stateChangedAt: row.stateChangedAt,
       steps: row.steps, apply: row.apply ?? null, dns: row.dns ?? null, expected: row.expected ?? null,
+      tenantSync: row.tenantSync ?? null,
     }
     : {
       state: UNKNOWN_STATE, origin: null, addedAt: null, addedBy: null, stateChangedAt: null, steps: {}, apply: null, dns: null,
-      expected: null,
+      expected: null, tenantSync: null,
     });
   const listed = nodeDomains ?? [];
   const merged = listed.map((d) => {
@@ -183,7 +187,7 @@ const restartSet = (row) => `
   state = 'node_created', steps = '{}', state_changed_by = $2, state_changed_at = NOW(), updated_at = NOW(),
   relayhost_id = NULL, apply_result = NULL, applied_at = NULL, dns_check = NULL, dns_checked_at = NULL,
   tenant = CASE WHEN ${row}.tenant->>'source' = 'manual' THEN ${row}.tenant END,
-  accepted_domain_type = NULL, node_created = NULL`;
+  accepted_domain_type = NULL, node_created = NULL, tenant_sync = NULL`;
 
 // A domain the panel just created on the node. Adding a domain again after it was removed from the
 // node starts its onboarding over: the node lost its settings with it. The node identity is bound
@@ -303,7 +307,8 @@ export async function adoptDomain({ domain, userId, nodeCreated = null }) {
 // (the values typed by hand stay through a restart, so they do not count): restarting it would
 // change nothing.
 const PRISTINE = `state = 'node_created' AND steps = '{}'::jsonb AND relayhost_id IS NULL AND dns_check IS NULL
-  AND dns_checked_at IS NULL AND (tenant IS NULL OR tenant->>'source' = 'manual') AND accepted_domain_type IS NULL`;
+  AND dns_checked_at IS NULL AND (tenant IS NULL OR tenant->>'source' = 'manual') AND accepted_domain_type IS NULL
+  AND tenant_sync IS NULL`;
 
 // "Restart onboarding": an administrator starts a domain's onboarding over, from any state. Where
 // the domain came from, who added it and its mailbox limit stay. Answers { from, to, steps } with

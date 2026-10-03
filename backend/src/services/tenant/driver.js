@@ -1,6 +1,6 @@
 import { createExoRunner } from './exoRunner.js';
 import { GRAPH_URL, LOGIN_URL, createGraphClient } from './graphClient.js';
-import { createFakeExoRunner, createFakeGraphFetch } from './fakes.js';
+import { createFakeExoRunner, createFakeGraphFetch, createFakeTenantModel } from './fakes.js';
 
 // TenantDriver (R-22): how the panel works with the Microsoft tenant. Two transports behind one
 // object: EXO PowerShell through the tenant worker (ExoRunner, services/tenant/exoRunner.js) and
@@ -47,12 +47,14 @@ export function createTenantDriver({ kind, exo, signer = null, graphUrl = GRAPH_
   };
 }
 
-// The fake driver: fake.exo and fake.graph let a test change the answers.
-export function createFakeTenantDriver({ answers = {}, graph = {}, token } = {}) {
-  const exo = createFakeExoRunner({ answers });
-  const graphFake = createFakeGraphFetch({ graph, ...(token !== undefined ? { token } : {}) });
+// The fake driver: fake.exo and fake.graph let a test change the answers, fake.model is the fake
+// tenant behind the stage 7b operations (fakes.js createFakeTenantModel; model options set it up).
+export function createFakeTenantDriver({ answers = {}, graph = {}, token, model: modelOptions = {} } = {}) {
+  const model = createFakeTenantModel(modelOptions);
+  const exo = createFakeExoRunner({ answers, model });
+  const graphFake = createFakeGraphFetch({ graph, model, ...(token !== undefined ? { token } : {}) });
   const driver = createTenantDriver({ kind: 'fake', exo, graphFetch: graphFake.fetchImpl, loginUrl: 'https://login.fake.invalid', graphUrl: 'https://graph.fake.invalid/v1.0' });
-  return Object.assign(driver, { fake: { exo, graph: graphFake } });
+  return Object.assign(driver, { fake: { exo, graph: graphFake, model } });
 }
 
 // The tenant of the EOP settings, or null until the four fields are set.

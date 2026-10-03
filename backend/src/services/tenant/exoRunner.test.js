@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { EXO_OPS, TenantError, checkExoOp, createExoRunner, createMutex } from './exoRunner.js';
+import { EXO_OPS, TenantError, checkExoOp, createExoRunner, createMutex, parseConnectorName } from './exoRunner.js';
+import { OPS as WORKER_OPS } from '../../../../deploy/tenant-worker/ops.mjs';
 
 // The panel's side of the tenant worker: the whitelist checked before anything is sent (R-36), the
 // token, one operation at a time (R-38), and how the worker's answers become errors.
@@ -14,7 +15,21 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 
 describe('checkExoOp (R-36)', () => {
   it('knows the same operations as the worker', () => {
-    expect(Object.keys(EXO_OPS).sort()).toEqual(['get_accepted_domain', 'get_blocked_connector', 'get_content_filter_policy', 'whoami']);
+    expect(Object.keys(EXO_OPS).sort()).toEqual(Object.keys(WORKER_OPS).sort());
+    for (const [op, spec] of Object.entries(EXO_OPS)) expect(spec.params, op).toEqual(WORKER_OPS[op].params);
+  });
+
+  it('checks connector names and addresses of the stage 7b operations', () => {
+    expect(checkExoOp('add_outbound_connector_domain', { connector: ' To mail node ', domain: 'Example.com' }))
+      .toEqual({ connector: 'To mail node', domain: 'example.com' });
+    for (const connector of ["x' -Confirm", 'a;b', 'Node$(x)', 'a'.repeat(65), '', null]) {
+      expect(() => checkExoOp('add_outbound_connector_domain', { connector, domain: 'example.com' })).toThrow(TenantError);
+      expect(parseConnectorName(connector)).toBeNull();
+    }
+    expect(checkExoOp('new_mail_contact', { address: 'Info@Example.com', external: 'info@relay.example.net' }))
+      .toEqual({ address: 'info@example.com', external: 'info@relay.example.net' });
+    expect(() => checkExoOp('new_mail_contact', { address: 'info@example.com' })).toThrow(TenantError);
+    expect(() => checkExoOp('remove_mail_contact', { address: "o'brien@example.com" })).toThrow(TenantError);
   });
 
   it('refuses unknown operations and extra arguments', () => {

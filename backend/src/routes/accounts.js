@@ -25,6 +25,7 @@ import {
 } from '../services/mailNode/mailcow.js';
 import { cancelDeletion, requestDeletion } from '../services/mailNode/mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
+import { MIRRORED_STATES, kickDomainSync } from '../services/tenant/tenantDomains.js';
 import { newMailboxRateLimit } from '../services/mailNode/nodeApply.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
@@ -81,6 +82,9 @@ const SAFE_FIELDS = [
   // A mail node mailbox someone asked to delete (migration 0081): when, by whom, when it goes for
   // good, and why the deletion job could not delete it yet.
   'deletion_requested_at', 'deletion_requested_by_email', 'deletion_reason', 'delete_after', 'deletion_last_error',
+  // Stage 7b (R-32): the mailbox's domain is Authoritative and the tenant has no recipient for it
+  // yet, so EOP still rejects mail to it; computed by GET /.
+  'tenant_pending',
 ];
 function safeAccount(row) {
   const obj = Object.fromEntries(SAFE_FIELDS.map(k => [k, row[k]]));
@@ -97,7 +101,10 @@ router.get('/', async (req, res) => {
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
             deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
-            last_received_at
+            last_received_at,
+            (mail_node AND tenant_recipient_at IS NULL AND EXISTS (
+              SELECT 1 FROM mail_node_domains d
+               WHERE d.domain = split_part(lower(email_address), '@', 2) AND d.state = 'authoritative')) AS tenant_pending
      FROM email_accounts
      ORDER BY sort_order, created_at`
   );
@@ -245,8 +252,15 @@ async function createDomainMailboxNow(req, res) {
     details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused },
   });
   imapManager.connectAccount(account).catch(console.error);
+  // R-32 with DBEB: the tenant gets the mailbox's recipient (services/tenant/tenantDomains.js). In an
+  // Authoritative domain EOP rejects the address until then, so the mailbox shows it.
+  const mirrored = MIRRORED_STATES.includes(panelDomain.state);
+  if (mirrored) kickDomainSync(domain, { userId: req.session.userId });
   // The store takes this row as is, so the second name is on it for compose's From list.
-  res.json({ ...safeAccount(account), aliases: secondName ? [secondName] : [] });
+  res.json({
+    ...safeAccount({ ...account, tenant_pending: panelDomain.state === 'authoritative' }),
+    aliases: secondName ? [secondName] : [],
+  });
 }
 
 // Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow or a

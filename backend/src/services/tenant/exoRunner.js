@@ -36,14 +36,37 @@ const parseAddress = (value) => {
   const domain = parseHostName(text.slice(at + 1));
   return local && domain ? `${local}@${domain}` : null;
 };
-const KINDS = { domain: parseHostName, address: parseAddress };
+// A connector's name as the owner gave it in EAC: letters, digits, space, dot, dash, underscore (the
+// worker's rule, deploy/tenant-worker/ops.mjs parseName); spaces around it are dropped here.
+const NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$/;
+export function parseConnectorName(value) {
+  if (typeof value !== 'string') return null;
+  const name = value.trim();
+  return NAME_RE.test(name) ? name : null;
+}
+const KINDS = { domain: parseHostName, address: parseAddress, name: parseConnectorName };
 
-// The operations of the worker, by stage. 7b and 7c add theirs to both tables.
+// The operations of the worker, by stage (the same table as deploy/tenant-worker/ops.mjs OPS; a
+// test keeps them equal). 7c adds its own to both.
 export const EXO_OPS = Object.freeze({
   whoami: { params: {} },
   get_blocked_connector: { params: {} },
   get_content_filter_policy: { params: {} },
   get_accepted_domain: { params: { domain: 'domain' } },
+  // Stage 7b: R-24 and R-29 (the accepted domain's type), R-25 (connectors), R-26 (EOP DKIM), R-29
+  // (the DBEB mail contacts).
+  set_accepted_domain_internal_relay: { params: { domain: 'domain' } },
+  set_accepted_domain_authoritative: { params: { domain: 'domain' } },
+  get_inbound_connectors: { params: {} },
+  get_outbound_connectors: { params: {} },
+  add_outbound_connector_domain: { params: { connector: 'name', domain: 'domain' } },
+  new_dkim_signing_config: { params: { domain: 'domain' } },
+  get_dkim_signing_config: { params: { domain: 'domain' } },
+  enable_dkim_signing_config: { params: { domain: 'domain' } },
+  get_recipients: { params: {} },
+  new_mail_contact: { params: { address: 'address', external: 'address' } },
+  hide_mail_contact: { params: { address: 'address' } },
+  remove_mail_contact: { params: { address: 'address' } },
 });
 
 // The checked arguments of an operation; throws a TenantError (exo_op_unknown, exo_args_invalid).

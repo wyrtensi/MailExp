@@ -449,6 +449,9 @@ function mailboxInfo(m) {
   return {
     email: String(m.username ?? '').toLowerCase(),
     active: Number(m.active_int ?? m.active) === 1,
+    // mailcow's active: 1 active, 0 disabled, 2 receives mail without login (the DBEB mirror keeps
+    // a recipient for every mailbox that receives, services/tenant/tenantDomains.js).
+    state: Number(m.active_int ?? m.active),
     quotaMb: Math.round(Number(m.quota ?? 0) / 1048576),
     usedBytes: Number(m.quota_used ?? 0),
   };
@@ -564,6 +567,21 @@ export async function listAliasesTo(cfg, email) {
     }))
     .filter((a) => a.address && a.address !== target && a.targets.includes(target))
     .map((a) => ({ address: a.address, onlyTarget: a.targets.length === 1 }))
+    .sort((a, b) => a.address.localeCompare(b.address));
+}
+
+// The node's aliases of one domain: { address, targets, active }, sorted by address. A catch-all
+// is the address '@<domain>' (forbidden on DBEB domains, decision D-6: the recipient mirror refuses
+// to make the domain Authoritative while one exists).
+export async function listDomainAliases(cfg, domain) {
+  const wanted = String(domain).toLowerCase();
+  return asList(await request(cfg, 'GET', 'get/alias/all'))
+    .map((a) => ({
+      address: String(a.address ?? '').trim().toLowerCase(),
+      targets: String(a.goto ?? '').toLowerCase().split(',').map((t) => t.trim()).filter(Boolean),
+      active: Number(a.active_int ?? a.active ?? 1) === 1,
+    }))
+    .filter((a) => a.address.slice(a.address.lastIndexOf('@') + 1) === wanted)
     .sort((a, b) => a.address.localeCompare(b.address));
 }
 

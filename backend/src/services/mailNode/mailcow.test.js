@@ -339,7 +339,7 @@ describe('API requests', () => {
 
   it('lists mailboxes with quota in MB and usage in bytes', async () => {
     safeFetch.mockResolvedValueOnce(answer([{ username: 'Info@example.com', active_int: 1, active: '1', quota: 5368709120, quota_used: 1048576 }]));
-    expect(await listMailboxes(CFG)).toEqual([{ email: 'info@example.com', active: true, quotaMb: 5120, usedBytes: 1048576, rateLimit: null }]);
+    expect(await listMailboxes(CFG)).toEqual([{ email: 'info@example.com', active: true, state: 1, quotaMb: 5120, usedBytes: 1048576, rateLimit: null }]);
   });
 
   it('reads the mail disk from status/vmail', async () => {

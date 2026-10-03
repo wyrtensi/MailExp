@@ -15,6 +15,7 @@ import { runOutageTrace, waitingSignal, waitingSummary } from './outageTrace.js'
 import { getTraceSource } from './traceSource.js';
 import { getTenantDriver, tenantOf } from '../tenant/driver.js';
 import { POLL_INTERVAL_MS, TENANT_FAILING_POLLS, getTenantState } from '../tenant/tenantJobs.js';
+import { connectorDrift } from '../tenant/connectors.js';
 
 // The mail node's alerts (R-18): what an administrator must hear about before the employees notice,
 // checked every five minutes and shown in the panel, and pinged to a Healthchecks-style check URL
@@ -88,6 +89,7 @@ export const ALERTS = Object.freeze({
   connector_blocked_tenant: ['tenant', 'error'],
   tenant_certificate: ['tenant_certificate', 'warning'],
   tenant_poll_failing: ['tenant_poll', 'warning'],
+  tenant_connector_drift: ['tenant_connectors', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -187,9 +189,10 @@ export const TENANT_CERT_WARN_DAYS = 30;
 export const TENANT_CERT_ERROR_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-// The tenant alerts from the stored poll state: { alerts, stale } (stale: the blocked connector
-// list could not be read lately, so its alert stays as it was). Before the first poll nothing is
-// stale enough to warn about.
+// The tenant alerts from the stored poll state: { alerts, stale, connectorsStale } (stale: the
+// blocked connector list could not be read lately, so its alert stays as it was; connectorsStale:
+// the same for the connectors compared with their reference, R-25). Before the first poll nothing
+// is stale enough to warn about.
 export function tenantSignals(state, now = Date.now()) {
   const alerts = [];
   const blocked = state?.blockedConnectors;
@@ -229,7 +232,21 @@ export function tenantSignals(state, now = Date.now()) {
       });
     }
   }
-  return { alerts, stale };
+  // R-25: a connector changed since the reference was taken (stage 7b).
+  const connectors = state?.connectors;
+  const connectorsAt = Date.parse(connectors?.at ?? '');
+  const connectorsStale = !connectors || connectors.ok === false || !Number.isFinite(connectorsAt) || now - connectorsAt > TENANT_STALE_MS;
+  if (!connectorsStale) {
+    const drift = connectorDrift(state.connectorReference, connectors);
+    if (drift.length) {
+      alerts.push({
+        key: 'tenant_connector_drift',
+        severity: 'warning',
+        details: { count: drift.length, connectors: drift.slice(0, SAMPLES).map(({ direction, name, kind }) => ({ direction, name, kind })), checkedAt: connectors.at },
+      });
+    }
+  }
+  return { alerts, stale, connectorsStale };
 }
 
 // The alerts of this run (fresh: those the sources that were read gave) merged with the previous
@@ -446,12 +463,13 @@ async function outageStep({ check, log, now, userId, fresh, failed }) {
 async function tenantStep({ eop, now, fresh, failed }) {
   if (!getTenantDriver() || !tenantOf(eop)) return;
   try {
-    const { alerts, stale } = tenantSignals(await getTenantState(), now);
+    const { alerts, stale, connectorsStale } = tenantSignals(await getTenantState(), now);
     fresh.push(...alerts);
     if (stale) failed.push('tenant');
+    if (connectorsStale) failed.push('tenant_connectors');
   } catch (err) {
     console.error(`Mail node tenant alerts were not read: ${err?.code || err?.message || 'error'}`);
-    failed.push('tenant', 'tenant_certificate', 'tenant_poll');
+    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors');
   }
 }
 

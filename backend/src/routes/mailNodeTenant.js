@@ -3,8 +3,13 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { query } from '../services/db.js';
 import { getJob } from '../services/jobQueue.js';
 import { getEopSettings } from '../services/mailNode/eopSettings.js';
+import { getDomainRow } from '../services/mailNode/domains.js';
+import { parseHostName } from '../services/mailNode/mailcow.js';
+import { recordAudit } from '../services/auditLog.js';
 import { getTenantDriver, tenantOf, tenantProfileWithoutDriver } from '../services/tenant/driver.js';
-import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState } from '../services/tenant/tenantJobs.js';
+import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState, takeConnectorReference } from '../services/tenant/tenantJobs.js';
+import { DOMAIN_SYNC_KIND, enqueueDomainSync } from '../services/tenant/tenantDomains.js';
+import { connectorDrift } from '../services/tenant/connectors.js';
 
 // The Microsoft tenant (stage 7a: R-22, R-27, R-28), mounted at /api/mail-node next to
 // routes/mailNode.js, administrators only. Reads answer what the tenant jobs stored
@@ -18,6 +23,12 @@ import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState } from '../services/
 //   POST /tenant/poll         "Check now" of the blocked connectors and the certificate
 //   POST /tenant/antispam     read the anti-spam policy again
 //   GET  /tenant/jobs/:id     { id, kind, status, errorCode, error }
+//
+// Stage 7b (R-23 ... R-26, R-29):
+//   POST /tenant/domains/:domain/sync    "Run the tenant steps now" for one domain (its result
+//                                        comes with GET /api/mail-node/domains, tenantSync)
+//   POST /tenant/connectors/reference    the last read of the connectors becomes the reference
+//                                        (R-25); GET /tenant answers the drift from it
 const router = Router();
 router.use('/tenant', requireAuth, requireAdmin);
 
@@ -25,6 +36,9 @@ const ERRORS = {
   tenant_driver_missing: [409, 'No tenant worker is configured for the panel (TENANT_WORKER_URL)'],
   tenant_not_configured: [409, 'Fill in the tenant ID, its onmicrosoft.com domain, the application ID and the certificate thumbprint first'],
   tenant_job_not_found: [404, 'No such tenant job'],
+  domain_invalid: [400, 'Domain must be a domain name such as example.com'],
+  domain_not_found: [404, 'The panel does not know this domain'],
+  connectors_not_read: [409, 'The connectors have not been read yet: check now first'],
 };
 
 function refuse(res, code) {
@@ -32,7 +46,7 @@ function refuse(res, code) {
   return res.status(status).json({ error, code });
 }
 
-const KINDS = new Set(Object.values(TENANT_JOB_KINDS));
+const KINDS = new Set([...Object.values(TENANT_JOB_KINDS), DOMAIN_SYNC_KIND]);
 
 const jobAnswer = (job) => (job ? {
   id: String(job.id), kind: job.kind, status: job.status, errorCode: job.error_code ?? null, error: job.last_error ?? null,
@@ -56,6 +70,8 @@ router.get('/tenant', async (req, res) => {
     profileWithoutDriver: tenantProfileWithoutDriver(),
     configured: !!tenantOf(settings),
     state,
+    // R-25: what changed in the connectors since the reference.
+    connectorDrift: connectorDrift(state.connectorReference, state.connectors),
     jobs: { test, antispam, poll },
   });
 });
@@ -72,6 +88,32 @@ function enqueueRoute(kind) {
 router.post('/tenant/test', enqueueRoute(TENANT_JOB_KINDS.test));
 router.post('/tenant/poll', enqueueRoute(TENANT_JOB_KINDS.poll));
 router.post('/tenant/antispam', enqueueRoute(TENANT_JOB_KINDS.antispam));
+
+// Precondition of the buttons: a driver and a configured tenant.
+async function tenantRefusal(res) {
+  if (!getTenantDriver()) return refuse(res, 'tenant_driver_missing');
+  if (!tenantOf(await getEopSettings())) return refuse(res, 'tenant_not_configured');
+  return null;
+}
+
+router.post('/tenant/domains/:domain/sync', async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  if (await tenantRefusal(res)) return undefined;
+  if (!(await getDomainRow(domain))) return refuse(res, 'domain_not_found');
+  const { job, created } = await enqueueDomainSync(domain, { userId: req.session.userId });
+  return res.status(202).json({ job: jobAnswer(job), created });
+});
+
+router.post('/tenant/connectors/reference', async (req, res) => {
+  const result = await takeConnectorReference({ userId: req.session.userId });
+  if (result.error) return refuse(res, result.error);
+  recordAudit({
+    actorUserId: req.session.userId, action: 'tenant.connector_reference_taken',
+    details: { inbound: result.reference.inbound.map((c) => c.name), outbound: result.reference.outbound.map((c) => c.name) },
+  });
+  return res.json({ reference: result.reference });
+});
 
 router.get('/tenant/jobs/:id', async (req, res) => {
   // Job ids are bigserial: digits only.

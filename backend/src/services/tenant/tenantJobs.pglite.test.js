@@ -93,7 +93,7 @@ describe('Test connection', () => {
     expect(state.connection.by).toBe(ADMIN);
     expect(state.connection.steps).toEqual({
       certificate: { ok: true, notAfter: '2027-09-01T00:00:00.000Z' },
-      graph: { ok: true, domains: 2, initialDomain: 'contoso.onmicrosoft.com' },
+      graph: { ok: true, domains: 1, initialDomain: 'contoso.onmicrosoft.com' },
       exo: { ok: true, organization: 'contoso.onmicrosoft.com', displayName: 'Contoso' },
     });
     expect(state.certificate).toMatchObject({ thumbprint: SETTINGS.certThumbprint, notAfter: '2027-09-01T00:00:00.000Z' });
@@ -204,7 +204,7 @@ describe('the poll (R-27)', () => {
     driver.fake.exo.calls.length = 0;
     await post('/tenant/poll');
     await runDue();
-    expect(driver.fake.exo.calls.map((c) => c.op)).toEqual(['get_blocked_connector']);
+    expect(driver.fake.exo.calls.map((c) => c.op)).toEqual(['get_blocked_connector', 'get_inbound_connectors', 'get_outbound_connectors']);
   });
 
   it('a failed read keeps the last list with the error beside it', async () => {
