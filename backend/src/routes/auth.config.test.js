@@ -15,6 +15,7 @@ vi.mock('../services/categorizer.js', () => ({ getGlobalCategorizationEnabled: v
 vi.mock('../services/redis.js', () => ({ redisClient: { scan: vi.fn(), get: vi.fn(), del: vi.fn() } }));
 vi.mock('../services/rateLimiter.js', () => ({
   consume: vi.fn(async () => ({ limited: false, resetMs: 0 })),
+  peek: vi.fn(async () => ({ limited: false, resetMs: 0 })),
   reset: vi.fn(),
 }));
 

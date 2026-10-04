@@ -17,7 +17,7 @@ vi.mock('../services/mailer.js', () => ({ sendSystemEmail: vi.fn() }));
 vi.mock('./oidc.js', () => ({ buildEndSessionUrl: vi.fn() }));
 vi.mock('../services/categorizer.js', () => ({ getGlobalCategorizationEnabled: vi.fn(async () => true) }));
 vi.mock('../services/redis.js', () => ({ redisClient: {} }));
-vi.mock('../services/rateLimiter.js', () => ({ consume: vi.fn(), reset: vi.fn() }));
+vi.mock('../services/rateLimiter.js', () => ({ consume: vi.fn(), peek: vi.fn(), reset: vi.fn() }));
 
 const { createRealSchemaDb } = await import('../services/testing/realSchema.js');
 const { patchPreferences, getPreferences } = await import('./auth.js');

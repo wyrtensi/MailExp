@@ -29,6 +29,7 @@ vi.mock('../services/redis.js', () => ({
 }));
 vi.mock('../services/rateLimiter.js', () => ({
   consume: vi.fn(),
+  peek: vi.fn(),
   reset: vi.fn(),
 }));
 
