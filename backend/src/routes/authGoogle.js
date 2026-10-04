@@ -16,7 +16,7 @@ const PROVIDER = 'auth-google';
 export const SIGN_IN_CALLBACK_PATH = '/oauth/login/google/callback';
 const SIGN_IN_ERROR_CODES = new Set([
   'access_denied', 'invalid_state', 'not_configured', 'email_not_verified',
-  'not_allowed', 'user_disabled', 'authentication_failed',
+  'not_allowed', 'user_disabled', 'authentication_failed', 'locked',
 ]);
 
 class SignInError extends Error {
@@ -38,6 +38,10 @@ function signInSettings() {
 router.get('/', async (req, res) => {
   const settings = signInSettings();
   if (!settings) return res.status(404).json({ error: 'Not found' });
+  // The screen-lock gate in index.js (#235) covers only /api. Signing in again from a locked
+  // session would swap it for an unlocked one without the PIN. /login sends a signed-in user
+  // on to the lock screen.
+  if (req.session?.locked) return res.redirect(loginError('locked'));
   const origin = allowedRequestOrigin(req);
   if (!origin) return res.redirect(loginError('not_configured'));
 
@@ -67,6 +71,8 @@ router.get('/callback', async (req, res) => {
     const pending = await consumeOAuthState({ provider: PROVIDER, state, anonymous: true });
     const expected = req.session.googleSignInState;
     delete req.session.googleSignInState;
+    // Also covers a sign-in that started before the session locked.
+    if (req.session.locked) throw new SignInError('locked');
 
     if (error !== undefined) {
       throw new SignInError(error === 'access_denied' ? 'access_denied' : 'authentication_failed');

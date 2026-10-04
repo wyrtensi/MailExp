@@ -61,6 +61,9 @@ async function resolveReconnectTarget(req) {
 // Step 1 of a reconnect: pick the app, create state + PKCE and send the user to Google.
 router.get('/', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
+  // The screen-lock gate in index.js (#235) covers only /api. Only the start legs are refused:
+  // the provider's callback lands in another tab while this one's auto-lock keeps counting.
+  if (req.session.locked) return res.redirect(errorRedirect('locked'));
 
   let selected = null;
   let target = null;
@@ -96,6 +99,8 @@ router.get('/', async (req, res) => {
 // Step 1b of the Gmail form: follow the one-time path created by POST /api/oauth/google/start.
 router.get('/launch', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
+  // A launch path minted before the lock must not start the flow afterwards.
+  if (req.session.locked) return res.redirect(errorRedirect('locked'));
   const flow = typeof req.query.flow === 'string' ? req.query.flow : '';
   const url = await consumeGoogleLaunch({ flow, userId: req.session.userId });
   res.redirect(url || errorRedirect('invalid_state'));

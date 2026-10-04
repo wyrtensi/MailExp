@@ -120,6 +120,34 @@ describe('GET /oauth/login/google', () => {
   });
 });
 
+// The screen-lock gate in index.js covers only /api. Signing in again from a locked session
+// would swap it for an unlocked one without the PIN.
+describe('Google sign-in from a locked session', () => {
+  const lock = (id = 'browser') => Object.assign(sessionFor(id), { userId: 'u1', authMethod: 'google', locked: true });
+
+  it('refuses to start', async () => {
+    lock();
+    const res = await get('/oauth/login/google');
+    expect(res.headers.get('location')).toBe('/login?auth_error=locked');
+    expect(redisStore.size).toBe(0);
+    expect(sessionFor('browser')).toMatchObject({ userId: 'u1', locked: true });
+  });
+
+  it('refuses to finish a sign-in started before the lock, and burns its state', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { state } = await start();
+    lock();
+    const res = await get(`/oauth/login/google/callback?state=${state}&code=c`);
+    expect(res.headers.get('location')).toBe('/login?auth_error=locked');
+    expect(exchangeGoogleCode).not.toHaveBeenCalled();
+    expect(sessionFor('browser').regenerate).not.toHaveBeenCalled();
+    expect(sessionFor('browser')).toMatchObject({ userId: 'u1', locked: true });
+    expect(sessionFor('browser').googleSignInState).toBeUndefined();
+    expect(redisStore.size).toBe(0);
+    error.mockRestore();
+  });
+});
+
 describe('GET /oauth/login/google/callback', () => {
   it('signs the approved user in', async () => {
     const { location, state } = await start();
