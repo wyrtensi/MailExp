@@ -742,7 +742,10 @@ keys() {
   fresh_node
   run bash "$RESTORE" latest --mailcow-dir "$MC" < <(keys)
   [ "$status" -eq 2 ]
-  [[ $output == *"snapshots of several nodes: "*"$HOST"*"mailexpert-node-bbbbbbbbbbbbbbbb; name one with --host"* ]]
+  # The hosts are listed sorted and $HOST is random, so check each one, not their order.
+  [[ $output == *"snapshots of several nodes: "*"; name one with --host"* ]]
+  [[ $output == *"$HOST"* ]]
+  [[ $output == *"mailexpert-node-bbbbbbbbbbbbbbbb"* ]]
   calls | lacks 'compose (up|pull)'
   run bash "$RESTORE" latest --host "$HOST" --mailcow-dir "$MC" < <(keys)
   [ "$status" -eq 0 ]
