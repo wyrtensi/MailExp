@@ -5,11 +5,17 @@
 # stdin, no Docker, no writes except the files passed in.
 
 # shellcheck disable=SC2034 # the limits below are read by updater.sh
-# The uid the backend container writes as: `USER node` in backend/Dockerfile (uid 1000 in the
-# official node images). A request file owned by anyone else did not come from the backend.
-SPOOL_UID=1000
+# The uid the backend container writes as, when install.sh could not ask the image: `USER node` in
+# backend/Dockerfile is uid 1000 in the official node images. install.sh records the image's real
+# uid in <state dir>/spool-uid (spool_uid). A request file owned by anyone else did not come from
+# the backend.
+DEFAULT_SPOOL_UID=1000
+SPOOL_UID=$DEFAULT_SPOOL_UID
 # A request is five short fields; anything bigger is not one.
 MAX_REQUEST_BYTES=4096
+# Requests taken per run; the rest are deleted without a result (a flood must not hold the
+# updater for hours or fill result/ with files).
+MAX_REQUESTS_PER_RUN=10
 # Result files kept in the spool; older ones are deleted.
 KEEP_RESULTS=20
 # Lines of the run's log copied into a result, and their width.
@@ -18,28 +24,54 @@ LOG_LINE_WIDTH=300
 
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 
+# spool_uid <state dir>: the backend's uid recorded by install.sh, DEFAULT_SPOOL_UID without a
+# valid record (a number, not root).
+spool_uid() {
+  local uid=''
+  if [ -f "$1/spool-uid" ]; then uid=$(head -c 16 "$1/spool-uid" | tr -d '[:space:]'); fi
+  if [[ $uid =~ ^[1-9][0-9]{0,9}$ ]]; then echo "$uid"; else echo "$DEFAULT_SPOOL_UID"; fi
+}
+
 # prepare_update_spool <state dir>: the spool the backend container mounts (deploy/compose.prod.yml):
-# request/ is the backend's (uid SPOOL_UID, 0700), result/ is root's and readable (0755). Run on
-# every install.sh, with or without systemd: without the directories the bind mounts would be
+# request/ is the backend's (uid from spool_uid, 0700), result/ is root's and readable (0755). Run
+# on every install.sh, with or without systemd: without the directories the bind mounts would be
 # created by dockerd as root and the backend could not write. An entry that is not a directory
 # (a link) is replaced; the parent is root's, so only root could have put it there.
 prepare_update_spool() {
-  local spool=$1/update-spool dir
+  local spool=$1/update-spool dir uid
+  uid=$(spool_uid "$1")
   for dir in "$spool" "$spool/result" "$spool/request"; do
     if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then rm -f -- "$dir"; fi
   done
   install -d -m 755 -o 0 -g 0 "$spool" "$spool/result"
-  install -d -m 700 -o "$SPOOL_UID" -g "$SPOOL_UID" "$spool/request"
+  install -d -m 700 -o "$uid" -g "$uid" "$spool/request"
 }
 
-# write_updater_installed <result dir> <version>: result/updater.json, how the panel learns that
-# the host units are there (no file: the card says the mechanism is not installed).
+# rolled_back_version <state dir>: the version a person (rollback.sh) or the updater's automatic
+# rollback went back from, empty when none. The panel does not offer it again: only a newer build.
+rolled_back_version() {
+  local v=''
+  if [ -f "$1/rolled-back-version" ]; then v=$(head -c 32 "$1/rolled-back-version" | tr -d '[:space:]'); fi
+  if [[ $v =~ ^sha-[0-9a-f]{12}$ ]]; then echo "$v"; fi
+  return 0
+}
+
+# record_rolled_back <state dir> <version>
+record_rolled_back() {
+  printf '%s\n' "$2" >"$1/rolled-back-version"
+}
+
+# write_updater_installed <state dir> <version>: result/updater.json, how the panel learns that
+# the host units are there (no file: the card says the mechanism is not installed) and which
+# version it must not offer again (rolledBack).
 write_updater_installed() {
-  local tmp
-  tmp=$(mktemp "$1/.updater.XXXXXX")
-  jq -cn --arg v "$2" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{installed: true, version: $v, updatedAt: $at}' >"$tmp"
+  local dir=$1/update-spool/result tmp rolled
+  rolled=$(rolled_back_version "$1")
+  tmp=$(mktemp "$dir/.updater.XXXXXX")
+  jq -cn --arg v "$2" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg r "$rolled" \
+    '{installed: true, version: $v, updatedAt: $at, rolledBack: (if $r == "" then null else $r end)}' >"$tmp"
   chmod 644 "$tmp"
-  mv -f "$tmp" "$1/updater.json"
+  mv -f "$tmp" "$dir/updater.json"
 }
 
 # request_name_ok <file name>: status 0 for <uuid>.json, the only name the backend writes.
@@ -75,7 +107,7 @@ parse_request() {
       and (keys == ["action", "id", "requestedAt", "requestedBy", "target"])
       and .id == $id
       and (.action == "check" or .action == "update")
-      and (.target | type == "string" and test("^sha-[0-9a-f]{12}$"))
+      and (.target | type == "string" and test("\\Asha-[0-9a-f]{12}\\z"))
       and (.requestedAt | type == "string" and length <= 64)
       and (.requestedBy | type == "string" and length <= 254)
     then "\(.action) \(.target)" else error("invalid request") end' 2>/dev/null
@@ -87,19 +119,24 @@ request_actor() {
   jq -r '.requestedBy // "" | tostring' 2>/dev/null | head -c 254 | LC_ALL=C tr -cd 'A-Za-z0-9@._+-'
 }
 
-# target_verdict <is HEAD 0|1> <descendant of HEAD 0|1> <the promoted latest 0|1> <on main 0|1>:
-# empty when the panel may move to the target, otherwise the reason. Only forward (a descendant of
-# the running commit, so a compromised admin or backend cannot roll the server back) and only the
-# promoted build or a commit on origin/main (never another branch). Going back is rollback.sh,
-# over SSH, by a person.
+# target_verdict <is HEAD 0|1> <descendant of HEAD 0|1> <the promoted latest 0|1> <on main 0|1>
+# <rolled back from 0|1>: empty when the panel may move to the target, otherwise the reason. Only
+# the build the owner promoted (the tag latest), only forward (a descendant of the running commit,
+# so a compromised admin or backend cannot roll the server back), only on origin/main, and never
+# the version a person just rolled back from. Any other version is update.sh over SSH; going back
+# is rollback.sh, by a person.
 target_verdict() {
-  local head=$1 descendant=$2 latest=$3 main=$4
+  local head=$1 descendant=$2 latest=$3 main=$4 rolled=$5
   if [ "$head" = 1 ]; then
     echo "the panel already runs this version"
+  elif [ "$latest" != 1 ]; then
+    echo "not the promoted latest build: the panel only installs what the owner promoted (other versions: update.sh over SSH)"
+  elif [ "$main" != 1 ]; then
+    echo "the tag latest names a commit outside main; the panel refuses it"
   elif [ "$descendant" != 1 ]; then
-    echo "not a descendant of the running commit: a downgrade or another branch is never done from the panel (going back: rollback.sh over SSH)"
-  elif [ "$latest" != 1 ] && [ "$main" != 1 ]; then
-    echo "neither the promoted latest build nor a commit on main"
+    echo "not a descendant of the running commit: a downgrade is never done from the panel (going back: rollback.sh over SSH)"
+  elif [ "$rolled" = 1 ]; then
+    echo "this version was rolled back; the panel offers it again only after a newer build is promoted"
   fi
   return 0
 }

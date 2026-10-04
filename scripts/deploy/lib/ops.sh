@@ -30,6 +30,17 @@ space_problem() {
   return 0
 }
 
+# rollback_space_problem <free kB> <dump bytes> <database bytes>: rollback.sh restores the dump
+# into a new database next to the live one, which it replaces only afterwards, and keeps both: it
+# needs the size of the live database (what the restored copy can grow to) plus the dump.
+rollback_space_problem() {
+  local free=$(($1 * 1024)) need=$(($2 + $3))
+  if [ "$free" -lt "$need" ]; then
+    echo "free space: $(($1 / 1024)) MB, the rollback needs $((need / 1048576)) MB (the database next to its restored copy, plus the dump)"
+  fi
+  return 0
+}
+
 # stale_local_dumps <keep>: reads dump paths, newest first, and prints the ones beyond <keep>.
 stale_local_dumps() {
   tail -n +"$(($1 + 1))"

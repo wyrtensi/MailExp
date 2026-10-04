@@ -196,7 +196,7 @@ main() {
   panel_ready || die "the panel is not ready now; fix that before updating" 2
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" rev-parse --verify --quiet "${target#sha-}^{commit}" >/dev/null ||
-    die "commit ${target#sha-} is not in $CFG_REPO_URL" 2
+    die "commit ${target#sha-} is not in $(redact_url "$CFG_REPO_URL")" 2
   check_data_images HEAD "${target#sha-}"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-backend:$target"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$target"

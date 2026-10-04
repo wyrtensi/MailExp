@@ -26,16 +26,23 @@ case " $* " in
   *" exec -T postgres "*) line="$line <<< $(cat | tr '\n' ' ')" ;;
 esac
 printf '%s\n' "$line" >>"$DOCKER_LOG"
-case " $* " in
+case " $line " in
   *" image inspect "*) exit 1 ;;
   *" pull "*) exit "${STUB_PULL:-0}" ;;
   *"pg_restore"*) exit "${STUB_RESTORE:-0}" ;;
+  *"pg_database_size"*) echo "${STUB_DB_BYTES:-1048576}" ;;
+  *"RENAME TO"*)
+    # STUB_SWAP_FAILS: how many swap attempts fail (the database still in use).
+    n=$(cat "$SWAP_COUNT" 2>/dev/null || echo 0)
+    echo $((n + 1)) >"$SWAP_COUNT"
+    [ "$n" -ge "${STUB_SWAP_FAILS:-0}" ] || exit 1 ;;
 esac
 exit 0
 STUB_EOF
   printf '#!/usr/bin/env bash\nexit 0\n' >"$STUB/curl"
   chmod +x "$STUB/docker" "$STUB/curl"
   export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log INSTALL_LOG=$BATS_TEST_TMPDIR/install.log
+  export SWAP_COUNT=$BATS_TEST_TMPDIR/swaps
 
   P=$BATS_TEST_TMPDIR/p
   mkdir -p "$P/app/scripts/deploy" "$P/state" "$P/backups" "$P/edge"
@@ -71,7 +78,7 @@ STUB_EOF
   [[ $output == *"no dump at"* ]]
   run bash "$SCRIPT" --prefix "$P" --to "sha-${NEW:0:12}"
   [ "$status" -eq 2 ]
-  [[ $output == *"is at sha-${NEW:0:12} already"* ]]
+  [[ $output == *"install.conf says sha-${NEW:0:12} already"*"finish it with install.sh --prefix $P"* ]]
   run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" </dev/null
   [ "$status" -eq 2 ]
   [[ $output == *"pass --confirm sha-${OLD:0:12}"* ]]
@@ -105,6 +112,56 @@ STUB_EOF
   [ "$(cat "$INSTALL_LOG")" = "--prefix $P --version sha-${OLD:0:12}" ]
   [ "$(env_get "$P/edge/.env" EDGE_IMAGE)" = ghcr.io/x/edge@sha256:old ]
   [[ $output == *"kept as mailexpert_before_rollback_"* ]]
+  # Connections to the live database are refused before the swap; the version left is recorded,
+  # and a version without updater.sh is not told it has one.
+  grep -q 'ALTER DATABASE "mailexpert" WITH ALLOW_CONNECTIONS false' "$DOCKER_LOG"
+  [ "$(cat "$P/state/rolled-back-version")" = "sha-${NEW:0:12}" ]
+  [ ! -e "$P/state/update-spool/result/updater.json" ]
+  [ ! -e "$P/state/rollback-in-progress" ]
+}
+
+@test "not enough space for the restored copy next to the database: exit 2 before anything stops" {
+  stub_install
+  STUB_DB_BYTES=999999999999999 run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 2 ]
+  [[ $output == *"the rollback needs"* ]]
+  ! grep -q " stop " "$DOCKER_LOG"
+}
+
+@test "the swap is retried while the database is in use, and given up cleanly" {
+  stub_install
+  STUB_SWAP_FAILS=2 run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  [[ $output == *"still in use (try 2 of 5)"* ]]
+  rm -f "$SWAP_COUNT" "$INSTALL_LOG" "$P/state/rolled-back-version"
+  printf '%s\n' "VERSION=sha-${NEW:0:12}" SIGNIN=direct DIRECT_HOST=panel.example.com LOCAL_AUTH=1 EDGE=0 \
+    PROJECT=me-test HTTP_PORT=18090 SYSTEM=0 "REPO_URL=$P/app" >"$P/install.conf"
+  STUB_SWAP_FAILS=9 run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 1 ]
+  [[ $output == *"could not be swapped; mailexpert is unchanged"* ]]
+  grep -q 'ALTER DATABASE "mailexpert" WITH ALLOW_CONNECTIONS true' "$DOCKER_LOG"
+  [ ! -e "$INSTALL_LOG" ]
+}
+
+@test "the name kept for the replaced database fits PostgreSQL's 63 bytes" {
+  stub_install
+  long=abcdefghijabcdefghijabcdefghijabcdefghija
+  printf '%s\n' COMPOSE_PROFILES= "DB_NAME=$long" >"$P/.env"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  kept=$(sed -n 's/.*RENAME TO "\([a-z_0-9]*_before_rollback_[0-9]*\)".*/\1/p' "$DOCKER_LOG" | head -1)
+  [ -n "$kept" ] && [ "${#kept}" -le 63 ]
+}
+
+@test "a run interrupted after the swap: the rerun only switches the code" {
+  stub_install
+  printf '%s\n%s\n%s\n' "sha-${OLD:0:12}" mailexpert_before_rollback_1 "sha-${NEW:0:12}" >"$P/state/rollback-in-progress"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  [[ $output == *"an earlier run already swapped the database"* ]]
+  ! grep -q "pg_restore" "$DOCKER_LOG"
+  [ "$(cat "$INSTALL_LOG")" = "--prefix $P --version sha-${OLD:0:12}" ]
+  [ ! -e "$P/state/rollback-in-progress" ]
 }
 
 @test "a dump that does not restore: the old database stays and the panel starts again" {

@@ -5,6 +5,11 @@ name: Promote to latest
 # (docs/architecture/deployment-system.md, section 9). Manual only, nothing is rebuilt: the images
 # CI published as sha-<12> get the tag `latest` (same digest) and the git tag `latest` moves to the
 # commit. Servers keep running sha-<12>.
+#
+# Required repository setting: a tag ruleset on `latest` that lets only this workflow (GitHub
+# Actions) and the owner create, move or delete it. Anyone else who can push tags could otherwise
+# point panels at another commit; hosts still refuse a `latest` outside main or older than what
+# they run, and compare the images' digests (deployment-system.md, section 9).
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +34,9 @@ jobs:
   promote:
     name: Promote
     runs-on: ubuntu-latest
+    # Only the workflow as it is on main: a run started from another branch would run that
+    # branch's copy of this file and of promote-latest.sh.
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v6
@@ -50,13 +58,15 @@ jobs:
       - name: Log in to GHCR
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$TOKEN" | crane auth login ghcr.io --username "${{ github.actor }}" --password-stdin
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | crane auth login ghcr.io --username "$ACTOR" --password-stdin
 
       - name: Promote
         env:
           INPUT_SHA: ${{ inputs.sha }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          ACTOR: ${{ github.actor }}
         run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git config user.name "$ACTOR"
+          git config user.email "$ACTOR@users.noreply.github.com"
           IMAGE_PREFIX="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" bash scripts/ci/promote-latest.sh "$INPUT_SHA"

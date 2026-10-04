@@ -56,6 +56,8 @@ request() {
   ! request "$ID1" update 'sha-0123456789ab; rm -rf /' | parse_request "$ID1"
   ! request "$ID1" update latest | parse_request "$ID1"
   ! request "$ID1" update SHA-0123456789AB | parse_request "$ID1"
+  ! request "$ID1" update 'sha-0123456789ab\n' | parse_request "$ID1"
+  ! printf '{"id":"%s","action":"update","target":"sha-0123456789ab\\n","requestedAt":"x","requestedBy":"x"}' "$ID1" | parse_request "$ID1"
   ! printf '{"id":"%s","action":"update","target":"sha-0123456789ab","requestedAt":"x","requestedBy":"x","extra":1}' "$ID1" | parse_request "$ID1"
   ! printf '{"id":"%s","action":"update","target":"sha-0123456789ab","requestedAt":"x"}' "$ID1" | parse_request "$ID1"
   ! printf '{"id":"%s","action":"update","target":"sha-0123456789ab","requestedAt":1,"requestedBy":"x"}' "$ID1" | parse_request "$ID1"
@@ -69,12 +71,41 @@ request() {
   [ "$(request "$ID1" update sha-0123456789ab 'a$(id)`b`@x.y' | request_actor)" = 'aidb@x.y' ]
 }
 
-@test "target_verdict: forward only, and only the promoted build or main" {
-  [ -z "$(target_verdict 0 1 1 0)" ]
-  [ -z "$(target_verdict 0 1 0 1)" ]
-  [[ $(target_verdict 1 1 1 1) == "the panel already runs this version" ]]
-  [[ $(target_verdict 0 0 1 1) == "not a descendant of the running commit"* ]]
-  [[ $(target_verdict 0 1 0 0) == "neither the promoted latest build nor a commit on main" ]]
+@test "target_verdict: only the promoted latest, on main, forward, not rolled back" {
+  [ -z "$(target_verdict 0 1 1 1 0)" ]
+  [[ $(target_verdict 1 1 1 1 0) == "the panel already runs this version" ]]
+  [[ $(target_verdict 0 1 0 1 0) == "not the promoted latest build"* ]]
+  [[ $(target_verdict 0 1 1 0 0) == "the tag latest names a commit outside main"* ]]
+  [[ $(target_verdict 0 0 1 1 0) == "not a descendant of the running commit"* ]]
+  [[ $(target_verdict 0 1 1 1 1) == "this version was rolled back"* ]]
+}
+
+@test "spool_uid and rolled_back_version read only well-formed records" {
+  S=$BATS_TEST_TMPDIR/s
+  mkdir -p "$S"
+  [ "$(spool_uid "$S")" = 1000 ]
+  echo 1001 >"$S/spool-uid"
+  [ "$(spool_uid "$S")" = 1001 ]
+  echo 0 >"$S/spool-uid"
+  [ "$(spool_uid "$S")" = 1000 ]
+  echo 'x; rm' >"$S/spool-uid"
+  [ "$(spool_uid "$S")" = 1000 ]
+  [ -z "$(rolled_back_version "$S")" ]
+  record_rolled_back "$S" sha-0123456789ab
+  [ "$(rolled_back_version "$S")" = sha-0123456789ab ]
+  echo 'sha-zz' >"$S/rolled-back-version"
+  [ -z "$(rolled_back_version "$S")" ]
+}
+
+@test "redact_url drops user information from a repository URL" {
+  [ "$(redact_url https://user:t0ken@github.com/o/r.git)" = https://github.com/o/r.git ]
+  [ "$(redact_url https://github.com/o/r.git)" = https://github.com/o/r.git ]
+  [ "$(redact_url /srv/repo)" = /srv/repo ]
+}
+
+@test "rollback_space_problem needs the database plus the dump" {
+  [ -z "$(rollback_space_problem 3000 1048576 1048576)" ]
+  [[ $(rollback_space_problem 1024 1048576 1048576) == "free space: 1 MB, the rollback needs 2 MB"* ]]
 }
 
 @test "preflight_verdict and preflight_summary read status.sh --json" {
@@ -221,6 +252,8 @@ STUB_EOF
   git -C "$P/app" checkout -q --detach "$NEW"
   git -C "$P/app" remote add origin "$P/app"
   git -C "$P/app" fetch -q origin
+  # The owner promoted MIG.
+  git -C "$P/app" tag latest "$MIG"
   printf '%s\n' COMPOSE_PROFILES= SESSION_SECRET=do-not-print-me >"$P/.env"
   at_version "$NEW"
   export STUB_APPLIED=0001_a
@@ -265,33 +298,78 @@ result() { jq -r "$2" "$RES/$1.json"; }
   [[ $stderr == *"request $ID1 from admin@example.com"* ]]
 }
 
-@test "refusals: a downgrade, another branch, the running version, an unknown commit" {
+id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }
+
+@test "refusals: a commit on main that is not latest, a downgrade, the running version, an unknown commit" {
   stub_install
-  put_request "$ID1" update "sha-${OLD:0:12}"
-  run_updater
-  [ "$(result "$ID1" .state)" = refused ]
-  [[ $(result "$ID1" .message) == "not a descendant of the running commit"* ]]
+  git -C "$P/app" tag -f latest "$MIG" >/dev/null
   at_version "$OLD"
-  put_request "$ID1" update "sha-${SIDE:0:12}"
+  put_request "$(id_n 1)" update "sha-${NEW:0:12}"
   run_updater
-  [ "$(result "$ID1" .state)" = refused ]
-  [ "$(result "$ID1" .message)" = "neither the promoted latest build nor a commit on main" ]
-  put_request "$ID1" check "sha-${OLD:0:12}"
+  [ "$(result "$(id_n 1)" .state)" = refused ]
+  [[ $(result "$(id_n 1)" .message) == "not the promoted latest build"*"update.sh over SSH"* ]]
+  at_version "$MIG"
+  git -C "$P/app" tag -f latest "$NEW" >/dev/null
+  put_request "$(id_n 2)" update "sha-${NEW:0:12}"
   run_updater
-  [ "$(result "$ID1" .message)" = "the panel already runs this version" ]
-  put_request "$ID1" check sha-0123456789ab
+  [[ $(result "$(id_n 2)" .message) == "not a descendant of the running commit"* ]]
+  put_request "$(id_n 3)" check "sha-${MIG:0:12}"
   run_updater
-  [[ $(result "$ID1" .message) == "commit 0123456789ab is not in "* ]]
+  [ "$(result "$(id_n 3)" .message)" = "the panel already runs this version" ]
+  put_request "$(id_n 4)" check sha-0123456789ab
+  run_updater
+  [[ $(result "$(id_n 4)" .message) == "commit 0123456789ab is not in "* ]]
   [ ! -e "$UPDATE_LOG" ]
 }
 
-@test "a commit off main is accepted when it is the promoted latest" {
+@test "the tag latest on a commit outside main is refused" {
   stub_install
   at_version "$OLD"
-  git -C "$P/app" tag latest "$SIDE"
+  git -C "$P/app" tag -f latest "$SIDE" >/dev/null
   put_request "$ID1" check "sha-${SIDE:0:12}"
   run_updater
-  [ "$(result "$ID1" .state)" = ready ]
+  [ "$(result "$ID1" .state)" = refused ]
+  [[ $(result "$ID1" .message) == "the tag latest names a commit outside main"* ]]
+}
+
+@test "a request with the id of an existing result is dropped and the result stays as it was" {
+  stub_install
+  printf '{"id":"%s","action":"update","state":"succeeded","terminal":true}\n' "$ID1" >"$RES/$ID1.json"
+  before=$(cat "$RES/$ID1.json")
+  put_request "$ID1" update "sha-0123456789ab"
+  run_updater
+  [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$REQ")" ]
+  [ "$(cat "$RES/$ID1.json")" = "$before" ]
+  [[ $stderr == *"request $ID1 dropped: a result with this id exists already"* ]]
+}
+
+@test "a flood: at most 10 requests per run get a result, the rest are removed with one log line" {
+  stub_install
+  for i in $(seq 1 15); do put_request "$(id_n "$i")" check "sha-${MIG:0:12}"; done
+  run_updater
+  [ "$status" -eq 0 ]
+  [ -z "$(ls -A "$REQ")" ]
+  [ "$(find "$RES" -name 'bbbbbbbb-*.json' | wc -l)" -eq 10 ]
+  [[ $stderr == *"removed 5 requests beyond 10 in one run, without results"* ]]
+}
+
+@test "the version a person rolled back from is refused" {
+  stub_install
+  record_rolled_back "$P/state" "sha-${MIG:0:12}"
+  put_request "$ID1" check "sha-${MIG:0:12}"
+  run_updater
+  [ "$(result "$ID1" .state)" = refused ]
+  [[ $(result "$ID1" .message) == "this version was rolled back"* ]]
+  [ "$(jq -r .rolledBack "$RES/updater.json")" = "sha-${MIG:0:12}" ]
+}
+
+@test "the owner check follows the uid install.sh recorded" {
+  stub_install
+  echo 1001 >"$P/state/spool-uid"
+  put_request "$ID1" check "sha-${MIG:0:12}"
+  run_updater
+  [[ $(result "$ID1" .message) == *"owned by uid 1000, not the backend's 1001"* ]]
 }
 
 @test "untrusted entries: junk names removed, links, fifos, foreign owners, big or bad files refused" {
@@ -381,7 +459,19 @@ result() { jq -r "$2" "$RES/$1.json"; }
   [ "$(result "$ID1" '.log | map(select(startswith("[mailexpert] backup"))) | length')" = 1 ]
   [ "$(result "$ID1" .logFile)" = "$P/state/updater/$ID1.log" ]
   [ "$(jq -r .version "$RES/updater.json")" = "sha-${MIG:0:12}" ]
+  [ "$(stat -c %a "$P/state/updater/$ID1.log")" = 600 ]
   ! grep -rq do-not-print-me "$RES"
+}
+
+@test "an exit code update.sh never uses (a signal): failed, no rollback" {
+  stub_install
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' STUB_UPDATE=137 run_updater
+  [ "$(result "$ID1" .autoRollback)" = true ]
+  [ "$(result "$ID1" .state)" = failed ]
+  [ "$(result "$ID1" .exitCode)" = 137 ]
+  [[ $(result "$ID1" .message) == *"the state of the panel is unknown"* ]]
+  [ ! -e "$INSTALL_LOG" ]
 }
 
 @test "exit 3 of update.sh: failed, nothing rolled back" {
@@ -403,6 +493,10 @@ result() { jq -r "$2" "$RES/$1.json"; }
   [ "$(result "$ID1" .state)" = rolled_back ]
   [ "$(result "$ID1" .exitCode)" = 1 ]
   [ "$(cat "$INSTALL_LOG")" = "--prefix $P --version sha-${NEW:0:12}" ]
+  # The version left is not offered again until a newer build is promoted.
+  [ "$(cat "$P/state/rolled-back-version")" = "sha-${MIG:0:12}" ]
+  [ "$(jq -r .rolledBack "$RES/updater.json")" = "sha-${MIG:0:12}" ]
+  [ "$(jq -r .version "$RES/updater.json")" = "sha-${NEW:0:12}" ]
 }
 
 @test "exit 1 when migrations were pending, or the count changed: stop, no rollback" {
@@ -451,11 +545,12 @@ result() { jq -r "$2" "$RES/$1.json"; }
 
 @test "status.sh --target latest resolves the tag; without one it is a problem" {
   stub_install
+  git -C "$P/app" tag -d latest >/dev/null
   run --separate-stderr bash "$DEPLOY_DIR/status.sh" --prefix "$P" --target latest --json
   [ "$status" -eq 1 ]
   [ "$(jq -r '.target.channel' <<<"$output")" = latest ]
   [ "$(jq -r '.problems | map(select(startswith("target: the channel latest cannot be resolved"))) | length' <<<"$output")" = 1 ]
-  git -C "$P/app" tag latest "$MIG"
+  git -C "$P/app" tag -f latest "$MIG" >/dev/null
   run --separate-stderr bash "$DEPLOY_DIR/status.sh" --prefix "$P" --target latest --json
   [ "$status" -eq 0 ]
   [ "$(jq -r '.target.version' <<<"$output")" = "sha-${MIG:0:12}" ]
@@ -464,7 +559,7 @@ result() { jq -r "$2" "$RES/$1.json"; }
 
 @test "update.sh refuses latest when the registry's latest images are another commit's" {
   stub_install
-  git -C "$P/app" tag latest "$MIG"
+  git -C "$P/app" tag -f latest "$MIG" >/dev/null
   cat >"$STUB/docker" <<'STUB_EOF'
 #!/usr/bin/env bash
 case " $* " in

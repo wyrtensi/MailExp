@@ -141,8 +141,21 @@ install_updater() {
   systemctl enable mailexpert-updater.path >/dev/null 2>&1
   systemctl reset-failed mailexpert-updater.path >/dev/null 2>&1 || true
   systemctl restart mailexpert-updater.path
-  write_updater_installed "$STATE_DIR/update-spool/result" "$CFG_VERSION"
+  write_updater_installed "$STATE_DIR" "$CFG_VERSION"
   log "updater: mailexpert-updater.path watches $STATE_DIR/update-spool/request"
+}
+
+# remove_updater <version>: after going back to a version without updater.sh: the path unit stops watching,
+# both units are removed and the panel is told the mechanism is not installed. Never stops a
+# running service (the caller is not inside one).
+remove_updater() {
+  local unit
+  rm -f "$STATE_DIR/update-spool/result/updater.json"
+  [ -e /etc/systemd/system/mailexpert-updater.path ] || [ -e /etc/systemd/system/mailexpert-updater.service ] || return 0
+  systemctl disable --now mailexpert-updater.path >/dev/null 2>&1 || true
+  for unit in path service; do rm -f "/etc/systemd/system/mailexpert-updater.$unit"; done
+  systemctl daemon-reload || true
+  log "updater: removed, $1 has no scripts/deploy/updater.sh"
 }
 
 # install_timers: a timer is enabled only when its script exists in the checked-out commit.

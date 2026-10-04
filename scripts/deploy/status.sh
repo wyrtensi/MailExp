@@ -223,7 +223,7 @@ collect_target() {
     git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warning "target: git fetch failed in $APP_DIR"
   fi
   if ! full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null); then
-    if [ "$locked" = 0 ]; then problem "target: commit $commit is not in $CFG_REPO_URL"; fi
+    if [ "$locked" = 0 ]; then problem "target: commit $commit is not in $(redact_url "$CFG_REPO_URL")"; fi
     return 0
   fi
   FACT[target_commit]=1

@@ -76,21 +76,31 @@ now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 json_str() { jq -cn --arg v "$1" '$v'; }
 
-# set_result <id> <name=<JSON value>...>: merges the fields into result/<id>.json, written to a
-# temporary file in the same directory and renamed, so the backend never reads half a file.
+# set_result <id> <name=<JSON value>...>: sets the fields of the result of the request in hand and
+# writes result/<id>.json whole, to a temporary file in the same directory renamed over it, so the
+# backend never reads half a file. The result is kept in memory (RESULT_ID, RESULT_JSON) and never
+# read back from the spool: a result file is only ever written fresh, for a request taken in this
+# run, so a request reusing the id of a finished one cannot change what that one says.
+RESULT_ID='' RESULT_JSON='{}'
 set_result() {
-  local id=$1 file tmp current='{}'
+  local id=$1 tmp next
   shift
-  file=$RESULT_DIR/$id.json
-  if [ -f "$file" ] && [ ! -L "$file" ]; then current=$(<"$file"); fi
-  tmp=$(mktemp "$RESULT_DIR/.result.XXXXXX")
-  if ! result_merge "$(now)" "$@" <<<"$current" >"$tmp"; then
-    rm -f "$tmp"
+  if [ "$id" != "$RESULT_ID" ]; then RESULT_ID=$id RESULT_JSON='{}'; fi
+  if ! next=$(result_merge "$(now)" "$@" <<<"$RESULT_JSON"); then
     warn "cannot write the result of $id"
     return 0
   fi
+  RESULT_JSON=$next
+  tmp=$(mktemp "$RESULT_DIR/.result.XXXXXX")
+  printf '%s\n' "$RESULT_JSON" >"$tmp"
   chmod 644 "$tmp"
-  mv -f "$tmp" "$file"
+  mv -f "$tmp" "$RESULT_DIR/$id.json"
+}
+
+# new_log <file>: the run's log, readable by root only.
+new_log() {
+  (umask 077 && : >>"$1")
+  chmod 600 "$1"
 }
 
 # json_or_null <value>: a JSON string, or null for an empty value.
@@ -116,26 +126,42 @@ prepare_spool() {
   done
 }
 
-# stage_requests: moves every *.json out of the request directory into the staging directory and
-# removes anything that is not a request (a *.tmp younger than TMP_GRACE_MIN is being written).
+# remove_entry <path>: out of the container's reach first, then removed (rm never follows a link).
+remove_entry() {
+  local junk
+  junk=$(mktemp -u "$STAGE_DIR/junk.XXXXXX")
+  if mv -f -- "$1" "$junk" 2>/dev/null; then rm -rf -- "$junk"; fi
+}
+
+# stage_requests: moves at most MAX_REQUESTS_PER_RUN *.json out of the request directory into the
+# staging directory and removes everything else: entries that are not requests (a *.tmp younger
+# than TMP_GRACE_MIN is being written and stays) and the requests beyond the limit, which get no
+# result, only one line in the journal.
 stage_requests() {
-  local path name junk
+  local path name taken=0 junk=0 dropped=0
   while IFS= read -r -d '' path; do
     name=${path##*/}
     if [[ $name == *.tmp ]] && [ -n "$(find "$path" -maxdepth 0 -mmin "-$TMP_GRACE_MIN" 2>/dev/null)" ]; then
       continue
     fi
     if ! request_name_ok "$name"; then
-      # Out of the container's reach first, then removed (rm never follows a link).
-      log "removing ${name//[^A-Za-z0-9._-]/?} from the request directory: not a request"
-      junk=$(mktemp -u "$STAGE_DIR/junk.XXXXXX")
-      if mv -f -- "$path" "$junk" 2>/dev/null; then rm -rf -- "$junk"; fi
+      remove_entry "$path"
+      junk=$((junk + 1))
+      continue
+    fi
+    if [ "$taken" -ge "$MAX_REQUESTS_PER_RUN" ]; then
+      remove_entry "$path"
+      dropped=$((dropped + 1))
       continue
     fi
     rm -rf -- "${STAGE_DIR:?}/$name"
     # The container may remove it meanwhile: then there is nothing to take.
     mv -f -- "$path" "$STAGE_DIR/$name" 2>/dev/null || continue
+    taken=$((taken + 1))
   done < <(find "$REQUEST_DIR" -mindepth 1 -maxdepth 1 -print0)
+  if [ "$junk" -gt 0 ]; then log "removed $junk entries from the request directory that are not requests"; fi
+  if [ "$dropped" -gt 0 ]; then log "removed $dropped requests beyond $MAX_REQUESTS_PER_RUN in one run, without results"; fi
+  return 0
 }
 
 # staged_in_order: the staged request names, oldest first.
@@ -170,13 +196,13 @@ read_staged() {
 # check_target <target>: empty when the panel may move to <target>, otherwise the reason. Fetches
 # origin and the tag latest first.
 check_target() {
-  local commit=${1#sha-} full head is_head=0 descendant=0 is_latest=0 on_main=0 latest=''
+  local commit=${1#sha-} full head is_head=0 descendant=0 is_latest=0 on_main=0 latest='' rolled=0 reason
   if is_standby; then echo "standby server: the panel does not run here"; return 0; fi
   if lock_held "$STATE_DIR/update.lock"; then echo "an update, rollback or restore is running now"; return 0; fi
   if ! git -C "$APP_DIR" fetch --quiet origin 2>/dev/null; then echo "git fetch failed in $APP_DIR"; return 0; fi
   fetch_latest_tag 2>/dev/null || true
   full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null) || {
-    echo "commit $commit is not in $CFG_REPO_URL"
+    echo "commit $commit is not in $(redact_url "$CFG_REPO_URL")"
     return 0
   }
   head=$(git -C "$APP_DIR" rev-parse HEAD)
@@ -185,7 +211,12 @@ check_target() {
   latest=$(latest_commit 2>/dev/null) || latest=''
   if [ -n "$latest" ] && [ "$latest" = "$full" ]; then is_latest=1; fi
   if git -C "$APP_DIR" merge-base --is-ancestor "$full" refs/remotes/origin/main 2>/dev/null; then on_main=1; fi
-  target_verdict "$is_head" "$descendant" "$is_latest" "$on_main"
+  if [ "$(rolled_back_version "$STATE_DIR")" = "$1" ]; then rolled=1; fi
+  reason=$(target_verdict "$is_head" "$descendant" "$is_latest" "$on_main" "$rolled")
+  if [ -z "$reason" ] && [ "$(channel_images_state "$1")" = differ ]; then
+    reason="the registry's latest images are not the images of $1 (a promotion half done?)"
+  fi
+  printf '%s' "$reason"
 }
 
 # preflight <id> <target> <log>: status.sh --target into the result; leaves the verdict (ready,
@@ -201,6 +232,7 @@ preflight() {
 
 do_check() {
   local id=$1 target=$2 logfile=$WORK_DIR/$1.log reason verdict message
+  new_log "$logfile"
   set_result "$id" "id=$(json_str "$id")" "action=\"check\"" "target=$(json_str "$target")" \
     "state=\"checking\"" "from=$(json_str "$CFG_VERSION")" "receivedAt=$(json_str "$(now)")" \
     "logFile=$(json_str "$logfile")" "journal=\"journalctl -u mailexpert-updater.service\""
@@ -242,6 +274,7 @@ run_logged() {
 do_update() {
   local id=$1 target=$2 logfile=$WORK_DIR/$1.log from=$CFG_VERSION reason verdict code=0 before after
   local next auto=false edge
+  new_log "$logfile"
   set_result "$id" "id=$(json_str "$id")" "action=\"update\"" "target=$(json_str "$target")" \
     "state=\"checking\"" "from=$(json_str "$from")" "receivedAt=$(json_str "$(now)")" \
     "logFile=$(json_str "$logfile")" "journal=\"journalctl -u mailexpert-updater.service\""
@@ -267,15 +300,24 @@ do_update() {
     0)
       set_result "$id" "state=\"succeeded\"" "exitCode=0" "next=$next" "finishedAt=$(json_str "$(now)")" \
         "message=$(json_str "updated to $target")"
+      rm -f "$STATE_DIR/rolled-back-version"
       write_updater_status "$target"
       return 0
       ;;
+    1) ;;
     2 | 3)
       set_result "$id" "state=\"failed\"" "exitCode=$code" "finishedAt=$(json_str "$(now)")" \
         "message=$(json_str "update.sh stopped before the switch (exit $code): nothing was changed, $from still runs")"
       return 0
       ;;
+    *)
+      # Not one of update.sh's codes (killed, a signal): what it changed is unknown, no rollback.
+      set_result "$id" "state=\"failed\"" "exitCode=$code" "finishedAt=$(json_str "$(now)")" \
+        "message=$(json_str "update.sh ended with exit $code; the state of the panel is unknown, nothing was rolled back: check status.sh, then the runbook or rollback.sh --to $from over SSH")"
+      return 0
+      ;;
   esac
+  # Exit 1: the switch began and $target did not become ready.
   after=$(migration_count 2>/dev/null | tr -d '[:space:]') || after=''
   if [ "$auto" != true ] || [ -z "$before" ] || [ "$after" != "$before" ]; then
     set_result "$id" "state=\"failed\"" "exitCode=$code" "finishedAt=$(json_str "$(now)")" \
@@ -288,6 +330,8 @@ do_update() {
   edge=$(previous_edge_image "$from") || edge=''
   if [ -n "$edge" ]; then env_set "$EDGE_ENV" EDGE_IMAGE "$edge"; fi
   if run_logged "$id" "$logfile" bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX" --version "$from"; then
+    record_rolled_back "$STATE_DIR" "$target"
+    write_updater_status "$from"
     set_result "$id" "state=\"rolled_back\"" "finishedAt=$(json_str "$(now)")" \
       "message=$(json_str "$target did not become ready; the panel went back to $from, nothing was lost")"
   else
@@ -308,13 +352,19 @@ prune_results() {
 
 # write_updater_status <version>: result/updater.json, how the panel knows the mechanism is there.
 write_updater_status() {
-  write_updater_installed "$RESULT_DIR" "$1"
+  write_updater_installed "${SPOOL%/update-spool}" "$1"
 }
 
-# handle <name>: one staged request: refused, checked or carried out.
+# handle <name>: one staged request: refused, checked or carried out. A request whose id already
+# has a result is dropped without writing anything: results are never overwritten.
 CHECKED=0 UPDATED=0 CURRENT_ID=''
 handle() {
   local name=$1 id=${1%.json} action target
+  if [ -e "$RESULT_DIR/$id.json" ] || [ -L "$RESULT_DIR/$id.json" ]; then
+    rm -rf -- "${STAGE_DIR:?}/$name"
+    log "request $id dropped: a result with this id exists already"
+    return 0
+  fi
   if ! read_staged "$name"; then
     rm -rf -- "${STAGE_DIR:?}/$name"
     refuse "$id" "$BAD_ACTION" '' "the request was refused: $PARSED"
@@ -342,10 +392,8 @@ handle() {
 # not wait for it.
 # shellcheck disable=SC2317,SC2329 # run by the EXIT trap
 finish_on_exit() {
-  local file
-  [ -n "$CURRENT_ID" ] || return 0
-  file=$RESULT_DIR/$CURRENT_ID.json
-  if [ -f "$file" ] && jq -e '.terminal == false' >/dev/null 2>&1 <"$file"; then
+  [ -n "$CURRENT_ID" ] && [ "$CURRENT_ID" = "$RESULT_ID" ] || return 0
+  if jq -e '.terminal == false' >/dev/null 2>&1 <<<"$RESULT_JSON"; then
     set_result "$CURRENT_ID" "state=\"error\"" "finishedAt=$(json_str "$(now)")" \
       "message=$(json_str "updater.sh stopped unexpectedly; see journalctl -u mailexpert-updater.service and status.sh")"
   fi
@@ -369,6 +417,7 @@ main() {
   [ "$(id -u)" = 0 ] || die "run updater.sh as root" 2
   SPOOL=$prefix/state/update-spool REQUEST_DIR=$SPOOL/request RESULT_DIR=$SPOOL/result
   WORK_DIR=$prefix/state/updater STAGE_DIR=$WORK_DIR/incoming
+  SPOOL_UID=$(spool_uid "$prefix/state")
   prepare_spool
   exec {fd}>"$WORK_DIR/updater.lock"
   if ! flock -n "$fd"; then

@@ -33,11 +33,11 @@ image_digests() {
 }
 
 # channel_images_state <sha-XXXXXXXXXXXX>: same, differ or unknown: whether the registry's `latest`
-# images (backend and frontend) are the images of that commit. differ means a promotion half done
-# or a tag moved by hand; unknown that the registry did not answer.
+# images (all four that promote.yml tags) are the images of that commit. differ means a promotion
+# half done or a tag moved by hand; unknown that the registry did not answer.
 channel_images_state() {
   local image a b
-  for image in mailexpert-backend mailexpert-frontend; do
+  for image in mailexpert-backend mailexpert-frontend mailexpert-edge mailexpert-tenant-worker; do
     a=$(image_digests "$CFG_IMAGE_PREFIX/$image:latest") || { echo unknown; return 0; }
     b=$(image_digests "$CFG_IMAGE_PREFIX/$image:$1") || { echo unknown; return 0; }
     if [ "$a" != "$b" ]; then
@@ -55,11 +55,11 @@ channel_images_state() {
 resolve_latest() {
   local full version
   if ! fetch_latest_tag 2>/dev/null; then
-    warn "cannot fetch the tag latest from $CFG_REPO_URL (has the owner promoted a build yet?)"
+    warn "cannot fetch the tag latest from $(redact_url "$CFG_REPO_URL") (has the owner promoted a build yet?)"
     return 1
   fi
   full=$(latest_commit) || {
-    warn "the tag latest does not name a commit in $CFG_REPO_URL"
+    warn "the tag latest does not name a commit in $(redact_url "$CFG_REPO_URL")"
     return 1
   }
   version=sha-${full:0:12}
