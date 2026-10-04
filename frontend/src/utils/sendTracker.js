@@ -6,7 +6,7 @@
 import i18n from '../i18n.js';
 import { useStore } from '../store/index.js';
 import { api } from './api.js';
-import { composeDataFromScheduled, sendFailureKey, sendOutcome } from './scheduledSend.js';
+import { DELIVERED_UNRECORDED, composeDataFromScheduled, sendFailureKey, sendOutcome } from './scheduledSend.js';
 
 // When to ask after the letter was due.
 const POLL_AFTER_DUE_MS = [1500, 4000, 10000, 30000, 90000];
@@ -54,9 +54,11 @@ export function isTracked(jobId) {
 
 export function notifySendFailed({ subject, code, error }) {
   const { addNotification, setShowScheduled } = useStore.getState();
+  // A letter the server accepted but that could not be recorded as sent: it went out, say so.
+  const delivered = code === DELIVERED_UNRECORDED;
   addNotification({
-    type: 'error',
-    title: t('scheduled.failedTitle'),
+    ...(delivered ? {} : { type: 'error' }),
+    title: t(delivered ? 'scheduled.deliveredUnrecordedTitle' : 'scheduled.failedTitle'),
     body: `${subject || t('common.noSubject')}: ${sendFailureText(code, error)}`,
     allowWrap: true,
     persistent: true,
@@ -128,7 +130,8 @@ export async function refreshScheduledSummary() {
   const { setScheduledSummary, user } = useStore.getState();
   try {
     const { letters } = await api.scheduled.list();
-    const failed = letters.filter(l => (l.status === 'failed' || l.status === 'needs_attention') && l.author?.id && l.author.id === user?.id).length;
+    const failed = letters.filter(l => (l.status === 'failed' || l.status === 'needs_attention') && l.errorCode !== DELIVERED_UNRECORDED
+      && l.author?.id && l.author.id === user?.id).length;
     setScheduledSummary({ count: letters.length, failed });
     return { letters, failed };
   } catch {

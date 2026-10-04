@@ -25,6 +25,11 @@ export const SEND_MAX_ATTEMPTS = 5;
 export const LISTED_STATUSES = Object.freeze(['queued', 'running', 'failed', 'needs_attention']);
 // A cancel or edit may take a letter from these: waiting, or kept after a failure.
 export const CANCELLABLE_STATUSES = Object.freeze(['queued', 'failed', 'needs_attention']);
+// The error code of a letter the mail server accepted but whose job could not be recorded done: it
+// needs attention (its content is kept), and is never sent again.
+export const DELIVERED_UNRECORDED = 'delivered_unrecorded';
+// Error codes of a kept letter that is never sent again (nor moved to another time).
+const NO_RESEND_CODES = Object.freeze([DELIVERED_UNRECORDED]);
 
 let broadcast = () => {};
 
@@ -62,13 +67,14 @@ export function deserializeMail(buffer) {
 
 // sendAt from the client: absent for a send with the undo window, else an ISO time with an explicit
 // offset or Z (stored as UTC), in the future and no further than SEND_LATER_MAX_MS. Returns
-// { sendAt } or { error, code }.
+// { sendAt } or { error, code }; a time that has passed also carries it as requestedAt, so a
+// retried request can still be matched to the letter it enqueued while the time was ahead.
 const ISO_WITH_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/i;
 export function parseSendAt(value, now = Date.now()) {
   if (value === undefined || value === null || value === '') return { sendAt: null };
   const at = typeof value === 'string' && ISO_WITH_OFFSET_RE.test(value) ? Date.parse(value) : NaN;
   if (!Number.isFinite(at)) return { error: 'sendAt must be an ISO date and time with a time zone offset', code: 'send_at_invalid' };
-  if (at <= now) return { error: 'The scheduled time has already passed.', code: 'send_at_past' };
+  if (at <= now) return { error: 'The scheduled time has already passed.', code: 'send_at_past', requestedAt: new Date(at) };
   if (at - now > SEND_LATER_MAX_MS) return { error: 'A letter can be scheduled at most a year ahead.', code: 'send_at_too_far' };
   return { sendAt: new Date(at) };
 }
@@ -120,9 +126,13 @@ export function sendRetryConflict(job, sendAt) {
   if (job.status === 'cancelled') {
     return { status: 409, error: 'This letter was cancelled. Send it again from the composer.', code: 'send_cancelled' };
   }
+  // A job enqueued before requestedAt was stored is compared with its run_at, as before.
+  const requested = job.payload && Object.hasOwn(job.payload, 'requestedAt')
+    ? job.payload.requestedAt
+    : (job.payload?.scheduled ? new Date(job.run_at).toISOString() : null);
   const sameTime = sendAt
-    ? !!job.payload?.scheduled && new Date(job.run_at).getTime() === sendAt.getTime()
-    : !job.payload?.scheduled;
+    ? !!requested && Date.parse(requested) === sendAt.getTime()
+    : !requested;
   if (!sameTime) return { status: 409, error: 'This request repeats another send with a different time.', code: 'idempotency_conflict' };
   return null;
 }
@@ -150,7 +160,9 @@ export async function enqueueOutgoingSend({ userId, accountId, dedupeKey = null,
   const result = await withTransaction(async (tx) => {
     const enqueued = await enqueueJob({
       kind: SEND_JOB_KIND,
-      payload: { scheduled: !!sendAt, messageId: mail.options.messageId },
+      // requestedAt: the time the writer asked for (null: the undo window), which a retried request
+      // is compared with; run_at moves (a retry's backoff, a reschedule).
+      payload: { scheduled: !!sendAt, messageId: mail.options.messageId, requestedAt: sendAt ? sendAt.toISOString() : null },
       runAt: sendAt,
       delayMs: sendAt ? null : SEND_UNDO_WINDOW_MS,
       createdBy: userId,
@@ -267,14 +279,17 @@ export async function cancelScheduled(id, { userId, isAdmin, reason = 'discard' 
     return { cancelled, content };
   });
   if (!out) throw notCancellable(await getJob(job.id) || job);
+  // A letter the server accepted is only dismissed: never given back to send again (by the row
+  // cancelled, so a relabel between the read and the cancel counts).
+  const outcome = NO_RESEND_CODES.includes(out.cancelled.error_code) ? 'discard' : reason;
   recordAudit({
     actorUserId: userId,
     accountId: job.account_id,
     action: 'message.send_cancelled',
-    details: { jobId: String(job.id), messageId: job.payload?.messageId ?? null, reason },
+    details: { jobId: String(job.id), messageId: job.payload?.messageId ?? null, reason: outcome },
   });
   if (listedChange(job)) broadcast({ type: 'scheduled_changed', accountId: job.account_id });
-  if (reason === 'discard' || !out.content) return { ok: true };
+  if (outcome === 'discard' || !out.content) return { ok: true };
   const keepsTime = job.status === 'queued' && !!job.payload?.scheduled && new Date(job.run_at).getTime() > Date.now();
   return {
     ok: true,
@@ -301,9 +316,14 @@ function restoredCompose({ compose, mail }) {
 export async function rescheduleScheduled(id, { userId, isAdmin, sendAt, resend = false }) {
   const job = await managedJob(id, { userId, isAdmin });
   const from = resend ? CANCELLABLE_STATUSES : ['queued'];
-  const moved = await rescheduleJob(job.id, { runAt: sendAt, from, payloadPatch: resend ? null : { scheduled: true } });
+  const moved = await rescheduleJob(job.id, {
+    runAt: sendAt, from, payloadPatch: resend ? null : { scheduled: true }, exceptErrorCodes: NO_RESEND_CODES,
+  });
   if (!moved) {
     const current = await getJob(job.id) || job;
+    if (current.status !== 'queued' && NO_RESEND_CODES.includes(current.error_code)) {
+      throw refusal(409, 'The mail server accepted this letter already: it is not sent again.', 'already_delivered');
+    }
     if (!resend && (current.status === 'failed' || current.status === 'needs_attention')) {
       throw refusal(409, 'The letter was not sent. Confirm sending it again.', 'resend_required');
     }
@@ -322,15 +342,16 @@ export async function rescheduleScheduled(id, { userId, isAdmin, sendAt, resend 
 // ── The handler ─────────────────────────────────────────────────────────────────────────────
 
 // A delivered letter whose lease the sweep took meanwhile (the worker stalled): the sweep marked it
-// needs_attention, but the server did take it. It is done, and its content goes, so a resend never
+// needs_attention (lease_expired, or delivered_unrecorded when the delivery was marked in time), but
+// the server did take it. It is done, and its content goes, so a resend never
 // sends it twice. Resolves the row, or null.
 async function settleSweptDelivery(jobId) {
   return withTransaction(async (tx) => {
     const { rows: [row] } = await tx.query(
       `UPDATE jobs SET status = 'done', finished_at = now(), error_code = NULL, last_error = NULL, updated_at = now()
-        WHERE id = $1 AND status = 'needs_attention' AND error_code = 'lease_expired'
+        WHERE id = $1 AND status = 'needs_attention' AND error_code IN ('lease_expired', $2)
        RETURNING *`,
-      [jobId]
+      [jobId, DELIVERED_UNRECORDED]
     );
     if (row) await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [jobId]);
     return row || null;
@@ -368,6 +389,11 @@ async function handleSendJob(job, ctx, imapManager) {
 
   let settledRow = null;
   let completed = false;
+  let delivered = false;
+  // Sent: the job is done and the letter's content goes, in one transaction.
+  const complete = () => ctx.complete(async (tx) => {
+    await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [job.id]);
+  });
   const sent = await deliverOutgoingMessage({
     account,
     mail,
@@ -375,14 +401,29 @@ async function handleSendJob(job, ctx, imapManager) {
     imapManager,
     detachPostSend: true,
     markEffectStarted: () => ctx.markEffectStarted(),
-    // Sent: the job is done and the letter's content goes, in one transaction.
     onDelivered: async () => {
-      completed = await ctx.complete(async (tx) => {
-        await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [job.id]);
-      });
+      delivered = true;
+      // Recorded first, apart from the job's completion: should the worker stop before the job is
+      // done, the sweep labels it delivered_unrecorded, never an uncertain send to offer again.
+      await ctx.markEffectDone(DELIVERED_UNRECORDED);
+      completed = await complete();
       if (!completed) settledRow = await settleSweptDelivery(job.id);
     },
   });
+  // The server took the letter but recording it failed (deliverOutgoingMessage logged why): one
+  // more try, then the job is settled as delivered-unrecorded rather than an uncertain send, so
+  // nobody is offered to send a delivered letter again.
+  if (delivered && !completed && !settledRow) {
+    try {
+      completed = await complete();
+      if (!completed) settledRow = await settleSweptDelivery(job.id);
+    } catch (err) {
+      console.error(`[send] Recording delivered job ${job.id} failed again:`, err?.message);
+      throw new JobError('The mail server accepted the letter, but recording it as sent failed. Do not send it again.', {
+        outcome: 'needs_attention', code: DELIVERED_UNRECORDED,
+      });
+    }
+  }
   return { ...sent, completed, settledRow };
 }
 

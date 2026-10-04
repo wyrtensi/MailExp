@@ -30,6 +30,7 @@ const { createAccountSendTransport } = await import('../services/mailSendTranspo
 const { registerSendJobKind, SEND_JOB_KIND } = await import('../services/sendQueue.js');
 const {
   claimDueJobs, failJobsOfDeletedAccount, runJob, runDueJobs, sweepExpiredLeases, unregisterJobKind,
+  _setSettleRetryDelaysForTests,
 } = await import('../services/jobQueue.js');
 
 const ACCOUNT = '40000000-0000-4000-8000-000000000001';
@@ -230,6 +231,28 @@ describe('Send later', () => {
     const res = await call('PATCH', `/scheduled/${queued.jobId}`, { body: { sendAt: new Date(Date.now() - 1000).toISOString() } });
     expect(res.status).toBe(400);
   });
+
+  it('answers a retry whose time passed meanwhile with the letter it enqueued, not send_at_past', async () => {
+    const at = new Date(Date.now() + 3600e3);
+    const first = await send({ sendAt: at.toISOString() }, { key: 'k-late' });
+    expect(first.status).toBe(200);
+    // The letter was asked for a minute ago, at a time that has come since; the client's retry of
+    // that request arrives only now.
+    const past = new Date(Date.now() - 60e3);
+    await db.query(
+      `UPDATE jobs SET run_at = $2, payload = payload || jsonb_build_object('requestedAt', $3::text) WHERE id = $1`,
+      [first.body.jobId, past, past.toISOString()],
+    );
+    const retried = await send({ sendAt: past.toISOString() }, { key: 'k-late' });
+    expect(retried).toMatchObject({ status: 200, body: { jobId: first.body.jobId, scheduled: true } });
+    // A retry backoff moved the job: the retry is still compared with the time asked for.
+    await db.query("UPDATE jobs SET run_at = now() + interval '10 minutes' WHERE id = $1", [first.body.jobId]);
+    expect((await send({ sendAt: past.toISOString() }, { key: 'k-late' })).body.jobId).toBe(first.body.jobId);
+    // The same key with another time is still a conflict, and without a known key a past time is refused.
+    const other = await send({ sendAt: new Date(past.getTime() - 60e3).toISOString() }, { key: 'k-late' });
+    expect(other).toMatchObject({ status: 409, body: { code: 'idempotency_conflict' } });
+    expect((await send({ sendAt: past.toISOString() }, { key: 'k-new' })).body.code).toBe('send_at_past');
+  });
 });
 
 describe('Failures after the writer left', () => {
@@ -374,6 +397,75 @@ describe('Review round', () => {
     expect(resend.status).toBe(409);
   });
 
+  it('a delivered letter that cannot be recorded done is marked delivered_unrecorded, never resent', async () => {
+    const { body } = await send();
+    await makeDue(body.jobId);
+    // The database refuses to record the job done (twice: once after delivery, once more).
+    await db.exec(`
+      CREATE FUNCTION refuse_done() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'connection lost'; END $$;
+      CREATE TRIGGER refuse_done BEFORE UPDATE ON jobs FOR EACH ROW WHEN (NEW.status = 'done') EXECUTE FUNCTION refuse_done();`);
+    try {
+      await runDueJobs({ wait: true });
+    } finally {
+      await db.exec('DROP TRIGGER refuse_done ON jobs; DROP FUNCTION refuse_done();');
+    }
+    expect(sendMail).toHaveBeenCalledOnce();
+    expect(await job(body.jobId)).toMatchObject({ status: 'needs_attention', error_code: 'delivered_unrecorded' });
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'send_failed', jobId: body.jobId, status: 'needs_attention', code: 'delivered_unrecorded' }), ANNA));
+    const { letters } = await (await call('GET', '/scheduled')).json();
+    expect(letters[0]).toMatchObject({ id: body.jobId, errorCode: 'delivered_unrecorded' });
+    // Neither a resend nor a new time sends it again.
+    const resend = await call('PATCH', `/scheduled/${body.jobId}`, { body: { resend: true } });
+    expect(resend.status).toBe(409);
+    expect((await resend.json()).code).toBe('already_delivered');
+    const moved = await call('PATCH', `/scheduled/${body.jobId}`, { body: { sendAt: new Date(Date.now() + 3600e3).toISOString() } });
+    expect(moved.status).toBe(409);
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+    // Deleting its mailbox leaves it as it is: still never sent again.
+    await failJobsOfDeletedAccount(ACCOUNT);
+    expect(await job(body.jobId)).toMatchObject({ status: 'needs_attention', error_code: 'delivered_unrecorded' });
+    expect((await call('PATCH', `/scheduled/${body.jobId}`, { body: { resend: true } })).status).toBe(409);
+    // Edit only dismisses it: no letter comes back to send again, and the journal says discard.
+    const edited = await call('POST', `/scheduled/${body.jobId}/cancel`, { body: { reason: 'edit' } });
+    expect(edited.status).toBe(200);
+    expect(await edited.json()).toEqual({ ok: true });
+    await vi.waitFor(async () => expect(await audit('message.send_cancelled')).toHaveLength(1));
+    expect((await audit('message.send_cancelled'))[0].details.reason).toBe('discard');
+    expect(sendMail).toHaveBeenCalledOnce();
+  });
+
+  it('a worker that stops after the server took the letter leaves it delivered_unrecorded, never resent', async () => {
+    const { body } = await send();
+    await makeDue(body.jobId);
+    // After the server accepted the letter the database refuses to settle the job, and the worker
+    // gives up (no retries here): only the delivery mark was written.
+    const [claimed] = await claimDueJobs(10);
+    await db.exec(`
+      CREATE FUNCTION hold_done() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'connection lost'; END $$;
+      CREATE TRIGGER hold_done BEFORE UPDATE ON jobs FOR EACH ROW
+        WHEN (NEW.status IN ('done', 'needs_attention') AND OLD.status = 'running') EXECUTE FUNCTION hold_done();`);
+    _setSettleRetryDelaysForTests([]);
+    try {
+      await runJob(claimed);
+    } finally {
+      _setSettleRetryDelaysForTests();
+      await db.exec('DROP TRIGGER hold_done ON jobs; DROP FUNCTION hold_done();');
+    }
+    // Nothing could be recorded but the delivery mark: the job is still running, until the sweep.
+    expect(await job(body.jobId)).toMatchObject({ status: 'running' });
+    await db.query("UPDATE jobs SET lease_until = now() - interval '1 second' WHERE id = $1", [body.jobId]);
+    await sweepExpiredLeases();
+    expect(await job(body.jobId)).toMatchObject({ status: 'needs_attention', error_code: 'delivered_unrecorded' });
+    const resend = await call('PATCH', `/scheduled/${body.jobId}`, { body: { resend: true } });
+    expect(resend.status).toBe(409);
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+  });
+
   it('a deleted mailbox fails its waiting letters: journaled, the author told, the row kept', async () => {
     const { body } = await send({ sendAt: new Date(Date.now() + 3600e3).toISOString() });
     await failJobsOfDeletedAccount(ACCOUNT);
@@ -382,9 +474,26 @@ describe('Review round', () => {
     await vi.waitFor(async () => expect(await audit('message.send_failed')).toHaveLength(1));
     await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'send_failed', jobId: body.jobId, code: 'account_missing', subject: 'Quarterly numbers' }), ANNA));
+    // Every tab's Scheduled list refreshes.
+    expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'scheduled_changed' }), null);
     const { letters } = await (await call('GET', '/scheduled')).json();
     expect(letters[0]).toMatchObject({ id: body.jobId, status: 'failed', accountId: null });
     expect(letters[0].keptUntil).toBeTruthy();
+  });
+
+  it('a deleted mailbox does not report again a letter that had failed already', async () => {
+    sendMail.mockRejectedValue(Object.assign(new Error('Message failed: 550 rejected'), { code: 'EMESSAGE', responseCode: 550, command: 'DATA' }));
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    await vi.waitFor(async () => expect(await audit('message.send_failed')).toHaveLength(1));
+    const failedToasts = () => imapManager.broadcast.mock.calls.filter(([event]) => event.type === 'send_failed').length;
+    await vi.waitFor(() => expect(failedToasts()).toBe(1));
+    await failJobsOfDeletedAccount(ACCOUNT);
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'smtp_rejected' });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(await audit('message.send_failed')).toHaveLength(1);
+    expect(failedToasts()).toBe(1);
   });
 
   it('fails a running letter whose mailbox went, and journals the failure of an author-less letter', async () => {

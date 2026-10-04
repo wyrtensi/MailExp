@@ -2702,7 +2702,7 @@ export default function MessageList() {
           {/* Hamburger */}
           <button
             onClick={() => setMobileSidebarOpen(true)}
-            aria-label={t('messageList.menu', 'Menu')}
+            aria-label={t('messageList.menu')}
             style={{
               background: 'none', border: 'none', color: 'var(--text-secondary)',
               cursor: 'pointer', padding: 0, borderRadius: 7,
@@ -2911,7 +2911,7 @@ export default function MessageList() {
                     }
                     setShowLayoutPicker(v => !v);
                   }}
-                  title={t('messageList.changeLayout', 'Change layout')}
+                  title={t('messageList.changeLayout')}
                   style={{
                     background: showLayoutPicker ? 'var(--accent-dim)' : 'none',
                     border: `1px solid ${showLayoutPicker ? 'var(--accent)' : 'transparent'}`,
@@ -2942,7 +2942,7 @@ export default function MessageList() {
                     padding: '6px 0',
                   }}>
                     <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', padding: '4px 12px 6px' }}>
-                      {t('messageList.layout', 'Layout')}
+                      {t('messageList.layout')}
                     </div>
                     {Object.entries(LAYOUTS).map(([key, def]) => {
                       const isActive = layout === key;
@@ -3075,7 +3075,7 @@ export default function MessageList() {
                   }
                   setShowLayoutPicker(v => !v);
                 }}
-                title={t('messageList.changeLayout', 'Change layout')}
+                title={t('messageList.changeLayout')}
                 style={{
                   background: showLayoutPicker ? 'var(--accent-dim)' : 'none',
                   border: `1px solid ${showLayoutPicker ? 'var(--accent)' : 'transparent'}`,
@@ -3105,7 +3105,7 @@ export default function MessageList() {
                   padding: '6px 0',
                 }}>
                   <div style={{ fontSize: 10, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-tertiary)', padding: '4px 12px 6px' }}>
-                    {t('messageList.layout', 'Layout')}
+                    {t('messageList.layout')}
                   </div>
                   {Object.entries(LAYOUTS).map(([key, def]) => {
                     const isActive = layout === key;
@@ -3168,6 +3168,7 @@ export default function MessageList() {
           {searchQuery && (
             <button
               onClick={() => setSearchQuery('')}
+              aria-label={t('messageList.clearSearch')}
               style={{
                 position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
                 background: 'none', border: 'none', color: 'var(--text-tertiary)',
@@ -3256,6 +3257,7 @@ export default function MessageList() {
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
+                aria-label={t('messageList.clearSearch')}
                 style={{
                   position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
                   background: 'none', border: 'none', color: 'var(--text-tertiary)',
@@ -3277,6 +3279,7 @@ export default function MessageList() {
           {!isMobile && catScrollEdges.left && (
             <button
               onClick={() => { catScrollRef.current?.scrollBy({ left: -120, behavior: 'smooth' }); }}
+              aria-label={t('messageList.scrollTabsLeft')}
               style={{
                 position: 'absolute', left: 0, top: 0, bottom: 0, width: 32, zIndex: 1,
                 background: 'linear-gradient(to right, var(--bg-secondary) 55%, transparent)',
@@ -3407,6 +3410,7 @@ export default function MessageList() {
           {!isMobile && catScrollEdges.right && (
             <button
               onClick={() => { catScrollRef.current?.scrollBy({ left: 120, behavior: 'smooth' }); }}
+              aria-label={t('messageList.scrollTabsRight')}
               style={{
                 position: 'absolute', right: 0, top: 0, bottom: 0, width: 32, zIndex: 1,
                 background: 'linear-gradient(to left, var(--bg-secondary) 55%, transparent)',
@@ -4593,6 +4597,7 @@ function ThreadRow({ message, account, folderList, isExpanded, threadMsgs, isLoa
               {message.is_starred && (
                 <button
                   onClick={e => { e.stopPropagation(); onStar(e, message); }}
+                  aria-label={t('contextMenu.unstar')}
                   style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--amber)" stroke="var(--amber)" strokeWidth="2">
@@ -4939,6 +4944,7 @@ function MessageRow({ message, account, folderList, selected, lastViewed, isChec
             {message.is_starred && (
               <button
                 onClick={e => { e.stopPropagation(); onStar(e, message); }}
+                aria-label={t('contextMenu.unstar')}
                 style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', display: 'flex', alignItems: 'center' }}
               >
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--amber)" stroke="var(--amber)" strokeWidth="2">

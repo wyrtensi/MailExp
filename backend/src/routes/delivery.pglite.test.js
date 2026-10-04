@@ -169,7 +169,10 @@ describe('GET /api/mail/messages/:id/delivery', () => {
   });
 
   it('gives a mailbox off the node only the delivery reports\' marks, and never reads the log for it', async () => {
-    await recordDeliveryReport({ accountId: OTHER_BOX, report: deliveryReportOf(NDR_STRUCTURE), statusText: NDR_STATUS, inReplyTo: '<orig-ndr@example.net>', date: '2026-10-02T10:01:00Z' });
+    // The report came an hour ago: a delay is marked only while its news is younger than
+    // DELAY_STALE_MS, so a fixed date would turn "delayed" into "unknown" a few days later.
+    const reportedAt = new Date(Date.now() - 3600e3).toISOString();
+    await recordDeliveryReport({ accountId: OTHER_BOX, report: deliveryReportOf(NDR_STRUCTURE), statusText: NDR_STATUS, inReplyTo: '<orig-ndr@example.net>', date: reportedAt });
     const { body } = await details(OTHER_ROW);
     expect(node.calls).toBe(0);
     expect(body).toMatchObject({ node: false, log: null });

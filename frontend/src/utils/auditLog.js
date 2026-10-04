@@ -438,6 +438,7 @@ export function auditDetail(entry) {
         ? { key: 'admin.audit.detailSendResent', values: {} }
         : { key: 'admin.audit.detailSendRescheduled', values: { time: formatDateTime(details.sendAt) } };
     case 'message.send_failed':
+      if (details.code === 'delivered_unrecorded') return { key: 'admin.audit.detailSendDeliveredUnrecorded', values: {} };
       return details.status === 'needs_attention'
         ? { key: 'admin.audit.detailSendUncertain', values: {} }
         : { key: 'admin.audit.detailSendFailed', values: { code: details.code ?? '' } };

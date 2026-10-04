@@ -3,9 +3,12 @@
 // (conversations keyed by the Gmail thread number), half are mailboxes on the mail node's domains
 // (conversations keyed by the reply headers, with every reason the server can record).
 
+import { demoTime } from './clock.js';
+
 export const FLEET_DOMAINS = Object.freeze(['example.com', 'example.org', 'acme.example']);
 const NODE_HOST = 'mail.demo.mailexpert.local';
-const BASE_TIME = Date.parse('2026-09-16T06:00:00.000Z');
+// Moved to today with the rest of the demo's fixtures (clock.js).
+const BASE_TIME = Date.parse(demoTime('2026-09-16T06:00:00.000Z'));
 const HOUR = 3600 * 1000;
 const FOLDER_MAPPINGS = { inbox: 'INBOX', sent: 'Sent', archive: 'Archive', spam: 'Spam', trash: 'Trash', drafts: 'Drafts' };
 const COLORS = ['#7c3aed', '#0891b2', '#16a34a', '#ea580c', '#db2777', '#2563eb', '#ca8a04', '#0d9488', '#9333ea', '#dc2626', '#4f46e5', '#65a30d'];

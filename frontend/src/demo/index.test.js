@@ -56,6 +56,24 @@ test('sent letters carry delivery marks and details like the server answers them
   await assert.rejects(demoRequest('POST', '/mail/messages/demo-001/eop-trace'), { code: 'trace_not_sent' });
 });
 
+test('the demo letters are dated from today, never ahead of it, whenever the demo runs', async () => {
+  const { demoTime, DEMO_SHIFT_MS, DEMO_WRITTEN_AT } = await import('./clock.js');
+  // Moved by whole days: a fixture keeps its time of day, and lands before now.
+  assert.equal(DEMO_SHIFT_MS % 86400000, 0);
+  assert.equal(demoTime('2026-09-16T08:45:00.000Z').slice(11), '08:45:00.000Z');
+  assert.ok(DEMO_WRITTEN_AT + DEMO_SHIFT_MS <= Date.now());
+  // Sent holds only fixtures (the letters that "just arrived" are dated from now, in the Inbox).
+  const times = [];
+  for (let page = 0; page < 40; page += 1) {
+    const { messages } = await demoRequest('GET', `/mail/messages?folder=Sent&limit=50&offset=${page * 50}`);
+    if (!messages.length) break;
+    times.push(...messages.map((m) => Date.parse(m.date)));
+  }
+  assert.ok(times.length > 0);
+  assert.ok(Math.max(...times) <= Date.now());
+  assert.ok(Math.max(...times) > Date.now() - 30 * 86400000, 'the newest sent letter is days old, not months');
+});
+
 test('advertised demo attachments expose pane fields and resolve to local content', async () => {
   const body = await demoRequest('GET', '/mail/messages/demo-001/body');
 
