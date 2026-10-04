@@ -120,7 +120,8 @@ router.post('/messages/:id/eop-trace', async (req, res) => {
   if (!sent.owned) return refuseTrace(res, 'trace_not_sent');
   const cfg = letter.mail_node ? await getMailNodeConfig() : null;
   if (!cfg || onOtherMailHost(letter, cfg)) return refuseTrace(res, 'trace_not_node');
-  if (!(await resolveTraceSource())) return refuseTrace(res, 'trace_not_connected');
+  // The trace reads the EOP settings: a failed read is "not connected", as in the GET.
+  if (!(await resolveTraceSource().catch(() => null))) return refuseTrace(res, 'trace_not_connected');
   const traceable = traceableLetter({ sentAt: sent.sentAt });
   if (!traceable.ok) return refuseTrace(res, traceable.code);
   const { trace, queued, cooldownUntil } = await requestTrace({

@@ -34,7 +34,8 @@ const { saveEopSettings } = await import('../mailNode/eopSettings.js');
 const { createFakeTenantDriver, setTenantDriver } = await import('./driver.js');
 const { TENANT_FIXTURES } = await import('./fakes.js');
 const {
-  AFTER_HANDOFF_MS, BEFORE_MS, MESSAGE_TRACE_KIND, registerMessageTraceKind, resetMessageTraceBudget, traceWindow,
+  AFTER_HANDOFF_MS, BEFORE_MS, MESSAGE_TRACE_KIND, availableTraceRequests, pruneMessageTraces, refundTraceRequests, registerMessageTraceKind,
+  reserveTraceRequests, resetMessageTraceBudget, traceWindow,
 } = await import('./messageTrace.js');
 
 const USER = '60000000-0000-4000-8000-000000000001';
@@ -175,13 +176,17 @@ describe('asking the trace (R-30)', () => {
     expect((await details(SENT_ROW)).eopTrace).toMatchObject({ available: false, reason: 'trace_not_connected' });
   });
 
-  it('a spent budget waits; details left over go on in a follow-up job', async () => {
+  it('a spent budget waits in a new job (no attempt spent); details left over go on in a follow-up job', async () => {
     resetMessageTraceBudget(0);
     await ask(SENT_ROW);
     await runDue();
-    let [job] = (await db.query('SELECT * FROM jobs WHERE kind = $1', [MESSAGE_TRACE_KIND])).rows;
-    expect(job).toMatchObject({ status: 'queued', error_code: 'trace_budget' });
+    const jobs = (await db.query('SELECT * FROM jobs WHERE kind = $1 ORDER BY id', [MESSAGE_TRACE_KIND])).rows;
+    expect(jobs.map((j) => j.status)).toEqual(['done', 'queued']);
+    expect(jobs[1].attempts).toBe(0);
+    expect(Date.parse(jobs[1].run_at) - Date.now()).toBeGreaterThan(5000);
+    expect((await details(SENT_ROW)).eopTrace.trace).toMatchObject({ state: 'queued', error: 'trace_budget' });
     expect(driver.fake.graph.requests).toEqual([]);
+    let job;
 
     // One request: the listing; the details wait for the next job.
     resetMessageTraceBudget(1);
@@ -223,6 +228,71 @@ describe('asking the trace (R-30)', () => {
     await runDue();
     expect((await details(SENT_ROW)).eopTrace.trace).toMatchObject({ state: 'failed', error: 'trace_auth' });
     model.listTraces = real;
+  });
+});
+
+describe('the review round (R-30)', () => {
+  it('reserves requests before sending: jobs at once never take more than the bucket', () => {
+    resetMessageTraceBudget();
+    expect(reserveTraceRequests(10)).toBe(10);
+    expect(reserveTraceRequests(10)).toBe(10);
+    expect(reserveTraceRequests(10)).toBe(0);
+    refundTraceRequests(7);
+    expect(reserveTraceRequests(10)).toBe(7);
+  });
+
+  it('jobs running together share the 20 requests', async () => {
+    // Three letters asked at once; the listing of each is several pages, so each would take 10.
+    const pages = [];
+    model.listTraces = (target) => {
+      pages.push(target.href);
+      const next = new URL(target.href);
+      next.searchParams.set('$skiptoken', String(pages.length));
+      return { status: 200, body: { value: [], '@odata.nextLink': next.href } };
+    };
+    const ids = ['<a@example.com>', '<b@example.com>', '<c@example.com>'];
+    for (const [i, id] of ids.entries()) {
+      await db.query(`INSERT INTO messages (id, account_id, uid, folder, message_id, subject, date, from_email)
+        VALUES ($1, $2, $3, 'Sent', $4, 's', $5, 'info@example.com')`, [`52000000-0000-4000-8000-00000000000${i}`, NODE_BOX, 10 + i, id, sentAt]);
+      await ask(`52000000-0000-4000-8000-00000000000${i}`);
+    }
+    const claimed = await claimDueJobs(10);
+    await Promise.all(claimed.map((job) => runJob(job)));
+    expect(pages.length).toBeLessThanOrEqual(20);
+    expect(availableTraceRequests()).toBe(0);
+  });
+
+  it('counts the requests sent before an error and gives back the rest', async () => {
+    resetMessageTraceBudget();
+    model.listTraces = () => ({ status: 500, body: { error: { code: 'InternalServerError' } } });
+    await ask(SENT_ROW);
+    await runDue();
+    expect((await details(SENT_ROW)).eopTrace.trace).toMatchObject({ state: 'failed', error: 'trace_failed' });
+    expect(availableTraceRequests()).toBe(19);
+  });
+
+  it('a queued row whose job is gone is asked again', async () => {
+    await db.query(`INSERT INTO message_eop_traces (account_id, message_id, state, sent_at, updated_at)
+      VALUES ($1, $2, 'queued', $3, NOW() - interval '1 hour')`, [NODE_BOX, MID, sentAt]);
+    const res = await ask(SENT_ROW);
+    expect(res.status).toBe(202);
+    await runDue();
+    expect((await details(SENT_ROW)).eopTrace.trace.state).toBe('done');
+  });
+
+  it('a trace that cannot be resolved answers not connected, not a server error', async () => {
+    setTenantDriver({ kind: 'fake', graphUrl: 'https://graph.fake.invalid/v1.0', forTenant: () => { throw new Error('broken driver'); } });
+    const res = await ask(SENT_ROW);
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('trace_not_connected');
+  });
+
+  it('old traces are deleted after 45 days', async () => {
+    await db.query(`INSERT INTO message_eop_traces (account_id, message_id, state, sent_at, updated_at)
+      VALUES ($1, '<old@example.com>', 'done', $2, NOW() - interval '46 days'), ($1, $3, 'done', $2, NOW())`, [NODE_BOX, sentAt, MID]);
+    await pruneMessageTraces();
+    const { rows } = await db.query('SELECT message_id FROM message_eop_traces');
+    expect(rows.map((r) => r.message_id)).toEqual([MID]);
   });
 });
 

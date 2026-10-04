@@ -277,9 +277,15 @@ export function createFakeTenantModel(options = {}) {
         ...Object.fromEntries(SUMMARY.map((key) => [key, clone(row[key])])), RecipientCount: (row.RecipientAddress ?? []).length,
       }));
     },
-    get_quarantine_message: ({ identity }) => [clone(quarantined(identity))],
-    // -ReleaseToAll. A second release of a released message: its wording is Inferred.
+    // As the worker answers it: only the message with exactly this Identity, none for an unknown one.
+    get_quarantine_message: ({ identity }) => (model.quarantine.has(identity) ? [clone(model.quarantine.get(identity))] : []),
+    // -ReleaseToAll, after the worker's guard (inbound HighConfPhish only, quarantine_not_allowed).
+    // A second release of a released message: its wording is Inferred.
     release_quarantine_message: ({ identity }) => {
+      const found = model.quarantine.get(identity);
+      if (!found || found.QuarantineTypes !== 'HighConfPhish' || found.Direction !== 'Inbound') {
+        throw exoError('quarantine_not_allowed', 'Only inbound high confidence phishing is released');
+      }
       const row = quarantined(identity);
       if (!isNotReleased(row)) throw exoError('exo_failed', 'The message has already been released.');
       row.ReleaseStatus = 'RELEASED';

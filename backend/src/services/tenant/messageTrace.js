@@ -1,4 +1,4 @@
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 import { JobError, enqueueJob, registerJobKind } from '../jobQueue.js';
 import { TRACE_HISTORY_MS, TraceSourceError, resolveTraceSource } from '../mailNode/traceSource.js';
 import { readEvents } from '../mailNode/outageTrace.js';
@@ -23,10 +23,13 @@ import { TenantError } from './exoRunner.js';
 //
 // Limits: Graph allows 100 requests per 5 minutes per tenant. R-43 keeps a bucket of 80
 // (services/mailNode/outageTrace.js); this one keeps the other 20 (BUCKET_SIZE), and a job takes at
-// most MAX_REQUESTS_PER_RUN. A run without requests left is queued again for when the bucket has
-// one; a listing cut short keeps its cursor and goes on in a follow-up job; throttling queues the
-// job again after a minute (the bucket is spent as if all were used). A letter is asked again at
-// most once per RECHECK_MS (the request answers the stored trace meanwhile).
+// most MAX_REQUESTS_PER_RUN, reserved before its first request and the unused part given back
+// after (requests sent before an error count). A run without requests left ends and queues a new
+// job for when the bucket has one (no attempt spent); a listing cut short keeps its cursor and goes
+// on in a follow-up job; throttling keeps the whole reservation spent and retries the job after a
+// minute. A letter is asked again at most once per RECHECK_MS (the request answers the stored trace
+// meanwhile); the row and its job are written in one transaction, and a queued row whose job is
+// gone is queued again. Rows are deleted RETENTION_DAYS after their last change.
 
 export const MESSAGE_TRACE_KIND = 'tenant_message_trace';
 const MINUTE_MS = 60 * 1000;
@@ -41,6 +44,10 @@ export const AFTER_SENT_MS = 6 * 60 * MINUTE_MS;
 const FOLLOW_UP_MS = 15 * 1000;
 const THROTTLED_MS = MINUTE_MS;
 const MAX_JOB_ATTEMPTS = 6;
+export const RETENTION_DAYS = 45;
+// A queued or running row whose job is gone (it failed to be queued, or ended without settling the
+// row) is stale after this: a new request queues again instead of answering "already asked".
+const STALE_MS = 15 * MINUTE_MS;
 
 // --- the request bucket ---------------------------------------------------------------------------
 
@@ -53,9 +60,18 @@ export function availableTraceRequests() {
   refill();
   return Math.floor(bucket.tokens);
 }
-function spend(count) {
+// Takes up to max whole requests out of the bucket now; answers how many.
+export function reserveTraceRequests(max) {
   refill();
-  bucket.tokens = Math.max(0, bucket.tokens - count);
+  const taken = Math.max(0, Math.min(max, Math.floor(bucket.tokens)));
+  bucket.tokens -= taken;
+  return taken;
+}
+// Puts back what a reservation did not use.
+export function refundTraceRequests(count) {
+  if (!(count > 0)) return;
+  refill();
+  bucket.tokens = Math.min(BUCKET_SIZE, bucket.tokens + count);
 }
 // How long until the bucket holds one request.
 function untilOne() {
@@ -127,22 +143,36 @@ export async function readTrace(accountId, messageId) {
 // one) and a job is queued.
 export async function requestTrace({ accountId, messageId, sentAt, userId = null, now = Date.now() }) {
   const existing = await readTrace(accountId, messageId);
-  if (existing && (existing.state === 'queued' || existing.state === 'running')) return { trace: existing, queued: false };
+  let stale = false;
+  if (existing && (existing.state === 'queued' || existing.state === 'running')) {
+    // Answered as it is while its job lives; a row whose job is gone queues again.
+    const { rows: [live] } = existing.job_id == null ? { rows: [] } : await query(
+      "SELECT 1 FROM jobs WHERE id = $1 AND status IN ('queued', 'running')", [existing.job_id],
+    );
+    const age = now - Date.parse(new Date(existing.updated_at).toISOString());
+    if (live || age < STALE_MS) return { trace: existing, queued: false };
+    stale = true;
+  }
   const checked = existing?.checked_at ? Date.parse(new Date(existing.checked_at).toISOString()) : null;
-  if (existing && checked != null && now - checked < RECHECK_MS) return { trace: existing, queued: false, cooldownUntil: new Date(checked + RECHECK_MS).toISOString() };
-  const { rows: [row] } = await query(`
-    INSERT INTO message_eop_traces (account_id, message_id, state, sent_at, requested_by, requested_at, cursor, error)
-    VALUES ($1, $2, 'queued', $3, $4, $5, NULL, NULL)
-    ON CONFLICT (account_id, message_id) DO UPDATE SET
-      state = 'queued', sent_at = EXCLUDED.sent_at, requested_by = EXCLUDED.requested_by, requested_at = EXCLUDED.requested_at,
-      cursor = NULL, error = NULL, updated_at = NOW()
-      WHERE message_eop_traces.state NOT IN ('queued', 'running')
-    RETURNING *
-  `, [accountId, messageId, sentAt, userId, new Date(now).toISOString()]);
-  if (!row) return { trace: await readTrace(accountId, messageId), queued: false };
-  const { job } = await enqueueJob({ kind: MESSAGE_TRACE_KIND, payload: { accountId, messageId }, createdBy: userId, accountId });
-  await query('UPDATE message_eop_traces SET job_id = $3 WHERE account_id = $1 AND message_id = $2', [accountId, messageId, job.id]);
-  return { trace: { ...row, job_id: job.id }, queued: true };
+  if (!stale && existing && checked != null && now - checked < RECHECK_MS) {
+    return { trace: existing, queued: false, cooldownUntil: new Date(checked + RECHECK_MS).toISOString() };
+  }
+  // The row and its job together: a failed enqueue leaves no "already asked" row behind.
+  return withTransaction(async (tx) => {
+    const { rows: [row] } = await tx.query(`
+      INSERT INTO message_eop_traces (account_id, message_id, state, sent_at, requested_by, requested_at, cursor, error)
+      VALUES ($1, $2, 'queued', $3, $4, $5, NULL, NULL)
+      ON CONFLICT (account_id, message_id) DO UPDATE SET
+        state = 'queued', sent_at = EXCLUDED.sent_at, requested_by = EXCLUDED.requested_by, requested_at = EXCLUDED.requested_at,
+        cursor = NULL, error = NULL, updated_at = NOW()
+        WHERE message_eop_traces.state NOT IN ('queued', 'running') OR $6::boolean
+      RETURNING *
+    `, [accountId, messageId, sentAt, userId, new Date(now).toISOString(), stale]);
+    if (!row) return { trace: await readTrace(accountId, messageId), queued: false };
+    const { job } = await enqueueJob({ kind: MESSAGE_TRACE_KIND, payload: { accountId, messageId }, createdBy: userId, accountId }, tx);
+    await tx.query('UPDATE message_eop_traces SET job_id = $3 WHERE account_id = $1 AND message_id = $2', [accountId, messageId, job.id]);
+    return { trace: { ...row, job_id: job.id }, queued: true };
+  });
 }
 
 async function save(accountId, messageId, fields) {
@@ -180,6 +210,7 @@ export async function handleTraceJob(job, { now = Date.now() } = {}) {
   const accountId = job.payload?.accountId;
   const messageId = job.payload?.messageId;
   if (!accountId || !messageId) throw new JobError('The job names no letter', { outcome: 'fail', code: 'trace_letter_invalid' });
+  await pruneMessageTraces();
   const row = await readTrace(accountId, messageId);
   // The mailbox was deleted (the row went with it) or a newer request took over.
   if (!row || (row.job_id != null && String(row.job_id) !== String(job.id))) return { skipped: 'trace_superseded' };
@@ -188,10 +219,14 @@ export async function handleTraceJob(job, { now = Date.now() } = {}) {
     await save(accountId, messageId, { state: 'failed', error: 'trace_not_connected' });
     return { error: 'trace_not_connected' };
   }
-  const allowed = Math.min(MAX_REQUESTS_PER_RUN, availableTraceRequests());
+  // The requests are reserved before the first one is sent (jobs running at once never take more
+  // than the bucket holds); what is not used goes back in finally.
+  const allowed = reserveTraceRequests(MAX_REQUESTS_PER_RUN);
   if (allowed < 1) {
-    // No requests left this time: the same job again when the bucket has one.
-    throw new JobError('The message trace budget is spent for now', { outcome: 'retry', code: 'trace_budget', delayMs: untilOne() || MINUTE_MS });
+    // No requests left this time: a new job for when the bucket has one (no attempt spent).
+    await save(accountId, messageId, { state: 'queued', error: 'trace_budget' });
+    await enqueueFollowUp(accountId, messageId, untilOne() || MINUTE_MS);
+    return { waiting: 'trace_budget' };
   }
   await save(accountId, messageId, { state: 'running' });
   let used = 0;
@@ -238,9 +273,12 @@ export async function handleTraceJob(job, { now = Date.now() } = {}) {
     });
     return { recipients: recipients.length };
   } catch (err) {
+    // The requests sent before the error, the failed one included (the source counts them).
+    used += Number.isFinite(err?.requests) ? err.requests : 1;
     const code = err instanceof TraceSourceError || err instanceof TenantError ? err.code : 'trace_failed';
     if (code === 'trace_throttled' || code === 'graph_throttled') {
-      // Graph says the tenant's 100 are gone: the bucket is spent and the job waits a minute.
+      // Graph says the tenant's 100 are gone: nothing of the reservation goes back, and the job
+      // waits a minute.
       used = allowed;
       await save(accountId, messageId, { state: 'queued', recipients, error: code });
       throw new JobError('The message trace asked to slow down', { outcome: 'retry', code, delayMs: err.retryAfterMs ?? THROTTLED_MS });
@@ -249,13 +287,18 @@ export async function handleTraceJob(job, { now = Date.now() } = {}) {
     await save(accountId, messageId, { state: 'failed', recipients, error: code, checked_at: new Date(now).toISOString() });
     return { error: code };
   } finally {
-    spend(used);
+    refundTraceRequests(allowed - Math.min(used, allowed));
   }
 }
 
-async function enqueueFollowUp(accountId, messageId) {
-  const { job } = await enqueueJob({ kind: MESSAGE_TRACE_KIND, payload: { accountId, messageId }, accountId, delayMs: FOLLOW_UP_MS });
+async function enqueueFollowUp(accountId, messageId, delayMs = FOLLOW_UP_MS) {
+  const { job } = await enqueueJob({ kind: MESSAGE_TRACE_KIND, payload: { accountId, messageId }, accountId, delayMs });
   await query('UPDATE message_eop_traces SET job_id = $3 WHERE account_id = $1 AND message_id = $2', [accountId, messageId, job.id]);
+}
+
+// Traces older than RETENTION_DAYS (since their last change) go: the poll timer and each job call it.
+export async function pruneMessageTraces() {
+  await query('DELETE FROM message_eop_traces WHERE updated_at < NOW() - make_interval(days => $1::int)', [RETENTION_DAYS]);
 }
 
 // A job that ended without finishing its row (its retries ran out while waiting for the budget or

@@ -9,7 +9,7 @@ import { policyConflicts, summarizePolicy } from './antispam.js';
 import { readConnectors } from './connectors.js';
 import { enqueueDueDomainSyncs } from './tenantDomains.js';
 import { enqueueReleaseSlot, registerQuarantineReleaseKind } from './quarantineRelease.js';
-import { registerMessageTraceKind } from './messageTrace.js';
+import { pruneMessageTraces, registerMessageTraceKind } from './messageTrace.js';
 
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
 // docs/architecture/job-queue.md) instead of a table of their own (R-22 planned `tenant_jobs`):
@@ -275,6 +275,7 @@ export function startTenantPoll() {
     enqueuePoll().catch((err) => console.error('Tenant poll could not be queued:', err?.code || err?.message));
     enqueueDueDomainSyncs().catch((err) => console.error('Tenant domain syncs could not be queued:', err?.code || err?.message));
     enqueueReleaseSlot(Date.now(), POLL_INTERVAL_MS).catch((err) => console.error('Tenant phish release could not be queued:', err?.code || err?.message));
+    pruneMessageTraces().catch((err) => console.error('Old message traces were not deleted:', err?.code || err?.message));
   };
   firstPoll = setTimeout(run, FIRST_POLL_DELAY_MS);
   firstPoll.unref?.();

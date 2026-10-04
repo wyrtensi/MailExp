@@ -11,9 +11,12 @@
 --   state     releasing  claimed, the release was sent or is about to be
 --             released   EOP shows it released (by the panel, or by someone else first: by_panel)
 --             skipped    a guard kept it in quarantine (reason: outbound, foreign_recipients,
---                        no_recipients, not_high_conf_phish, release_denied); final
---             failed     the release failed (error, attempts); the next slot tries again up to the
---                        job's limit, then it stays failed for an administrator
+--                        no_recipients, not_high_conf_phish, release_denied, worker_refused), or it
+--                        left the quarantine (gone, after two reads); final
+--             failed     the read or the release failed (reason read_failed, not_found or none;
+--                        error, attempts); the next slot tries again up to three attempts, then
+--                        reason attempts_exhausted: held for an administrator, read again every
+--                        six hours
 -- sender, subject and recipients are kept for the administrators' list (the quarantine itself
 -- keeps them for 30 days); rows are deleted 45 days after their last change. No body is kept.
 CREATE TABLE IF NOT EXISTS tenant_quarantine_releases (
@@ -42,7 +45,7 @@ CREATE INDEX IF NOT EXISTS tenant_quarantine_releases_state_idx ON tenant_quaran
 --   state      queued, running (a cut-short listing keeps cursor and goes on), done, failed
 --   recipients [{ recipient, traceId, status, receivedAt, statusCode, detail, eventAt, deliveredAt }]
 --   error      a stable code when failed or when the last attempt was throttled
--- No subject, body or event data is kept.
+-- No subject, body or event data is kept. Rows are deleted 45 days after their last change.
 CREATE TABLE IF NOT EXISTS message_eop_traces (
   account_id    UUID NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
   message_id    TEXT NOT NULL,

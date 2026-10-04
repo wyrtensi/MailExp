@@ -171,8 +171,9 @@ export function createGraphTraceSource({
     }
     if (res.status === 429) throw new TraceSourceError('trace_throttled', 'The message trace asked to slow down (HTTP 429)');
     if (res.status === 401 || res.status === 403) {
-      // A token refused: the next request asks for a new one instead of sending it again.
-      onAuthFailure?.();
+      // A token refused (401): the next request asks for a new one instead of sending it again. A
+      // 403 is a missing right or role, which a new token does not change.
+      if (res.status === 401) onAuthFailure?.();
       throw new TraceSourceError('trace_auth', `The message trace refused the request (HTTP ${res.status})`);
     }
     if (!res.ok) throw new TraceSourceError('trace_failed', `The message trace answered HTTP ${res.status}`);
@@ -195,7 +196,14 @@ export function createGraphTraceSource({
           if (requests >= maxRequests) {
             return { rows: keepRows(rows, { recipientDomains, statuses }), requests, complete: false, cursor: { range: index, next: url } };
           }
-          const body = await get(url);
+          let body;
+          try {
+            body = await get(url);
+          } catch (err) {
+            // The requests this call sent, the failed one included, for the caller's budget.
+            err.requests = requests + 1;
+            throw err;
+          }
           requests += 1;
           for (const item of Array.isArray(body?.value) ? body.value : []) {
             const row = normalizeTraceRow(item);
@@ -209,8 +217,14 @@ export function createGraphTraceSource({
     async details(row) {
       const url = `${base}/admin/exchange/tracing/messageTraces/${encodeURIComponent(row.id)}`
         + `/getDetailsByRecipient(recipientAddress='${encodeURIComponent(ODATA_QUOTE(row.recipientAddress))}')`;
-      const body = await get(url);
-      const events = (Array.isArray(body?.value) ? body.value : []).map(normalizeTraceEvent).filter(Boolean);
+      let body;
+      try {
+        body = await get(url);
+      } catch (err) {
+        err.requests = 1;
+        throw err;
+      }
+      const events =(Array.isArray(body?.value) ? body.value : []).map(normalizeTraceEvent).filter(Boolean);
       return { events, requests: 1 };
     },
   };

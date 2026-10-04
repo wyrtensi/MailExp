@@ -188,6 +188,25 @@ describe('the tenant driver as the trace (stage 7c)', () => {
     expect(driver.fake.graph.requests.filter((r) => r.kind === 'token')).toHaveLength(2);
   });
 
+  it('a 403 (a missing right) keeps the token; a failed listing says how many requests it sent', async () => {
+    const driver = createFakeTenantDriver();
+    let calls = 0;
+    driver.fake.model.listTraces = (target) => {
+      calls += 1;
+      if (calls === 1) {
+        const next = new URL(target.href);
+        next.searchParams.set('$skiptoken', '1');
+        return { status: 200, body: { value: [], '@odata.nextLink': next.href } };
+      }
+      return { status: 403, body: { error: { code: 'Forbidden' } } };
+    };
+    const source = tenantTraceSource(driver, TENANT);
+    await expect(source.list({ start: Date.now() - 3600 * 1000, end: Date.now() })).rejects.toMatchObject({ code: 'trace_auth', requests: 2 });
+    await expect(source.list({ start: Date.now() - 3600 * 1000, end: Date.now() })).rejects.toMatchObject({ code: 'trace_auth' });
+    expect(driver.fake.graph.requests.filter((r) => r.kind === 'token')).toHaveLength(1);
+    await expect(source.details({ id: 'x', recipientAddress: 'a@example.org' })).rejects.toMatchObject({ requests: 1 });
+  });
+
   it('resolveTraceSource: a test\'s or the stand\'s first, then the driver with a configured tenant, else none', async () => {
     setTenantDriver(createFakeTenantDriver());
     try {

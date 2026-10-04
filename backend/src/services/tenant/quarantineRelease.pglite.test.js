@@ -30,8 +30,10 @@ const { TenantError } = await import('./exoRunner.js');
 const { TENANT_FIXTURES } = await import('./fakes.js');
 const { getTenantState, registerTenantJobKinds } = await import('./tenantJobs.js');
 const {
-  MAX_MESSAGES_PER_RUN, MAX_RELEASE_ATTEMPTS, QUARANTINE_RELEASE_KIND, enqueueReleaseSlot, heldSummary, setReleaseEnabled,
+  MAX_MESSAGES_PER_RUN, MAX_RELEASE_ATTEMPTS, QUARANTINE_RELEASE_KIND, RUN_LOCK_PROVIDER, enqueueReleaseSlot, getReleaseSettings,
+  handleReleaseJob, heldSummary, markReleased, runRelease, setReleaseEnabled,
 } = await import('./quarantineRelease.js');
+const { tenantContext } = await import('./tenantJobs.js');
 const { enqueueJob } = await import('../jobQueue.js');
 
 const ADMIN = '60000000-0000-4000-8000-000000000001';
@@ -84,12 +86,15 @@ beforeEach(async () => {
   journal.entries = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
   await db.exec(`DELETE FROM jobs; DELETE FROM tenant_quarantine_releases; DELETE FROM mail_node_domains;
-    DELETE FROM integration_config WHERE provider IN ('mail_node_eop', 'mail_node_tenant_state', 'mail_node_phish_release');`);
+    DELETE FROM integration_config WHERE provider IN ('mail_node_eop', 'mail_node_tenant_state', 'mail_node_phish_release', 'mail_node_phish_release_run');`);
   await db.query("INSERT INTO mail_node_domains (domain, state) VALUES ('example.com', 'ready')");
   await saveEopSettings(SETTINGS);
   driver = createFakeTenantDriver();
   model = driver.fake.model;
   setTenantDriver(driver);
+  // Off by default until experiment 17; these tests turn it on.
+  await setReleaseEnabled(true, { userId: ADMIN });
+  journal.entries = [];
 });
 
 describe('the release job (R-42)', () => {
@@ -236,6 +241,139 @@ describe('the release job (R-42)', () => {
     await runNow();
     expect(model.released).toEqual([]);
     expect((await getTenantState()).phishRelease).toMatchObject({ noDomains: true });
+  });
+});
+
+describe('the review round (R-42)', () => {
+  const runDirect = async (options = {}) => runRelease(await tenantContext(), options);
+
+  it('is off by default, and turning it on is journaled', async () => {
+    await db.query("DELETE FROM integration_config WHERE provider = 'mail_node_phish_release'");
+    expect((await getReleaseSettings()).enabled).toBe(false);
+    quarantine(30);
+    await runNow();
+    expect(model.released).toEqual([]);
+    expect((await getTenantState()).phishRelease).toMatchObject({ paused: true });
+    await setReleaseEnabled(true, { userId: ADMIN });
+    expect(journal.entries).toContainEqual(expect.objectContaining({ action: 'tenant.phish_release_changed', details: { enabled: true } }));
+  });
+
+  it('failed reads cost attempts: the queue moves on, later messages are reached, and the follow-ups stop', async () => {
+    for (let n = 200; n < 200 + MAX_MESSAGES_PER_RUN + 5; n += 1) quarantine(n);
+    driver.fake.exo.answers.get_quarantine_message = new TenantError('exo_failed', 'Something went wrong');
+    let runs = 0;
+    for (; runs < 30; runs += 1) {
+      const { rows } = await db.query("SELECT id FROM jobs WHERE kind = $1 AND status = 'queued'", [QUARANTINE_RELEASE_KIND]);
+      if (runs > 0 && !rows.length) break;
+      if (!rows.length) await enqueueJob({ kind: QUARANTINE_RELEASE_KIND });
+      await db.query('UPDATE jobs SET run_at = NOW()');
+      await runDue();
+    }
+    expect(runs).toBeLessThan(30);
+    const { rows } = await db.query('SELECT state, reason, attempts FROM tenant_quarantine_releases');
+    expect(rows).toHaveLength(MAX_MESSAGES_PER_RUN + 5);
+    expect(rows.every((r) => r.state === 'failed' && r.reason === 'attempts_exhausted' && r.attempts === MAX_RELEASE_ATTEMPTS)).toBe(true);
+    expect(model.released).toEqual([]);
+  });
+
+  it('a pause in the middle of a pass stops the releases before the next claim', async () => {
+    quarantine(40);
+    quarantine(41);
+    quarantine(42);
+    driver.fake.exo.answers.release_quarantine_message = async (args) => {
+      const answer = model.exo.release_quarantine_message(args);
+      await setReleaseEnabled(false, { userId: ADMIN });
+      return answer;
+    };
+    const result = await runDirect({ releaseCheckMs: 0 });
+    expect(model.released).toHaveLength(1);
+    expect(result).toMatchObject({ paused: true, left: false, counts: { released: 1 } });
+  });
+
+  it('marks a release once: a second run reaching it journals nothing', async () => {
+    const f = { messageId: '<m@x>', sender: 's@x', subject: null, recipients: ['info@example.com'], receivedAt: null, expiresAt: null };
+    const [a, b] = await Promise.all([markReleased(qid(50), f, { byPanel: true, now: Date.now() }), markReleased(qid(50), f, { byPanel: true, now: Date.now() })]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    expect(releases()).toHaveLength(1);
+    expect(await markReleased(qid(50), f, { byPanel: true, now: Date.now() })).toBe(false);
+    expect(releases()).toHaveLength(1);
+  });
+
+  it('one run at a time: a second job ends at once while the first holds the lock', async () => {
+    quarantine(51);
+    await db.query(`INSERT INTO integration_config (provider, config) VALUES ($1, '{"job":"other"}')`, [RUN_LOCK_PROVIDER]);
+    expect(await handleReleaseJob({ id: 999 }, null)).toEqual({ skipped: 'phish_release_busy' });
+    expect(model.released).toEqual([]);
+    // A lock of a run that died long ago is taken over.
+    await db.query(`UPDATE integration_config SET updated_at = NOW() - interval '2 hours' WHERE provider = $1`, [RUN_LOCK_PROVIDER]);
+    await handleReleaseJob({ id: 1000 }, null);
+    expect(model.released).toEqual([qid(51)]);
+    expect((await db.query('SELECT config FROM integration_config WHERE provider = $1', [RUN_LOCK_PROVIDER])).rows[0].config).toEqual({});
+  });
+
+  it('releases only to domains that receive mail through EOP', async () => {
+    await db.query("UPDATE mail_node_domains SET state = 'dns_ok'");
+    quarantine(52);
+    await runNow();
+    expect(model.released).toEqual([]);
+    expect((await getTenantState()).phishRelease).toMatchObject({ noDomains: true });
+    await db.query("INSERT INTO mail_node_domains (domain, state) VALUES ('other.example.org', 'connector_ready')");
+    quarantine(53, { RecipientAddress: ['info@example.com'] });
+    await runNow();
+    // example.com is still onboarding: its recipients are not on a releasing domain.
+    expect(model.released).toEqual([]);
+    expect(await rowOf(qid(53))).toMatchObject({ state: 'skipped', reason: 'foreign_recipients' });
+  });
+
+  it('a message the quarantine does not know is gone only after a second read', async () => {
+    model.exo.get_quarantine_messages = () => [{ Identity: qid(54) }];
+    await runNow();
+    expect(await rowOf(qid(54))).toMatchObject({ state: 'failed', reason: 'not_found', attempts: 1 });
+    await runNow();
+    expect(await rowOf(qid(54))).toMatchObject({ state: 'skipped', reason: 'gone' });
+  });
+
+  it('re-reads a message whose attempts ran out and settles it when it was released after all', async () => {
+    quarantine(55);
+    model.quarantine.get(qid(55)).ReleaseStatus = 'RELEASED';
+    await db.query(`INSERT INTO tenant_quarantine_releases (identity, state, reason, attempts, expires_at, updated_at)
+      VALUES ($1, 'failed', 'attempts_exhausted', $2, $3, NOW() - interval '7 hours')`, [qid(55), MAX_RELEASE_ATTEMPTS, FUTURE]);
+    expect((await heldSummary()).count).toBe(1);
+    await runNow();
+    expect(await rowOf(qid(55))).toMatchObject({ state: 'released' });
+    expect((await heldSummary()).count).toBe(0);
+    expect(releaseCalls()).toEqual([]);
+  });
+
+  it('an exhausted message still in the quarantine stays held, read again only after hours', async () => {
+    quarantine(56);
+    await db.query(`INSERT INTO tenant_quarantine_releases (identity, state, reason, attempts, expires_at, updated_at)
+      VALUES ($1, 'failed', 'attempts_exhausted', $2, $3, NOW() - interval '1 hour')`, [qid(56), MAX_RELEASE_ATTEMPTS, FUTURE]);
+    model.exo.get_quarantine_messages = () => [];
+    await runNow();
+    expect(driver.fake.exo.calls.filter((c) => c.op === 'get_quarantine_message')).toEqual([]);
+    await db.query("UPDATE tenant_quarantine_releases SET updated_at = NOW() - interval '7 hours'");
+    await runNow();
+    expect(await rowOf(qid(56))).toMatchObject({ state: 'failed', reason: 'attempts_exhausted' });
+    expect(releaseCalls()).toEqual([]);
+  });
+
+  it('waits while a release is being prepared', async () => {
+    quarantine(57);
+    model.exo.get_quarantine_messages = () => [{ Identity: qid(57) }];
+    model.quarantine.get(qid(57)).ReleaseStatus = 'PREPARINGTORELEASE';
+    await runNow();
+    expect(await rowOf(qid(57))).toBeUndefined();
+    expect((await getTenantState()).phishRelease.counts).toMatchObject({ waiting: 1 });
+    expect(releaseCalls()).toEqual([]);
+  });
+
+  it('a message the worker refuses to release stays in the quarantine with the reason', async () => {
+    quarantine(58);
+    driver.fake.exo.answers.release_quarantine_message = new TenantError('quarantine_not_allowed', 'Only inbound high confidence phishing is released');
+    await runNow();
+    expect(await rowOf(qid(58))).toMatchObject({ state: 'skipped', reason: 'worker_refused' });
+    expect(releases()).toEqual([]);
   });
 });
 
