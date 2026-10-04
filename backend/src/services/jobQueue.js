@@ -122,17 +122,21 @@ export async function getJob(id, db = { query }) {
   return job || null;
 }
 
-// Jobs of a kind, by mailbox (accountIds) and/or author, newest due first.
-export async function listJobs({ kind, accountIds = null, createdBy = null, statuses = null, limit = 200 } = {}, db = { query }) {
+// Jobs of a kind (or of any of kinds), by mailbox (accountIds) and/or author, soonest due first, or
+// the newest first (newestFirst: by id, for an administrator's list of recent jobs).
+export async function listJobs({
+  kind, kinds = null, accountIds = null, createdBy = null, statuses = null, limit = 200, newestFirst = false,
+} = {}, db = { query }) {
   const { rows } = await db.query(
     `SELECT * FROM jobs
       WHERE ($1::text IS NULL OR kind = $1)
         AND ($2::uuid[] IS NULL OR account_id = ANY($2::uuid[]))
         AND ($3::uuid IS NULL OR created_by = $3)
         AND ($4::text[] IS NULL OR status = ANY($4::text[]))
-      ORDER BY run_at, id
+        AND ($6::text[] IS NULL OR kind = ANY($6::text[]))
+      ORDER BY ${newestFirst ? 'id DESC' : 'run_at, id'}
       LIMIT $5`,
-    [kind ?? null, accountIds, createdBy, statuses, limit]
+    [kind ?? null, accountIds, createdBy, statuses, limit, kinds]
   );
   return rows;
 }

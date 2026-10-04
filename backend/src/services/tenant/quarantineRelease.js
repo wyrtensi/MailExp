@@ -1,6 +1,7 @@
 import { query, withTransaction } from '../db.js';
 import { JobError, enqueueJob, registerJobKind } from '../jobQueue.js';
 import { insertAuditEntries, recordAudit } from '../auditLog.js';
+import { auditOf } from '../actor.js';
 import { getEopSettings } from '../mailNode/eopSettings.js';
 import { SYSTEM_ACTOR } from '../mailNode/domains.js';
 import { checkSpamRule } from '../mailNode/nodeApply.js';
@@ -103,16 +104,17 @@ export async function getReleaseSettings() {
   return { enabled: config.enabled !== false, changedAt: config.changedAt ?? null, changedBy: config.changedBy ?? null };
 }
 
-// The switch, journaled when it changes.
-export async function setReleaseEnabled(enabled, { userId = null, now = Date.now() } = {}) {
+// The switch, journaled when it changes. actor (services/actor.js) or, as before, userId.
+export async function setReleaseEnabled(enabled, { userId = null, actor = null, now = Date.now() } = {}) {
+  const who = actor ?? { userId };
   const before = await getReleaseSettings();
-  const config = { enabled: !!enabled, changedAt: new Date(now).toISOString(), changedBy: userId };
+  const config = { enabled: !!enabled, changedAt: new Date(now).toISOString(), changedBy: who.userId ?? null };
   await query(`
     INSERT INTO integration_config (provider, config) VALUES ($1, $2)
     ON CONFLICT (provider) DO UPDATE SET config = EXCLUDED.config, updated_at = NOW()
   `, [RELEASE_SETTINGS_PROVIDER, config]);
   if (before.enabled !== config.enabled) {
-    recordAudit({ actorUserId: userId, action: 'tenant.phish_release_changed', details: { enabled: config.enabled } });
+    recordAudit(auditOf(who, { action: 'tenant.phish_release_changed', details: { enabled: config.enabled } }));
   }
   return config;
 }
@@ -606,40 +608,55 @@ export async function enqueueReleaseSlot(now = Date.now(), slotMs = 10 * 60 * 10
 // For the screen: the newest rows.
 export async function listReleases({ limit = 100 } = {}) {
   const { rows } = await query(`SELECT * FROM tenant_quarantine_releases ORDER BY updated_at DESC LIMIT $1`, [limit]);
-  return rows.map((row) => {
-    const error = row.error ? String(row.error) : null;
-    const code = error && /^[a-z][a-z0-9_]{1,63}:/.test(error) ? error.slice(0, error.indexOf(':')) : null;
-    return {
-      identity: row.identity,
-      type: row.quarantine_type ?? null,
-      messageId: row.message_id,
-      sender: row.sender,
-      subject: row.subject,
-      recipients: row.recipients ?? [],
-      receivedAt: row.received_at ? new Date(row.received_at).toISOString() : null,
-      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
-      state: row.state,
-      reason: row.reason,
-      error,
-      errorCode: code,
-      attempts: row.attempts,
-      byPanel: row.by_panel,
-      releasedAt: row.released_at ? new Date(row.released_at).toISOString() : null,
-      updatedAt: new Date(row.updated_at).toISOString(),
-    };
-  });
+  return rows.map(releaseOf);
+}
+
+function releaseOf(row) {
+  const error = row.error ? String(row.error) : null;
+  const code = error && /^[a-z][a-z0-9_]{1,63}:/.test(error) ? error.slice(0, error.indexOf(':')) : null;
+  return {
+    identity: row.identity,
+    type: row.quarantine_type ?? null,
+    messageId: row.message_id,
+    sender: row.sender,
+    subject: row.subject,
+    recipients: row.recipients ?? [],
+    receivedAt: row.received_at ? new Date(row.received_at).toISOString() : null,
+    expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+    state: row.state,
+    reason: row.reason,
+    error,
+    errorCode: code,
+    attempts: row.attempts,
+    byPanel: row.by_panel,
+    releasedAt: row.released_at ? new Date(row.released_at).toISOString() : null,
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
 }
 
 // The messages the panel keeps in the quarantine and that are still there (not expired): a guard
 // skipped them (not 'gone') or their attempts ran out. The alert tenant_phish_held.
+const HELD_WHERE = `((state = 'skipped' AND reason <> 'gone') OR (state = 'failed' AND reason = 'attempts_exhausted'))
+       AND (expires_at IS NULL OR expires_at > $1)`;
+
 export async function heldSummary(now = Date.now()) {
   const { rows: [row] } = await query(`
     SELECT COUNT(*)::int AS count, MIN(expires_at) AS soonest
       FROM tenant_quarantine_releases
-     WHERE ((state = 'skipped' AND reason <> 'gone') OR (state = 'failed' AND reason = 'attempts_exhausted'))
-       AND (expires_at IS NULL OR expires_at > $1)
+     WHERE ${HELD_WHERE}
   `, [new Date(now).toISOString()]);
   return { count: row?.count ?? 0, soonestExpiresAt: row?.soonest ? new Date(row.soonest).toISOString() : null };
+}
+
+// Those messages themselves, soonest to expire first, as listReleases shows a row.
+export async function listHeld({ limit = 200, now = Date.now() } = {}) {
+  const { rows } = await query(`
+    SELECT * FROM tenant_quarantine_releases
+     WHERE ${HELD_WHERE}
+     ORDER BY expires_at NULLS LAST, updated_at DESC
+     LIMIT $2
+  `, [new Date(now).toISOString(), limit]);
+  return rows.map(releaseOf);
 }
 
 export function registerQuarantineReleaseKind() {
