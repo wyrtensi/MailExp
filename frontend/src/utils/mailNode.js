@@ -1182,6 +1182,7 @@ const TENANT_FAILURE_KEYS = {
   connector_guid_missing: 'admin.tenant.failConnectorGuidMissing',
   // Stage 7c: the phishing release (backend services/tenant/quarantineRelease.js).
   list_failed: 'admin.tenant.failExo',
+  quarantine_not_allowed: 'admin.tenant.failQuarantineNotAllowed',
   mail_node_not_configured: 'admin.mailNode.errorNotConfigured',
   mail_node_unreachable: 'admin.mailNode.errorUnreachable',
   mail_node_auth: 'admin.mailNode.errorAuth',
@@ -1237,6 +1238,9 @@ const PHISH_REASON_KEYS = {
   release_denied: 'admin.tenant.phishReasonDenied',
   gone: 'admin.tenant.phishReasonGone',
   attempts_exhausted: 'admin.tenant.phishReasonAttempts',
+  read_failed: 'admin.tenant.phishReasonReadFailed',
+  not_found: 'admin.tenant.phishReasonNotFound',
+  worker_refused: 'admin.tenant.phishReasonWorkerRefused',
 };
 export function phishReasonKey(reason) {
   if (!reason) return null;

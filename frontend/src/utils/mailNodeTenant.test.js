@@ -77,6 +77,10 @@ describe('the phishing release (R-42, stage 7c)', () => {
     assert.equal(phishReasonKey('foreign_recipients'), 'admin.tenant.phishReasonForeign');
     assert.equal(phishReasonKey('attempts_exhausted'), 'admin.tenant.phishReasonAttempts');
     assert.equal(phishReasonKey('new_reason'), 'admin.tenant.phishReasonOther');
+    assert.equal(phishReasonKey('read_failed'), 'admin.tenant.phishReasonReadFailed');
+    assert.equal(phishReasonKey('not_found'), 'admin.tenant.phishReasonNotFound');
+    assert.equal(phishReasonKey('worker_refused'), 'admin.tenant.phishReasonWorkerRefused');
+    assert.equal(tenantFailureKey('quarantine_not_allowed'), 'admin.tenant.failQuarantineNotAllowed');
     assert.equal(phishReasonKey(null), null);
     assert.equal(phishHeld({ state: 'skipped', reason: 'outbound' }), true);
     assert.equal(phishHeld({ state: 'skipped', reason: 'gone' }), false);

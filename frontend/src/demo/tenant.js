@@ -119,13 +119,13 @@ function finish(kind, settings) {
 
 const latest = (kind) => [...jobs.values()].filter((job) => job.kind === kind).at(-1) ?? null;
 
-// Stage 7c (R-42): the release of quarantined phishing, on, with a run of 8 minutes ago: one message
+// Stage 7c (R-42): the release of quarantined phishing, off as on a new install (until experiment 17), with an earlier run of 8 minutes ago: one message
 // released to a demo mailbox, one kept because a recipient is not on the node (it raises the
 // tenant_phish_held alert), one that left the quarantine.
 const QID = (n) => [`c14401cf-aa9a-465b-cfd5-00000000000${n}`, `4c2ca98e-94ea-db3a-7eb8-00000000000${n}`].join('\\');
 const heldRow = (row) => (row.state === 'skipped' && row.reason !== 'gone') || (row.state === 'failed' && row.reason === 'attempts_exhausted');
 let phish = {
-  enabled: true,
+  enabled: false,
   changedAt: null,
   run: { at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 1, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false },
   rows: [

@@ -399,7 +399,12 @@ function PhishRelease({ canRun, revision }) {
                       <td style={cellStyle}>
                         {t(phishStateKey(row.state))}
                         {reason && <div style={{ color: 'var(--text-tertiary)' }}>{t(reason)}</div>}
-                        {row.error && row.state !== 'released' && <div style={{ color: 'var(--text-tertiary)' }}>{row.error}</div>}
+                        {row.error && row.state !== 'released' && (
+                          <div data-phish-error={row.errorCode ?? 'other'} style={{ color: 'var(--text-tertiary)' }}>
+                            {t(tenantFailureKey(row.errorCode))}
+                            <div title={row.error} style={{ fontSize: 10, wordBreak: 'break-word' }}>{row.error}</div>
+                          </div>
+                        )}
                       </td>
                       <td style={cellStyle}>{when(row.receivedAt)}</td>
                       <td style={{ ...cellStyle, ...monoStyle, fontSize: 11 }}>{row.sender ?? '—'}</td>

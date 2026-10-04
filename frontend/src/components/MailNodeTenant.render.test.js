@@ -128,6 +128,10 @@ describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
     releases: [
       { identity: QID, state: 'released', reason: null, sender: 'billing@phish.example.net', recipients: ['info@example.com'], subject: 'Invoice', receivedAt: '2026-10-03T07:40:00.000Z' },
       { identity: `${QID}x`, state: 'skipped', reason: 'foreign_recipients', sender: 'x@phish.example.net', recipients: ['info@example.com', 'a@other.example.org'], subject: 'Reset', receivedAt: null },
+      {
+        identity: `${QID}y`, state: 'failed', reason: 'read_failed', error: 'exo_failed: Something went wrong', errorCode: 'exo_failed',
+        sender: null, recipients: [], subject: null, receivedAt: null,
+      },
     ],
     job: null,
   };
@@ -140,7 +144,12 @@ describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
     assert.match(root.querySelector('[data-phish-run]').textContent, /admin\.tenant\.phishRunCounts/);
     assert.match(root.querySelector('[data-phish-held]').textContent, /admin\.tenant\.phishHeld/);
     const rows = [...root.querySelectorAll('[data-phish-row]')];
-    assert.deepEqual(rows.map((r) => r.getAttribute('data-phish-row')), ['released', 'skipped']);
+    assert.deepEqual(rows.map((r) => r.getAttribute('data-phish-row')), ['released', 'skipped', 'failed']);
+    // EXO's words are a detail under a translated reason, not the message itself.
+    const failure = rows[2].querySelector('[data-phish-error]');
+    assert.equal(failure.getAttribute('data-phish-error'), 'exo_failed');
+    assert.ok(failure.textContent.startsWith('admin.tenant.failExo'));
+    assert.match(rows[2].textContent, /admin\.tenant\.phishReasonReadFailed/);
     assert.match(rows[1].textContent, /admin\.tenant\.phishReasonForeign/);
     assert.equal(rows[1].getAttribute('data-phish-held-row'), 'true');
     assert.match(rows[1].textContent, /a@other\.example\.org/);
