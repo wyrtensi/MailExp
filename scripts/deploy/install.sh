@@ -22,6 +22,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/app.sh"
 # shellcheck source=lib/backup.sh
 . "$SCRIPT_DIR/lib/backup.sh"
+# shellcheck source=lib/updater.sh
+. "$SCRIPT_DIR/lib/updater.sh"
 
 exit_on_unexpected_failure
 
@@ -69,6 +71,7 @@ prepare_dirs() {
   fi
   mkdir -p "$APP_DIR" "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
   chmod 700 "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
+  prepare_update_spool "$STATE_DIR"
 }
 
 # lock_install: one install.sh or configure.sh at a time per prefix: configure.sh takes the same
@@ -106,7 +109,7 @@ check_ports() {
 checkout_code() {
   local commit=${CFG_VERSION#sha-} full
   if [ ! -d "$APP_DIR/.git" ]; then
-    log "cloning $CFG_REPO_URL"
+    log "cloning $(redact_url "$CFG_REPO_URL")"
     git clone --quiet "$CFG_REPO_URL" "$APP_DIR"
   elif [ "$(git -C "$APP_DIR" remote get-url origin)" != "$CFG_REPO_URL" ]; then
     git -C "$APP_DIR" remote set-url origin "$CFG_REPO_URL"
@@ -114,7 +117,7 @@ checkout_code() {
   if ! git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" >/dev/null; then
     git -C "$APP_DIR" fetch --quiet origin
   fi
-  full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}") || die "commit $commit is not in $CFG_REPO_URL"
+  full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}") || die "commit $commit is not in $(redact_url "$CFG_REPO_URL")"
   if [ "$(git -C "$APP_DIR" rev-parse HEAD)" != "$full" ]; then
     [ -z "$(git -C "$APP_DIR" status --porcelain --untracked-files=no)" ] ||
       die "$APP_DIR has local changes; refusing to switch commits"
@@ -152,6 +155,21 @@ write_app_settings() {
 ensure_app_images() {
   ensure_image "$BACKEND_IMAGE"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$CFG_VERSION"
+}
+
+# record_spool_uid: the uid the backend image runs as, asked from the image itself (a throwaway
+# container without network), kept in <state>/spool-uid for the spool's owner and the updater's
+# owner check; the spool is then made again with it. Without an answer the recorded or default uid
+# (1000, `USER node`) stays.
+record_spool_uid() {
+  local uid
+  uid=$(docker run --rm --network none --entrypoint id "$BACKEND_IMAGE" -u 2>/dev/null | tr -d '[:space:]') || uid=''
+  if [[ $uid =~ ^[1-9][0-9]{0,9}$ ]]; then
+    printf '%s\n' "$uid" >"$STATE_DIR/spool-uid"
+  else
+    warn "cannot ask $BACKEND_IMAGE for its uid; the update spool stays owned by uid $(spool_uid "$STATE_DIR")"
+  fi
+  prepare_update_spool "$STATE_DIR"
 }
 
 # pinned_edge_image: the EDGE_IMAGE to keep. A digest stays as it is; a tag becomes its digest
@@ -350,6 +368,7 @@ main() {
 
   write_app_settings
   ensure_app_images
+  record_spool_uid
   guard_existing_database
   generate_app_secrets "$ENV_FILE"
   if [ "$CFG_EDGE" = 1 ]; then
@@ -368,7 +387,10 @@ main() {
   fi
   admin_notice
   setup_backups
-  if [ "$CFG_SYSTEM" = 1 ]; then install_timers; fi
+  if [ "$CFG_SYSTEM" = 1 ]; then
+    install_timers
+    install_updater
+  fi
   log "done"
 }
 

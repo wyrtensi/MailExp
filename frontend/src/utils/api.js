@@ -355,6 +355,10 @@ export const api = {
     getAccessSync: () => request('GET', '/admin/access-sync'),
     saveAccessSync: (data) => request('PUT', '/admin/access-sync', data),
     runAccessSync: () => request('POST', '/admin/access-sync/run'),
+    // Update of the panel from the admin UI (the host's updater does the work; see utils/panelUpdate.js).
+    getPanelUpdate: () => request('GET', '/admin/update'),
+    checkPanelUpdate: (target) => request('POST', '/admin/update/check', { target }),
+    startPanelUpdate: (target) => request('POST', '/admin/update', { target, confirm: target }),
     googleApps: {
       list: () => request('GET', '/admin/google-apps'),
       create: (data) => request('POST', '/admin/google-apps', data),

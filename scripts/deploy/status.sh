@@ -40,6 +40,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/ops.sh"
 # shellcheck source=lib/status.sh
 . "$LIB_DIR/status.sh"
+# shellcheck source=lib/channel.sh
+. "$LIB_DIR/channel.sh"
 
 MIN_FREE_PCT=${MAILEXPERT_MIN_FREE_PCT:-15}
 
@@ -221,7 +223,7 @@ collect_target() {
     git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warning "target: git fetch failed in $APP_DIR"
   fi
   if ! full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null); then
-    if [ "$locked" = 0 ]; then problem "target: commit $commit is not in $CFG_REPO_URL"; fi
+    if [ "$locked" = 0 ]; then problem "target: commit $commit is not in $(redact_url "$CFG_REPO_URL")"; fi
     return 0
   fi
   FACT[target_commit]=1
@@ -229,6 +231,11 @@ collect_target() {
   if is_standby; then problem "target: standby server: update.sh refuses it; install.sh --version sets its version"; fi
 
   if [ "${FACT[tenant_worker]}" = 1 ]; then images+=(mailexpert-tenant-worker); fi
+  head=$(git -C "$APP_DIR" rev-parse --verify --quiet HEAD 2>/dev/null) || head=''
+  changed=''
+  if [ -n "$head" ]; then changed=$(git -C "$APP_DIR" diff --name-only "$head" "$full" 2>/dev/null) || changed=''; fi
+  # update.sh takes the new Caddy image when it changes (lib/ops.sh edge_image_changes).
+  if edge_image_changes "${FACT[edge_services]}" <<<"$changed"; then images+=(mailexpert-edge); fi
   for image in "${images[@]}"; do
     state=$(image_state "$prefix/$image:$target")
     TARGET_IMAGES+="$image $state"$'\n'
@@ -255,7 +262,6 @@ collect_target() {
   if [ -n "${FACT[last_dump_bytes]}" ] && [ -n "${FACT[free_kb]}" ]; then
     lines_into PROBLEMS < <(space_problem "${FACT[free_kb]}" "${FACT[last_dump_bytes]}")
   fi
-  head=$(git -C "$APP_DIR" rev-parse --verify --quiet HEAD 2>/dev/null) || head=''
   [ -n "$head" ] && [ "$head" != "$full" ] || return 0
   while read -r kind service from _ to; do
     if [ "$kind" = problem ]; then
@@ -265,7 +271,6 @@ collect_target() {
     fi
   done < <(data_image_changes <(git -C "$APP_DIR" show "$head:docker-compose.yml" 2>/dev/null) \
     <(git -C "$APP_DIR" show "$full:docker-compose.yml" 2>/dev/null))
-  changed=$(git -C "$APP_DIR" diff --name-only "$head" "$full" 2>/dev/null) || changed=''
   while IFS= read -r line; do
     case $line in
       "next "*) NEXT+=("${line#next }") ;;
@@ -277,11 +282,39 @@ collect_target() {
   fi
 }
 
+# resolve_target_channel: RESOLVED_TARGET = the sha-<12> the channel latest names now, empty (with
+# a problem) when it cannot be resolved. Next to a running update only the local tag is read,
+# never fetched. Not in a subshell: it records facts and problems.
+RESOLVED_TARGET=''
+resolve_target_channel() {
+  local full errors line
+  FACT[channel]=latest
+  RESOLVED_TARGET=''
+  if lock_held "$STATE_DIR/update.lock"; then
+    if full=$(latest_commit 2>/dev/null); then
+      RESOLVED_TARGET=sha-${full:0:12}
+    else
+      problem "target: the channel latest cannot be resolved while an update runs"
+    fi
+    return 0
+  fi
+  errors=$(mktemp)
+  if RESOLVED_TARGET=$(resolve_latest 2>"$errors"); then
+    while IFS= read -r line; do
+      if [ -n "$line" ]; then warning "target: ${line#\[mailexpert\] warning: }"; fi
+    done <"$errors"
+  else
+    RESOLVED_TARGET=''
+    problem "target: the channel latest cannot be resolved: $(sed 's/^\[mailexpert\] warning: //' "$errors" | paste -sd';' -)"
+  fi
+  rm -f "$errors"
+}
+
 report_text() {
   local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
   for key in version checkout running ready tenant_worker edge_services edge_image backup_configured \
-    last_backup_at last_dump_bytes free_kb migrations_applied spam_rule target target_commit; do
+    last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_commit; do
     [ -n "${FACT[$key]+set}" ] || continue
     printf '  %-20s %s\n' "$key" "${FACT[$key]:--}"
   done
@@ -327,8 +360,10 @@ report_json() {
                last_dump_bytes: ($f.last_dump_bytes | num), pre_update_dumps: $dumps},
       free_kb: ($f.free_kb | num), migrations_applied: ($f.migrations_applied | num),
       spam_rule: (if ($f.spam_rule // "") == "" then null else $f.spam_rule end),
-      target: (if $f.target == null then null else
-        {version: $f.target, commit_found: ($f.target_commit | flag), images: $images,
+      target: (if $f.target == null then
+          (if $f.channel == null then null else {version: null, channel: $f.channel, commit_found: false} end)
+        else
+        {version: $f.target, channel: ($f.channel // null), commit_found: ($f.target_commit | flag), images: $images,
          pending_migrations: (if $schema_read then $pending else null end),
          unknown_migrations: (if $schema_read then $unknown else null end)} end),
       problems: $problems, warnings: $warnings, next: $next, info: $info}'
@@ -348,8 +383,8 @@ main() {
       *) die "unknown option: $1 (see --help)" 2 ;;
     esac
   done
-  if [ -n "$target" ] && ! [[ $target =~ ^sha-[0-9a-f]{12}$ ]]; then
-    die "--target must be sha-<first 12 characters of the commit>" 2
+  if [ -n "$target" ] && ! [[ $target =~ ^sha-[0-9a-f]{12}$ || $target == latest ]]; then
+    die "--target must be sha-<first 12 characters of the commit> or latest" 2
   fi
   [[ $MIN_FREE_PCT =~ ^[0-9]+$ ]] || die "MAILEXPERT_MIN_FREE_PCT must be a number" 2
   [ "$(id -u)" = 0 ] || die "run status.sh as root (it reads <prefix>/.env and talks to docker)" 2
@@ -362,6 +397,10 @@ main() {
   collect_containers
   collect_disk_and_backups
   collect_database
+  if [ "$target" = latest ]; then
+    resolve_target_channel
+    target=$RESOLVED_TARGET
+  fi
   if [ -n "$target" ]; then collect_target "$target"; fi
 
   if [ "$json" = 1 ]; then report_json; else report_text; fi

@@ -20,10 +20,13 @@ hand-rolled docker commands), verify, report what the commands printed.
 
 - `<PANEL_HOST>`: SSH target of the panel server, and `<PREFIX>` (default `/opt/mailexpert`).
 - The target version `sha-<12>`. The production channel is `latest`: the build the owner promoted
-  as ready for production (the promotion step arrives with the in-panel update, see
-  deployment-system.md, section 9). Until it exists, take the version the human names; the latest
-  green `main` (below) only when the human agrees to it. A channel is always resolved to its
-  `sha-<12>` first: servers only ever run `sha-<12>` images.
+  as ready for production with the `promote.yml` workflow (git tag `latest` plus image tags
+  `latest` on the same digests; deployment-system.md, section 9). Default to `latest` when the
+  human says "update"; another `sha-<12>` only when the human names it, the latest green `main`
+  (below) only when the human agrees to it. A channel is always resolved to its `sha-<12>` first
+  (`update.sh latest` and `status.sh --target latest` do it): servers only ever run `sha-<12>`
+  images. Never run `promote.yml` yourself unless the owner explicitly asks for that promotion (it
+  runs only from main and needs a tag ruleset on `latest`, see docs/operations/README.md, section 9).
 - For the mail node: `<MAIL_HOST>` SSH target. For a first install: sign-in mode, hosts, admin
   emails (see `docs/operations/deployment.md`, sections 1-3).
 - Which components are in scope (panel only, panel + node, tenant).
@@ -70,6 +73,19 @@ before `ssh` sends the command.
 ```bash
 ssh root@<PANEL_HOST> "$D/status.sh --prefix <PREFIX> --json"
 ssh root@<PANEL_HOST> "systemctl list-timers 'mailexpert-*' --no-pager"
+```
+
+The promoted `latest` (what the panel's "Обновление панели" card offers):
+
+```bash
+gh api repos/wyrtensi/MailExpert/git/ref/tags/latest --jq '.object.sha[0:12]'
+```
+
+Whether the host updater behind that card is installed, and what it did last (results hold no
+secrets; they are what the panel shows):
+
+```bash
+ssh root@<PANEL_HOST> "systemctl is-active mailexpert-updater.path; ls -t <PREFIX>/state/update-spool/result/ | head -3"
 ```
 
 Latest green version on `main` (CI's `images` job published `sha-<12>` for it):
@@ -130,12 +146,14 @@ Pending migrations: <list | none | unknown>
   -> rollback without data loss: yes only if "none"; "unknown" counts as present: dump only
 Steps:
   1. update.sh sha-<12> on <PANEL_HOST>, detached (pre-update dump + restic snapshot, up to 10 min) [GATE]
+     (or: the human presses "Обновить" in Настройки -> Администрирование -> Обновление панели;
+     same checks, same update.sh, run by the host updater)
   2. <only if next says so> node: checkout <commit>, setup.sh --dry-run, setup.sh            [GATE]
-  3. <only if next says so> edge: empty EDGE_IMAGE, install.sh (old digest: <edge_image>)     [GATE]
-  4. panel warnings to clear: <spam rule / apply settings / tenant policy>                    [human, in UI]
+  3. panel warnings to clear: <spam rule / apply settings / tenant policy>                    [human, in UI]
+Edge: <the Caddy image changes: update.sh pulls and pins it, old digest <edge_image> | unchanged>
 Post-checks: status.sh (running = target, no problems), healthcheck.sh, sign-in, mailbox status
 Rollback triggers: update.sh exit 1; backend restart loop; running != target; mass mailbox errors
-Rollback: <install.sh --version sha-<running> | runbook "Откат обновления" with the dump>
+Rollback: <install.sh --version sha-<running> | rollback.sh --to sha-<running> (the dump)>
 Downtime: backend restart; migrations may add minutes
 ```
 
@@ -176,10 +194,27 @@ ssh root@<MAIL_HOST> "/opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh
 If `setup.sh` says `mailcow.conf` changed and a full `docker compose down && up -d` of mailcow is
 needed, that is a separate GATE: mail stops for the restart, EOP queues inbound mail.
 
-Edge image, when `next: edge: the Caddy image changed` appeared: ask the human to set
-`EDGE_IMAGE=` (empty) in `<PREFIX>/edge/.env` or get approval to do exactly that edit with
-`sed -i 's/^EDGE_IMAGE=.*/EDGE_IMAGE=/'`, then `install.sh --prefix <PREFIX>` (GATE, detached as
-above with another unit name).
+Edge image: when the Caddy image changes between the versions (`info: edge: the Caddy image
+changed`), `update.sh` pulls the new one before the backup, pins it by digest and keeps the old
+`EDGE_IMAGE` in `<PREFIX>/state/edge-image.previous`; nothing to do by hand.
+
+Update from the panel (the human's button) runs the same `update.sh` through the host updater
+(`mailexpert-updater.path` -> `.service` -> `updater.sh`). If the human pressed it, do not start
+`update.sh` yourself; follow it read-only:
+
+```bash
+ssh root@<PANEL_HOST> "journalctl -u mailexpert-updater.service -o cat --no-pager -n 200"
+ssh root@<PANEL_HOST> "jq '{state, message, exitCode, next}' <PREFIX>/state/update-spool/result/<request id>.json"
+```
+
+The button installs only exactly the promoted `latest` (on main, newer than the running version,
+not a version that was rolled back); any other version is `update.sh sha-<12>` over SSH after the
+human's "yes". The updater rolls back by itself only after `update.sh` exit 1 when the preflight
+read the schema, nothing was pending and the migration count did not change
+(`state: rolled_back`); any other exit code means no rollback. `failed` or `rollback_failed` means
+the Rollback section below, by a person's decision. A version left by a rollback
+(`<PREFIX>/state/rolled-back-version`) is not offered again until a newer build is promoted; do not
+delete that file to get around it.
 
 First install of a panel: `docs/operations/deployment.md`, section 2. Run `install.sh` with the
 human's flags (detached); exit 3 lists the missing secrets: hand the list to the human, who feeds
@@ -219,12 +254,19 @@ and `version` are the target and `running` is usually empty (not ready).
 - **No migrations were recorded** (`update.sh` said "no migration was recorded as applied", and
   the preflight's `pending_migrations` was `[]`, not `null`):
   `install.sh --prefix <PREFIX> --version sha-<old>` (GATE, detached). No data loss.
-- **Migrations were applied, or it is unknown**: the runbook `docs/operations/deployment.md`,
-  "Откат обновления": stop backend and frontend, restore `backups/pre-update-sha-<old>.dump` into a
-  new database, swap by rename, `install.sh --version sha-<old>`. Everything written since the
-  update is lost. Separate GATE before the restore and before the rename; show the exact commands
-  with the project and database names filled in first.
-- **Edge**: put the old digest back into `EDGE_IMAGE`, `install.sh` (GATE).
+- **Migrations were applied, or it is unknown**: `rollback.sh --prefix <PREFIX> --to sha-<old>`
+  (the runbook `docs/operations/deployment.md`, "Откат обновления", as one script: stops backend
+  and frontend, restores `backups/pre-update-sha-<old>.dump` into a new database, swaps it in by
+  renaming, keeps the replaced database as `<db>_before_rollback_<time>`, restores the Caddy image
+  an update replaced, `install.sh --version sha-<old>`). Everything written since the update is
+  lost. GATE: show the human the command and what is lost; after an explicit "yes" run it
+  detached with `--confirm sha-<old>` (it refuses without a terminal or that flag). Exit codes:
+  0 done, 1 failed after the stop (read its output), 2/3 nothing changed (2 also covers too little
+  free space: it needs the database size plus the dump). Interrupted after the swap: rerun the same
+  command, it only switches the code; if it says install.conf is at the target already, the next
+  step is `install.sh --prefix <PREFIX>` (GATE). Never drop the kept database yourself.
+- **Edge** without `rollback.sh`: put the old digest (`state/edge-image.previous`) back into
+  `EDGE_IMAGE`, `install.sh` (GATE).
 - **Node scripts**: previous commit in `/opt/mailexpert-node-src`, `setup.sh` (GATE).
 - Node data: `node-restore.sh` only onto a clean server (`mail-node.md`, section 8). Never on a
   live node.

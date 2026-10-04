@@ -1,0 +1,10 @@
+[Unit]
+Description=MailExpert update requests from the panel
+
+[Path]
+# The backend writes <uuid>.tmp and renames it to <uuid>.json: only a complete request matches.
+PathExistsGlob=@PREFIX@/state/update-spool/request/*.json
+Unit=mailexpert-updater.service
+
+[Install]
+WantedBy=paths.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=MailExpert updater: checks and updates asked for from the panel
+Wants=docker.service
+After=docker.service network-online.target
+# A backstop against a loop: updater.sh empties the request directory on every run, so the path
+# unit does not retrigger. If this limit is hit anyway, the path unit stops watching until
+# `systemctl reset-failed mailexpert-updater.service mailexpert-updater.path` and
+# `systemctl start mailexpert-updater.path` (or install.sh).
+StartLimitIntervalSec=10min
+StartLimitBurst=30
+
+[Service]
+Type=oneshot
+ExecStart=@PREFIX@/app/scripts/deploy/updater.sh --prefix @PREFIX@
+# An update waits up to 10 minutes for readiness after a backup that can take long; the default
+# 90 s of a oneshot would kill it half-way.
+TimeoutStartSec=4h

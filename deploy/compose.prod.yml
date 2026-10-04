@@ -31,6 +31,13 @@ services:
       # two hops to the client's address, which the sign-in rate limit keys on
       # (backend/src/utils/trustProxy.js).
       TRUST_PROXY: ${TRUST_PROXY:-2}
+      # Update from the panel (docs/architecture/deployment-system.md, section 9): the backend
+      # writes requests into request/ and reads the host's results from result/ (read-only). The
+      # host directories are made by install.sh, which also writes UPDATE_SPOOL_HOST_DIR to .env.
+      UPDATE_SPOOL_DIR: /var/lib/mailexpert/update-spool
+    volumes:
+      - ${UPDATE_SPOOL_HOST_DIR:-/opt/mailexpert/state/update-spool}/request:/var/lib/mailexpert/update-spool/request
+      - ${UPDATE_SPOOL_HOST_DIR:-/opt/mailexpert/state/update-spool}/result:/var/lib/mailexpert/update-spool/result:ro
 
   # Optional (profile "tenant", docker-compose.yml): pulled and started only with
   # COMPOSE_PROFILES=tenant.

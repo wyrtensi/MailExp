@@ -143,7 +143,8 @@ app_settings() {
     "APP_ALT_URLS=$alt" \
     "AUTH_MODE=$auth" \
     "BOOTSTRAP_ADMIN_EMAILS=$CFG_ADMIN_EMAILS" \
-    "GOOGLE_REDIRECT_URI=$url/oauth/google/callback"
+    "GOOGLE_REDIRECT_URI=$url/oauth/google/callback" \
+    "UPDATE_SPOOL_HOST_DIR=$OPT_PREFIX/state/update-spool"
 }
 
 # edge_services: the edge services this install runs, one per line.

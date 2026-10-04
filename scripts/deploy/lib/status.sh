@@ -120,7 +120,7 @@ update_notes() {
   fi
   if [[ $edge == *,caddy,* ]]; then
     if grep -q '^deploy/edge/Dockerfile$' <<<"$paths"; then
-      echo "next edge: the Caddy image changed; update.sh keeps the pinned EDGE_IMAGE: to take the new one, empty EDGE_IMAGE in <prefix>/edge/.env and run install.sh (docs/operations/README.md, section 9)"
+      echo "info edge: the Caddy image changed; update.sh pulls the new one before the backup and pins it by digest, the previous EDGE_IMAGE is kept in <prefix>/state/edge-image.previous for going back"
     fi
     if grep -q '^deploy/edge/Caddyfile.tmpl$' <<<"$paths"; then
       echo "info edge: the Caddyfile template changed; install.sh (run by update.sh) writes it and restarts Caddy"

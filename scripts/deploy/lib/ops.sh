@@ -30,7 +30,44 @@ space_problem() {
   return 0
 }
 
+# rollback_space_problem <free kB> <dump bytes> <database bytes>: rollback.sh restores the dump
+# into a new database next to the live one, which it replaces only afterwards, and keeps both: it
+# needs the size of the live database (what the restored copy can grow to) plus the dump.
+rollback_space_problem() {
+  local free=$(($1 * 1024)) need=$(($2 + $3))
+  if [ "$free" -lt "$need" ]; then
+    echo "free space: $(($1 / 1024)) MB, the rollback needs $((need / 1048576)) MB (the database next to its restored copy, plus the dump)"
+  fi
+  return 0
+}
+
 # stale_local_dumps <keep>: reads dump paths, newest first, and prints the ones beyond <keep>.
 stale_local_dumps() {
   tail -n +"$(($1 + 1))"
+}
+
+# The EDGE_IMAGE an update replaced, kept so that going back to that version restores it:
+# <state dir>/edge-image.previous holds "<version left> <image>".
+
+# save_previous_edge_image <version left> <image>
+save_previous_edge_image() {
+  printf '%s %s\n' "$1" "$2" >"$STATE_DIR/edge-image.previous"
+}
+
+# previous_edge_image <version>: the edge image that ran with <version> before an update replaced
+# it; status 1 when no update replaced it.
+previous_edge_image() {
+  local version='' image=''
+  [ -f "$STATE_DIR/edge-image.previous" ] || return 1
+  read -r version image <"$STATE_DIR/edge-image.previous" || true
+  [ "$version" = "$1" ] && [ -n "$image" ] || return 1
+  printf '%s\n' "$image"
+}
+
+# edge_image_changes <edge services, comma-separated>: reads the paths changed between two
+# versions on stdin; status 0 when the Caddy image changes (it is built from deploy/edge/Dockerfile;
+# the Caddyfile and the compose file are written by install.sh) and this install runs Caddy.
+edge_image_changes() {
+  [[ ",$1," == *,caddy,* ]] || return 1
+  grep -q '^deploy/edge/Dockerfile$'
 }

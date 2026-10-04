@@ -65,6 +65,10 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'rule.updated': 'admin.audit.actionRuleUpdated',
   'rule.deleted': 'admin.audit.actionRuleDeleted',
   'rule.run': 'admin.audit.actionRuleRun',
+  'panel.update_requested': 'admin.audit.actionPanelUpdateRequested',
+  'panel.update_started': 'admin.audit.actionPanelUpdateStarted',
+  'panel.update_finished': 'admin.audit.actionPanelUpdateFinished',
+  'panel.update_failed': 'admin.audit.actionPanelUpdateFailed',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -291,6 +295,17 @@ export function auditDetail(entry) {
     // A hand-started run of a mailbox's rules (backend POST /rules/run): how many it ran.
     case 'rule.run':
       return { key: 'admin.audit.detailRuleRun', values: { count: Array.isArray(details.ruleIds) ? details.ruleIds.length : 0 } };
+    // A panel update (backend panelUpdate service): the version it went to, and where from when known.
+    case 'panel.update_requested':
+    case 'panel.update_started':
+    case 'panel.update_finished':
+    case 'panel.update_failed': {
+      const target = typeof details.target === 'string' ? details.target : '';
+      if (!target) return null;
+      return typeof details.from === 'string' && details.from
+        ? { key: 'admin.audit.detailPanelUpdate', values: { from: details.from, target } }
+        : { key: 'admin.audit.detailPanelUpdateTarget', values: { target } };
+    }
     case 'mailbox.added':
     case 'mailbox.reconnected':
     case 'mailbox.oauth_subject_reset':

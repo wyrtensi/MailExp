@@ -102,6 +102,7 @@ expect_invalid() {
   [[ $output == *"GOOGLE_REDIRECT_URI=https://cf.example.com/oauth/google/callback"* ]]
   [[ $output == *"MAILEXPERT_VERSION=sha-0123456789ab"* ]]
   [[ $output == *"COMPOSE_PROJECT_NAME=mailexpert"* && $output == *"APP_HTTP_PORT=8080"* ]]
+  [[ $output == *"UPDATE_SPOOL_HOST_DIR=/opt/mailexpert/state/update-spool"* ]]
   configure --version sha-0123456789ab --signin both --cf-host cf.example.com --direct-host panel.example.com --admin-email admin@example.com
   run app_settings
   [[ $output == *$'APP_URL=https://cf.example.com\nAPP_ALT_URLS=https://panel.example.com\n'* ]]

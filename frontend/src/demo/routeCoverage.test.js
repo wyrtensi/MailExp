@@ -60,6 +60,7 @@ const CONCRETE_PATH = {
   '/admin/auth-events': '/admin/auth-events?limit=100&offset=0',
   '/admin/audit': '/admin/audit',
   '/admin/access-sync': '/admin/access-sync',
+  '/admin/update': '/admin/update',
   '/admin/google-apps': '/admin/google-apps',
   '/admin/oidc': '/admin/oidc',
   '/auth/oidc/providers': '/auth/oidc/providers',
@@ -222,6 +223,8 @@ test('as a plain user the admin routes answer 403, the user routes still answer'
       ['POST', '/mail-node/quarantine/1/release'],
       ['GET', '/mail-node/outages'],
       ['GET', '/admin/users'],
+      ['GET', '/admin/update'],
+      ['POST', '/admin/update', { target: 'sha-dddddddddddd', confirm: 'sha-dddddddddddd' }],
       ['GET', '/admin/ai'],
       ['GET', '/integrations'],
       ['POST', '/integrations/microsoft', {}],
@@ -474,6 +477,14 @@ test('admin AI config round-trips; provider test/codex sign-in reject', async ()
   await answer('/admin/ai/codex/device', 'DELETE', '/admin/ai/codex/device');
   await answer('/admin/ai/codex', 'DELETE', '/admin/ai/codex');
   await answer('/admin/ai', 'DELETE', '/admin/ai');
+});
+
+test('the panel update reports a panel without an update mechanism; starting or checking rejects', async () => {
+  const state = await demoRequest('GET', '/admin/update');
+  assert.equal(state.updater.installed, false);
+  assert.equal(state.updateAvailable, false);
+  await reject('/admin/update/check', 'POST', '/admin/update/check', { target: 'sha-dddddddddddd' }, /demo mode/);
+  await reject('/admin/update', 'POST', '/admin/update', { target: 'sha-dddddddddddd', confirm: 'sha-dddddddddddd' }, /demo mode/);
 });
 
 test('category sources round-trip; AI classification rejects', async () => {

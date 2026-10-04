@@ -4,6 +4,13 @@
 log() { printf '[mailexpert] %s\n' "$*" >&2; }
 warn() { printf '[mailexpert] warning: %s\n' "$*" >&2; }
 
+# redact_url <url>: the URL without user information (https://user:token@host/x -> https://host/x),
+# for messages and logs: a repository URL may carry a token, and the updater's results reach the
+# backend container.
+redact_url() {
+  printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'
+}
+
 # die <message> [exit code, default 1]
 die() {
   printf '[mailexpert] error: %s\n' "$1" >&2

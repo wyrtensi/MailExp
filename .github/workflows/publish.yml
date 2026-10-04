@@ -1,5 +1,7 @@
 name: Publish to GHCR
 
+# Semver images for a v* tag. They never get the tag `latest`: that is the production channel the
+# owner sets with promote.yml (docs/architecture/deployment-system.md, section 9).
 on:
   push:
     tags:
@@ -40,7 +42,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
 
       - name: Build and push backend
         uses: docker/build-push-action@v6
@@ -68,7 +69,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
 
       - name: Build and push frontend
         uses: docker/build-push-action@v6
