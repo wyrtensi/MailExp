@@ -12,6 +12,14 @@ RESTIC_IMAGE=restic/restic:0.18.0
 # share the repository, the old and the new one around a move, can never evict each other's.
 RESTIC_HOST=''
 RESTIC_KEYS=(RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY)
+# Extra `docker run` arguments of every restic container (the mail node labels its own, so a run
+# killed from outside leaves containers its next run can find and remove).
+RESTIC_DOCKER_ARGS=()
+# The restic hosts of the panel's own snapshots: mailexpert-<hex>, never the mail node's
+# mailexpert-node-<hex> (the two keep separate repositories; this keeps a mix-up from restoring the
+# other's snapshot).
+# shellcheck disable=SC2034 # read by restore.sh and the mail node's scripts
+PANEL_HOST_RE='^mailexpert-(?!node-)'
 # The health check fails when the last backup is older: nightly at 03:30 plus slack.
 BACKUP_MAX_AGE=$((26 * 3600))
 # How long ensure_backup_repo's `restic cat config` may take. restic 0.18 retries a backend error
@@ -96,17 +104,18 @@ restic_host_ok() {
   [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
 }
 
-# load_restic_host: RESTIC_HOST from state/restic-host, which is written once, the first time it
-# is needed (install.sh, or the first backup.sh of a server installed before the file existed),
-# and never replaced: state/ describes this server and is not part of a snapshot, so a server
-# restored from another one's snapshot keeps its own host. The first writer wins (ln fails on an
-# existing file), so two scripts starting at once agree on one name.
+# load_restic_host [prefix, default mailexpert]: RESTIC_HOST from state/restic-host, which is
+# written once, the first time it is needed (install.sh, or the first backup.sh of a server
+# installed before the file existed), and never replaced: state/ describes this server and is not
+# part of a snapshot, so a server restored from another one's snapshot keeps its own host. The
+# first writer wins (ln fails on an existing file), so two scripts starting at once agree on one
+# name. The mail node's backup (mail-node/node-backup.sh) uses the prefix mailexpert-node.
 load_restic_host() {
-  local file=$STATE_DIR/restic-host tmp host
+  local file=$STATE_DIR/restic-host prefix=${1:-mailexpert} tmp host
   if [ ! -e "$file" ]; then
     tmp=$(mktemp "$file.XXXXXX")
     chmod 600 "$tmp"
-    printf 'mailexpert-%s\n' "$(gen_hex 8)" >"$tmp"
+    printf '%s-%s\n' "$prefix" "$(gen_hex 8)" >"$tmp"
     if ln "$tmp" "$file" 2>/dev/null; then log "backups: the restic host of this server is $(<"$file")"; fi
     rm -f "$tmp"
   fi
@@ -189,9 +198,34 @@ restic_run() {
   [ "${1:-}" = -- ] || die "restic_run: -- expected before the restic arguments"
   shift
   mkdir -p "$STATE_DIR/restic-cache"
-  docker run --rm --network host \
+  docker run --rm --network host "${RESTIC_DOCKER_ARGS[@]}" \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
     -e RESTIC_CACHE_DIR=/cache -v "$STATE_DIR/restic-cache:/cache" "${mounts[@]}" "${run[@]}" "$@"
+}
+
+# pick_snapshot <latest|id> <host or ''> [tag] [host regex]: prints "<id> <host> <time> <epoch>
+# <tags, comma separated>" of the snapshot to restore: the newest one (by time, whatever the time
+# zone of the server that made it) or the one named, among the snapshots of that host and with that
+# tag when they are given; without a host, only of the hosts the regex matches. Shared by restore.sh
+# (the panel's hosts) and the mail node's node-restore.sh (the node's).
+pick_snapshot() {
+  local -a filter=()
+  if [ -n "$2" ]; then filter=(--host "$2"); fi
+  if [ -n "${3:-}" ]; then filter+=(--tag "$3"); fi
+  if [ "$1" != latest ]; then filter+=("$1"); fi
+  restic_run -- snapshots --json "${filter[@]}" | snapshots_pick "$([ -n "$2" ] || printf '%s' "${4:-}")"
+}
+
+# snapshots_pick [host regex]: the newest snapshot of `restic snapshots --json` on stdin, among the
+# hosts the regex matches (all without one), as pick_snapshot prints it.
+snapshots_pick() {
+  jq -r --arg re "${1:-}" '
+    def epoch: capture("^(?<d>[0-9-]+T[0-9:]+)(?<f>[.][0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
+      | (.d + "Z" | fromdateiso8601)
+        - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[4:6] | tonumber) * 60) end);
+    map(select($re == "" or (.hostname | test($re))))
+    | if length == 0 then empty else max_by([(.time | epoch), .time])
+      | "\(.id) \(.hostname) \(.time) \(.time | epoch | floor) \((.tags // []) | join(","))" end'
 }
 
 # ensure_backup_repo: opens the repository, creating it (format v2, compressed) only when restic
@@ -234,8 +268,9 @@ print_recovery_key() {
   } >&2
 }
 
-# show_recovery_key_once: prints the recovery key the first time, and only to a terminal:
-# cloud-init and CI logs must not keep it.
+# show_recovery_key_once <command that shows it later>: prints the recovery key the first time,
+# and only to a terminal: cloud-init and CI logs must not keep it. install.sh names backup.sh, the
+# mail node's setup.sh node-backup.sh.
 show_recovery_key_once() {
   local marker=$STATE_DIR/recovery-key.shown
   [ ! -f "$marker" ] || return 0
@@ -243,7 +278,7 @@ show_recovery_key_once() {
     print_recovery_key
     : >"$marker"
   else
-    log "the recovery key has not been shown yet (no terminal); show it with: $APP_DIR/scripts/deploy/backup.sh --prefix $OPT_PREFIX --show-recovery-key"
+    log "the recovery key has not been shown yet (no terminal); show it with: $1"
   fi
 }
 

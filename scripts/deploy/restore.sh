@@ -15,7 +15,8 @@
 #
 #   restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--host <restic host>] [--no-start]
 #
-# latest is the newest snapshot of any server (each server backs up under its own restic host);
+# latest is the newest snapshot of any panel server (each server backs up under its own restic host,
+# mailexpert-<hex>; a mail node's mailexpert-node-<hex> snapshots are never picked);
 # --host limits the choice to one server's snapshots. The host and time restored are printed.
 #
 # Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no data changed).
@@ -46,7 +47,7 @@ Usage: restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--host <resti
 
 On a fresh server: install.sh --version <the snapshot's version> --no-start, configure.sh with
 RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then this.
-latest       the newest snapshot of any server in the repository
+latest       the newest snapshot of any panel server in the repository (never a mail node's)
 --host       only snapshots of this restic host (restic snapshots lists them)
 --no-start   restore without starting the panel (rehearsal of a move); the server stays standby
 Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no data changed).
@@ -103,19 +104,6 @@ restore_redis() {
   app_compose up --no-start redis >/dev/null
   app_compose cp "$1/redis.rdb" redis:/data/dump.rdb
   log "redis: dump.rdb restored"
-}
-
-# pick_snapshot <latest|id> <host or ''>: prints "<id> <host> <time>" of the snapshot to restore:
-# the newest one (by time, whatever the time zone of the server that made it) or the one named.
-pick_snapshot() {
-  local -a filter=()
-  if [ -n "$2" ]; then filter=(--host "$2"); fi
-  if [ "$1" != latest ]; then filter+=("$1"); fi
-  restic_run -- snapshots --json "${filter[@]}" | jq -r '
-    def epoch: capture("^(?<d>[0-9-]+T[0-9:]+)(?<f>[.][0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
-      | (.d + "Z" | fromdateiso8601)
-        - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[4:6] | tonumber) * 60) end);
-    if length == 0 then empty else max_by([(.time | epoch), .time]) | "\(.id) \(.hostname) \(.time)" end'
 }
 
 # check_restored <counts json>: verify-restore.mjs in the backend image against the restored
@@ -176,9 +164,9 @@ main() {
   load_restic_env
   ensure_image "$RESTIC_IMAGE"
   started=$SECONDS
-  picked=$(pick_snapshot "$snapshot" "$host") || die "restic could not list $snapshot: no such snapshot, or the repository is unreachable"
+  picked=$(pick_snapshot "$snapshot" "$host" '' "$PANEL_HOST_RE") || die "restic could not list $snapshot: no such snapshot, or the repository is unreachable"
   [ -n "$picked" ] || die "no snapshot $snapshot${host:+ of host $host} in the repository" 2
-  read -r id from at <<<"$picked"
+  read -r id from at _ <<<"$picked"
   log "restoring snapshot ${id:0:8} of host $from, made at $at"
   restic_run -v "$WORK:/restore" -- restore "$id" --target /restore >/dev/null
   files=$WORK/backup

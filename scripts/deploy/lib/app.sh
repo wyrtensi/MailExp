@@ -31,14 +31,6 @@ load_install() {
 app_compose() { "${APP_COMPOSE[@]}" "$@"; }
 edge_compose() { "${EDGE_COMPOSE[@]}" "$@"; }
 
-# ensure_image <image>: pulls the image unless it is present locally (an emergency build from
-# source tags a local image that a pull must not replace).
-ensure_image() {
-  if docker image inspect "$1" >/dev/null 2>&1; then return 0; fi
-  log "pulling $1"
-  docker pull --quiet "$1" >/dev/null || die "cannot pull $1 (emergency build from source: see deploy/compose.prod.yml)"
-}
-
 # panel_ready: status 0 when /api/health/ready answers 200 on the loopback port.
 panel_ready() {
   curl -fs -m 5 -o /dev/null "http://127.0.0.1:$CFG_HTTP_PORT/api/health/ready"

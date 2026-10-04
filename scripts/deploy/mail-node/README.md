@@ -2,18 +2,23 @@
 
 The parts of a mailcow mail node that have no API: what [`setup.sh`](setup.sh) puts on the host and
 what [`eop-ranges.sh`](eop-ranges.sh) keeps current there (requirements R-39 and R-40 in
-[eop-panel-requirements.md](../../../docs/architecture/mail-node-research/eop-panel-requirements.md)).
+[eop-panel-requirements.md](../../../docs/architecture/mail-node-research/eop-panel-requirements.md)),
+and the node's backup and restore ([`node-backup.sh`](node-backup.sh), [`node-restore.sh`](node-restore.sh)).
 Everything the mailcow API can do, the panel does ("Apply settings", runbook section 6). The owner's
-runbook is [docs/operations/mail-node.md](../../../docs/operations/mail-node.md), sections 3 and 4.
+runbook is [docs/operations/mail-node.md](../../../docs/operations/mail-node.md), sections 3 and 4,
+and 7 and 8 for the backup and the move.
 
 | File | What it is |
 |---|---|
 | `setup.sh` | one idempotent run on the node host, as root, from a checkout of this repository |
 | `eop-ranges.sh` | the EOP ranges, the firewall and the node checks; installed to `/opt/mailexpert-node`, run hourly and at boot |
 | `lib.sh` | shared by both (parsing, mailcow files, ipsets, the `DOCKER-USER` chains) |
+| `node-backup.sh` | the nightly backup of the node into restic; installed to `/opt/mailexpert-node` once the restic keys are stored |
+| `node-restore.sh` | restores a node backup onto a fresh server (a move, a rebuilt node) |
+| `backup-lib.sh` | shared by the two and `setup.sh`; uses the panel's `lib/backup.sh` (restic in its pinned container) |
 | `extra-cf.sh` | edits one `key = value` line of Postfix's `extra.cf`; the local stand uses it too |
 | `dovecot-extra.conf` | the Dovecot settings `setup.sh` keeps as a block in `data/conf/dovecot/extra.conf` |
-| `systemd/`, `cron/` | the timer, the boot unit, and the cron file for a host without systemd |
+| `systemd/`, `cron/` | the timers, the boot unit, and the cron files for a host without systemd |
 
 ## setup.sh
 
@@ -129,7 +134,11 @@ temporary file) and the version to `eop-version`. `--restore` checks the saved l
 Then every run checks the node: the firewall is in place, `mailcow.conf` still has the `ENABLE_IPV6`
 that `setup.sh` set, and with IPv6 off nothing listens on the mail ports over IPv6 (`ss -ltn`). Any
 problem, or any failure above, pings `<EOP_RANGES_PING_URL>/fail` with the reasons and exits 1;
-otherwise the run pings success.
+otherwise the run pings success. On the old node of a move (standby after `node-backup.sh --tag
+move`) a run asks Microsoft nothing: the node's chain closes every mail port to everyone (25 dropped,
+587 and 993 reset, the rest dropped; no EOP set needed) and the run pings only `/fail`, when
+`postfix-mailcow`, `dovecot-mailcow` or the watchdog run again; the new node pings the same check
+otherwise. `setup.sh --end-standby` ends standby.
 
 The list file is the same list the panel applies as mailcow forwarding hosts (R-12); the panel has
 its own copy in `eopRanges.js` and shows its version in the apply result. When the version changes,
@@ -141,6 +150,74 @@ change alerts once (the next hourly ping recovers it) and the panel's copy gets 
 The units run with `NoNewPrivileges`, `PrivateTmp`, `ProtectHome` and `ProtectSystem=full`; they
 write only `/var/lib/mailexpert-node`.
 
+## node-backup.sh and node-restore.sh
+
+```bash
+sudo scripts/deploy/mail-node/setup.sh --backup-keys < node-backup.env   # KEY=VALUE lines, see below
+/opt/mailexpert-node/node-backup.sh                       # what mailexpert-node-backup.timer runs, 02:30
+/opt/mailexpert-node/node-backup.sh --tag manual --verify # now, with the restore check
+/opt/mailexpert-node/node-backup.sh --status              # the last backup; exit 1 when older than 26 h
+/opt/mailexpert-node/node-backup.sh --show-recovery-key
+/opt/mailexpert-node/node-backup.sh --tag move            # the last one before a move: postfix and dovecot stopped
+/opt/mailexpert-node/node-backup.sh --forget-host <host>  # after a move: the old node's snapshots but its move one
+/opt/mailexpert-node/node-backup.sh --cleanup             # the unit's ExecStopPost: containers a killed run left
+scripts/deploy/mail-node/setup.sh --end-standby           # the move was called off
+scripts/deploy/mail-node/node-restore.sh latest|<id> [--host <restic host>] [--rehearsal | --update] < keys
+```
+
+`--backup-keys` takes `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` (stored once, never replaced),
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `NODE_BACKUP_PING_URL`,
+`NODE_BACKUP_READ_SUBSET` (default `5%`), `NODE_BACKUP_DUMP_TIMEOUT` (3600), `NODE_BACKUP_PUSH_TIMEOUT`
+(43200), `NODE_BACKUP_VERIFY_TIMEOUT` (7200, each restic call of the restore check),
+`NODE_BACKUP_RESERVE_PERCENT` (10) and `NODE_BACKUP_RESERVE_GB` (2; the larger stays free besides the
+dump) and `NODE_BACKUP_PARTIAL_LIMIT` (3) on stdin into `node.env`; `setup.sh` then opens the repository
+(creating it when it does not exist), shows the recovery key once in a terminal and enables the
+timer, whose `TimeoutStartSec` (the cron line's `timeout`) is the sum of those bounds, an hour for
+retention, the small calls and an hour of slack (63000 s by default). Under cron the output goes to
+`/var/log/mailexpert-node-backup.log` (0600, `/etc/logrotate.d/mailexpert-node-backup`); a `/fail` ping
+names the journal or that file. The node's repository is its own, with its own password
+(`s3:https://<endpoint>/<bucket>/node`): the same restic code as the panel's backups (`lib/backup.sh`),
+the node's restic host `mailexpert-node-<hex>`; a repository with the panel's hosts in it is refused,
+and the panel's `restore.sh` never picks a node's snapshot.
+
+A run: containers a killed run left removed (restic's carry the label `mailexpert.node-backup=1`;
+mailcow's is `mailcow-backup`) and stale restic locks unlocked; a free space check (the dump and the
+reserve); mailcow's own `helper-scripts/backup_and_restore.sh backup crypt redis rspamd postfix mysql`
+into `/var/backups/mailexpert-node/mailcow`, every archive checked (the script exits 0 when a step
+failed), the crypt archive listed for `ecprivkey.pem` and `ecpubkey.pem` and the database archive for a
+file; mailcow's configuration files, certificates, override, `node.env` and `meta.json` (the mailcow
+commit, the number of mailboxes) added; then one `restic backup` of that dump (`/backup`) and of the
+vmail volume mounted read-only (`/vmail`), tags `mailcow` and the run's tag. vmail goes past mailcow's
+script: it would tar all mail locally first (a second full copy on the disk), and a compressed tar
+deduplicates poorly where maildir files deduplicate almost whole. restic's exit 3 (files it could not
+read) is a partial snapshot: noted in the ping and `backup-last.json`, `/fail` after
+`NODE_BACKUP_PARTIAL_LIMIT` runs in a row, an error for `--tag move`. Retention: 7 daily, 4 weekly, 6
+monthly, every `move`; the nightly run on Sunday prunes. The local dump is removed; then, on Sundays
+and with `--verify`: `restic check --read-data-subset`, and the dump plus one mailbox (another each
+week) restored into a temporary directory with `--verify` (after a free space check of its own),
+mailcow's archives listed whole in mailcow's backup image. `/var/lib/mailexpert-node/backup-last.json`
+keeps the time, sizes, durations and `partial`; pings go to `NODE_BACKUP_PING_URL` (start, success,
+`/fail`). The panel does not read any of this: it reaches the node only through the mailcow API, so a
+missed or failed backup is the Healthchecks check's to report.
+
+`--tag move` refuses while `postfix-mailcow` or `dovecot-mailcow` runs, sets the restart policy of
+those two and the watchdog to `no` and stops the watchdog, needs a complete snapshot, checks the two
+are still down, and only then makes the node standby.
+
+`node-restore.sh` on a fresh server (mailcow cloned at the backup's commit, `generate_config.sh` run,
+nothing started): `/backup` into a temporary directory, mailcow.conf and the files in place, `docker
+compose pull` and `up -d`, vmail from restic straight into the volume (Dovecot stopped; `--overwrite
+if-changed --delete`, so an update downloads only what changed), then mailcow's own `restore` with its
+questions answered, once `mailcow_restore_prompts_ok` has checked that this version of the script asks
+exactly those (the questions of mailcow 2026-09 are in `test/mail-node/mailcow-2026-09-prompts`). The
+result is checked on the server, not in mailcow's output: the mail_crypt key pair in the crypt volume,
+and the database answering with the backup's number of mailboxes. `/var/lib/mailexpert-node/restored`
+keeps what it did: `in-progress` (run it again), `rehearsal` (`--update` only, to a newer snapshot of
+the same node or a move snapshot) or `live` (never again; `setup.sh` marks a restored server live).
+`--rehearsal` leaves the mail queue (Postfix's data set) out and stops `postfix-mailcow`,
+`ofelia-mailcow` (scheduled jobs, the sync jobs among them) and the watchdog with the restart policy
+`no`. `latest` without `--host` refuses when several nodes have snapshots.
+
 ## Tests
 
 ```bash
@@ -149,7 +226,9 @@ docker run --rm -v "$PWD:/code:ro" -w /code --entrypoint bash bats/bats:1.14.0 \
 docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:stable scripts/deploy/mail-node/*.sh
 ```
 
-`scripts/deploy/test/mail-node-setup.bats` and `mail-node-eop-ranges.bats` run with `docker`,
-`iptables`, `ip6tables`, `ipset`, `curl`, `ss` and `systemctl` mocked (`test/mail-node/mocks/`); the
+`scripts/deploy/test/mail-node-setup.bats`, `mail-node-eop-ranges.bats` and `mail-node-backup.bats` run
+with `docker` (restic inside it: `mock-restic`), `git`, `iptables`, `ip6tables`, `ipset`, `curl`, `ss`
+and `systemctl` mocked (`test/mail-node/mocks/`) and mailcow's backup script replaced by
+`test/mail-node/fake-backup-and-restore` (its layout and its questions); the
 web service answers are recorded (`test/mail-node/version.json`, `endpoints.json`, 2026-10-02,
 version `2026081400`).

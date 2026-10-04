@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# mailcow's helper-scripts/backup_and_restore.sh for the mail node tests, installed into the test's
+# mailcow directory: the same arguments, the same layout of a backup (mailcow-<date>/ with
+# backup_<set>.tar.zst, mailcow.conf and the architecture marker) and the same questions on restore
+# (mailcow-2026-09-prompts), read from stdin. Like the real one it exits 0 after a step failed.
+# The archives are text, one entry per line, which the docker mock lists as tar -t would: the crypt
+# archive names the files of the crypt volume, the database archive a file and the volume's
+# mailbox count (mailboxes=N), which a restore writes back.
+#   MOCK_MAILCOW_STATUS   exit status of a backup (it then writes nothing)
+#   MOCK_MAILCOW_DROP     the data set whose archive a backup leaves out (a step that failed)
+#   MOCK_MAILCOW_EMPTY_DB 1: mariabackup failed, the database archive holds only its directory
+#   MOCK_MAILCOW_STARTS   a service the backup starts while it runs (into $MOCK_DIR/running)
+#   MOCK_MAILCOW_RESTORE_SKIP  the data set a restore silently does not restore (crypt or mysql)
+printf 'mailcow %s\n' "$*" >>"$MOCK_DIR/calls"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+VOLUMES=$MOCK_DIR/volumes/${MOCK_PROJECT:-mailcowdockerized}
+BACKUP_LOCATION=${MAILCOW_BACKUP_LOCATION:-}
+if [ -z "$BACKUP_LOCATION" ]; then
+  read -ep "Backup location (absolute path, starting with /): " BACKUP_LOCATION
+fi
+if [ ! -d "$BACKUP_LOCATION" ]; then
+  read -p "Create it now? [y|N] " CREATE_BACKUP_LOCATION
+  exit 1
+fi
+
+if [ "$1" = backup ]; then
+  [ "${MOCK_MAILCOW_STATUS:-0}" = 0 ] || exit "$MOCK_MAILCOW_STATUS"
+  if [ -n "${MOCK_MAILCOW_STARTS:-}" ]; then echo "$MOCK_MAILCOW_STARTS" >>"$MOCK_DIR/running"; fi
+  dir=$BACKUP_LOCATION/mailcow-2026-10-04-02-30-00
+  mkdir -p "$dir"
+  cp "$SCRIPT_DIR/../mailcow.conf" "$dir/"
+  touch "$dir/.x86_64"
+  shift
+  for set in "$@"; do
+    name=$set
+    [ "$set" != mysql ] || name=mariadb
+    [ "$set" != "${MOCK_MAILCOW_DROP:-}" ] || continue
+    case $set in
+      crypt) (cd "${VOLUMES}_crypt-vol-1" && find . -type f | sed 's|^\./|/crypt/|') >"$dir/backup_crypt.tar.zst" ;;
+      mysql)
+        echo "/backup_mariadb/" >"$dir/backup_mariadb.tar.zst"
+        if [ "${MOCK_MAILCOW_EMPTY_DB:-0}" != 1 ]; then
+          echo "/backup_mariadb/ibdata1" >>"$dir/backup_mariadb.tar.zst"
+          echo "mailboxes=$(cat "${VOLUMES}_mysql-vol-1/mailboxes")" >>"$dir/backup_mariadb.tar.zst"
+        fi
+        ;;
+      *) printf '/%s/some/file\n' "$set" >"$dir/backup_$name.tar.zst" ;;
+    esac
+    echo "/$set/some/file"
+  done
+  exit 0
+fi
+
+if [ "$1" = restore ]; then
+  for folder in "$BACKUP_LOCATION"/mailcow-*/; do echo "[ 1 ] - $folder"; done
+  read -p "Select a restore point: " point
+  echo "[ 0 ] - all"
+  read -p "Select a dataset to restore: " dataset
+  read -p "mailcow will be stopped and the currently active mailcow.conf will be modified to use the DB parameters found in it - do you want to proceed? [Y|n] " proceed
+  printf 'mailcow restore answers: %s %s %s\n' "$point" "$dataset" "${proceed:-}" >>"$MOCK_DIR/calls"
+  dir=$(ls -d "$BACKUP_LOCATION"/mailcow-*/)
+  mkdir -p "$MOCK_DIR/mailcow-restored"
+  cp -a "$dir/." "$MOCK_DIR/mailcow-restored/"
+  if [ "${MOCK_MAILCOW_RESTORE_SKIP:-}" != crypt ] && [ -f "$dir/backup_crypt.tar.zst" ]; then
+    while IFS= read -r file; do
+      mkdir -p "$(dirname "${VOLUMES}_crypt-vol-1/${file#/crypt/}")"
+      printf 'key\n' >"${VOLUMES}_crypt-vol-1/${file#/crypt/}"
+    done <"$dir/backup_crypt.tar.zst"
+  else
+    printf '\e[31mError: No backup file found for crypt\e[0m\n'
+  fi
+  if [ "${MOCK_MAILCOW_RESTORE_SKIP:-}" != mysql ]; then
+    sed -n 's/^mailboxes=//p' "$dir/backup_mariadb.tar.zst" >"${VOLUMES}_mysql-vol-1/mailboxes"
+  fi
+  if false; then read -p "Force a resync now? [y|N] " FORCE_RESYNC; fi
+fi
+exit 0

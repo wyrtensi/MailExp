@@ -24,7 +24,9 @@ Google-приложений для ящиков Gmail — отдельно, в [
   [google-oauth.md](google-oauth.md).
 - S3-совместимый бакет **у другого провайдера, чем сам сервер** — для бэкапов restic. Можно
   добавить позже: без него `install.sh` предупреждает «backups are off» и ставит панель без
-  ночных бэкапов, а `update.sh` перед обновлением всё равно делает локальный дамп.
+  ночных бэкапов, а `update.sh` перед обновлением всё равно делает локальный дамп. Почтовый узел
+  бэкапится в то же хранилище, но в свой репозиторий restic со своим паролем
+  ([mail-node.md, раздел 7](mail-node.md)).
 - Проверка в Healthchecks.io (или совместимом сервисе) с интеграцией в Telegram — оповещения о
   сбое бэкапа, проверки здоровья или о том, что пинги вообще перестали приходить.
 
@@ -291,6 +293,8 @@ sudo /opt/mailexpert/app/scripts/deploy/update.sh sha-<12 символов ко�
 2. **Репетиция:**
 
    ```bash
+   # latest — самый новый снимок панели (хосты restic mailexpert-<hex>; снимки почтового узла,
+   # mailexpert-node-<hex>, restore.sh не выбирает, даже если их положили в тот же репозиторий)
    sudo /opt/mailexpert/app/scripts/deploy/restore.sh latest --no-start
    curl --resolve <DIRECT_HOST>:443:<IP сервера B> https://<DIRECT_HOST>/api/health
    docker compose -p mailexpert down -v   # убрать репетиционные данные с B
@@ -336,7 +340,11 @@ sudo /opt/mailexpert/app/scripts/deploy/update.sh sha-<12 символов ко�
 
 Установка, файрвол, EOP, бэкап и переезд узла описаны в [mail-node.md](mail-node.md). Коротко:
 MailExpert хранит только `<MAIL_HOST>`, IP узла не хранится нигде, поэтому после переезда узла в
-панели менять нечего.
+панели менять нечего. `backup.sh` панели узел не бэкапит: у узла свой ночной бэкап
+(`node-backup.sh`, таймер `mailexpert-node-backup.timer`, ставится `setup.sh` узла) и свой скрипт
+восстановления на новый сервер (`node-restore.sh`), которым пользуется и переезд узла
+([mail-node.md, разделы 7 и 8](mail-node.md)). Его состояние в панели не показывается: о сбое или
+пропуске сообщает его проверка Healthchecks.
 
 ## 8. Проверка перед продом
 

@@ -1,13 +1,85 @@
 #!/usr/bin/env bash
-# docker for the mail node tests: records `docker compose` calls with the directory they ran in.
-# MOCK_RUNNING lists the mailcow services that run (space separated).
+# docker for the mail node tests: records every call (with the directory `docker compose` ran in).
+# The mailcow services that run: MOCK_RUNNING (space separated) and the lines of $MOCK_DIR/running
+# (a test or the mailcow script fixture may start one while a script runs).
+# Volumes are directories under $MOCK_DIR/volumes; `docker compose up` creates mailcow's when
+# MOCK_PROJECT names its compose project. `docker run` of the restic image goes to mock-restic,
+# with the mounts (-v) passed on; mailcow's backup image lists an archive (the fixture's archives are
+# text: one entry per line) or, for the restore check's loop, exits MOCK_TAR_STATUS (default 0).
+# mailcow's database answers `SELECT COUNT(*) FROM mailbox` with the number in its volume's file
+# `mailboxes`. MOCK_LEFTOVER: ids of labelled restic containers a killed run left;
+# MOCK_MAILCOW_BACKUP_LEFTOVER=1: mailcow's backup container is still there.
 printf 'docker %s (in %s)\n' "$*" "$PWD" >>"$MOCK_DIR/calls"
+running() { [[ " ${MOCK_RUNNING:-} $(cat "$MOCK_DIR/running" 2>/dev/null | tr '\n' ' ') " == *" $1 "* ]]; }
 # MOCK_RESTART_FAIL lists the services whose restart fails.
 if [ "$1 $2" = "compose ps" ] && [ "$3" = -q ]; then
-  [[ " ${MOCK_RUNNING:-} " != *" $4 "* ]] || echo "0123456789ab"
+  if [ -n "${4:-}" ]; then
+    if running "$4"; then echo "0123456789ab"; fi
+  elif [ -n "${MOCK_RUNNING:-}" ]; then
+    echo "0123456789ab"
+  fi
+fi
+if [ "$1 $2" = "compose ps" ] && [ "$3" = -aq ]; then
+  shift 3
+  for service in "$@"; do echo "id-$service"; done
 fi
 if [ "$1 $2" = "compose restart" ] && [[ " ${MOCK_RESTART_FAIL:-} " == *" $3 "* ]]; then
   echo "Error response from daemon: restart failed" >&2
   exit 1
 fi
+if [ "$1 $2" = "compose up" ] && [ -n "${MOCK_PROJECT:-}" ]; then
+  for set in vmail crypt redis rspamd postfix mysql; do mkdir -p "$MOCK_DIR/volumes/${MOCK_PROJECT}_$set-vol-1"; done
+fi
+if [ "$1 $2" = "compose exec" ] && [[ " $* " == *" mysql-mailcow mysql "* ]]; then
+  cat >/dev/null
+  file=$MOCK_DIR/volumes/${MOCK_PROJECT:-mailcowdockerized}_mysql-vol-1/mailboxes
+  [ -f "$file" ] || { echo "ERROR 2002 (HY000): Can't connect" >&2; exit 1; }
+  cat "$file"
+  exit 0
+fi
+case $1 in
+  volume)
+    [ "$2" = inspect ] || exit 0
+    if [ "$3" = -f ]; then name=$5; else name=$3; fi
+    [ -d "$MOCK_DIR/volumes/$name" ] || { echo "Error: No such volume: $name" >&2; exit 1; }
+    if [ "$3" = -f ]; then echo "$MOCK_DIR/volumes/$name"; else echo '[{}]'; fi
+    ;;
+  ps)
+    [[ " $* " == *" --filter label="* ]] && [ -n "${MOCK_LEFTOVER:-}" ] && echo "$MOCK_LEFTOVER"
+    ;;
+  container)
+    [ "$2" = inspect ] && [ "${MOCK_MAILCOW_BACKUP_LEFTOVER:-0}" = 1 ] && exit 0
+    exit 1
+    ;;
+  run)
+    shift
+    mounts=() image=''
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -v) mounts+=("$2") && shift 2 ;;
+        -e | --network | --name | --label | -u) shift 2 ;;
+        --entrypoint) entrypoint=$2 && shift 2 ;;
+        --rm | -i | -t | -d) shift ;;
+        *) image=$1 && shift && break ;;
+      esac
+    done
+    case $image in
+      restic/*)
+        # restic_run -t: the image's timeout runs restic: "<seconds> restic <args>".
+        if [ "${entrypoint:-}" = /usr/bin/timeout ]; then shift 2; fi
+        MOCK_MOUNTS=$(printf '%s\n' "${mounts[@]}") exec mock-restic "$@"
+        ;;
+      ghcr.io/mailcow/backup*)
+        if [ "$1" = tar ]; then
+          archive=${*: -1}
+          src=${mounts[0]%%:*}
+          [ -f "$src/${archive#/backup/}" ] || exit 2
+          grep -v '^mailboxes=' "$src/${archive#/backup/}"
+          exit 0
+        fi
+        exit "${MOCK_TAR_STATUS:-0}"
+        ;;
+    esac
+    ;;
+esac
 exit 0

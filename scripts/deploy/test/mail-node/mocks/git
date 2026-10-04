@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# git for the mail node tests: the commit of the mailcow checkout is MOCK_GIT_HEAD (none: not a
+# git checkout), its tag MOCK_GIT_DESCRIBE.
+case "$*" in
+  *"rev-parse HEAD"*) [ -n "${MOCK_GIT_HEAD:-}" ] || exit 128 && echo "$MOCK_GIT_HEAD" ;;
+  *describe*) [ -n "${MOCK_GIT_HEAD:-}" ] || exit 128 && echo "${MOCK_GIT_DESCRIBE:-2026-09}" ;;
+  *) exit 1 ;;
+esac

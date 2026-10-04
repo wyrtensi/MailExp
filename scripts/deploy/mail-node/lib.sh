@@ -47,6 +47,36 @@ DOVECOT_BEGIN='# BEGIN MailExpert: dovecot-extra.conf (managed by scripts/deploy
 DOVECOT_END='# END MailExpert: dovecot-extra.conf'
 
 ranges_file() { printf '%s/eop-ranges.txt\n' "$NODE_STATE"; }
+# Left by node-backup.sh --tag move on the old node of a move: its backup stops, eop-ranges.sh
+# closes mailcow's mail ports to everyone and pings only when postfix or dovecot run again (the new
+# node pings the same checks). setup.sh --end-standby removes it.
+node_standby_file() { printf '%s/standby\n' "$NODE_STATE"; }
+# The services that must stay down on a standby node: they would take mail the new node never sees.
+# The watchdog restarts a mail service it finds unhealthy.
+# shellcheck disable=SC2034 # read by eop-ranges.sh, node-backup.sh and setup.sh
+STANDBY_SERVICES=(postfix-mailcow dovecot-mailcow watchdog-mailcow)
+
+# mailcow_running <mailcow dir> <service...>: the given services that run, one per line.
+mailcow_running() {
+  local dir=$1 service
+  shift
+  for service in "$@"; do
+    if [ -n "$(cd "$dir" && docker compose ps -q "$service" 2>/dev/null)" ]; then echo "$service"; fi
+  done
+  return 0
+}
+
+# mailcow_restart_policy <mailcow dir> <no|always> <service...>: the restart policy of the
+# services' containers (docker update; compose does not track it, so `docker compose up -d` keeps
+# it). Status 1 when a container refused.
+mailcow_restart_policy() {
+  local dir=$1 policy=$2 ids
+  shift 2
+  ids=$(cd "$dir" && docker compose ps -aq "$@" 2>/dev/null) || ids=''
+  [ -n "$ids" ] || return 0
+  # shellcheck disable=SC2086 # one id per word
+  docker update --restart="$policy" $ids >/dev/null
+}
 version_file() { printf '%s/eop-version\n' "$NODE_STATE"; }
 firewall_state_file() { printf '%s/firewall-%s.rules\n' "$NODE_STATE" "$1"; }
 firewall_chain_file() { printf '%s/firewall-%s.chain\n' "$NODE_STATE" "$1"; }
@@ -329,6 +359,13 @@ ipt() { if [ "$1" = 4 ]; then shift; iptables -w "$@"; else shift; ip6tables -w 
 firewall_rules() {
   local family=$1 net set match="-o $MAILCOW_BRIDGE ! -i $MAILCOW_BRIDGE"
   shift
+  # A standby node (eop-ranges.sh sets FIREWALL_CLOSED): every mail port closed to everyone.
+  if [ "${FIREWALL_CLOSED:-0}" = 1 ]; then
+    printf -- '%s -p tcp --dport 25 -j DROP\n' "$match"
+    printf -- '%s -p tcp -m multiport --dports %s -j REJECT --reject-with tcp-reset\n' "$match" "$PANEL_PORTS"
+    printf -- '%s -p tcp -m multiport --dports %s -j DROP\n' "$match" "$CLOSED_PORTS"
+    return 0
+  fi
   if [ "$family" = 4 ]; then set=$EOP_SET4; else set=$EOP_SET6; fi
   printf -- '%s -p tcp --dport 25 -m set --match-set %s src -j RETURN\n' "$match" "$set"
   printf -- '%s -p tcp --dport 25 -j DROP\n' "$match"
@@ -388,7 +425,9 @@ firewall_apply() {
   shift 2
   if [ "$family" = 4 ]; then set=$EOP_SET4; else set=$EOP_SET6; fi
   count=$(set_count "$set") || count=''
-  if ! [[ $count =~ ^[0-9]+$ ]] || { [ "$family" = 4 ] && [ "$count" -eq 0 ]; }; then
+  if [ "${FIREWALL_CLOSED:-0}" = 1 ]; then
+    : # the closed rules match no set
+  elif ! [[ $count =~ ^[0-9]+$ ]] || { [ "$family" = 4 ] && [ "$count" -eq 0 ]; }; then
     warn "firewall (IPv$family): the EOP set $set is missing${count:+ or empty}; the rules are not installed"
     return 1
   fi
