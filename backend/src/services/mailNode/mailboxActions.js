@@ -4,7 +4,9 @@ import { recordAudit } from '../auditLog.js';
 import { auditOf } from '../actor.js';
 import { createKeyedSerializer } from '../../utils/keyedSerializer.js';
 import { addSecondSenderName, normalizeAddress, parseSenderNames } from '../../utils/senderNames.js';
-import { hasHeaderInjectionChars } from '../accountAliases.js';
+import {
+  createAlias, deleteAlias, hasHeaderInjectionChars, listAliases, updateAlias,
+} from '../accountAliases.js';
 import { MAIL_NODE_ERRORS } from './errors.js';
 import { DISK_WARN_PERCENT } from './diskWatch.js';
 import {
@@ -247,30 +249,31 @@ export async function setNodeMailboxNames(ref, { name, senderName, senderNameAlt
   // stored one.
   const names = parseSenderNames({ senderName: senderName ?? account.sender_name, senderNameAlt });
   if (names.error) return { error: 'sender_name_invalid' };
-  const { rows: own } = await query(
-    'SELECT id, name FROM account_aliases WHERE account_id = $1 AND lower(email) = lower($2) ORDER BY created_at, id',
-    [account.id, account.email_address],
-  );
+  const own = (await listAliases(account.id))
+    .filter((alias) => normalizeAddress(alias.email) === normalizeAddress(account.email_address));
   if (senderNameAlt !== undefined && own.length > 1) return { error: 'sender_name_alt_ambiguous' };
-  // The second name repeating the first is dropped, as on the add form.
-  const alt = senderNameAlt === undefined ? undefined
-    : (String(senderNameAlt).trim() && !names.senderNameAlt ? null : names.senderNameAlt);
-  await withTransaction(async (client) => {
-    if (name !== undefined) await client.query('UPDATE email_accounts SET name = $2 WHERE id = $1', [account.id, name.trim().slice(0, 200)]);
-    if (senderName !== undefined) await client.query('UPDATE email_accounts SET sender_name = $2 WHERE id = $1', [account.id, names.senderName]);
-    if (alt === undefined) return;
-    if (!alt) {
-      if (own.length) await client.query('DELETE FROM account_aliases WHERE id = $1', [own[0].id]);
-    } else if (own.length) {
-      await client.query('UPDATE account_aliases SET name = $2 WHERE id = $1', [own[0].id, alt]);
-    } else {
-      await addSecondSenderName(client, { accountId: account.id, email: account.email_address, senderNameAlt: alt });
-    }
-  });
+  // The second name repeating the first is dropped, as on the add form; '' removes it.
+  const alt = senderNameAlt === undefined ? undefined : names.senderNameAlt;
+  const updates = [];
+  if (name !== undefined) updates.push(['name', name.trim().slice(0, 200)]);
+  if (senderName !== undefined) updates.push(['sender_name', names.senderName]);
+  if (updates.length) {
+    await query(
+      `UPDATE email_accounts SET ${updates.map(([column], i) => `${column} = $${i + 2}`).join(', ')} WHERE id = $1`,
+      [account.id, ...updates.map(([, value]) => value)],
+    );
+  }
+  // The alias editor's own actions (services/accountAliases.js), with the mailbox's address.
+  if (alt === null && own.length) await deleteAlias(account.id, own[0].id);
+  else if (alt && own.length) {
+    const result = await updateAlias(account.id, own[0].id, { ...own[0], name: alt, email: account.email_address });
+    if (result.error) return result;
+  } else if (alt) {
+    const result = await createAlias(account.id, { name: alt, email: account.email_address });
+    if (result.error) return result;
+  }
   const { rows: [row] } = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
-  const { rows: aliases } = await query(
-    'SELECT id, name, email FROM account_aliases WHERE account_id = $1 ORDER BY created_at, id', [account.id],
-  );
+  const aliases = (await listAliases(account.id)).map(({ id, name: aliasName, email }) => ({ id, name: aliasName, email }));
   return { account: withoutSecrets(row), aliases };
 }
 

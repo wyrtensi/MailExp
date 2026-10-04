@@ -1,4 +1,4 @@
-// A mailcow in memory for tests of services/mailNode/nodeApply.js: answers the API calls the panel
+// A mailcow in memory for tests of services/mailNode/nodeApply.js and the panel CLI: answers the API calls the panel
 // makes the way mailcow 2026-09 does (data/web/json_api.php and inc/functions.*.inc.php), through a
 // stand-in for safeFetch. Keeps what it was asked to change so a test can read the node afterwards
 // and run the panel again.
@@ -63,6 +63,16 @@ export function createFakeMailcow(initial = {}) {
         rl: m.rl ?? false, rl_scope: m.rl ? 'mailbox' : 'domain',
       }));
     }
+    // One mailbox (getMailbox): mailcow answers {} for an address it does not have.
+    if (path.startsWith('get/mailbox/')) {
+      const email = decodeURIComponent(path.slice('get/mailbox/'.length));
+      const m = node.mailboxes.find((entry) => entry.username === email);
+      return m ? {
+        username: m.username, domain: email.split('@')[1], active: '1', active_int: m.active_int ?? 1,
+        quota: 5368709120, quota_used: 0, authsource: 'mailcow', attributes: { imap_access: '1', force_pw_update: '0' },
+      } : {};
+    }
+    if (path === 'get/status/vmail') return node.disk ?? { used_percent: '12%', used: '1.2G', total: '10G' };
     if (path === 'get/domain/all') return Object.keys(node.domains).map((d) => ({ domain_name: d, active: '1', relayhost: String(node.domains[d].relayhost) }));
     if (path.startsWith('get/domain/')) {
       const d = decodeURIComponent(path.slice('get/domain/'.length));
@@ -110,6 +120,12 @@ export function createFakeMailcow(initial = {}) {
         const entry = node.relayhosts.find((r) => r.id === Number(body.items[0]));
         entry.active = String(body.attr.active);
         return [success('object_modified', '')];
+      }
+      case 'add/mailbox': {
+        const email = `${body.local_part}@${body.domain}`;
+        if (node.mailboxes.some((m) => m.username === email)) return [danger('object_exists', email)];
+        node.mailboxes.push({ username: email, rl: body.rl_value ? { value: body.rl_value, frame: body.rl_frame } : null });
+        return [success('mailbox_added', email)];
       }
       case 'edit/domain':
         node.domains[body.items[0]].relayhost = Number(body.attr.relayhost);
