@@ -206,6 +206,17 @@ describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
     assert.equal(again.querySelector('[data-phish-rule-waiting]'), null);
   });
 
+  // React.StrictMode (main.jsx, every dev build and the demo) mounts, unmounts and mounts again: a
+  // load must still land after the second mount, not be dropped as if the section had gone.
+  test('shows the switch, the last run and the rows under StrictMode', async () => {
+    answers['GET /api/mail-node/tenant/phish-release'] = RELEASE;
+    const root = await mount(React.createElement(React.StrictMode, null, React.createElement(MailNodeTenant)));
+    assert.ok(root.querySelector('[data-phish-release] input[type="checkbox"]'));
+    assert.match(root.querySelector('[data-phish-run]').textContent, /admin\.tenant\.phishRunCounts/);
+    assert.equal(root.querySelectorAll('[data-phish-row]').length, 3);
+    assert.equal(buttons(root, 'admin.tenant.phishRunNow').length, 1);
+  });
+
   test('is not shown without a driver or a configured tenant', async () => {
     answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: false, state: {}, jobs: {} };
     const root = await mount(React.createElement(MailNodeTenant));

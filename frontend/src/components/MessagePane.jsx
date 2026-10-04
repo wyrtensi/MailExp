@@ -186,10 +186,14 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const mountedRef = useRef(true);
   const swipeBackTimerRef = useRef(null);
   const autoMarkReadTimerRef = useRef(null);
-  useEffect(() => () => {
-    mountedRef.current = false;
-    if (swipeBackTimerRef.current) clearTimeout(swipeBackTimerRef.current);
-    clearTimeout(autoMarkReadTimerRef.current);
+  useEffect(() => {
+    // Set again on every mount (React.StrictMode mounts twice), not only cleared.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (swipeBackTimerRef.current) clearTimeout(swipeBackTimerRef.current);
+      clearTimeout(autoMarkReadTimerRef.current);
+    };
   }, []);
 
   const resetPaneSwipeStyles = useCallback(() => {

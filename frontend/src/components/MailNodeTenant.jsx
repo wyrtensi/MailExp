@@ -327,8 +327,13 @@ function PhishRelease({ canRun, revision }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Set again on every mount: React.StrictMode mounts, unmounts and mounts once more, and a flag
+  // only ever cleared would drop every answer after that (the section showed its title alone).
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
