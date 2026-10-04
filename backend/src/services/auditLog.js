@@ -12,7 +12,9 @@ import { query } from './db.js';
 // from EOP's quarantine, the release paused or resumed, and a letter's message trace asked for.
 // Creating, changing or deleting an inbox rule is recorded too (who did it, the rule's actions
 // and where it forwards to), since a rule can forward a mailbox's mail outside; mail sync and the
-// rules running write only rule.run, when someone starts a run by hand.
+// rules running write only rule.run, when someone starts a run by hand. An administrator asking
+// for a panel update from the admin UI is recorded, and so are its start and end as the host's
+// updater reports them (services/panelUpdate/reconcile.js), under that administrator.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
@@ -35,6 +37,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   // Section 5.14 (the owner's decisions after stage 7).
   'tenant.antispam_enforced', 'tenant.alias_contacts_removal_approved',
   'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
+  'panel.update_requested', 'panel.update_started', 'panel.update_finished', 'panel.update_failed',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 

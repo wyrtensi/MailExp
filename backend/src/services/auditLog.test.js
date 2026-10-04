@@ -37,6 +37,7 @@ describe('recordAudit', () => {
       'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
       'tenant.antispam_enforced', 'tenant.alias_contacts_removal_approved',
       'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
+      'panel.update_requested', 'panel.update_started', 'panel.update_finished', 'panel.update_failed',
     ]);
   });
 

@@ -60,6 +60,7 @@ import { closeUserSockets, setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
 import { loadSyncSettings } from './services/syncSettings.js';
 import { getUpdateStatus } from './services/updateCheck.js';
+import { startUpdateAuditReconciler } from './services/panelUpdate/reconcile.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
 import { authSettingsError, getAuthSettings } from './services/auth/authSettings.js';
@@ -265,6 +266,10 @@ setupWebSocket(wss, sessionMiddleware);
 
 // Run pending schema migrations then start
 await runMigrations();
+
+// Journal the start and end of panel updates the host's updater reports in the update spool
+// (services/panelUpdate/reconcile.js); a pass every 30 s that never keeps the process alive.
+startUpdateAuditReconciler();
 
 // Mail node domains that already hold panel mailboxes keep taking new ones: they are recorded as
 // ready before the server takes requests (services/mailNode/domains.js).

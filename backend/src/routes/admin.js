@@ -19,6 +19,7 @@ import { closeUserSockets } from '../services/websocket.js';
 import { destroyUserSessions } from './auth.js';
 import accessSyncRoutes from './accessSync.js';
 import googleAppsAdminRoutes from './googleAppsAdmin.js';
+import adminUpdateRoutes from './adminUpdate.js';
 import { requestAccessSync } from '../services/accessSync/index.js';
 import {
   FOLDER_SYNC_INTERVAL_KEY, SYNC_INTERVAL_KEY, loadSyncSettings, parseFolderSyncIntervalSec, parseSyncIntervalSec,
@@ -30,6 +31,8 @@ router.use(requireAdmin);
 router.param('id', uuidParam('id'));
 router.use('/access-sync', accessSyncRoutes);
 router.use('/google-apps', googleAppsAdminRoutes);
+// Updating the panel from the admin UI; the sub-router validates its own :id.
+router.use('/update', adminUpdateRoutes);
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
