@@ -22,6 +22,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$SCRIPT_DIR/lib/app.sh"
 # shellcheck source=lib/backup.sh
 . "$SCRIPT_DIR/lib/backup.sh"
+# shellcheck source=lib/updater.sh
+. "$SCRIPT_DIR/lib/updater.sh"
 
 exit_on_unexpected_failure
 
@@ -69,6 +71,7 @@ prepare_dirs() {
   fi
   mkdir -p "$APP_DIR" "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
   chmod 700 "$EDGE_DIR" "$OPT_PREFIX/backups" "$STATE_DIR"
+  prepare_update_spool "$STATE_DIR"
 }
 
 # lock_install: one install.sh or configure.sh at a time per prefix: configure.sh takes the same
@@ -368,7 +371,10 @@ main() {
   fi
   admin_notice
   setup_backups
-  if [ "$CFG_SYSTEM" = 1 ]; then install_timers; fi
+  if [ "$CFG_SYSTEM" = 1 ]; then
+    install_timers
+    install_updater
+  fi
   log "done"
 }
 

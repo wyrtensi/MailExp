@@ -1,0 +1,62 @@
+name: Promote to latest
+
+# The owner's decision that a build is ready for production: it becomes the channel `latest` that
+# panels offer under "Администрирование -> Обновление панели" and that `update.sh latest` installs
+# (docs/architecture/deployment-system.md, section 9). Manual only, nothing is rebuilt: the images
+# CI published as sha-<12> get the tag `latest` (same digest) and the git tag `latest` moves to the
+# commit. Servers keep running sha-<12>.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to promote: a sha or sha-<12>; empty = the head of main"
+        required: false
+        default: ""
+      dry_run:
+        description: "Only check that the images exist"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: promote-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # crane retags by copying the manifest bytes, so latest keeps the digest of sha-<12>.
+      - name: Install crane
+        env:
+          CRANE_VERSION: v0.22.1
+          CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+        run: |
+          curl -fsSL -o crane.tar.gz "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "${CRANE_SHA256}  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane
+          sudo install -m 755 crane /usr/local/bin/crane
+          rm -f crane crane.tar.gz
+
+      - name: Log in to GHCR
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$TOKEN" | crane auth login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Promote
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          IMAGE_PREFIX="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" bash scripts/ci/promote-latest.sh "$INPUT_SHA"

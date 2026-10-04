@@ -10,12 +10,20 @@
 # (the runbook's "Откат обновления": stop, restore the pre-update dump, install.sh --version <old>),
 # because anything written after the update would be lost.
 #
-#   update.sh sha-<commit> [--prefix /opt/mailexpert]
-#   update.sh --check sha-<commit> [--prefix /opt/mailexpert]   (status.sh --target: read-only)
+#   update.sh sha-<commit>|latest [--prefix /opt/mailexpert]
+#   update.sh --version sha-<commit>|latest [--prefix /opt/mailexpert]
+#   update.sh --check sha-<commit>|latest [--prefix /opt/mailexpert]   (status.sh --target: read-only)
+#
+# latest is the build the owner promoted (the git tag `latest`, lib/channel.sh); it is turned into
+# that commit's sha-<12> first, and the server runs that tag, never `latest`.
+#
+# When the Caddy image changes between the two commits (deploy/edge/Dockerfile) and Caddy runs
+# here, the new edge image is pulled before the backup like the panel's, the pinned EDGE_IMAGE is
+# kept in <prefix>/state/edge-image.previous and install.sh pins the new one.
 #
 # After an update it lists, from the files that changed between the two commits, the steps a
-# person takes outside the panel ("next:": the mail node's host scripts, the pinned edge image) and
-# context ("info:": migrations, what install.sh did by itself).
+# person takes outside the panel ("next:": the mail node's host scripts) and context ("info:":
+# migrations, the edge image, what install.sh did by itself).
 #
 # Exit codes:
 #   0 updated (or already at that version);
@@ -44,6 +52,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/ops.sh"
 # shellcheck source=lib/status.sh
 . "$LIB_DIR/status.sh"
+# shellcheck source=lib/channel.sh
+. "$LIB_DIR/channel.sh"
 exit_on_unexpected_failure
 
 # 1 from the moment install.sh is started: before that every failure leaves the server unchanged
@@ -62,11 +72,13 @@ READY_TIMEOUT=${MAILEXPERT_READY_TIMEOUT:-600}
 
 usage() {
   cat <<'EOF'
-Usage: update.sh sha-<first 12 characters of the commit> [--prefix /opt/mailexpert]
-       update.sh --check sha-<commit> [--prefix /opt/mailexpert]
+Usage: update.sh sha-<first 12 characters of the commit>|latest [--prefix /opt/mailexpert]
+       update.sh --version sha-<commit>|latest [--prefix /opt/mailexpert]
+       update.sh --check sha-<commit>|latest [--prefix /opt/mailexpert]
 
 Backs up, switches to the new version with install.sh and checks it. A version that does not
-become ready is left as it is and the way back is printed: see the runbook, "Откат обновления".
+become ready is left as it is and the way back is printed: see the runbook, "Откат обновления",
+or rollback.sh. latest is the build the owner promoted; the server runs its sha-<12>.
 --check changes nothing: it runs status.sh --target <version> (exit 0 ready to update, 1 problems).
 MAILEXPERT_READY_TIMEOUT: seconds to wait for readiness (default 600).
 Exit codes: 0 updated; 1 the new version did not become ready (after the switch); 2 invalid
@@ -139,17 +151,22 @@ run_install() {
 
 main() {
   local prefix=/opt/mailexpert target='' old dump free_kb bytes problem since url check=0 old_head profiles
-  local before after
+  local before after changed edge_image='' edge_previous=''
   while [ $# -gt 0 ]; do
     case $1 in
-      --prefix)
-        if [ $# -lt 2 ] || [ -z "$2" ]; then die "--prefix needs a value" 2; fi
-        prefix=$2
+      --prefix | --version)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value" 2; fi
+        if [ "$1" = --prefix ]; then
+          prefix=$2
+        else
+          if [ -n "$target" ]; then die "one version only" 2; fi
+          target=$2
+        fi
         shift 2
         ;;
       -h | --help) usage && return 0 ;;
       --check) check=1 && shift ;;
-      sha-*)
+      sha-* | latest)
         if [ -n "$target" ]; then die "one version only" 2; fi
         target=$1
         shift
@@ -157,13 +174,18 @@ main() {
       *) die "unknown argument: $1 (see --help)" 2 ;;
     esac
   done
-  [[ $target =~ ^sha-[0-9a-f]{12}$ ]] || die "usage: update.sh sha-<first 12 characters of the commit> [--prefix <prefix>]" 2
+  [[ $target =~ ^sha-[0-9a-f]{12}$ || $target == latest ]] ||
+    die "usage: update.sh sha-<first 12 characters of the commit>|latest [--prefix <prefix>]" 2
   if [ "$check" = 1 ]; then
     exec bash "$SCRIPT_DIR/status.sh" --prefix "$prefix" --target "$target"
   fi
   [[ $READY_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_READY_TIMEOUT must be a number of seconds" 2
   [ "$(id -u)" = 0 ] || die "run update.sh as root" 2
   load_install "$prefix"
+  if [ "$target" = latest ]; then
+    target=$(resolve_latest) || die "cannot resolve the channel latest; name the version (sha-<12>)" 2
+    log "latest is $target"
+  fi
   old=$CFG_VERSION
   if [ "$target" = "$old" ]; then
     log "already at $target"
@@ -182,6 +204,13 @@ main() {
   # before the backup and before anything is switched, not in the middle of `up`.
   profiles=$(env_get "$ENV_FILE" COMPOSE_PROFILES) || profiles=''
   if has_profile "$profiles" tenant; then ensure_image "$CFG_IMAGE_PREFIX/mailexpert-tenant-worker:$target"; fi
+  # The Caddy image follows the panel when it changes: pulled here, before the backup, like the
+  # panel's own images.
+  changed=$(git -C "$APP_DIR" diff --name-only HEAD "${target#sha-}")
+  if edge_image_changes "$(edge_services | paste -sd, -)" <<<"$changed"; then
+    edge_image=$CFG_IMAGE_PREFIX/mailexpert-edge:$target
+    ensure_image "$edge_image"
+  fi
   free_kb=$(df -Pk "$OPT_PREFIX" | awk 'NR == 2 {print $4}')
   bytes=$(estimate_dump_bytes)
   problem=$(space_problem "$free_kb" "$bytes")
@@ -196,12 +225,22 @@ main() {
   old_head=$(git -C "$APP_DIR" rev-parse HEAD)
   url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=
   before=$(applied_migrations)
+  if [ -n "$edge_image" ]; then
+    edge_previous=$(env_get "$EDGE_ENV" EDGE_IMAGE) || edge_previous=''
+    if [ -n "$edge_previous" ]; then save_previous_edge_image "$old" "$edge_previous"; fi
+    # Empty: install.sh pins the image of the new version by its digest.
+    env_set "$EDGE_ENV" EDGE_IMAGE ''
+    log "the Caddy image changes: $edge_image replaces ${edge_previous:-the unpinned image} (kept in $STATE_DIR/edge-image.previous)"
+  fi
   log "updating $old -> $target"
   SWITCHED=1
   if ! run_install "$target"; then
     send_ping "$url" fail "the update to $target did not become ready"
     warn "$target did not become ready; nothing was rolled back"
     log "the backend log: docker compose -p $CFG_PROJECT logs backend"
+    if [ -n "$edge_previous" ]; then
+      log "the Caddy image was replaced as well; going back restores $edge_previous (rollback.sh does it, or set EDGE_IMAGE in $EDGE_ENV)"
+    fi
     after=$(applied_migrations)
     if [ -n "$before" ] && [ "$before" = "$after" ]; then
       log "no migration was recorded as applied ($after before and after): unless the backend log shows a migration that failed halfway, going back is install.sh --prefix $OPT_PREFIX --version $old and nothing is lost (the pre-update dump $dump stays in case it is needed)"

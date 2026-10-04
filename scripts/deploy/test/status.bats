@@ -81,7 +81,7 @@ setup() {
   run update_notes 0 caddy,cloudflared <<<$'backend/migrations/0091_x.sql\nscripts/deploy/mail-node/setup.sh\ndeploy/edge/Dockerfile\ndeploy/edge/Caddyfile.tmpl\ndeploy/edge/compose.yml\ndeploy/systemd/mailexpert-health.timer'
   [[ ${lines[0]} == "info migrations: "* ]]
   [[ ${lines[1]} == "next mail node: "*"setup.sh --dry-run"* ]]
-  [[ ${lines[2]} == "next edge: the Caddy image changed"*"EDGE_IMAGE"* ]]
+  [[ ${lines[2]} == "info edge: the Caddy image changed; update.sh pulls the new one"*"edge-image.previous"* ]]
   [[ ${lines[3]} == "info edge: the Caddyfile template changed"* ]]
   [[ ${lines[4]} == "info edge: its compose file changed"* ]]
   [[ ${lines[5]} == "info timers: "* ]]

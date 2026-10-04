@@ -120,6 +120,31 @@ apply_ufw() {
   log "ufw: enabled, SSH ports ${ports[*]}${rules[*]:+, allowed now: ${rules[*]}}"
 }
 
+# install_updater: the host side of "update from the panel" (updater.sh): mailexpert-updater.path
+# watches the spool's request directory and starts mailexpert-updater.service. Installed only when
+# the checked-out commit has updater.sh; reruns rewrite the units.
+#
+# The service is never restarted or stopped here: install.sh runs inside the update that service
+# started (update.sh -> install.sh), and a restart would kill that update half-way. A changed
+# service unit applies from its next start (daemon-reload only). Restarting the path unit is safe:
+# stopping a path unit never stops the unit it triggers.
+install_updater() {
+  local unit
+  if [ ! -x "$APP_DIR/scripts/deploy/updater.sh" ]; then
+    log "updater: skipped, $CFG_VERSION has no scripts/deploy/updater.sh"
+    return 0
+  fi
+  for unit in service path; do
+    render_unit "$APP_DIR/deploy/systemd/mailexpert-updater.$unit" "$OPT_PREFIX" >"/etc/systemd/system/mailexpert-updater.$unit"
+  done
+  systemctl daemon-reload
+  systemctl enable mailexpert-updater.path >/dev/null 2>&1
+  systemctl reset-failed mailexpert-updater.path >/dev/null 2>&1 || true
+  systemctl restart mailexpert-updater.path
+  write_updater_installed "$STATE_DIR/update-spool/result" "$CFG_VERSION"
+  log "updater: mailexpert-updater.path watches $STATE_DIR/update-spool/request"
+}
+
 # install_timers: a timer is enabled only when its script exists in the checked-out commit.
 install_timers() {
   local name script unit

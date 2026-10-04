@@ -34,3 +34,29 @@ space_problem() {
 stale_local_dumps() {
   tail -n +"$(($1 + 1))"
 }
+
+# The EDGE_IMAGE an update replaced, kept so that going back to that version restores it:
+# <state dir>/edge-image.previous holds "<version left> <image>".
+
+# save_previous_edge_image <version left> <image>
+save_previous_edge_image() {
+  printf '%s %s\n' "$1" "$2" >"$STATE_DIR/edge-image.previous"
+}
+
+# previous_edge_image <version>: the edge image that ran with <version> before an update replaced
+# it; status 1 when no update replaced it.
+previous_edge_image() {
+  local version='' image=''
+  [ -f "$STATE_DIR/edge-image.previous" ] || return 1
+  read -r version image <"$STATE_DIR/edge-image.previous" || true
+  [ "$version" = "$1" ] && [ -n "$image" ] || return 1
+  printf '%s\n' "$image"
+}
+
+# edge_image_changes <edge services, comma-separated>: reads the paths changed between two
+# versions on stdin; status 0 when the Caddy image changes (it is built from deploy/edge/Dockerfile;
+# the Caddyfile and the compose file are written by install.sh) and this install runs Caddy.
+edge_image_changes() {
+  [[ ",$1," == *,caddy,* ]] || return 1
+  grep -q '^deploy/edge/Dockerfile$'
+}
