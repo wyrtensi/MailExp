@@ -15,9 +15,15 @@
 
 Команды панели ниже — от root на `<PANEL_HOST>`; короче: `D=<PREFIX>/app/scripts/deploy`.
 
+Первая установка с нуля — [quickstart.md](quickstart.md): от чистого VPS до работающей панели за
+несколько команд, с проверками, и готовый запрос для ИИ-агента.
+
 | Документ | О чём |
 |---|---|
+| [quickstart.md](quickstart.md) | быстрый старт: панель на чистом VPS, почтовый узел по желанию, установка агентом |
 | [deployment.md](deployment.md) | установка панели, режимы входа, CLI, обновление, откат, переезд панели |
+| [cli.md](cli.md) | справочник командной строки панели `mailexpert` |
+| [../user-guide/README.md](../user-guide/README.md) | руководство по экранам панели для пользователей и администраторов |
 | [mail-node.md](mail-node.md) | почтовый узел: mailcow, файрвол, EOP, тенант Microsoft, бэкап и переезд узла |
 | [google-oauth.md](google-oauth.md) | Google-приложения для Gmail-ящиков пользователей |
 | [microsoft-oauth.md](microsoft-oauth.md) | ящики Microsoft 365 / Outlook |
@@ -63,8 +69,9 @@
 
 ## 3. Установить панель
 
-[deployment.md, разделы 2-3](deployment.md): `git clone`, `install.sh --version sha-<12> --signin ...`,
-секреты через `configure.sh`, повторный `install.sh`. Сохранить ключ восстановления restic.
+[quickstart.md](quickstart.md) или [deployment.md, разделы 2-3](deployment.md): `git clone --branch
+latest`, `install.sh --version sha-<12> --signin ...` (код 3 и список ключей), секреты через
+`configure.sh`, повторный `install.sh`. Сохранить ключ восстановления restic.
 
 Проверка:
 
