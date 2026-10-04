@@ -134,7 +134,10 @@ git -C /opt/mailexpert-node-src checkout --detach <коммит панели>
 
 ## 9. Обновление
 
-Версия — коммит `main` с зелёным CI (джоба `images` опубликовала образы `sha-<12>`). Узнать последнюю:
+Версия — коммит `main` с зелёным CI (джоба `images` опубликовала образы `sha-<12>`). Боевой канал —
+`latest`: сборка, которую владелец отметил как готовую к проду (механизм отметки появится вместе с
+обновлением из панели, [deployment-system.md, раздел 9](../architecture/deployment-system.md)). Пока
+его нет, версию называет владелец; последний зелёный `main`:
 
 ```bash
 gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status success --limit 1 \
@@ -147,38 +150,59 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
    sudo $D/update.sh --check sha-<12>      # = status.sh --target sha-<12>
    ```
 
+   Код 0 — можно обновлять. `problem:` — устранить до обновления (не та версия в checkout, образа
+   нет в реестре или реестр не ответил, мало места, база новее целевой версии, смена мажорной версии
+   PostgreSQL, идёт другое обновление). `next:` — шаги после `update.sh`, `info:` — справка. Строка
+   `pending_migrations` решает, каким будет откат: `none` — новых миграций нет; список — есть;
+   `unknown` — схему прочитать не удалось (postgres не отвечает, standby), считать, что миграции
+   **есть**.
+
    **Первое обновление с версии без `status.sh`** (`update.sh` отвечает «unknown argument:
-   --check»): запустить предпроверку из свежей копии репозитория — скрипт работает с уже
-   установленной панелью любой версии, — а само обновление как обычно:
+   --check»): предпроверка из свежей копии репозитория, само обновление — как обычно:
 
    ```bash
-   git clone --depth 1 https://github.com/wyrtensi/MailExpert.git /root/mailexpert-next
+   sudo git clone --depth 1 https://github.com/wyrtensi/MailExpert.git /root/mailexpert-next
    sudo /root/mailexpert-next/scripts/deploy/status.sh --prefix <PREFIX> --target sha-<12>
    ```
 
-   После обновления `status.sh` есть в `<PREFIX>/app`, копию можно удалить.
-
-   Код 0 — можно обновлять. `problem:` — устранить до обновления (не та версия в checkout, нет
-   образа в реестре, мало места, база новее целевой версии, идёт другое обновление). `note:` — шаги
-   после `update.sh`. Строка `pending_migrations` — есть ли новые миграции: от неё зависит откат.
-2. **Обновление**:
+   Оговорка: так сегодняшний скрипт читает старую установку. Нужна установка, сделанная
+   `install.sh` (есть `<PREFIX>/install.conf`); у совсем старой версии часть «проблем» может
+   оказаться просто разницей версий (теги образов, файлы состояния, которых тогда не было). Такой
+   вывод — подсказка, а не вердикт; собственные проверки `update.sh` остаются. После обновления
+   `status.sh` есть в `<PREFIX>/app`, копию можно удалить (`sudo rm -rf /root/mailexpert-next`).
+2. **Обновление** — отдельно от SSH-сессии: обновление идёт до 10 минут и дольше, а обрыв
+   соединения убил бы запущенный в ней `update.sh` на полпути:
 
    ```bash
-   sudo $D/update.sh sha-<12>
+   sudo systemctl reset-failed mailexpert-update 2>/dev/null; sudo systemctl stop mailexpert-update 2>/dev/null
+   sudo systemd-run --unit=mailexpert-update --property=RemainAfterExit=yes $D/update.sh sha-<12> --prefix <PREFIX>
+   sudo journalctl -u mailexpert-update -f -o cat          # Ctrl-C закрывает только просмотр
+   sudo systemctl show mailexpert-update -p ActiveState -p SubState -p ExecMainStatus
    ```
 
-   Бэкап перед обновлением, переключение, ожидание готовности до 10 минут. tenant-worker (если
-   включён) обновляется вместе с панелью. В конце `update.sh` печатает строки `next:` — что сделать
-   вне панели.
+   `SubState=running` — ещё идёт; `exited` или `ActiveState=failed` — закончилось, код выхода в
+   `ExecMainStatus`. Без systemd: `nohup $D/update.sh sha-<12> >/var/log/mailexpert-update.log 2>&1 &`
+   и чтение лога.
+
+   `update.sh`: бэкап перед обновлением, переключение, ожидание готовности до 10 минут.
+   tenant-worker (если включён) обновляется вместе с панелью. Коды выхода:
+
+   | Код | Что значит |
+   |---|---|
+   | 0 | обновлено; дальше — строки `next:` |
+   | 1 | переключение началось, новая версия не поднялась; в выводе — были ли записаны миграции и путь назад (раздел 10) |
+   | 2 | неверный ввод или состояние, запрещающее обновление (standby, панель не готова, нет коммита, мало места, мажорная версия PostgreSQL); ничего не изменено |
+   | 3 | сбой до переключения (образ не скачался, бэкап перед обновлением, любая другая команда); ничего не изменено, работает прежняя версия |
 3. **Шаги по строкам `next:`**:
    - `mail node: ...` — на узле тот же коммит (раздел 4 выше), `setup.sh --dry-run`, затем `setup.sh`;
    - `edge: the Caddy image changed ...` — в `<PREFIX>/edge/.env` оставить `EDGE_IMAGE=` пустым и
      запустить `sudo $D/install.sh --prefix <PREFIX>`: он закрепит образ края текущей версии.
-     Прежний digest записать заранее (`status.sh`, строка `edge_image`) — он нужен для отката;
-   - `migrations: ...` — откат теперь только через дамп (раздел 10).
+     Прежний digest записать заранее (`status.sh`, строка `edge_image`) — он нужен для отката.
 4. **Предупреждения панели**: правило раскладки спама на узле (`status.sh`: `spam_rule outdated`),
    «Применить настройки» узла, антиспам-политика тенанта.
-5. **Проверка**: `sudo $D/status.sh` без проблем, `sudo $D/healthcheck.sh` код 0, вход, статус ящиков.
+5. **Проверка** на сервере, а не через публичный адрес (он за Access или входом Google):
+   `sudo $D/status.sh` — `running` равен новой версии, проблем нет; `sudo $D/healthcheck.sh` — код 0;
+   затем вход и статус ящиков.
 
 **mailcow** обновляется отдельно и не в одном окне с панелью: `./update.sh` mailcow, затем `setup.sh`
 без параметров ([mail-node.md, разделы 3-4](mail-node.md)).
@@ -188,11 +212,16 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
 
 ## 10. Откат
 
-- **Не было новых миграций** (`pending_migrations none` в предпроверке):
-  `sudo $D/install.sh --prefix <PREFIX> --version sha-<старая>`. Данные не теряются.
-- **Были новые миграции**: [deployment.md, «Откат обновления»](deployment.md) — восстановление
-  `backups/pre-update-<старая>.dump` в отдельную базу, подмена переименованием, `install.sh --version`.
-  Теряется всё, записанное после обновления.
+Сначала — состояние сервера сейчас: `sudo $D/status.sh` (`version`, `checkout`, `running`,
+`migrations_applied`). После кода 2 или 3 там прежняя версия — откатывать нечего.
+
+- **Новых миграций не было** (в предпроверке `pending_migrations none`, а не `unknown`, и
+  `update.sh` написал «no migration was recorded as applied»):
+  `sudo $D/install.sh --prefix <PREFIX> --version sha-<старая>` (тоже через `systemd-run`). Данные
+  не теряются.
+- **Миграции были или неизвестно**: [deployment.md, «Откат обновления»](deployment.md) —
+  восстановление `backups/pre-update-<старая>.dump` в отдельную базу, подмена переименованием,
+  `install.sh --version`. Теряется всё, записанное после обновления.
 - **Образ края**: вернуть прежний digest в `EDGE_IMAGE` и `install.sh --prefix <PREFIX>`.
 - **Скрипты узла**: прежний коммит в `/opt/mailexpert-node-src`, `setup.sh`.
 
@@ -207,18 +236,23 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
 
 ## 12. Неполадки
 
-Коды выхода скриптов панели: `0` — сделано; `1` — сбой (или найдены проблемы: `status.sh`,
-`healthcheck.sh`); `2` — неверный ввод или состояние, ничего не изменено; `3` — `install.sh` ждёт
-секреты от `configure.sh` (у `mailexpert-cli.sh` — сбой docker или CLI). Скрипты узла: `0`, `1` —
-шаг не удался, `2` — неверный ввод.
+Коды выхода скриптов панели: `0` — сделано; `1` — сбой (у `status.sh` и `healthcheck.sh` — найдены
+проблемы; у `update.sh` — сбой после переключения); `2` — неверный ввод или состояние, ничего не
+изменено; `3` — у `install.sh` ждёт секреты от `configure.sh`, у `update.sh` — сбой до
+переключения, ничего не изменено, у `mailexpert-cli.sh` — сбой docker или CLI. `status.sh --json`
+при сбое самого скрипта печатает `{"error": ..., "exit_code": N}`. Скрипты узла: `0`, `1` — шаг не
+удался, `2` — неверный ввод.
 
 | Признак | Где смотреть | Что делать |
 |---|---|---|
 | `install.sh` вышел с кодом 3 | его вывод: список ключей | `configure.sh` с этими ключами, повторить `install.sh` |
-| `update.sh`: «did not become ready» | `docker compose -p <project> logs backend` | миграция или старт backend; откат — раздел 10 |
+| `update.sh` вышел с кодом 3 | его вывод: что не удалось | устранить (реестр, место, ключи restic) и повторить; сервер не менялся |
+| `update.sh`: «did not become ready» (код 1) | `docker compose -p <project> logs backend` | миграция или старт backend; откат — раздел 10 |
 | `status.sh`: «checkout ... install.conf says» | прерванная установка или обновление | `install.sh --prefix <PREFIX>` доведёт до версии из `install.conf` |
 | `status.sh`: «older than the database schema» | обновление на версию старее базы | только откат через дамп |
-| `status.sh`: «not in the registry» | CI коммита: джоба `images` | выбрать коммит с зелёным CI |
+| `status.sh`: «does not exist in the registry» | CI коммита: джоба `images` | выбрать коммит с зелёным CI |
+| `status.sh`: «registry is unreachable or refused access» | сеть сервера, `docker manifest inspect <образ>` | доступ к `ghcr.io`, лимиты; образ при этом может существовать |
+| `status.sh`: «PostgreSQL major version» | `docker-compose.yml` целевой версии | скриптами не поддерживается: дамп, новый том, восстановление — отдельная задача |
 | `status.sh` / `healthcheck.sh`: «backup: ... hours old» | `journalctl -u mailexpert-backup` | бэкап вручную `backup.sh --tag manual`, проверить ключи restic |
 | `containers: tenant-worker ...` | `docker compose -p <project> logs tenant-worker` | нет PFX или файла пароля; [mail-node.md, раздел 6е](mail-node.md) |
 | `https://<DIRECT_HOST>` не отвечает | `docker compose -p edge logs caddy` | токен DNS, A-запись, `ufw` |
@@ -227,5 +261,6 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
 | пинг EOP-диапазонов `/fail` | тело пинга в Healthchecks | [mail-node.md, раздел 4](mail-node.md) |
 
 Логи: `docker compose -p <project> logs backend` (или `frontend`, `postgres`, `redis`,
-`tenant-worker`), `journalctl -u mailexpert-backup`, `journalctl -u mailexpert-health`; на узле —
-`journalctl -u mailexpert-eop-ranges`, `journalctl -u mailexpert-node-backup`.
+`tenant-worker`), `journalctl -u mailexpert-update`, `journalctl -u mailexpert-backup`,
+`journalctl -u mailexpert-health`; на узле — `journalctl -u mailexpert-eop-ranges`,
+`journalctl -u mailexpert-node-backup`.
