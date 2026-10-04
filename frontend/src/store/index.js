@@ -610,7 +610,7 @@ export const useStore = create((set, get) => ({
 
   // Admin panel
   showAdmin: false,
-  adminTab: 'accounts', // 'accounts' | 'appearance' | 'integrations' | 'users'
+  adminTab: 'accounts', // a TABS id of AdminPanel.jsx: 'accounts' | 'appearance' | 'integrations' | 'mail-node' | 'users' | ...
   // Closing the settings also drops a request still waiting for the (lazy-loaded) panel to take it,
   // so it cannot fire later and open a view nobody asked for.
   setShowAdmin: (v) => set(v ? { showAdmin: true } : { showAdmin: false, addAccountRequested: false, accountSettingsRequested: null }),

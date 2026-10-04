@@ -17,8 +17,14 @@ const TAGS = { en: 'en-US', ru: 'ru-RU' };
 const YESTERDAY = { en: 'Yesterday', ru: 'Вчера' };
 // Russian reads a 24-hour clock and the day before the month.
 const PATTERNS = {
-  en: { time: 'h:mm a', day: 'MMM d', dayYear: 'MMM d, yyyy', dateTime: 'MMM d, h:mm a', dateTimeYear: 'MMM d, yyyy h:mm a' },
-  ru: { time: 'HH:mm', day: 'd MMM', dayYear: 'd MMM yyyy', dateTime: 'd MMM, HH:mm', dateTimeYear: 'd MMM yyyy, HH:mm' },
+  en: {
+    time: 'h:mm a', day: 'MMM d', dayYear: 'MMM d, yyyy', dateTime: 'MMM d, h:mm a', dateTimeYear: 'MMM d, yyyy h:mm a',
+    dateTimeSeconds: 'MMM d, h:mm:ss a', dateTimeYearSeconds: 'MMM d, yyyy h:mm:ss a',
+  },
+  ru: {
+    time: 'HH:mm', day: 'd MMM', dayYear: 'd MMM yyyy', dateTime: 'd MMM, HH:mm', dateTimeYear: 'd MMM yyyy, HH:mm',
+    dateTimeSeconds: 'd MMM, HH:mm:ss', dateTimeYearSeconds: 'd MMM yyyy, HH:mm:ss',
+  },
 };
 
 const valid = (value) => {
@@ -51,8 +57,11 @@ export function formatDay(dateStr, lang = currentLanguage) {
   return d ? fmt(d, 'dayYear', PATTERNS[lang] ? lang : 'en') : '';
 }
 
-// Day and time, with or without the year: the open letter's date.
-export function formatDateTime(dateStr, { withYear = true, lang = currentLanguage } = {}) {
+// Day and time, with or without the year: the open letter's date. `seconds` adds them where they
+// tell events apart (the node's queue and alerts, a tenant job).
+export function formatDateTime(dateStr, { withYear = true, seconds = false, lang = currentLanguage } = {}) {
   const d = valid(dateStr);
-  return d ? fmt(d, withYear ? 'dateTimeYear' : 'dateTime', PATTERNS[lang] ? lang : 'en') : '';
+  if (!d) return '';
+  const pattern = (withYear ? 'dateTimeYear' : 'dateTime') + (seconds ? 'Seconds' : '');
+  return fmt(d, pattern, PATTERNS[lang] ? lang : 'en');
 }

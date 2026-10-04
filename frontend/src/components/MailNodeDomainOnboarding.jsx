@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import MailNodeApplyResult from './MailNodeApplyResult.jsx';
 import MailNodeDnsResult, { CopyButton } from './MailNodeDnsResult.jsx';
@@ -48,7 +49,8 @@ const ORIGIN_KEYS = {
   existing_mailboxes: 'admin.mailNode.originExistingMailboxes',
 };
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at);
 const subTitleStyle = { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', margin: '14px 0 4px' };
 const fieldStyle = {
   width: '100%', padding: '6px 9px', background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 7,

@@ -14,7 +14,7 @@ const primaryButtonStyle = { ...buttonStyle, background: 'var(--accent)', border
 const cellStyle = { padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)', fontSize: 12, textAlign: 'left', verticalAlign: 'top' };
 const headCellStyle = { ...cellStyle, fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' };
 
-// Settings -> Integrations -> "Aliases with another address" (admins only), under "Mail node".
+// Settings -> Mail node -> "Aliases with another address" (admins only), under "Mail node".
 // Owner decision D-16: a mail node mailbox sends only from its own address, and each address is a
 // separate, billed mailbox. Aliases with another address saved on node mailboxes before that are
 // listed here (the server no longer sends from them) with two actions: create the address as its

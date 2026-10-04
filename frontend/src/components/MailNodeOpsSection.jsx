@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import {
   DEFAULT_DEFERRED_COUNT,
@@ -40,7 +41,9 @@ const SEVERITY_COLORS = { error: 'var(--red)', warning: 'var(--amber)', info: 'v
 // oldest ones and the counts.
 const MAX_QUEUE_ROWS = 200;
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+// With seconds: queue entries and alerts a few seconds apart stay apart.
+const when = (at) => formatDateTime(at, { seconds: true });
 
 const settingsForm = (settings) => ({
   pingUrl: settings?.pingUrl ?? '',
@@ -48,7 +51,7 @@ const settingsForm = (settings) => ({
   deferredMinutes: String(settings?.deferredMinutes ?? DEFAULT_DEFERRED_MINUTES),
 });
 
-// Settings -> Integrations -> "Node operations" (admins only), under the mail node and EOP
+// Settings -> Mail node -> "Node operations" (admins only), under the mail node and EOP
 // sections: the node's alerts (R-18: EOP refusals and mail around EOP in the node's log, the
 // deferred queue, the node's certificate, its containers, the tenant's TERRL budget), checked by
 // the server every five minutes and on "Check now", with the settings of their own Healthchecks

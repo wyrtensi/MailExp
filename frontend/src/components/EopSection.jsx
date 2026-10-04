@@ -45,6 +45,16 @@ const TLS_POLICY_KEYS = {
 };
 const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '20px 0 8px' };
 
+// Why the domains' checklist is done by hand (shown only while the tenant driver does not run the
+// tenant steps, tenantDriverActive false): no worker, or the tenant fields not filled in yet. A
+// driver with a filled tenant that still is not active is the demo's (its domains keep the manual
+// onboarding): no cause is claimed then.
+function checklistNoteKey(stored) {
+  if (!stored?.tenantDriver) return 'admin.eop.checklistNoteNoDriver';
+  if (!stored.tenantConfigured) return 'admin.eop.checklistNoteNotConfigured';
+  return 'admin.eop.checklistNoteManual';
+}
+
 // What the TERRL limit is made of: a save that changes one of them recounts the budget.
 const BUDGET_FIELDS = ['terrl', 'licenses', 'tenantCreatedOn'];
 const TEXT_FIELDS = [
@@ -62,16 +72,15 @@ function toForm(settings) {
   };
 }
 
-// Settings -> Integrations -> "EOP" (admins only), next to the mail node: how the node's mail goes
+// Settings -> Mail node -> "EOP" (admins only), next to the mail node: how the node's mail goes
 // through Microsoft EOP. The next hop with its TLS policy, the DKIM mode and the send limit are
 // applied to the node through the mailcow API (saving them starts an apply after the answer, shown
 // on the next load; "Apply settings" does it again for the node and every domain and waits for it),
 // and the last result is shown item by item. The spam filing
-// rule is written only by its own button, after a warning: it restarts Dovecot on the node. Until
-// the panel works with the tenant itself (the server's tenantDriverActive, false until the tenant
-// driver exists), the domains' onboarding is done by hand, so this section also lists the domains
-// that are not ready with their checklist and the "Done" of each step. Filling in the tenant ids
-// alone does not change that. Next to the TERRL it shows the tenant's external recipient budget of
+// rule is written only by its own button, after a warning: it restarts Dovecot on the node. While
+// the panel does not run the tenant steps itself (the server's tenantDriverActive: no tenant driver,
+// or the tenant fields not filled in), the domains' onboarding is done by hand, so this section also
+// lists the domains that are not ready with their checklist and the "Done" of each step. Next to the TERRL it shows the tenant's external recipient budget of
 // the last 24 hours (R-21), from the licenses and the tenant's creation date when no TERRL is set.
 export default function EopSection({ revision = 0, onDomainsChanged }) {
   const { t } = useTranslation();
@@ -88,8 +97,10 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   const [confirmPrefilter, setConfirmPrefilter] = useState(false);
   // The TERRL budget now (R-21); null while it loads or when it could not be read.
   const [budget, setBudget] = useState(null);
-  // Bumped by every save, so the tenant part reads what the new settings allow.
+  // Bumped by every save, so the tenant part reads what the new settings allow, and by every apply,
+  // which reads the node's spam rule again (the tenant part shows it next to the policy).
   const [saves, setSaves] = useState(0);
+  const [applies, setApplies] = useState(0);
 
   const loadBudget = useCallback(async () => {
     try {
@@ -178,6 +189,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     setNotice(null);
     try {
       const answer = await action();
+      setApplies((n) => n + 1);
       await loadApplied();
       setNotice(typeof noticeKey === 'function' ? noticeKey(answer) : noticeKey);
       domainChanged();
@@ -209,6 +221,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{t('admin.eop.title')}</div>
       <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, marginBottom: 16 }}>
         {t('admin.eop.description')}
+        {stored && ` ${t(stored.tenantDriver ? 'admin.eop.descriptionDriver' : 'admin.eop.descriptionNoDriver')}`}
       </div>
 
       {!stored && !error && <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>}
@@ -329,7 +342,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       {stored && (
         <div data-eop-tenant>
           <div style={subTitleStyle}>{t('admin.tenant.title')}</div>
-          <MailNodeTenant revision={saves} />
+          <MailNodeTenant revision={saves + applies} />
         </div>
       )}
 
@@ -366,7 +379,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       {showChecklist && (
         <>
           <div style={subTitleStyle}>{t('admin.eop.checklistTitle')}</div>
-          <span style={{ ...hintStyle, marginTop: 0, marginBottom: 10 }}>{t('admin.eop.checklistNote')}</span>
+          <span style={{ ...hintStyle, marginTop: 0, marginBottom: 10 }}>{t(checklistNoteKey(stored))}</span>
           {domainsError && <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{t(domainsError.key)}</div>}
           {domainsNodeError && (
             <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>

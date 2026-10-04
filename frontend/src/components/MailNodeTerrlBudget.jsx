@@ -1,8 +1,10 @@
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { TERRL_WARN_PERCENT } from '../utils/mailNode.js';
 
 const noteStyle = { fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at);
 
 // The tenant's external recipient budget (R-21, backend services/mailNode/terrl.js): unique
 // external recipients of the last 24 hours against the limit, the limit's origin and the young

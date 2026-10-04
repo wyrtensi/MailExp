@@ -1,4 +1,5 @@
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import {
   APPLY_STATUS_COLORS,
   applyItemKey,
@@ -9,7 +10,8 @@ import {
 const noteStyle = { fontSize: 11, color: 'var(--text-tertiary)' };
 const monoStyle = { fontFamily: 'JetBrains Mono, monospace', fontSize: 11 };
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at);
 const shown = (value) => (value === null || value === undefined || value === '' ? '—' : String(value));
 
 // The forwarding hosts item's detail (R-12): how many EOP ranges of the panel's list are on the node,

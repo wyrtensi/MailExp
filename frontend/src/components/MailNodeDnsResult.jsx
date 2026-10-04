@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import {
   DNS_STATUS_COLORS,
   dnsCheckKey,
@@ -24,7 +25,8 @@ const warningBoxStyle = {
 // How long "Copied" or the failure stays before the button reads "Copy" again.
 const COPY_FEEDBACK_MS = 3000;
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at);
 
 // A button that copies a value, and says (to screen readers too) whether it worked; the word goes
 // back to "Copy" after a few seconds.

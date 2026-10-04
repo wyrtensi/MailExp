@@ -439,6 +439,23 @@ describe('EopSection', () => {
     assert.ok(host.querySelector('[data-domain-onboarding="pending.example"]'));
   });
 
+  test('says why the checklist is by hand: no worker, the tenant not filled in, or neither', async () => {
+    const note = async (eop) => {
+      answers['GET /api/mail-node/eop'] = eop;
+      const host = await mount(React.createElement(EopSection));
+      return host.textContent;
+    };
+    const noDriver = await note({ ...EOP, tenantDriver: null });
+    assert.ok(noDriver.includes('admin.eop.checklistNoteNoDriver'));
+    assert.ok(noDriver.includes('admin.eop.descriptionNoDriver'));
+    const notFilled = await note({ ...EOP, tenantDriver: 'worker', tenantConfigured: false });
+    assert.ok(notFilled.includes('admin.eop.checklistNoteNotConfigured'));
+    assert.ok(notFilled.includes('admin.eop.descriptionDriver'));
+    assert.equal(notFilled.includes('admin.eop.descriptionNoDriver'), false);
+    const filled = await note({ ...EOP, tenantDriver: 'fake', tenantConfigured: true });
+    assert.ok(filled.includes('admin.eop.checklistNoteManual'));
+  });
+
   test('leaves the checklist out once the tenant driver works with the tenant', async () => {
     answers['GET /api/mail-node/eop'] = { ...EOP, tenantConfigured: true, tenantDriverActive: true };
     const host = await mount(React.createElement(EopSection));

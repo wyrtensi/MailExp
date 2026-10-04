@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import {
   POLICY_FIELDS,
@@ -34,7 +35,27 @@ const SEVERITY_COLORS = { error: 'var(--red)', warning: '#b45309', info: 'var(--
 const POLL_MS = 1500;
 const POLL_LIMIT = 200;
 
-const when = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+// With seconds: a job's start and end, and the runs, are seconds apart.
+const when = (iso) => formatDateTime(iso, { seconds: true }) || '—';
+
+// The policy without conflicts, said with the node's spam rule: the actions deliver spam, phishing
+// and bulk to the node, which files them into Spam only with the rule (section 5.14). `rule` is the
+// server's last read of it (GET /tenant spamRule, the one the quarantine release waits for):
+// { state, code? }, null when nothing has read it yet, undefined from a server that does not say.
+function PolicyFits({ rule }) {
+  const { t } = useTranslation();
+  if (rule === undefined || rule?.state === 'ok') {
+    return <div data-policy-fits={rule ? 'ok' : 'policy'} style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>;
+  }
+  const state = rule?.state ?? 'never';
+  let text;
+  if (state === 'missing') text = t('admin.tenant.policyFitsRuleMissing');
+  else if (state === 'outdated') text = t('admin.tenant.policyFitsRuleOutdated');
+  else if (state === 'never') text = t('admin.tenant.policyFitsRuleUnknown');
+  else text = t('admin.tenant.policyFitsRuleUnreadable', { reason: t(mailNodeErrorKey(rule.code)) });
+  return <div role="status" data-policy-fits={state} style={boxStyle('warning')}>{text}</div>;
+}
 
 // One failure line: the translated reason, with the server's short message when it has one.
 function Failure({ failure }) {
@@ -48,7 +69,7 @@ function Failure({ failure }) {
   );
 }
 
-// Settings -> Integrations -> EOP -> "Microsoft tenant" (stage 7a, admins only): the tenant driver
+// Settings -> Mail node -> EOP -> "Microsoft tenant" (stage 7a, admins only): the tenant driver
 // the panel runs with, the application certificate the tenant worker holds (thumbprint and expiry;
 // the PFX itself never enters the panel, R-35), "Test connection" (a Graph token and EXO whoami
 // through the job queue, its result step by step), the blocked inbound connectors the poll found
@@ -237,7 +258,7 @@ export default function MailNodeTenant({ revision = 0 }) {
             </div>
           )}
           {(antispam.conflicts ?? []).length === 0
-            ? <div style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>
+            ? <PolicyFits rule={data?.spamRule} />
             : (antispam.conflicts.map((c) => (
               <div key={c.field} data-policy-conflict={c.field} style={boxStyle(c.severity === 'error' ? 'error' : 'warning')}>
                 <span style={{ fontWeight: 600, color: SEVERITY_COLORS[c.severity] ?? 'var(--red)' }}>{t(policyFieldKey(c.field))}: {c.action}</span>
@@ -308,7 +329,7 @@ export default function MailNodeTenant({ revision = 0 }) {
 
       {error && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(error)}</div>}
 
-      {data?.driver && data?.configured && <PhishRelease canRun revision={revision} />}
+      {data?.driver && data?.configured && <PhishRelease canRun revision={revision} spamRule={data.spamRule} />}
     </div>
   );
 }
@@ -322,13 +343,18 @@ const cellStyle = { padding: '4px 6px', borderTop: '1px solid var(--border)', ve
 // (a guard: a type not released, a recipient outside the node, an outbound message, a release
 // denied; or a release that kept failing) and the latest rows. R-31 (a release by hand, the Tenant
 // Allow/Block List) is not offered.
-function PhishRelease({ canRun, revision }) {
+function PhishRelease({ canRun, revision, spamRule }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Set again on every mount: React.StrictMode mounts, unmounts and mounts once more, and a flag
+  // only ever cleared would drop every answer after that (the section showed its title alone).
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -362,6 +388,9 @@ function PhishRelease({ canRun, revision }) {
   };
 
   const run = data?.run;
+  // The rule as the server last read it, shared with the policy above so the two never disagree;
+  // the last run's own read when the server does not say.
+  const ruleState = spamRule !== undefined ? spamRule?.state : run?.rule?.state;
   const held = data?.held?.count ?? 0;
   const rows = data?.releases ?? [];
   return (
@@ -391,9 +420,9 @@ function PhishRelease({ canRun, revision }) {
               })}
               {run.left && <div>{t('admin.tenant.phishRunLeft')}</div>}
               {/* Section 5.14: spam, phishing and bulk wait for this version of the spam rule on the node. */}
-              {run.rule && run.rule.state !== 'ok' && !run.paused && !run.noDomains && (
-                <div role="status" data-phish-rule-waiting={run.rule.state} style={boxStyle('warning')}>
-                  {t('admin.tenant.phishRuleWaiting', { count: run.counts?.ruleWaiting ?? 0 })}
+              {ruleState && ruleState !== 'ok' && !run.paused && !run.noDomains && (
+                <div role="status" data-phish-rule-waiting={ruleState} style={boxStyle('warning')}>
+                  {t('admin.tenant.phishRuleWaiting', { n: run.counts?.ruleWaiting ?? 0 })}
                 </div>
               )}
               {run.throttled && <div><Failure failure={{ code: run.throttled.code }} /></div>}

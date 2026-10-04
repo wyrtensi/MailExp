@@ -222,7 +222,7 @@ function QuarantineEntry({ entry, admin, onReleased, onLearnedSpam, onDeleted, o
 }
 
 // The mail node's quarantine (R-20): the letters rspamd on the node refused or marked as spam, kept
-// by mailcow. Administrators see every entry (Settings -> Integrations, next to the mail node) and
+// by mailcow. Administrators see every entry (Settings -> Mail node) and
 // may release or delete one, and choose whether users see it too; a user sees, read-only, the
 // entries addressed to the panel's node mailboxes (Settings -> Mailboxes) once an administrator
 // allowed it, and nothing otherwise: the section hides itself when the server says no.

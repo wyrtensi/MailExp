@@ -231,6 +231,9 @@ function GtdAccountBlock({ account }) {
           type="button"
           disabled={toggling}
           onClick={handleToggle}
+          role="switch"
+          aria-checked={!!enabled}
+          aria-label={account.name || account.email_address}
           style={{
             width: 36, height: 20, borderRadius: 10, border: 'none', cursor: toggling ? 'default' : 'pointer', padding: 0,
             background: enabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -374,6 +377,9 @@ export default function GtdSettings({ initialSubTab }) {
         <button
           type="button"
           onClick={handleToggleGtd}
+          role="switch"
+          aria-checked={!!gtdRevealed}
+          aria-label={t('admin.categories.gtdReveal')}
           style={{
             width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
             background: gtdRevealed ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,

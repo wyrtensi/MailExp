@@ -30,6 +30,7 @@ import SendLaterMenu from './SendLaterMenu.jsx';
 import { composeContext } from '../utils/scheduledSend.js';
 import { trackSend } from '../utils/sendTracker.js';
 import { formatDateTime } from '../utils/formatDate.js';
+import { useOnValuesChange } from '../hooks/useOnValuesChange.js';
 
 // Resize an image blob/file to max maxW pixels wide, preserving aspect ratio.
 // Returns a Promise<string> of a base64 data URL.
@@ -1079,14 +1080,11 @@ export default function ComposeModal() {
   });
 
   // Every edit outside the rich-text editor (subject, recipients, attachments, the plaintext
-  // body) goes through state, so a render marks the edit time. Skips the mount render so an
-  // untouched composer is not immediately considered "just edited".
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    if (!mountedRef.current) { mountedRef.current = true; return; }
-    lastEditAtRef.current = Date.now();
-  }, [subject, toChips, ccChips, bccChips, toInput, ccInput, bccInput, body, htmlSource,
-      attachments, fwdAttachments, plaintextEmail, htmlMode]);
+  // body) goes through state, so a change of these values marks the edit time. Compared with the
+  // previous values rather than skipping the first run, so an untouched composer is not "just
+  // edited", StrictMode's second effect run included.
+  useOnValuesChange([subject, toChips, ccChips, bccChips, toInput, ccInput, bccInput, body, htmlSource,
+    attachments, fwdAttachments, plaintextEmail, htmlMode], () => { lastEditAtRef.current = Date.now(); });
 
   // Single save path shared by the timer and the tab-hidden handler, so the guards can never
   // drift apart between the two triggers.

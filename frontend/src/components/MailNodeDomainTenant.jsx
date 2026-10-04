@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import { mailNodeErrorKey, tenantFailureKey } from '../utils/mailNode.js';
 
@@ -16,7 +17,8 @@ const warningStyle = {
   background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.35)',
 };
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at, { seconds: true });
 const list = (items) => (items ?? []).join(', ');
 
 // A failed part of the run: the translated reason and the server's short message.

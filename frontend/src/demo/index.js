@@ -1096,7 +1096,8 @@ function demoNodeItems() {
     : { item: 'fail2ban', target: null, status: 'skipped', code: 'panel_ips_missing' });
   items.push(demoNode.prefilterWritten
     ? { item: 'prefilter', target: null, status: 'ok' }
-    : { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' });
+    // rule: as the server's prefilterCheck; the demo's node has no MailExpert rule until it is applied.
+    : { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs', rule: 'missing' });
   items.push(demoForwardingHostsItem());
   return items;
 }
@@ -1948,10 +1949,43 @@ function demoThreadingDiagnostics(id) {
   };
 }
 
+// The routes the backend guards with requireAdmin (middleware/auth.js), as the demo's paths
+// (without /api): routes/admin.js and the /admin/ai routes of routes/ai.js, routes/mailNode*.js
+// except what an ordinary user reads, routes/integrations.js, the category source writes of
+// routes/categories.js and the admin routes of routes/accounts.js. Checks written inside a handler
+// (a mailbox's server settings, its deletion) are left to the handlers.
+const MAIL_NODE_USER_READS = [
+  /^\/mail-node\/domains$/,
+  /^\/mail-node\/outage-letters$/,
+  /^\/mail-node\/quarantine$/,
+  /^\/mail-node\/messages\/[^/]+\/spam-verdict$/,
+];
+export function demoAdminOnly(verb, pathname, body = {}) {
+  if (pathname === '/admin' || pathname.startsWith('/admin/')) return true;
+  if (pathname.startsWith('/mail-node/')) {
+    if (verb !== 'GET') return true;
+    if (MAIL_NODE_USER_READS.some((re) => re.test(pathname))) return false;
+    // GET /mail-node/quarantine/:itemId is the user's; /quarantine/settings is matched first, an admin's.
+    return !/^\/mail-node\/quarantine\/[^/]+$/.test(pathname) || pathname === '/mail-node/quarantine/settings';
+  }
+  if (pathname === '/integrations') return verb === 'GET';
+  if (/^\/integrations\/[^/]+$/.test(pathname)) return (verb === 'POST' || verb === 'DELETE') && pathname !== '/integrations/status';
+  if (pathname.startsWith('/categories/sources')) return verb !== 'GET';
+  if (/^\/categories\/recategorize\/[^/]+$/.test(pathname)) return verb === 'POST';
+  if (pathname === '/accounts') return verb === 'POST' && body?.kind !== 'domain';
+  if (/^\/accounts\/[^/]+\/(oauth-subject\/reset|threading\/(preview|mode))$/.test(pathname)) return verb === 'POST';
+  return false;
+}
+
 export async function demoRequest(method, path, body = {}) {
   const verb = method.toUpperCase();
   const url = parsePath(path);
   const pathname = url.pathname;
+
+  // "Watch as a user" signs in without admin rights: the admin routes answer 403 as on a server.
+  if (!demoViewer().isAdmin && demoAdminOnly(verb, pathname, body)) {
+    throw Object.assign(demoError('Admin access required'), { status: 403 });
+  }
 
   if (verb === 'GET' && pathname === '/auth/config') return { mode: 'local', cloudflare: false, googleSignIn: false };
   if (verb === 'GET' && pathname === '/auth/me') {
@@ -2737,7 +2771,7 @@ export async function demoRequest(method, path, body = {}) {
   }
   if (verb === 'GET' && pathname === '/mail-node/eop/budget') return clone(demoTerrlBudget());
   if (pathname.startsWith('/mail-node/tenant')) {
-    const tenantAnswer = demoTenantRequest(verb, pathname, demoEopSettings, demoError, body);
+    const tenantAnswer = demoTenantRequest(verb, pathname, demoEopSettings, demoError, body, { spamRule: demoNode.prefilterWritten ? 'ok' : 'missing' });
     if (tenantAnswer !== undefined) return tenantAnswer;
   }
   const quarantineAnswer = demoQuarantineRequest(verb, pathname, body);

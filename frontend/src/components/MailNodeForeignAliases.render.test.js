@@ -59,7 +59,7 @@ const React = await import('react');
 const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const MailNodeForeignAliases = (await import('./MailNodeForeignAliases.jsx')).default;
-const { AccountsTab } = await import('./AdminPanel.jsx');
+const { AccountsTab, TAB_GROUPS, TABS, makeSearchIndex } = await import('./AdminPanel.jsx');
 
 const account = (id, email, extra = {}) => ({
   id, name: email, email_address: email, color: '#7c3aed', protocol: 'imap', enabled: true, health: 'healthy',
@@ -263,8 +263,15 @@ describe('alias editor of a node mailbox', () => {
     // with the mailbox address keeps both.
     assert.equal(host.querySelectorAll('button[title="common.edit"]').length, 1);
     assert.equal(host.querySelectorAll('button[title="common.delete"]').length, 2);
+    // The list itself is on the page (as the Mail node tab renders it): the link scrolls to it.
+    const list = await mount(React.createElement(MailNodeForeignAliases));
+    let scrolled = null;
+    list.host.querySelector('[data-section="node-foreign-aliases"]').scrollIntoView = function scrollIntoView() { scrolled = this; };
     await click(button(host, 'admin.aliases.foreignNodeAliasOpen'));
-    assert.equal(useStore.getState().adminTab, 'integrations', 'the marker leads to the list in Integrations');
+    assert.equal(useStore.getState().adminTab, 'mail-node', 'the marker leads to the list in the Mail node tab');
+    await flush();
+    assert.equal(scrolled?.getAttribute('data-section'), 'node-foreign-aliases', 'and brings the list into view');
+    await list.unmount();
 
     await click(button(host, 'admin.aliases.addNameButton'));
     const email = host.querySelector('#alias-email');
@@ -289,5 +296,32 @@ describe('alias editor of a node mailbox', () => {
     assert.equal(email.readOnly, false);
     assert.equal(email.value, '');
     await unmount();
+  });
+});
+
+describe('the mail node tab', () => {
+  test('is its own admin-only tab in Administration, not in Integrations', () => {
+    const groupOf = (id) => TAB_GROUPS.find((g) => g.tabIds.includes(id))?.id;
+    assert.equal(groupOf('mail-node'), 'admin');
+    assert.equal(groupOf('integrations'), 'security-integrations');
+    const tab = TABS.find((x) => x.id === 'mail-node');
+    assert.equal(tab.adminOnly, true);
+    assert.equal(tab.labelKey, 'admin.tabs.mailNode');
+  });
+
+  test('the settings search finds the node, EOP and the tenant there, for administrators', () => {
+    const index = makeSearchIndex((key) => key);
+    const inTab = index.filter((item) => item.tab === 'mail-node');
+    assert.ok(inTab.length >= 5);
+    assert.ok(inTab.every((item) => item.adminOnly === true));
+    for (const label of ['admin.mailNode.title', 'admin.eop.title', 'admin.tenant.title', 'admin.quarantine.title']) {
+      assert.ok(inTab.some((item) => item.label === label), label);
+    }
+    // One entry per label: the tab's name and its first section's title are the same words.
+    assert.equal(new Set(inTab.map((item) => item.label)).size, inTab.length);
+    assert.equal(inTab.some((item) => item.label === 'admin.tabs.mailNode'), false);
+    assert.ok(inTab.some((item) => item.keywords.includes('eop')));
+    // Google apps and Microsoft 365 stay in Integrations.
+    assert.equal(index.find((item) => item.label === 'admin.integrations.googleApps.title').tab, 'integrations');
   });
 });

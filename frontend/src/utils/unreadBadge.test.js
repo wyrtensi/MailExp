@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { unreadBadge } from './unreadBadge.js';
+import { formatDateTime } from './formatDate.js';
 
 describe('unreadBadge: the ghost badge it exists to prevent', () => {
   test('a stale count of zero renders nothing', () => {
@@ -26,21 +27,23 @@ describe('unreadBadge: the ghost badge it exists to prevent', () => {
 
 describe('unreadBadge: what it does show', () => {
   test('a real count renders plainly', () => {
-    assert.deepEqual(unreadBadge({ count: 3 }), { text: '3', stale: false, title: 'Unread messages' });
+    assert.deepEqual(unreadBadge({ count: 3 }), { text: '3', stale: false, title: 'sidebar.unreadTitle' });
   });
 
   test('staleness annotates a badge that already had a reason to exist', () => {
     const b = unreadBadge({ count: 3, stale: true });
     assert.equal(b.text, '3', 'the count itself carries no marker; the title says it is stale');
     assert.equal(b.stale, true);
-    assert.match(b.title, /Last observed/);
+    assert.equal(b.title, 'sidebar.unreadStale');
   });
 
   test('the stale title names the observation time when there is one', () => {
     const at = '2026-09-09T12:45:20.000Z';
-    assert.ok(unreadBadge({ count: 1, stale: true, observedAt: at }).title.includes(new Date(at).toLocaleString()));
-    assert.match(unreadBadge({ count: 1, stale: true }).title, /Last observed unread count; awaiting/,
-      'no timestamp must not leave a dangling empty parenthesis');
+    // The title is translated: t gets the key and the time in the interface language.
+    const t = (key, values) => `${key}${values ? ` ${JSON.stringify(values)}` : ''}`;
+    assert.equal(unreadBadge({ count: 1, stale: true, observedAt: at, t }).title, `sidebar.unreadStaleAt {"time":"${formatDateTime(at)}"}`);
+    assert.equal(unreadBadge({ count: 1, stale: true, t }).title, 'sidebar.unreadStale',
+      'no timestamp: the sentence without one, never an empty parenthesis');
   });
 
   test('clamps above max, stale or not', () => {
