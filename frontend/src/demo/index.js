@@ -1,3 +1,4 @@
+import { demoTime } from './clock.js';
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoOutageRequest, demoOutageWaiting } from './outages.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
@@ -165,51 +166,51 @@ function message({
 const MESSAGE_FIXTURES = [
   message({
     id: 'demo-001', accountId: 'demo-sales', subject: 'Enterprise renewal approved',
-    fromName: 'Maya Chen', fromEmail: 'maya@northstar.example', date: '2026-09-16T08:45:00.000Z',
+    fromName: 'Maya Chen', fromEmail: 'maya@northstar.example', date: demoTime('2026-09-16T08:45:00.000Z'),
     snippet: 'The renewal is approved. Please send the final order form.',
     bodyText: 'Great news — our procurement team approved the renewal. Please send the final order form for signature.',
     starred: true, attachments: true, threadId: 'demo-renewal',
   }),
   message({
     id: 'demo-002', accountId: 'demo-ops', subject: 'Incident review: queue latency',
-    fromName: 'Noah Williams', fromEmail: 'noah@demo.mailexpert.local', date: '2026-09-16T07:20:00.000Z',
+    fromName: 'Noah Williams', fromEmail: 'noah@demo.mailexpert.local', date: demoTime('2026-09-16T07:20:00.000Z'),
     snippet: 'The post-incident review is ready for comments.',
     bodyText: 'The post-incident review is ready. Please add comments before tomorrow morning.', category: 'automated',
   }),
   message({
     id: 'demo-003', accountId: 'demo-sales', subject: 'September product brief',
-    fromName: 'Aster Product News', fromEmail: 'newsletter@aster.example', date: '2026-09-15T16:10:00.000Z',
+    fromName: 'Aster Product News', fromEmail: 'newsletter@aster.example', date: demoTime('2026-09-15T16:10:00.000Z'),
     snippet: 'A faster workspace, smarter triage, and what is coming next.',
     bodyText: 'This month: a faster workspace, smarter triage, and a preview of what is coming next.', category: 'newsletter',
   }),
   message({
     id: 'demo-004', accountId: 'demo-ops', subject: 'Re: Vendor access checklist',
-    fromName: 'Priya Shah', fromEmail: 'priya@vendor.example', date: '2026-09-15T12:30:00.000Z',
+    fromName: 'Priya Shah', fromEmail: 'priya@vendor.example', date: demoTime('2026-09-15T12:30:00.000Z'),
     snippet: 'All requested access details are attached.',
     bodyText: 'All requested access details are attached. Let me know if security needs anything else.', read: true, attachments: true,
     threadId: 'demo-vendor-access',
   }),
   message({
     id: 'demo-005', accountId: 'demo-sales', folder: 'Sent', subject: 'Re: Enterprise renewal approved',
-    fromName: 'MailExpert Sales', fromEmail: 'sales@demo.mailexpert.local', date: '2026-09-15T09:00:00.000Z',
+    fromName: 'MailExpert Sales', fromEmail: 'sales@demo.mailexpert.local', date: demoTime('2026-09-15T09:00:00.000Z'),
     snippet: 'Thanks, Maya. The order form is attached.', bodyText: 'Thanks, Maya. The order form is attached for signature.',
     read: true, attachments: true, threadId: 'demo-renewal', toAddresses: ['maya@northstar.example'],
   }),
   message({
     id: 'demo-006', accountId: 'demo-ops', folder: 'Projects/Launch', subject: 'Launch runbook v3',
-    fromName: 'Lucas Martin', fromEmail: 'lucas@demo.mailexpert.local', date: '2026-09-14T18:25:00.000Z',
+    fromName: 'Lucas Martin', fromEmail: 'lucas@demo.mailexpert.local', date: demoTime('2026-09-14T18:25:00.000Z'),
     snippet: 'Updated owners and rollback steps are now in the runbook.',
     bodyText: 'I updated the owners, checkpoints, and rollback steps in the launch runbook.', read: true,
   }),
   message({
     id: 'demo-007', accountId: 'demo-sales', folder: 'Archive', subject: 'Q3 pipeline review notes',
-    fromName: 'Elena Rossi', fromEmail: 'elena@demo.mailexpert.local', date: '2026-09-13T11:40:00.000Z',
+    fromName: 'Elena Rossi', fromEmail: 'elena@demo.mailexpert.local', date: demoTime('2026-09-13T11:40:00.000Z'),
     snippet: 'Notes and follow-ups from the pipeline review.', bodyText: 'Here are the notes and follow-ups from our Q3 pipeline review.', read: true,
   }),
   // Spam opens in safe view (R-41): as text, the link's target written out, the attachment locked.
   message({
     id: 'demo-008', accountId: 'demo-ops', folder: 'Spam', subject: 'You have won a cloud server',
-    fromName: 'Cloud Prize Desk', fromEmail: 'winner@suspicious.example', date: '2026-09-12T05:15:00.000Z',
+    fromName: 'Cloud Prize Desk', fromEmail: 'winner@suspicious.example', date: demoTime('2026-09-12T05:15:00.000Z'),
     snippet: 'Claim your prize immediately.', bodyText: '', category: 'promotion', attachments: true,
     bodyHtml: '<div style="font-family:Arial,sans-serif;text-align:center;padding:24px;background:#fff7d6;border:2px dashed #f59e0b">'
       + '<h1 style="color:#b45309;margin:0 0 12px">Congratulations!</h1>'
@@ -220,7 +221,7 @@ const MESSAGE_FIXTURES = [
   // EOP marked it as phishing (CAT:PHSH) yet it sits in the Inbox: safe view all the same.
   message({
     id: 'demo-010', accountId: 'demo-ops', subject: 'Action required: your mailbox will be closed',
-    fromName: 'IT Service Desk', fromEmail: 'it-support@helpdesk-mailexpert.example', date: '2026-09-16T06:05:00.000Z',
+    fromName: 'IT Service Desk', fromEmail: 'it-support@helpdesk-mailexpert.example', date: demoTime('2026-09-16T06:05:00.000Z'),
     snippet: 'Your mailbox storage is full. Verify your account within 24 hours.', bodyText: '', eopCategory: 'PHSH',
     bodyHtml: '<div style="font-family:Segoe UI,Arial,sans-serif;max-width:520px">'
       + '<div style="background:#0f62fe;color:#fff;padding:12px 16px;font-weight:600">MailExpert IT Service Desk</div>'
@@ -233,7 +234,7 @@ const MESSAGE_FIXTURES = [
   }),
   message({
     id: 'demo-009', accountId: 'demo-sales', folder: 'Trash', subject: 'Old conference invitation',
-    fromName: 'Events Team', fromEmail: 'events@conference.example', date: '2026-09-10T14:00:00.000Z',
+    fromName: 'Events Team', fromEmail: 'events@conference.example', date: demoTime('2026-09-10T14:00:00.000Z'),
     snippet: 'Your invitation for the summer conference.', bodyText: 'Your invitation for the summer conference is enclosed.', read: true,
   }),
   ...fleetLetters(FLEET_ACCOUNTS).map(message),
@@ -277,8 +278,8 @@ const CONTACT_FIXTURES = [
     phones: [{ value: '+1 555 0142', type: 'work', primary: true }],
     urls: [{ value: 'https://northstar.example', type: 'work' }],
     organization: 'Northstar', notes: 'Enterprise renewal contact', is_auto: false, send_count: 8,
-    last_sent: '2026-09-15T15:42:00.000Z', etag: 'demo-contact-1-v1', created_at: '2026-08-20T09:00:00.000Z',
-    updated_at: '2026-09-15T15:42:00.000Z', has_contact_photo: false,
+    last_sent: demoTime('2026-09-15T15:42:00.000Z'), etag: 'demo-contact-1-v1', created_at: demoTime('2026-08-20T09:00:00.000Z'),
+    updated_at: demoTime('2026-09-15T15:42:00.000Z'), has_contact_photo: false,
   },
   {
     id: 'demo-contact-2', uid: 'demo-contact-2', display_name: 'Priya Shah', first_name: 'Priya', last_name: 'Shah',
@@ -286,7 +287,7 @@ const CONTACT_FIXTURES = [
     emails: [{ value: 'priya@vendor.example', type: 'work', primary: true }],
     phones: [{ value: '+1 555 0102', type: 'work', primary: true }],
     organization: 'Vendor Works', notes: '', is_auto: false, send_count: 5, last_sent: null,
-    etag: 'demo-contact-2-v1', created_at: '2026-08-25T09:00:00.000Z', updated_at: '2026-09-12T09:00:00.000Z',
+    etag: 'demo-contact-2-v1', created_at: demoTime('2026-08-25T09:00:00.000Z'), updated_at: demoTime('2026-09-12T09:00:00.000Z'),
     has_contact_photo: false,
   },
   {
@@ -294,7 +295,7 @@ const CONTACT_FIXTURES = [
     primary_email: 'lucas@demo.mailexpert.local',
     emails: [{ value: 'lucas@demo.mailexpert.local', type: 'work', primary: true }], phones: [],
     organization: 'MailExpert', notes: '', is_auto: true, send_count: 3, last_sent: null,
-    etag: 'demo-contact-3-v1', created_at: '2026-09-01T09:00:00.000Z', updated_at: '2026-09-14T18:25:00.000Z',
+    etag: 'demo-contact-3-v1', created_at: demoTime('2026-09-01T09:00:00.000Z'), updated_at: demoTime('2026-09-14T18:25:00.000Z'),
     has_contact_photo: false,
   },
 ];
@@ -333,47 +334,47 @@ const DEMO_USER = {
 // the same on every load.
 const AUDIT_FIXTURES = [
   {
-    id: '9', occurredAt: '2026-09-18T11:20:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '9', occurredAt: demoTime('2026-09-18T11:20:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: null, accountEmail: null, action: 'mail_node.domain_state_changed',
     details: { domain: 'pilot.demo.mailexpert.local', from: 'node_configured', to: 'dns_ok', how: 'step_confirmed' },
   },
   {
-    id: '8', occurredAt: '2026-09-18T09:00:00.000Z', actorUserId: null, actorEmail: 'MailExpert',
+    id: '8', occurredAt: demoTime('2026-09-18T09:00:00.000Z'), actorUserId: null, actorEmail: 'MailExpert',
     accountId: null, accountEmail: null, action: 'mail_node.domain_adopted',
     details: { domain: 'demo.mailexpert.local', state: 'ready', origin: 'existing_mailboxes' },
   },
   {
-    id: '7', occurredAt: '2026-09-17T10:05:00.000Z', actorUserId: null, actorEmail: 'Cloudflare Access',
+    id: '7', occurredAt: demoTime('2026-09-17T10:05:00.000Z'), actorUserId: null, actorEmail: 'Cloudflare Access',
     accountId: null, accountEmail: null, action: 'access.sync_aborted',
     details: { candidates: ['colleague@demo.mailexpert.local', 'former@demo.mailexpert.local'], activeUsers: 3, maxDisables: 10 },
   },
   {
-    id: '6', occurredAt: '2026-09-17T09:40:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '6', occurredAt: demoTime('2026-09-17T09:40:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'message.deleted',
     details: { messageId: '<demo-archive@demo.mailexpert.local>', folder: 'INBOX', from: 'newsletter@example.com', permanent: false },
   },
   {
-    id: '5', occurredAt: '2026-09-17T09:15:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '5', occurredAt: demoTime('2026-09-17T09:15:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'message.sent',
     details: { messageId: '<demo-reply@demo.mailexpert.local>', to: ['buyer@example.com'], cc: [], bcc: [] },
   },
   {
-    id: '4', occurredAt: '2026-09-16T16:05:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '4', occurredAt: demoTime('2026-09-16T16:05:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: 'demo-ops', accountEmail: 'ops@demo.mailexpert.local', action: 'mailbox.connection_changed',
     details: { fields: ['smtp_port'] },
   },
   {
-    id: '3', occurredAt: '2026-09-16T12:30:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '3', occurredAt: demoTime('2026-09-16T12:30:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: null, accountEmail: null, action: 'user.added',
     details: { userId: 'demo-colleague', email: 'colleague@demo.mailexpert.local', isAdmin: false },
   },
   {
-    id: '2', occurredAt: '2026-09-15T10:00:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '2', occurredAt: demoTime('2026-09-15T10:00:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: 'demo-ops', accountEmail: 'ops@demo.mailexpert.local', action: 'mailbox.added',
     details: { protocol: 'imap', oauthProvider: 'google' },
   },
   {
-    id: '1', occurredAt: '2026-09-15T09:55:00.000Z', actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
+    id: '1', occurredAt: demoTime('2026-09-15T09:55:00.000Z'), actorUserId: 'demo-user', actorEmail: 'demo@mailexpert.local',
     accountId: 'demo-sales', accountEmail: 'sales@demo.mailexpert.local', action: 'mailbox.added',
     details: { protocol: 'imap', oauthProvider: 'google' },
   },
@@ -389,7 +390,7 @@ const ACCESS_SYNC_FIXTURE = {
     apiTokenSet: true,
   },
   lastRun: {
-    trigger: 'schedule', startedAt: '2026-09-17T09:00:00.000Z', finishedAt: '2026-09-17T09:00:01.000Z',
+    trigger: 'schedule', startedAt: demoTime('2026-09-17T09:00:00.000Z'), finishedAt: demoTime('2026-09-17T09:00:01.000Z'),
     outcome: 'updated', added: 1, removed: 0, disabled: 0, wouldDisable: 0, error: null,
   },
   maxDisables: 10,
@@ -416,21 +417,21 @@ const DEFAULT_PREFERENCES = {
 const ADMIN_USER_FIXTURES = [
   {
     id: 'demo-user', username: 'demo@mailexpert.local', email: 'demo@mailexpert.local',
-    isAdmin: true, totpEnabled: false, disabledAt: null, created_at: '2026-08-01T09:00:00.000Z',
+    isAdmin: true, totpEnabled: false, disabledAt: null, created_at: demoTime('2026-08-01T09:00:00.000Z'),
     isBootstrapAdmin: true,
   },
   {
     id: 'demo-colleague', username: 'colleague@demo.mailexpert.local', email: 'colleague@demo.mailexpert.local',
-    isAdmin: false, totpEnabled: false, disabledAt: null, created_at: '2026-08-10T09:00:00.000Z',
+    isAdmin: false, totpEnabled: false, disabledAt: null, created_at: demoTime('2026-08-10T09:00:00.000Z'),
     isBootstrapAdmin: false,
   },
 ];
 
 // Sign-in history (GET /admin/auth-events), same columns the server selects.
 const AUTH_EVENT_FIXTURES = [
-  { id: '3', event_type: 'login', username: 'demo@mailexpert.local', user_id: 'demo-user', ip: '203.0.113.10', success: true, created_at: '2026-09-17T08:05:00.000Z' },
-  { id: '2', event_type: 'login', username: 'colleague@demo.mailexpert.local', user_id: 'demo-colleague', ip: '203.0.113.24', success: true, created_at: '2026-09-16T14:22:00.000Z' },
-  { id: '1', event_type: 'login_failed', username: 'demo@mailexpert.local', user_id: null, ip: '198.51.100.7', success: false, created_at: '2026-09-15T21:40:00.000Z' },
+  { id: '3', event_type: 'login', username: 'demo@mailexpert.local', user_id: 'demo-user', ip: '203.0.113.10', success: true, created_at: demoTime('2026-09-17T08:05:00.000Z') },
+  { id: '2', event_type: 'login', username: 'colleague@demo.mailexpert.local', user_id: 'demo-colleague', ip: '203.0.113.24', success: true, created_at: demoTime('2026-09-16T14:22:00.000Z') },
+  { id: '1', event_type: 'login_failed', username: 'demo@mailexpert.local', user_id: null, ip: '198.51.100.7', success: false, created_at: demoTime('2026-09-15T21:40:00.000Z') },
 ];
 
 // System settings (GET/PATCH /admin/settings). Values are strings, as system_settings stores
@@ -493,7 +494,7 @@ function cleanupPreviewFor(accountId, fromEmail) {
 // with TLS and EOP's acceptance; the first letter a Gmail mailbox sent came back as a report of
 // the remote server. The list marks the first, second and fourth. Every other letter of a node
 // mailbox is older than the demo node's log.
-const DEMO_LOG_OLDEST = '2026-09-14T00:00:00.000Z';
+const DEMO_LOG_OLDEST = demoTime('2026-09-14T00:00:00.000Z');
 const DEMO_DELIVERY_CASES = new Map();
 {
   const nodeSent = MESSAGE_FIXTURES.filter(row => row.folder === 'Sent' && accountFor(row.account_id)?.mail_node && row.date >= DEMO_LOG_OLDEST);
@@ -577,7 +578,7 @@ function unreadCounts() {
       totalCount: inbox.length,
       revision: String(messages.length),
       attemptRevision: String(messages.length),
-      observedAt: '2026-09-16T09:00:00.000Z',
+      observedAt: demoTime('2026-09-16T09:00:00.000Z'),
       stale: false,
       known: true,
     };
@@ -602,7 +603,7 @@ function foldersFor(accountId) {
       unread_count: contents.filter(item => !item.is_read).length,
       server_total_count: contents.length,
       server_unread_count: contents.filter(item => !item.is_read).length,
-      server_counts_at: '2026-09-16T09:00:00.000Z',
+      server_counts_at: demoTime('2026-09-16T09:00:00.000Z'),
       counts_known: true,
       counts_stale: false,
     };
@@ -965,7 +966,7 @@ function demoDomain(node, panel) {
 }
 
 const readyDomain = (node) => demoDomain(node, {
-  state: 'ready', origin: 'existing_mailboxes', addedAt: '2026-09-18T09:00:00.000Z', stateChangedAt: '2026-09-18T09:00:00.000Z',
+  state: 'ready', origin: 'existing_mailboxes', addedAt: demoTime('2026-09-18T09:00:00.000Z'), stateChangedAt: demoTime('2026-09-18T09:00:00.000Z'),
 });
 
 // The node as the demo's "apply" finds it (backend services/mailNode/nodeApply.js): the TLS entry it
@@ -994,14 +995,14 @@ let mailNodeDomains = [
   readyDomain({ domain: 'demo.mailexpert.local', active: true, maxMailboxes: 500, mailboxes: 0 }),
   ...fleetDomains(FLEET_ACCOUNTS).map(readyDomain),
   demoDomain({ domain: 'pilot.demo.mailexpert.local', active: true, maxMailboxes: 50, mailboxes: 0 }, {
-    state: 'dns_ok', origin: 'created', addedAt: '2026-09-18T10:00:00.000Z', addedBy: DEMO_ADMIN_EMAIL,
-    stateChangedAt: '2026-09-18T11:20:00.000Z',
-    steps: { node_configured: demoStep('2026-09-18T10:30:00.000Z'), dns_ok: demoStep('2026-09-18T11:20:00.000Z') },
+    state: 'dns_ok', origin: 'created', addedAt: demoTime('2026-09-18T10:00:00.000Z'), addedBy: DEMO_ADMIN_EMAIL,
+    stateChangedAt: demoTime('2026-09-18T11:20:00.000Z'),
+    steps: { node_configured: demoStep(demoTime('2026-09-18T10:30:00.000Z')), dns_ok: demoStep(demoTime('2026-09-18T11:20:00.000Z')) },
   }),
   demoDomain({ domain: 'legacy.demo.mailexpert.local', active: true, maxMailboxes: 20, mailboxes: 0 }),
   demoDomain({ domain: 'branch.demo.mailexpert.local', active: true, maxMailboxes: 100, mailboxes: 0, created: '2026-09-29 16:40:00' }, {
-    state: 'ready', origin: 'created', addedAt: '2026-09-02T09:15:00.000Z', addedBy: DEMO_ADMIN_EMAIL,
-    stateChangedAt: '2026-09-03T12:00:00.000Z', steps: { ready: { ...demoStep('2026-09-03T12:00:00.000Z'), markedReady: true } },
+    state: 'ready', origin: 'created', addedAt: demoTime('2026-09-02T09:15:00.000Z'), addedBy: DEMO_ADMIN_EMAIL,
+    stateChangedAt: demoTime('2026-09-03T12:00:00.000Z'), steps: { ready: { ...demoStep(demoTime('2026-09-03T12:00:00.000Z')), markedReady: true } },
     recreated: true, nodeCreated: '2026-09-02 09:15:00',
   }),
 ].sort((a, b) => a.domain.localeCompare(b.domain));
@@ -1310,7 +1311,7 @@ let mailNodeMailboxes = FLEET_ACCOUNTS.filter(account => account.mail_node).map(
   rateLimitDefault: { ...DEMO_DEFAULT_LIMIT },
 }));
 // The node and its domains as the last apply left them, before anyone pressed "Apply" in the demo.
-demoNodeApply = { at: '2026-09-30T18:00:00.000Z', items: demoNodeItems() };
+demoNodeApply = { at: demoTime('2026-09-30T18:00:00.000Z'), items: demoNodeItems() };
 for (const d of mailNodeDomains) if (d.state !== 'unknown') demoDomainApply(d);
 mailNodeMailboxes = mailNodeMailboxes.map((m, index) => (index === 1 ? { ...m, rateLimit: null } : m));
 // The DNS as the last scheduled check found it: the values to publish entered for every known
@@ -1443,7 +1444,7 @@ let demoQuarantineUserView = false;
 let demoQuarantine = [
   {
     id: 41, qid: '4F1A21C3B9', subject: 'Overdue invoice #4471', score: 16.1, sender: 'billing@invoice-alerts.example', rcpt: quarantineBox,
-    action: 'reject', created: '2026-09-30T07:12:04.000Z', notified: false, virus: false, ip: '198.51.100.7',
+    action: 'reject', created: demoTime('2026-09-30T07:12:04.000Z'), notified: false, virus: false, ip: '198.51.100.7',
     symbols: quarantineSymbols(['MIME_BAD_EXTENSION', 10.1, ['exe']], ['MICROSOFT_SPAM', 4], ['URL_NO_TLD', 2, ['invoice-alerts']], ['MIME_GOOD', -0.1]),
     letter: quarantineLetter({
       from: 'Billing <billing@invoice-alerts.example>', to: quarantineBox, subject: 'Overdue invoice #4471',
@@ -1455,7 +1456,7 @@ let demoQuarantine = [
   },
   {
     id: 40, qid: '2B7E0C11A4', subject: 'Partner newsletter: October', score: 9.2, sender: 'news@partner.example', rcpt: quarantineBox2,
-    action: 'add header', created: '2026-09-29T15:40:11.000Z', notified: false, virus: false, ip: '40.107.22.31',
+    action: 'add header', created: demoTime('2026-09-29T15:40:11.000Z'), notified: false, virus: false, ip: '40.107.22.31',
     symbols: quarantineSymbols(['R_SPF_FAIL', 8, ['-all']], ['MIME_HTML_ONLY', 0.2], ['MID_RHS_MATCH_FROM', 0], ['DMARC_POLICY_ALLOW', -0.5, ['partner.example', 'none']]),
     letter: quarantineLetter({
       from: 'Partner news <news@partner.example>', to: quarantineBox2, subject: 'Partner newsletter: October',
@@ -1465,7 +1466,7 @@ let demoQuarantine = [
   },
   {
     id: 38, qid: '9C44D07E21', subject: 'Re: your account', score: 15.4, sender: 'noreply@account-check.example', rcpt: 'postmaster@example.com',
-    action: 'reject', created: '2026-09-28T22:03:50.000Z', notified: false, virus: false, ip: '203.0.113.45',
+    action: 'reject', created: demoTime('2026-09-28T22:03:50.000Z'), notified: false, virus: false, ip: '203.0.113.45',
     symbols: quarantineSymbols(['PHISHING', 7, ['account-check.example->example.com']], ['HFILTER_HOSTNAME_UNKNOWN', 2.5], ['URL_NO_TLD', 2]),
     letter: quarantineLetter({
       from: 'Account team <noreply@account-check.example>', to: 'postmaster@example.com', subject: 'Re: your account',
