@@ -13,11 +13,18 @@
 #   update.sh sha-<commit> [--prefix /opt/mailexpert]
 #   update.sh --check sha-<commit> [--prefix /opt/mailexpert]   (status.sh --target: read-only)
 #
-# After an update it lists the steps outside the panel that the change needs (the mail node's host
-# scripts, the pinned edge image), from the files that changed between the two commits.
+# After an update it lists, from the files that changed between the two commits, the steps a
+# person takes outside the panel ("next:": the mail node's host scripts, the pinned edge image) and
+# context ("info:": migrations, what install.sh did by itself).
 #
-# Exit codes: 0 updated (or already at that version), 1 failure, 2 invalid input or a state that
-# forbids an update (nothing changed).
+# Exit codes:
+#   0 updated (or already at that version);
+#   1 failure after the switch began: install.sh ran and the new version did not become ready; the
+#     server may run neither version (the log says whether migrations were applied);
+#   2 invalid input or a state that forbids an update (not root, standby, not ready, no such
+#     commit, not enough space, a PostgreSQL major change): nothing changed;
+#   3 failure before the switch (an image that does not pull, the pre-update backup, any other
+#     command): nothing changed, the old version runs.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
@@ -39,6 +46,18 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/status.sh"
 exit_on_unexpected_failure
 
+# 1 from the moment install.sh is started: before that every failure leaves the server unchanged
+# and exits 3 (nothing_changed_exit), whatever failed (die, ensure_image, the ERR trap).
+SWITCHED=0
+# shellcheck disable=SC2329 # run by the EXIT trap below
+nothing_changed_exit() {
+  if [ "$SWITCHED" = 0 ] && [ "$1" = 1 ]; then
+    printf '[mailexpert] nothing was changed: the old version still runs\n' >&2
+    exit 3
+  fi
+}
+trap 'nothing_changed_exit $?' EXIT
+
 READY_TIMEOUT=${MAILEXPERT_READY_TIMEOUT:-600}
 
 usage() {
@@ -50,7 +69,8 @@ Backs up, switches to the new version with install.sh and checks it. A version t
 become ready is left as it is and the way back is printed: see the runbook, "Откат обновления".
 --check changes nothing: it runs status.sh --target <version> (exit 0 ready to update, 1 problems).
 MAILEXPERT_READY_TIMEOUT: seconds to wait for readiness (default 600).
-Exit codes: 0 updated, 1 failure, 2 invalid input or state (nothing changed).
+Exit codes: 0 updated; 1 the new version did not become ready (after the switch); 2 invalid
+input or state, nothing changed; 3 failure before the switch, nothing changed.
 EOF
 }
 
@@ -79,15 +99,36 @@ check_index_warning() {
   if [ -n "$line" ]; then warn "$line"; fi
 }
 
-# print_update_notes <old commit> <new commit>: the steps outside update.sh the change needs.
+# print_update_notes <old commit> <new commit>: "next:" for the steps a person takes outside
+# update.sh, "info:" for context.
 print_update_notes() {
   local changed tenant=0 profiles line
   changed=$(git -C "$APP_DIR" diff --name-only "$1" "$2" 2>/dev/null) || return 0
   profiles=$(env_get "$ENV_FILE" COMPOSE_PROFILES) || profiles=''
   if has_profile "$profiles" tenant; then tenant=1; fi
   while IFS= read -r line; do
-    if [ -n "$line" ]; then log "next: $line"; fi
-  done < <(update_notes "$tenant" <<<"$changed")
+    case $line in
+      "next "*) log "next: ${line#next }" ;;
+      "info "*) log "info: ${line#info }" ;;
+    esac
+  done < <(update_notes "$tenant" "$(edge_services | paste -sd, -)" <<<"$changed")
+}
+
+# check_data_images <old commit> <new commit>: refuses a PostgreSQL major change, which update.sh
+# cannot carry over (the old data directory does not start on a new major version).
+check_data_images() {
+  local kind service from to
+  while read -r kind service from _ to; do
+    if [ "$kind" = problem ]; then
+      die "$service changes from $from to $to between these versions: a new PostgreSQL major version needs a dump and a restore into a new volume, which update.sh does not do" 2
+    fi
+  done < <(data_image_changes <(git -C "$APP_DIR" show "$1:docker-compose.yml" 2>/dev/null) \
+    <(git -C "$APP_DIR" show "$2:docker-compose.yml" 2>/dev/null))
+}
+
+# applied_migrations: the number of applied migrations, empty when the database does not answer.
+applied_migrations() {
+  migration_count 2>/dev/null | tr -d '[:space:]' || true
 }
 
 # run_install <version>: install.sh of the current checkout switches to <version> (and continues
@@ -98,6 +139,7 @@ run_install() {
 
 main() {
   local prefix=/opt/mailexpert target='' old dump free_kb bytes problem since url check=0 old_head profiles
+  local before after
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
@@ -120,7 +162,7 @@ main() {
     exec bash "$SCRIPT_DIR/status.sh" --prefix "$prefix" --target "$target"
   fi
   [[ $READY_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_READY_TIMEOUT must be a number of seconds" 2
-  [ "$(id -u)" = 0 ] || die "run update.sh as root"
+  [ "$(id -u)" = 0 ] || die "run update.sh as root" 2
   load_install "$prefix"
   old=$CFG_VERSION
   if [ "$target" = "$old" ]; then
@@ -133,6 +175,7 @@ main() {
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" rev-parse --verify --quiet "${target#sha-}^{commit}" >/dev/null ||
     die "commit ${target#sha-} is not in $CFG_REPO_URL" 2
+  check_data_images HEAD "${target#sha-}"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-backend:$target"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$target"
   # The tenant worker runs the same tag; pulled here so that a missing image stops the update
@@ -152,12 +195,19 @@ main() {
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   old_head=$(git -C "$APP_DIR" rev-parse HEAD)
   url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=
+  before=$(applied_migrations)
   log "updating $old -> $target"
+  SWITCHED=1
   if ! run_install "$target"; then
     send_ping "$url" fail "the update to $target did not become ready"
     warn "$target did not become ready; nothing was rolled back"
     log "the backend log: docker compose -p $CFG_PROJECT logs backend"
-    log "to go back to $old (what was written since the update is lost): stop backend and frontend, restore $dump into the database, then run install.sh --prefix $OPT_PREFIX --version $old (runbook: \"Откат обновления\")"
+    after=$(applied_migrations)
+    if [ -n "$before" ] && [ "$before" = "$after" ]; then
+      log "no migration was recorded as applied ($after before and after): unless the backend log shows a migration that failed halfway, going back is install.sh --prefix $OPT_PREFIX --version $old and nothing is lost (the pre-update dump $dump stays in case it is needed)"
+    else
+      log "migrations were applied or cannot be counted (${before:-?} before, ${after:-?} now): to go back to $old (what was written since the update is lost): stop backend and frontend, restore $dump into the database, then run install.sh --prefix $OPT_PREFIX --version $old (runbook: \"Откат обновления\")"
+    fi
     exit 1
   fi
   check_index_warning "$since"

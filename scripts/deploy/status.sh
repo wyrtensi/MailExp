@@ -4,12 +4,18 @@
 # containers, the tenant worker, the edge image, free space, backups, applied migrations and the
 # last known state of the mail node's spam rule. With --target sha-<12> it also checks that
 # version: the commit, its images in the registry, the migrations it would run, a target older
-# than the schema, and the steps outside update.sh that the change needs (mail node, edge).
+# than the schema, a PostgreSQL major change, and the steps outside update.sh that the change needs
+# (mail node, edge).
 #
 # It changes nothing on the server, with one exception: with --target, a commit that is not in the
-# checkout yet is fetched (git fetch, as update.sh does). It never prints a value from .env.
+# checkout yet is fetched (git fetch, as update.sh does; never while an update holds its lock). Of
+# the env files it prints only non-secret values (EDGE_IMAGE, the image pinned by digest); secrets
+# never.
 #
 #   status.sh [--prefix /opt/mailexpert] [--target sha-<12>] [--json]
+#
+# With --json stdout always carries one JSON object: the report, or {"error": ..., "exit_code": N}
+# when the script itself failed or the input was invalid.
 #
 # Exit codes: 0 no problem (warnings may remain), 1 problems found (an update would be refused or
 # fail), 2 invalid input or no installation.
@@ -44,20 +50,27 @@ Usage: status.sh [--prefix /opt/mailexpert] [--target sha-<12>] [--json]
 Read-only preflight: versions, readiness, containers, tenant worker, edge image, free space,
 backups, migrations, the mail node's spam rule. --target checks a version to update to (the
 commit, its images, pending migrations, steps outside update.sh); a commit missing from the
-checkout is fetched. --json prints one JSON object on stdout. No value from .env is printed.
+checkout is fetched. --json prints one JSON object on stdout (with "error" when the script
+failed). Secrets are never printed.
 Exit codes: 0 no problem, 1 problems found, 2 invalid input or no installation.
 EOF
 }
 
-PROBLEMS=() WARNINGS=() NOTES=()
+# PROBLEMS block an update; WARNINGS do not; NEXT are steps a person takes besides update.sh; INFO
+# is context (what update.sh does by itself, what matters for a rollback).
+PROBLEMS=() WARNINGS=() NEXT=() INFO=()
 problem() { PROBLEMS+=("$1"); }
 warning() { WARNINGS+=("$1"); }
-note() { NOTES+=("$1"); }
+info() { INFO+=("$1"); }
 
 # Facts, filled by collect and read by the reports.
 declare -A FACT=()
 PRE_UPDATE_DUMPS='' APPLIED=''
 TARGET_PENDING='' TARGET_UNKNOWN='' TARGET_IMAGES=''
+# 1 once schema_migrations was read: until then pending and unknown migrations are unknown (null),
+# never "none".
+SCHEMA_READ=0
+JSON=0 REPORTED=0
 
 # lines_into <array name>: appends the non-empty lines on stdin to the array.
 lines_into() {
@@ -93,7 +106,7 @@ collect_versions() {
   fi
   if [ "${FACT[ready]}" = 0 ]; then
     if is_standby; then
-      note "standby: the panel does not run here on purpose (install.sh --no-start, or a move); update.sh refuses a standby server"
+      info "standby: the panel does not run here on purpose (install.sh --no-start, or a move); update.sh refuses a standby server"
     else
       problem "ready: http://127.0.0.1:$CFG_HTTP_PORT/api/health/ready does not answer 200"
     fi
@@ -109,6 +122,9 @@ collect_containers() {
     FACT[tenant_worker]=1
     app_services+=(tenant-worker)
   fi
+  services=$(edge_services)
+  FACT[edge_services]=$(paste -sd, - <<<"$services")
+  FACT[edge_image]=$(env_get "$EDGE_ENV" EDGE_IMAGE 2>/dev/null) || FACT[edge_image]=''
   is_standby && return 0
   if ps=$(app_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then
     lines_into PROBLEMS < <(service_problems "${app_services[@]}" <<<"$ps")
@@ -118,9 +134,6 @@ collect_containers() {
   if images=$(app_compose ps --all --format '{{.Service}} {{.Image}}' 2>/dev/null); then
     lines_into PROBLEMS < <(image_problems "$CFG_VERSION" frontend backend tenant-worker <<<"$images")
   fi
-  services=$(edge_services)
-  FACT[edge_services]=$(paste -sd, - <<<"$services")
-  FACT[edge_image]=$(env_get "$EDGE_ENV" EDGE_IMAGE 2>/dev/null) || FACT[edge_image]=''
   if [ -n "$services" ]; then
     if ps=$(edge_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then
       # shellcheck disable=SC2086 # one service name per word
@@ -165,6 +178,7 @@ collect_database() {
   FACT[migrations_applied]='' FACT[spam_rule]=''
   is_standby && return 0
   if APPLIED=$(printf 'SELECT version FROM schema_migrations ORDER BY version;\n' | app_psql 2>/dev/null); then
+    SCHEMA_READ=1
     APPLIED=$(LC_ALL=C sort -u <<<"$APPLIED" | sed '/^$/d')
     FACT[migrations_applied]=$(grep -c . <<<"$APPLIED" || true)
   else
@@ -180,64 +194,91 @@ collect_database() {
   fi
 }
 
+# image_state <image reference>: ok, missing or unknown (manifest_state); a local image is ok.
+image_state() {
+  local err status=0
+  if docker image inspect "$1" >/dev/null 2>&1; then
+    echo ok
+    return 0
+  fi
+  err=$(docker manifest inspect "$1" 2>&1 >/dev/null) || status=$?
+  manifest_state "$status" "$err"
+}
+
 # collect_target <sha-XXXXXXXXXXXX>
 collect_target() {
-  local target=$1 commit=${1#sha-} full head image prefix=$CFG_IMAGE_PREFIX need
-  local applied_file target_file changed
+  local target=$1 commit=${1#sha-} full head image state prefix=$CFG_IMAGE_PREFIX locked=0
+  local applied_file target_file changed line kind service from to
   local -a images=(mailexpert-backend mailexpert-frontend)
   FACT[target]=$target
   FACT[target_commit]=0
-  if ! git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" >/dev/null 2>&1; then
+  if lock_held "$STATE_DIR/update.lock"; then
+    locked=1
+    problem "target: an update, rollback or restore is running now"
+  fi
+  # Never fetched next to a running update: it is switching this checkout.
+  if [ "$locked" = 0 ] && ! git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" >/dev/null 2>&1; then
     git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warning "target: git fetch failed in $APP_DIR"
   fi
   if ! full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null); then
-    problem "target: commit $commit is not in $CFG_REPO_URL"
+    if [ "$locked" = 0 ]; then problem "target: commit $commit is not in $CFG_REPO_URL"; fi
     return 0
   fi
   FACT[target_commit]=1
-  if [ "$target" = "$CFG_VERSION" ]; then note "target: the panel is already at $target"; fi
+  if [ "$target" = "$CFG_VERSION" ]; then info "target: the panel is already at $target"; fi
   if is_standby; then problem "target: standby server: update.sh refuses it; install.sh --version sets its version"; fi
-  if lock_held "$STATE_DIR/update.lock"; then problem "target: an update, rollback or restore is running now"; fi
 
   if [ "${FACT[tenant_worker]}" = 1 ]; then images+=(mailexpert-tenant-worker); fi
   for image in "${images[@]}"; do
-    if docker image inspect "$prefix/$image:$target" >/dev/null 2>&1 ||
-      docker manifest inspect "$prefix/$image:$target" >/dev/null 2>&1; then
-      TARGET_IMAGES+="$image ok"$'\n'
-    else
-      TARGET_IMAGES+="$image missing"$'\n'
-      problem "target: image $prefix/$image:$target is not in the registry (did CI's images job pass for this commit?)"
-    fi
+    state=$(image_state "$prefix/$image:$target")
+    TARGET_IMAGES+="$image $state"$'\n'
+    case $state in
+      missing) problem "target: image $prefix/$image:$target does not exist in the registry (did CI's images job pass for this commit?)" ;;
+      unknown) problem "target: cannot check image $prefix/$image:$target: the registry is unreachable or refused access (network, credentials, rate limit); update.sh would stop at the same point" ;;
+    esac
   done
 
-  applied_file=$(mktemp) target_file=$(mktemp)
-  printf '%s\n' "$APPLIED" | sed '/^$/d' >"$applied_file"
-  git -C "$APP_DIR" ls-tree --name-only "$full" backend/migrations/ | migration_versions >"$target_file"
-  if [ -n "$APPLIED" ]; then
+  if [ "$SCHEMA_READ" = 1 ]; then
+    applied_file=$(mktemp) target_file=$(mktemp)
+    printf '%s\n' "$APPLIED" | sed '/^$/d' >"$applied_file"
+    git -C "$APP_DIR" ls-tree --name-only "$full" backend/migrations/ | migration_versions >"$target_file"
     TARGET_PENDING=$(pending_migrations "$applied_file" "$target_file")
     TARGET_UNKNOWN=$(unknown_migrations "$applied_file" "$target_file")
+    rm -f "$applied_file" "$target_file"
     if [ -n "$TARGET_UNKNOWN" ]; then
       problem "target: $target is older than the database schema ($(grep -c . <<<"$TARGET_UNKNOWN") migration(s) it does not know); old code on a new schema is not supported: go back with the pre-update dump (runbook: \"Откат обновления\")"
     fi
+  else
+    warning "target: the database schema could not be read, so pending migrations are unknown: treat them as present (going back then needs the pre-update dump)"
   fi
-  rm -f "$applied_file" "$target_file"
 
   if [ -n "${FACT[last_dump_bytes]}" ] && [ -n "${FACT[free_kb]}" ]; then
     lines_into PROBLEMS < <(space_problem "${FACT[free_kb]}" "${FACT[last_dump_bytes]}")
   fi
   head=$(git -C "$APP_DIR" rev-parse --verify --quiet HEAD 2>/dev/null) || head=''
-  if [ -n "$head" ] && [ "$head" != "$full" ]; then
-    changed=$(git -C "$APP_DIR" diff --name-only "$head" "$full" 2>/dev/null) || changed=''
-    lines_into NOTES < <(update_notes "${FACT[tenant_worker]}" <<<"$changed")
-    need=$(git -C "$APP_DIR" merge-base --is-ancestor "$head" "$full" 2>/dev/null && echo forward || echo other)
-    if [ "$need" != forward ]; then
-      note "target: $target is not a descendant of the running commit (a downgrade or another branch)"
+  [ -n "$head" ] && [ "$head" != "$full" ] || return 0
+  while read -r kind service from _ to; do
+    if [ "$kind" = problem ]; then
+      problem "target: $service changes from $from to $to: a new PostgreSQL major version does not start on the old data directory, and update.sh does not migrate it (dump, new volume, restore)"
+    elif [ -n "$kind" ]; then
+      info "target: the $service image changes from $from to $to"
     fi
+  done < <(data_image_changes <(git -C "$APP_DIR" show "$head:docker-compose.yml" 2>/dev/null) \
+    <(git -C "$APP_DIR" show "$full:docker-compose.yml" 2>/dev/null))
+  changed=$(git -C "$APP_DIR" diff --name-only "$head" "$full" 2>/dev/null) || changed=''
+  while IFS= read -r line; do
+    case $line in
+      "next "*) NEXT+=("${line#next }") ;;
+      "info "*) INFO+=("${line#info }") ;;
+    esac
+  done < <(update_notes "${FACT[tenant_worker]}" "${FACT[edge_services]}" <<<"$changed")
+  if ! git -C "$APP_DIR" merge-base --is-ancestor "$head" "$full" 2>/dev/null; then
+    info "target: $target is not a descendant of the running commit (a downgrade or another branch)"
   fi
 }
 
 report_text() {
-  local line key
+  local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
   for key in version checkout running ready tenant_worker edge_services edge_image backup_configured \
     last_backup_at last_dump_bytes free_kb migrations_applied spam_rule target target_commit; do
@@ -247,11 +288,14 @@ report_text() {
   if [ -n "$PRE_UPDATE_DUMPS" ]; then printf '  %-20s %s\n' pre_update_dumps "$(paste -sd' ' - <<<"$PRE_UPDATE_DUMPS")"; fi
   if [ -n "$TARGET_IMAGES" ]; then printf '  %-20s %s\n' target_images "$(sed '/^$/d' <<<"$TARGET_IMAGES" | paste -sd, -)"; fi
   if [ -n "${FACT[target]+set}" ] && [ "${FACT[target_commit]}" = 1 ]; then
-    printf '  %-20s %s\n' pending_migrations "$(sed '/^$/d' <<<"$TARGET_PENDING" | paste -sd' ' - | sed 's/^$/none/')"
+    pending=$(sed '/^$/d' <<<"$TARGET_PENDING" | paste -sd' ' -)
+    if [ "$SCHEMA_READ" = 0 ]; then pending=unknown; fi
+    printf '  %-20s %s\n' pending_migrations "${pending:-none}"
   fi
   for line in "${PROBLEMS[@]}"; do printf 'problem: %s\n' "$line"; done
   for line in "${WARNINGS[@]}"; do printf 'warning: %s\n' "$line"; done
-  for line in "${NOTES[@]}"; do printf 'note: %s\n' "$line"; done
+  for line in "${NEXT[@]}"; do printf 'next: %s\n' "$line"; done
+  for line in "${INFO[@]}"; do printf 'info: %s\n' "$line"; done
   if [ "${#PROBLEMS[@]}" -eq 0 ]; then printf 'result: no problems\n'; else printf 'result: %s problem(s)\n' "${#PROBLEMS[@]}"; fi
 }
 
@@ -263,11 +307,13 @@ report_json() {
     --arg prefix "$OPT_PREFIX" \
     --argjson problems "$(printf '%s\n' "${PROBLEMS[@]}" | sed '/^$/d' | lines_json)" \
     --argjson warnings "$(printf '%s\n' "${WARNINGS[@]}" | sed '/^$/d' | lines_json)" \
-    --argjson notes "$(printf '%s\n' "${NOTES[@]}" | sed '/^$/d' | lines_json)" \
+    --argjson next "$(printf '%s\n' "${NEXT[@]}" | sed '/^$/d' | lines_json)" \
+    --argjson info "$(printf '%s\n' "${INFO[@]}" | sed '/^$/d' | lines_json)" \
+    --argjson schema_read "$(if [ "$SCHEMA_READ" = 1 ]; then echo true; else echo false; fi)" \
     --argjson dumps "$(sed '/^$/d' <<<"$PRE_UPDATE_DUMPS" | lines_json)" \
     --argjson pending "$(sed '/^$/d' <<<"$TARGET_PENDING" | lines_json)" \
     --argjson unknown "$(sed '/^$/d' <<<"$TARGET_UNKNOWN" | lines_json)" \
-    --argjson images "$(sed '/^$/d' <<<"$TARGET_IMAGES" | jq -Rn '[inputs | split(" ") | {(.[0]): (.[1] == "ok")}] | add // {}')" \
+    --argjson images "$(sed '/^$/d' <<<"$TARGET_IMAGES" | jq -Rn '[inputs | split(" ") | {(.[0]): .[1]}] | add // {}')" \
     'def num: if . == null or . == "" then null else tonumber end;
      def flag: . == "1";
      $ARGS.named as $f
@@ -283,8 +329,9 @@ report_json() {
       spam_rule: (if ($f.spam_rule // "") == "" then null else $f.spam_rule end),
       target: (if $f.target == null then null else
         {version: $f.target, commit_found: ($f.target_commit | flag), images: $images,
-         pending_migrations: $pending, unknown_migrations: $unknown} end),
-      problems: $problems, warnings: $warnings, notes: $notes}'
+         pending_migrations: (if $schema_read then $pending else null end),
+         unknown_migrations: (if $schema_read then $unknown else null end)} end),
+      problems: $problems, warnings: $warnings, next: $next, info: $info}'
 }
 
 main() {
@@ -310,7 +357,7 @@ main() {
 
   FACT[standby]=0
   if is_standby; then FACT[standby]=1; fi
-  if lock_held "$STATE_DIR/update.lock"; then note "an update, rollback or restore is running now: results may be in flux"; fi
+  if lock_held "$STATE_DIR/update.lock"; then info "an update, rollback or restore is running now: results may be in flux"; fi
   collect_versions
   collect_containers
   collect_disk_and_backups
@@ -318,12 +365,26 @@ main() {
   if [ -n "$target" ]; then collect_target "$target"; fi
 
   if [ "$json" = 1 ]; then report_json; else report_text; fi
+  REPORTED=1
   # exit, not return: a nonzero return from main would trip the ERR trap.
   if [ "${#PROBLEMS[@]}" -gt 0 ]; then exit 1; fi
   exit 0
 }
 
+# json_failure <exit code>: with --json, the object a failed run leaves on stdout instead of a
+# report, so that a caller never mistakes a failure for a status.
+json_failure() {
+  local kind=script_failure
+  if [ "$JSON" = 1 ] && [ "$REPORTED" = 0 ] && [ "$1" != 0 ]; then
+    if [ "$1" = 2 ]; then kind=invalid_input_or_no_installation; fi
+    printf '{"error":"%s","exit_code":%s}\n' "$kind" "$1"
+  fi
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   exit_on_unexpected_failure
+  # Known before main parses the arguments: a failure while parsing gets its object too.
+  for arg in "$@"; do if [ "$arg" = --json ]; then JSON=1; fi; done
+  trap 'json_failure $?' EXIT
   main "$@"
 fi

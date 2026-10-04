@@ -9,9 +9,10 @@ has_profile() {
 }
 
 # migration_versions: reads paths or file names of migrations (backend/migrations/0001_x.sql) and
-# prints their versions (0001_x), sorted, one per line. Other files are skipped.
+# prints their versions (0001_x), sorted, one per line. Only the names the backend's runner takes
+# (backend/src/services/migrations.js: /^\d{4}_.+\.sql$/); other files are skipped.
 migration_versions() {
-  sed -n 's|^\(.*/\)\{0,1\}\([^/]*\)\.sql$|\2|p' | LC_ALL=C sort -u
+  sed -n 's|^\(.*/\)\{0,1\}\([0-9]\{4\}_[^/]\{1,\}\)\.sql$|\2|p' | LC_ALL=C sort -u
 }
 
 # pending_migrations <applied versions file> <target versions file>: the versions the target has
@@ -53,33 +54,83 @@ image_problems() {
   return 0
 }
 
-# update_notes <tenant profile on: 0|1>: reads the paths changed between two versions (git diff
-# --name-only) on stdin and prints one line per part of the system that needs a step besides
-# update.sh. Nothing when the change stays inside the panel's images.
+# manifest_state <docker manifest inspect exit code> <its stderr>: ok, missing (the registry
+# answered that there is no such tag) or unknown (anything else: the registry unreachable, access
+# denied, a rate limit). Only "missing" means the commit has no image.
+manifest_state() {
+  if [ "$1" = 0 ]; then
+    echo ok
+  elif grep -qiE 'no such manifest|manifest unknown|not found' <<<"$2"; then
+    echo missing
+  else
+    echo unknown
+  fi
+}
+
+# compose_image <service> : reads a compose file on stdin and prints the image of <service>
+# (the first `image:` line inside its block), empty when it has none.
+compose_image() {
+  awk -v s="$1" '
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { inside = ($1 == s ":") }
+    inside && /^    image:/ { sub(/^    image:[[:space:]]*/, ""); print; exit }'
+}
+
+# major_of <image reference>: the leading number of its tag (postgres:16-alpine -> 16).
+major_of() {
+  local tag
+  tag=$(image_tag "$1")
+  printf '%s\n' "${tag%%[!0-9]*}"
+}
+
+# data_image_changes <old docker-compose.yml> <new docker-compose.yml>: one line per data service
+# whose image changes between the two files: "<problem|info> <service> <old> -> <new>". A new
+# PostgreSQL major version cannot start on the old data directory (it needs a dump and a restore,
+# which update.sh does not do): problem. Any other change (a Redis tag, a PostgreSQL minor tag):
+# info.
+data_image_changes() {
+  local service old new kind
+  for service in postgres redis; do
+    old=$(compose_image "$service" <"$1")
+    new=$(compose_image "$service" <"$2")
+    [ "$old" != "$new" ] || continue
+    kind=info
+    if [ "$service" = postgres ] && [ "$(major_of "$old")" != "$(major_of "$new")" ]; then kind=problem; fi
+    printf '%s %s %s -> %s\n' "$kind" "$service" "${old:-none}" "${new:-none}"
+  done
+  return 0
+}
+
+# update_notes <tenant profile on: 0|1> <edge services, comma-separated>: reads the paths changed
+# between two versions (git diff --name-only) on stdin and prints one line per part of the system
+# the change touches outside the panel's images: "next <text>" for a step a person has to take,
+# "info <text>" for what update.sh does by itself or what only matters for a rollback. Nothing for a
+# change inside the panel's images.
 update_notes() {
-  local tenant=$1 paths
+  local tenant=$1 edge=",${2:-},"
+  local paths
   paths=$(cat)
   if grep -q '^backend/migrations/' <<<"$paths"; then
-    echo "migrations: the new version adds database migrations; they run when the backend starts, and going back means restoring the pre-update dump (runbook: \"Откат обновления\")"
+    echo "info migrations: the new version adds database migrations; they run when the backend starts, and going back means restoring the pre-update dump (runbook: \"Откат обновления\")"
   fi
   if grep -q '^scripts/deploy/mail-node/' <<<"$paths"; then
-    echo "mail node: its host scripts changed; on the node, check out the same commit and run scripts/deploy/mail-node/setup.sh --dry-run, then without --dry-run (docs/operations/mail-node.md, section 4)"
+    echo "next mail node: its host scripts changed; on the node, check out the same commit and run scripts/deploy/mail-node/setup.sh --dry-run, then without --dry-run (docs/operations/mail-node.md, section 4)"
   fi
-  if grep -q '^deploy/tenant-worker/' <<<"$paths"; then
-    if [ "$tenant" = 1 ]; then
-      echo "tenant worker: its image changed; update.sh pulls and restarts it together with the panel (same tag)"
-    else
-      echo "tenant worker: its image changed; this install runs no tenant worker (COMPOSE_PROFILES has no tenant), nothing to do"
+  if grep -q '^deploy/tenant-worker/' <<<"$paths" && [ "$tenant" = 1 ]; then
+    echo "info tenant worker: its image changed; update.sh pulls and restarts it together with the panel (same tag)"
+  fi
+  if [[ $edge == *,caddy,* ]]; then
+    if grep -q '^deploy/edge/Dockerfile$' <<<"$paths"; then
+      echo "next edge: the Caddy image changed; update.sh keeps the pinned EDGE_IMAGE: to take the new one, empty EDGE_IMAGE in <prefix>/edge/.env and run install.sh (docs/operations/README.md, section 9)"
+    fi
+    if grep -q '^deploy/edge/Caddyfile.tmpl$' <<<"$paths"; then
+      echo "info edge: the Caddyfile template changed; install.sh (run by update.sh) writes it and restarts Caddy"
     fi
   fi
-  if grep -q '^deploy/edge/Dockerfile$' <<<"$paths"; then
-    echo "edge: the Caddy image changed; update.sh keeps the pinned EDGE_IMAGE: to take the new one, empty EDGE_IMAGE in <prefix>/edge/.env and run install.sh (runbook: docs/operations/README.md, \"Обновление\")"
-  fi
-  if grep -q '^deploy/edge/\(compose.yml\|Caddyfile.tmpl\)$' <<<"$paths"; then
-    echo "edge: its compose file or Caddyfile template changed; install.sh (run by update.sh) writes them and restarts Caddy when the Caddyfile differs"
+  if [ "$edge" != ",," ] && grep -q '^deploy/edge/compose.yml$' <<<"$paths"; then
+    echo "info edge: its compose file changed; install.sh (run by update.sh) copies it and recreates what changed"
   fi
   if grep -q '^deploy/systemd/' <<<"$paths"; then
-    echo "timers: the systemd units changed; install.sh (run by update.sh) installs them"
+    echo "info timers: the systemd units changed; install.sh (run by update.sh) installs them"
   fi
   return 0
 }
