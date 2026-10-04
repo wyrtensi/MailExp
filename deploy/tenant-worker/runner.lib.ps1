@@ -65,6 +65,11 @@ $Ops = @{
     Cmdlet = 'Set-HostedContentFilterPolicy'; Fixed = @{ Identity = 'Default'; PhishSpamAction = 'MoveToJmf' }; Args = @{}
     Keep = @()
   }
+  # Bulk (D-11, the owner's default after stage 7): to Junk as well.
+  set_bulk_spam_action_junk = @{
+    Cmdlet = 'Set-HostedContentFilterPolicy'; Fixed = @{ Identity = 'Default'; BulkSpamAction = 'MoveToJmf' }; Args = @{}
+    Keep = @()
+  }
   get_accepted_domain = @{
     Cmdlet = 'Get-AcceptedDomain'; Fixed = @{}; Args = @{ domain = @('Identity', $DomainPattern) }
     Keep = @('DomainName', 'DomainType', 'Default', 'Identity')
@@ -143,7 +148,7 @@ $Ops = @{
   # released to all its recipients.
   get_quarantine_messages = @{
     Cmdlet = 'Get-QuarantineMessage'
-    Fixed = @{ QuarantineTypes = @('HighConfPhish', 'Phish', 'Spam'); Direction = 'Inbound'; ReleaseStatus = 'NotReleased'; PageSize = 100 }
+    Fixed = @{ QuarantineTypes = @('HighConfPhish', 'Phish', 'Spam', 'Bulk'); Direction = 'Inbound'; ReleaseStatus = 'NotReleased'; PageSize = 100 }
     Args = @{ page = @('Page', $PagePattern) }
     Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus', 'Direction',
       'MessageId', 'Expires', 'RecipientCount')
@@ -155,9 +160,9 @@ $Ops = @{
     Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'RecipientAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus',
       'Released', 'ReleasedUser', 'Direction', 'MessageId', 'Expires')
   }
-  # Guard: the message is read by its Identity first and released only if it is inbound and every
-  # type it carries is a releasable one ($ReleasableTypes; quarantine_not_allowed otherwise): the
-  # worker can release no malware, bulk, mail flow rule, file type or DLP quarantine.
+  # Guard: the message is read by its Identity first and released only if it passes
+  # Test-ReleasableInbound (quarantine_not_allowed otherwise): the worker can release no malware,
+  # mail flow rule, file type or DLP quarantine.
   release_quarantine_message = @{
     Cmdlet = 'Release-QuarantineMessage'; Fixed = @{ ReleaseToAll = $true; Confirm = $false }
     Args = @{ identity = @('Identity', $QuarantineIdPattern) }; Guard = 'ReleasableInbound'
@@ -237,30 +242,45 @@ function Connect-Tenant($tenant, $commands) {
   $script:Session = $key
 }
 
-# The quarantine types the worker may release (owner's decision after stage 7, section 5.14): high
-# confidence phishing, phishing, spam and high confidence spam, as tokens: lower case, letters only,
-# Get-QuarantineMessage's two spellings of a type made one ('High Confidence Phish' = HighConfPhish).
-# Matched whole, never as a part: 'Phish, Malware' is not 'phish'.
-$ReleasableTypes = @('highconfphish', 'phish', 'spam', 'highconfspam')
+# The quarantine types the worker may release (owner's decisions after stage 7, section 5.14): high
+# confidence phishing, phishing, spam, high confidence spam and bulk, as tokens: lower case, letters
+# only, the spellings Get-QuarantineMessage uses made one ('High Confidence Phish' = HighConfPhish).
+# The same set as RELEASABLE_TYPES in backend/src/services/tenant/quarantineRelease.js (a test keeps
+# them equal). Matched whole, never as a part.
+$ReleasableTypes = @('highconfphish', 'phish', 'spam', 'highconfspam', 'bulk')
+# Words that are never released wherever they stand, QuarantineTypes or Type (a veto): malware (and
+# SPOMalware), a mail flow rule, a file type block, DLP.
+$ForbiddenTypeWords = @('malware', 'transportrule', 'filetype', 'datalossprevention')
 function ConvertTo-QuarantineType([string]$value) {
   $token = $value.ToLowerInvariant() -replace '[^a-z]', ''
-  if ($token -ceq 'highconfidencephish') { return 'highconfphish' }
+  if ($token -ceq 'highconfidencephish' -or $token -ceq 'highconfidencephishing') { return 'highconfphish' }
+  if ($token -ceq 'phishing') { return 'phish' }
   if ($token -ceq 'highconfidencespam') { return 'highconfspam' }
   return $token
 }
 
-# The release guard: exactly one message with this Identity, inbound, and every type it carries
-# (QuarantineTypes, one or several, and Type) releasable; a message with no type is refused.
+function Get-PresentValues($value) {
+  $list = [System.Collections.Generic.List[string]]::new()
+  foreach ($item in @($value)) { if ($null -ne $item -and ([string]$item).Trim() -ne '') { $list.Add([string]$item) } }
+  return , $list.ToArray()
+}
+
+# The release guard: exactly one message with this Identity, inbound; QuarantineTypes (an enum)
+# decides: every value releasable (Type stands in only when QuarantineTypes is empty, Type's
+# spellings are not documented); no value of either names a forbidden word. Without a type: refused.
 function Test-ReleasableInbound([string]$identity) {
   $found = @(Get-QuarantineMessage -Identity $identity | Where-Object { $null -ne $_ -and ([string]$_.Identity) -ieq $identity })
   if ($found.Count -ne 1) { return $false }
   $q = $found[0]
-  $types = [System.Collections.Generic.List[string]]::new()
-  foreach ($value in @($q.QuarantineTypes) + @($q.Type)) {
-    if ($null -ne $value -and ([string]$value).Trim() -ne '') { $types.Add((ConvertTo-QuarantineType ([string]$value))) }
+  $kinds = Get-PresentValues $q.QuarantineTypes
+  $typeText = Get-PresentValues $q.Type
+  foreach ($value in @($kinds) + @($typeText)) {
+    $token = ConvertTo-QuarantineType $value
+    foreach ($word in $ForbiddenTypeWords) { if ($token.Contains($word)) { return $false } }
   }
-  if ($types.Count -eq 0) { return $false }
-  foreach ($type in $types) { if ($ReleasableTypes -cnotcontains $type) { return $false } }
+  $deciding = if ($kinds.Count -gt 0) { $kinds } else { @($typeText | Select-Object -First 1) }
+  if (@($deciding).Count -eq 0) { return $false }
+  foreach ($value in $deciding) { if ($ReleasableTypes -cnotcontains (ConvertTo-QuarantineType $value)) { return $false } }
   return (([string]$q.Direction) -ieq 'Inbound')
 }
 

@@ -69,6 +69,7 @@ export const EXO_OPS = Object.freeze({
   set_spam_action_junk: { params: {} },
   set_high_confidence_spam_action_junk: { params: {} },
   set_phish_spam_action_junk: { params: {} },
+  set_bulk_spam_action_junk: { params: {} },
   get_accepted_domain: { params: { domain: 'domain' } },
   // Stage 7b: R-24 and R-29 (the accepted domain's type), R-25 (connectors), R-26 (EOP DKIM), R-29
   // (the DBEB mail contacts).

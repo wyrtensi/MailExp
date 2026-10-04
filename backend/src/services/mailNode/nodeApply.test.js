@@ -9,7 +9,7 @@ vi.mock('../db.js', () => ({ query: vi.fn() }));
 vi.mock('../safeFetch.js', () => ({ safeFetch: (url, options) => fake.current.fetch(url, options) }));
 
 const {
-  PREFILTER_ALWAYS_CAT, PREFILTER_CAT, PREFILTER_SFV, buildPrefilter, defaultRateLimit, runApply, runPrefilterApply,
+  PREFILTER_ALWAYS_CAT, PREFILTER_SFV, buildPrefilter, defaultRateLimit, runApply, runPrefilterApply, spamRuleStateOf,
 } = await import('./nodeApply.js');
 
 const CFG = { mailHost: 'mail.example.com', apiKey: 'k', quotaMb: 5120 };
@@ -294,13 +294,10 @@ describe('the spam filing rule', () => {
   const RULE = [
     '# BEGIN MailExpert: EOP verdicts to Junk (managed by MailExpert, do not edit)',
     'if anyof (',
-    '  header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(PHSH|HPHSH|HPHISH|MALW|SPM|HSPM|SPOOF)[[:space:]]*(;|$)",',
+    '  header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(PHSH|HPHSH|HPHISH|MALW|SPM|HSPM|SPOOF|BULK)[[:space:]]*(;|$)",',
     '  allof (',
     '    not header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:SKQ[[:space:]]*(;|$)",',
-    '    anyof (',
-    '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:(SPM|SKS|SKB)[[:space:]]*(;|$)",',
-    '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:BULK[[:space:]]*(;|$)"',
-    '    )',
+    '    header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:(SPM|SKS|SKB)[[:space:]]*(;|$)"',
     '  )',
     ') {',
     '  fileinto "Junk";',
@@ -309,28 +306,38 @@ describe('the spam filing rule', () => {
     '# END MailExpert: EOP verdicts',
   ].join('\n');
 
-  it('files phishing, malware, spam and spoofing always, and bulk unless released from quarantine (D-2, D-11, section 5.14)', () => {
-    expect(PREFILTER_ALWAYS_CAT).toEqual(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF']);
+  it('files every unwanted category always, and the spam verdicts unless released from quarantine (D-2, D-11, section 5.14)', () => {
+    expect(PREFILTER_ALWAYS_CAT).toEqual(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF', 'BULK']);
     expect(PREFILTER_SFV).toEqual(['SPM', 'SKS', 'SKB']);
-    expect(PREFILTER_CAT).toEqual(['BULK']);
     const script = buildPrefilter('');
     expect(script).toContain('require ["fileinto", "regex"];');
     expect(script.endsWith(`${RULE}\n`)).toBe(true);
   });
 
-  // The rule as Pigeonhole runs it, from the generated script itself: its four regular expressions in
-  // order (phishing and malware; released from quarantine; the spam verdicts; the spam categories),
+  // The rule as Pigeonhole runs it, from the generated script itself: its three regular expressions in
+  // order (the unwanted categories; released from quarantine; the spam verdicts),
   // as POSIX ERE matched case-insensitively (the default comparator i;ascii-casemap), combined the way
   // the script's anyof / allof / not combine them. [[:space:]] reads as \s in JavaScript.
   const regexes = [...buildPrefilter('').matchAll(/header :regex "X-Forefront-Antispam-Report" "([^"]*)"/g)]
     .map((m) => new RegExp(m[1].replaceAll('[[:space:]]', '\\s'), 'i'));
   const toJunk = (header) => {
-    const [always, released, verdict, category] = regexes.map((re) => re.test(header));
-    return always || (!released && (verdict || category));
+    const [always, released, verdict] = regexes.map((re) => re.test(header));
+    return always || (!released && verdict);
   };
 
-  it('has the four tests the rule combines', () => {
-    expect(regexes).toHaveLength(4);
+  it('has the three tests the rule combines', () => {
+    expect(regexes).toHaveLength(3);
+  });
+
+  it('tells this version of the rule from an older one and from none (section 5.14)', () => {
+    expect(spamRuleStateOf(buildPrefilter(''))).toEqual({ state: 'ok' });
+    // The rule of the previous version: bulk and the spam categories under the SKQ exception.
+    const older = buildPrefilter('').replace('|SPM|HSPM|SPOOF|BULK)', ')');
+    expect(spamRuleStateOf(older)).toEqual({ state: 'outdated' });
+    expect(spamRuleStateOf('')).toEqual({ state: 'missing' });
+    expect(spamRuleStateOf('require ["fileinto"];\n')).toEqual({ state: 'missing' });
+    expect(spamRuleStateOf('# BEGIN MailExpert: EOP verdicts to Junk (managed by MailExpert, do not edit)\n'))
+      .toEqual({ state: 'unknown', code: 'prefilter_markers_broken' });
   });
 
   it('decides by whole fields, also in a folded header', () => {
@@ -341,16 +348,17 @@ describe('the spam filing rule', () => {
       ['SFV:NSPM;CAT:SPOOF;', true],
       ['SFV:NSPM;CAT:MALW;', true],
       ['SFV:NSPM;CAT:HPHSH', true],
-      // Released from quarantine (the panel releases spam and phishing, section 5.14): phishing,
-      // malware, spam and spoofing still go to Junk; only bulk does not.
+      // Released from quarantine (the panel releases spam, phishing and bulk, section 5.14): every
+      // unwanted category still goes to Junk; a released letter without one does not.
       ['SFV:SKQ;CAT:PHSH;', true],
       ['SFV:SKQ;CAT:HPHISH;', true],
       ['SFV:SKQ;CAT:MALW;', true],
       ['SFV:SKQ;CAT:SPM;', true],
       ['SFV:SKQ;CAT:HSPM;', true],
       ['SFV:SKQ;CAT:SPOOF;', true],
-      ['SFV:SKQ;CAT:BULK;', false],
+      ['SFV:SKQ;CAT:BULK;', true],
       ['SFV:SKQ;CAT:NONE;', false],
+      ['SFV:SKQ;', false],
       // What MoveToJmf delivers for each verdict the panel sets (section 5.14).
       ['SFV:SPM;CAT:HSPM;SCL:9;', true],
       ['SFV:SPM;CAT:PHSH;SCL:9;', true],

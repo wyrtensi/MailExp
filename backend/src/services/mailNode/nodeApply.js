@@ -78,18 +78,16 @@ const TIMEOUTS_UNTIL_DOWN = 2;
 // the message. SFV is the verdict: SPM spam, SKS marked spam by a mail flow rule, SKB a blocked
 // sender; CAT the category. By the owner's decisions D-2 and D-11 (R-42) and those after stage 7
 // (section 5.14 of eop-panel-requirements.md):
-// - phishing, malware, spam and spoofing (CAT PHSH, HPHSH, HPHISH, MALW, SPM, HSPM, SPOOF) always go
-//   to Junk, also when EOP released them from quarantine (SFV:SKQ): the panel releases high
-//   confidence phishing, phishing, spam and high confidence spam itself (a spoof quarantined as
-//   phishing among them) and shows them in Junk in safe mode;
-// - the spam verdicts and bulk (SFV SPM/SKS/SKB, CAT BULK) go to Junk unless released from
-//   quarantine (SFV:SKQ: someone decided it is not spam; the panel never releases bulk).
+// - every category EOP marks as unwanted (CAT PHSH, HPHSH, HPHISH, MALW, SPM, HSPM, SPOOF, BULK)
+//   always goes to Junk, also when EOP released it from quarantine (SFV:SKQ): the panel releases
+//   high confidence phishing, phishing, spam, high confidence spam and bulk itself (a spoof
+//   quarantined as phishing among them) and shows them in Junk in safe mode;
+// - the spam verdicts (SFV SPM/SKS/SKB) go to Junk unless released from quarantine (SFV:SKQ).
 // That a released message keeps its CAT is an assumption for tenant experiment 17.
 // Each value must be a whole field: after the start of the header or a ";" (with any blank the
 // unfolding left) and before ";" or the end, so "SFV:SPMX" or "XSFV:SPM" match nothing.
 export const PREFILTER_SFV = Object.freeze(['SPM', 'SKS', 'SKB']);
-export const PREFILTER_ALWAYS_CAT = Object.freeze(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF']);
-export const PREFILTER_CAT = Object.freeze(['BULK']);
+export const PREFILTER_ALWAYS_CAT = Object.freeze(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF', 'BULK']);
 const HEADER = 'X-Forefront-Antispam-Report';
 const field = (name, values) => {
   const value = values.length === 1 ? values[0] : `(${values.join('|')})`;
@@ -111,10 +109,7 @@ const RULE_BLOCK = [
   `  ${test(field('CAT', PREFILTER_ALWAYS_CAT))},`,
   '  allof (',
   `    not ${test(field('SFV', ['SKQ']))},`,
-  '    anyof (',
-  `      ${test(field('SFV', PREFILTER_SFV))},`,
-  `      ${test(field('CAT', PREFILTER_CAT))}`,
-  '    )',
+  `    ${test(field('SFV', PREFILTER_SFV))}`,
   '  )',
   ') {',
   '  fileinto "Junk";',
@@ -150,6 +145,62 @@ export function buildPrefilter(existing) {
   const rest = withoutBlocks(withoutBlocks(text, REQUIRE_BEGIN, REQUIRE_END), RULE_BEGIN, RULE_END)
     .replace(/^\s*\n/, '').replace(/\s+$/, '');
   return `${[REQUIRE_BLOCK, rest, RULE_BLOCK].filter(Boolean).join('\n\n')}\n`;
+}
+
+// --- The rule on the node, as the release from EOP's quarantine and the alerts need it ----------
+
+// Section 5.14: the release of spam and phishing from EOP's quarantine (services/tenant/
+// quarantineRelease.js) relies on the node filing released spam into Junk, which only this version
+// of the rule does (earlier versions filed SFV:SKQ with CAT SPM, HSPM, SPOOF or BULK into the
+// Inbox). A node keeps its old rule until an administrator writes the new one by its own action
+// (it restarts Dovecot), so the state is read from the node itself:
+//   ok        the prefilter holds this version of the rule
+//   outdated  it holds a MailExpert rule of another version
+//   missing   it holds no MailExpert rule
+//   unknown   no node, the node did not answer, or the panel's markers are broken (code)
+// The last state is kept in integration_config SPAM_RULE_PROVIDER for the screens.
+export const SPAM_RULE_PROVIDER = 'mail_node_spam_rule';
+export function spamRuleStateOf(current) {
+  // The same comparison as the "Apply" check (prefilterCheck).
+  const text = String(current ?? '');
+  try {
+    if (buildPrefilter(text) === text) return { state: 'ok' };
+  } catch (err) {
+    if (err instanceof MailNodeError) return { state: 'unknown', code: err.code };
+    throw err;
+  }
+  return { state: text.replace(/\r\n?/g, '\n').split('\n').includes(RULE_BEGIN) ? 'outdated' : 'missing' };
+}
+
+export async function saveSpamRuleState(found, now = Date.now()) {
+  const value = { at: new Date(now).toISOString(), state: found.state, ...(found.code ? { code: found.code } : {}) };
+  await query(`
+    INSERT INTO integration_config (provider, config) VALUES ($1, $2)
+    ON CONFLICT (provider) DO UPDATE SET config = EXCLUDED.config, updated_at = NOW()
+  `, [SPAM_RULE_PROVIDER, value]);
+  return value;
+}
+
+export async function getSpamRuleState() {
+  const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [SPAM_RULE_PROVIDER]);
+  return rows[0]?.config ?? null;
+}
+
+// Reads the rule on the node now and keeps the answer: { at, state, code? }.
+export async function checkSpamRule({ cfg = undefined, now = Date.now() } = {}) {
+  const config = cfg === undefined ? await getMailNodeConfig() : cfg;
+  let found;
+  if (!config) {
+    found = { state: 'unknown', code: 'mail_node_not_configured' };
+  } else {
+    try {
+      found = spamRuleStateOf(await getPrefilter(config));
+    } catch (err) {
+      if (!(err instanceof MailNodeError)) throw err;
+      found = { state: 'unknown', code: err.code };
+    }
+  }
+  return saveSpamRuleState(found, now);
 }
 
 // --- One run ---------------------------------------------------------------------------------
@@ -280,7 +331,9 @@ async function fail2banItem(cfg, panelIps, owned) {
 // R-11, the check only: the general apply never writes the rule.
 async function prefilterCheck(cfg) {
   const current = await getPrefilter(cfg);
-  return buildPrefilter(current) === current ? { status: 'ok' } : { status: 'pending', code: 'prefilter_differs' };
+  if (buildPrefilter(current) === current) return { status: 'ok' };
+  // rule: outdated or missing, kept for the release of spam from EOP's quarantine (section 5.14).
+  return { status: 'pending', code: 'prefilter_differs', rule: spamRuleStateOf(current).state };
 }
 
 // The rule written, then read back: mailcow answers "written" without writing when the file is
@@ -684,6 +737,13 @@ function journal({ userId, trigger, scope, domain, items }) {
   });
 }
 
+// The rule's state as a run's prefilter item shows it (a failed item tells nothing new).
+async function keepSpamRuleState(item) {
+  if (!item) return;
+  if (item.status === 'ok' || item.status === 'changed') await saveSpamRuleState({ state: 'ok' });
+  else if (item.status === 'pending' && item.rule) await saveSpamRuleState({ state: item.rule });
+}
+
 // Runs never overlap: two at once could each add the relayhost.
 let queue = Promise.resolve();
 function serialized(fn) {
@@ -715,6 +775,7 @@ export function applyNode({ userId, trigger = 'manual' }) {
     });
     const at = new Date().toISOString();
     await saveNodeResult({ at, items: result.node, owned: result.owned });
+    await keepSpamRuleState(result.node.find((i) => i.item === 'prefilter'));
     for (const d of result.domains) await saveDomainResult(d, at);
     journal({ userId, trigger, scope: 'node', items: [...result.node, ...result.domains.flatMap((d) => d.items)] });
     return { at, node: result.node, domains: result.domains };
@@ -767,6 +828,7 @@ export function applyPrefilter({ userId, ranges = EOP_RANGES }) {
     if (item.status === 'ok' || item.status === 'changed') fresh.push(await runForwardingHostsApply(cfg, owned, ranges));
     const items = replaceItems(stored?.items ?? [], fresh);
     await saveNodeResult({ at: stored?.at ?? at, items, owned });
+    await keepSpamRuleState(item);
     journal({ userId, trigger: 'manual', scope: 'prefilter', items: fresh });
     const fwd = fresh[1];
     return { ...item, forwardingHosts: fwd ? { status: fwd.status, ...(fwd.code ? { code: fwd.code } : {}) } : null };

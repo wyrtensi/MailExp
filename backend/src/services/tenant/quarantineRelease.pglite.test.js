@@ -15,6 +15,12 @@ vi.mock('../auditLog.js', () => ({
   recordAudit: vi.fn(async (entries) => { journal.entries.push(...[entries].flat()); }),
   insertAuditEntries: vi.fn(async (_tx, entries) => { journal.entries.push(...entries); }),
 }));
+// The node's spam rule (section 5.14): this version unless a test says otherwise.
+const spamRule = vi.hoisted(() => ({ state: 'ok' }));
+vi.mock('../mailNode/nodeApply.js', async (importActual) => ({
+  ...(await importActual()),
+  checkSpamRule: vi.fn(async () => ({ at: new Date().toISOString(), state: spamRule.state })),
+}));
 vi.mock('../../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: '60000000-0000-4000-8000-000000000001' }; next(); },
   requireAdmin: (_req, _res, next) => next(),
@@ -94,6 +100,8 @@ beforeEach(async () => {
   setTenantDriver(driver);
   // On by default (section 5.14): no switch row at the start of a test.
   journal.entries = [];
+  spamRule.state = 'ok';
+  await db.query("DELETE FROM integration_config WHERE provider = 'mail_node_phish_release_cursor'");
 });
 
 describe('the release job (R-42)', () => {
@@ -133,6 +141,64 @@ describe('the release job (R-42)', () => {
     expect(releases().map((e) => e.details.type).sort()).toEqual(['HighConfSpam', 'Phish', 'Spam']);
     const shown = await (await fetch(`${base}/tenant/phish-release`)).json();
     expect(shown.releases.find((r) => r.identity === qid(72))).toMatchObject({ type: 'HighConfSpam', state: 'released' });
+  });
+
+  it('holds spam, phishing and bulk while the node keeps an older spam rule; high confidence phishing goes (section 5.14)', async () => {
+    spamRule.state = 'outdated';
+    quarantine(80, { QuarantineTypes: 'Spam', Type: 'Spam' });
+    quarantine(81, { QuarantineTypes: 'Bulk', Type: 'Bulk' });
+    quarantine(82);
+    await runNow();
+    expect(model.released).toEqual([qid(82)]);
+    // Not read, not stored: nothing final about them.
+    expect(await rowOf(qid(80))).toBeUndefined();
+    expect(await rowOf(qid(81))).toBeUndefined();
+    expect((await getTenantState()).phishRelease).toMatchObject({ rule: { state: 'outdated' }, counts: { ruleWaiting: 2, released: 1 } });
+    // A row left behind (a failed attempt) is read and waits too.
+    quarantine(83, { QuarantineTypes: 'Phish', Type: 'Phish' });
+    await db.query("INSERT INTO tenant_quarantine_releases (identity, state, attempts) VALUES ($1, 'failed', 1)", [qid(83)]);
+    await runNow();
+    expect(model.released).toEqual([qid(82)]);
+    expect(await rowOf(qid(83))).toMatchObject({ state: 'failed', attempts: 1 });
+    // The rule written: they go.
+    spamRule.state = 'ok';
+    await runNow();
+    expect(model.released.sort()).toEqual([qid(80), qid(81), qid(82), qid(83)].sort());
+  });
+
+  it('a Type spelling the panel does not know neither blocks a known QuarantineTypes nor ends a message (I1)', async () => {
+    quarantine(84, { QuarantineTypes: 'HighConfPhish', Type: 'High Confidence Phishing' });
+    quarantine(85, { QuarantineTypes: 'Phish', Type: 'Phishing' });
+    quarantine(86, { QuarantineTypes: 'Phish', Type: 'Something new' });
+    await runNow();
+    expect(model.released.sort()).toEqual([qid(84), qid(85), qid(86)].sort());
+    // An unknown QuarantineTypes value waits (no row), and a known forbidden word in Type is final.
+    quarantine(87, { QuarantineTypes: 'NewKind', Type: 'Phish' });
+    quarantine(88, { QuarantineTypes: 'Phish', Type: 'Phish, Malware' });
+    model.exo.get_quarantine_messages = () => [{ Identity: qid(87) }, { Identity: qid(88) }];
+    await runNow();
+    expect(await rowOf(qid(87))).toBeUndefined();
+    expect((await getTenantState()).phishRelease.counts).toMatchObject({ waiting: 1 });
+    expect(await rowOf(qid(88))).toMatchObject({ state: 'skipped', reason: 'type_not_allowed' });
+  });
+
+  it('reaches mail behind 500 kept messages: the window walks the pages over runs (I2)', async () => {
+    // 520 messages kept for good (a recipient off the node), then one to release.
+    for (let n = 1000; n < 1520; n += 1) {
+      quarantine(n, { RecipientAddress: ['x@other.example.org'] });
+      await db.query("INSERT INTO tenant_quarantine_releases (identity, state, reason) VALUES ($1, 'skipped', 'foreign_recipients')", [qid(n)]);
+    }
+    quarantine(1520);
+    let runs = 0;
+    while (!model.released.includes(qid(1520)) && runs < 4) {
+      await runNow();
+      runs += 1;
+    }
+    expect(model.released).toEqual([qid(1520)]);
+    expect(runs).toBe(2);
+    // The next walk starts over from the second page.
+    const { rows: [cursor] } = await db.query("SELECT config FROM integration_config WHERE provider = 'mail_node_phish_release_cursor'");
+    expect(cursor.config.page).toBe(2);
   });
 
   it('keeps malware or a mixed type that reaches it all the same, with the reason', async () => {

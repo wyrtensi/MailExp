@@ -78,6 +78,7 @@ export const OPS = Object.freeze({
   set_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
   set_high_confidence_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
   set_phish_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
+  set_bulk_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
   // Read only, for stage 7b (R-24): whether a domain is an accepted domain and of which type.
   get_accepted_domain: { cmdlets: ['Get-AcceptedDomain'], params: { domain: 'domain' } },
   // Stage 7b. R-24 and R-29: the accepted domain's type (the type is fixed by the operation).
@@ -102,13 +103,14 @@ export const OPS = Object.freeze({
   remove_mail_contact: { cmdlets: ['Remove-MailContact'], params: { address: 'address' } },
   // Stage 7c, R-42 (decision D-2), widened by the owner's decision after stage 7 (section 5.14):
   // the spam and phishing EOP quarantined, released to the node's mailboxes by the panel. The list
-  // is fixed to inbound HighConfPhish, Phish and Spam (high confidence spam is listed as Spam:
+  // is fixed to inbound HighConfPhish, Phish, Spam and Bulk (high confidence spam is listed as Spam:
   // Learn's QuarantineTypes has no value of its own for it) not yet released, a page of 100 at a
   // time; one message is read by its Identity (only then are its recipients shown; only the item
   // with exactly that Identity is answered) and released to all its original recipients. The
   // release reads the message again in runner.lib.ps1 and refuses (quarantine_not_allowed) unless
-  // it is inbound and every type it carries is HighConfPhish, Phish, Spam or HighConfSpam, so
-  // malware, bulk, mail flow rule, file type and DLP quarantine are never released; -User,
+  // it is inbound, every QuarantineTypes value (Type when there is none) is HighConfPhish, Phish,
+  // Spam, HighConfSpam or Bulk and no type names malware, a mail flow rule, a file type or DLP, so
+  // those are never released; -User,
   // -AllowSender and the Tenant Allow/Block List of R-31 are not reachable.
   get_quarantine_messages: { cmdlets: ['Get-QuarantineMessage'], params: { page: 'page' } },
   get_quarantine_message: { cmdlets: ['Get-QuarantineMessage'], params: { identity: 'quarantine_id' } },

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { RELEASABLE_TYPES, decide, quarantineTypeOf, recipientsOf } from './quarantineRelease.js';
 import { TENANT_FIXTURES } from './fakes.js';
@@ -15,8 +16,9 @@ describe('decide (R-42 guards)', () => {
     expect(decide({ ...ROW, ReleaseStatus: 'ERROR' }, DOMAINS)).toEqual({ act: 'release' });
   });
 
-  it('releases phishing, spam and high confidence spam the same way (section 5.14)', () => {
-    expect(RELEASABLE_TYPES).toEqual(['HighConfPhish', 'Phish', 'Spam', 'HighConfSpam']);
+  it('releases phishing, spam, high confidence spam and bulk the same way (section 5.14)', () => {
+    expect(RELEASABLE_TYPES).toEqual(['HighConfPhish', 'Phish', 'Spam', 'HighConfSpam', 'Bulk']);
+    expect(decide({ ...ROW, QuarantineTypes: 'Bulk', Type: 'Bulk' }, DOMAINS)).toEqual({ act: 'release' });
     expect(decide({ ...ROW, QuarantineTypes: 'Phish', Type: 'Phish' }, DOMAINS)).toEqual({ act: 'release' });
     expect(decide({ ...ROW, QuarantineTypes: 'Spam', Type: 'Spam' }, DOMAINS)).toEqual({ act: 'release' });
     expect(decide({ ...ROW, QuarantineTypes: 'Spam', Type: 'High Confidence Spam' }, DOMAINS)).toEqual({ act: 'release' });
@@ -27,15 +29,48 @@ describe('decide (R-42 guards)', () => {
       .toEqual({ act: 'skip', reason: 'foreign_recipients' });
   });
 
-  it('never releases malware or another type, a message without a type or one of mixed types', () => {
+  it('never releases malware or another forbidden type, nor a mixed one: final', () => {
     for (const [types, type] of [
-      ['Malware', 'Malware'], ['Bulk', 'Bulk'], ['TransportRule', 'Transport Rule'], ['FileTypeBlock', 'FileTypeBlock'],
+      ['Malware', 'Malware'], ['TransportRule', 'Transport Rule'], ['FileTypeBlock', 'FileTypeBlock'],
       ['DataLossPrevention', 'Data Loss Prevention'], ['SPOMalware', 'SPOMalware'],
-      [['Phish', 'Malware'], 'Phish'], ['Spam', 'Phish, Malware'], [undefined, undefined], ['', ''], [[], null],
+      [['Phish', 'Malware'], 'Phish'], ['Spam', 'Phish, Malware'], ['Phish', 'Malware'],
     ]) {
       expect(decide({ ...ROW, QuarantineTypes: types, Type: type }, DOMAINS), JSON.stringify([types, type]))
         .toEqual({ act: 'skip', reason: 'type_not_allowed' });
     }
+  });
+
+  it('decides by QuarantineTypes; a Type spelling it does not know waits only when nothing else tells (I1)', () => {
+    // The enum decides, whatever Type spells.
+    for (const type of ['High Confidence Phishing', 'Phishing', 'Something new', undefined]) {
+      expect(decide({ ...ROW, QuarantineTypes: 'HighConfPhish', Type: type }, DOMAINS), String(type)).toEqual({ act: 'release' });
+    }
+    // Type stands in when QuarantineTypes is empty: a known spelling releases, an unknown one waits.
+    expect(decide({ ...ROW, QuarantineTypes: undefined, Type: 'Phishing' }, DOMAINS)).toEqual({ act: 'release' });
+    expect(decide({ ...ROW, QuarantineTypes: undefined, Type: 'High Confidence Phishing' }, DOMAINS)).toEqual({ act: 'release' });
+    for (const [types, type] of [[undefined, 'Something new'], ['NewKind', 'Phish'], [undefined, undefined], ['', ''], [[], null]]) {
+      expect(decide({ ...ROW, QuarantineTypes: types, Type: type }, DOMAINS), JSON.stringify([types, type]))
+        .toEqual({ act: 'wait', reason: 'type_unknown' });
+    }
+  });
+
+  it('holds every type but high confidence phishing while the node keeps an older spam rule (C1)', () => {
+    expect(decide(ROW, DOMAINS, { ruleOk: false })).toEqual({ act: 'release' });
+    for (const types of ['Phish', 'Spam', 'Bulk']) {
+      expect(decide({ ...ROW, QuarantineTypes: types, Type: types }, DOMAINS, { ruleOk: false }), types)
+        .toEqual({ act: 'wait', reason: 'spam_rule_not_applied' });
+    }
+    // Final verdicts stay final.
+    expect(decide({ ...ROW, QuarantineTypes: 'Spam', Direction: 'Outbound' }, DOMAINS, { ruleOk: false })).toEqual({ act: 'skip', reason: 'outbound' });
+    expect(decide({ ...ROW, QuarantineTypes: 'Spam', ReleaseStatus: 'Released' }, DOMAINS, { ruleOk: false })).toEqual({ act: 'released' });
+  });
+
+  it('holds the same releasable set as the worker (runner.lib.ps1 $ReleasableTypes)', () => {
+    const runner = readFileSync(new URL('../../../../deploy/tenant-worker/runner.lib.ps1', import.meta.url), 'utf8');
+    const tokens = /\$ReleasableTypes = @\(([^)]*)\)/.exec(runner)[1].match(/'([a-z]+)'/g).map((t) => t.slice(1, -1));
+    expect(tokens).toEqual(RELEASABLE_TYPES.map((t) => t.toLowerCase()));
+    const words = /\$ForbiddenTypeWords = @\(([^)]*)\)/.exec(runner)[1].match(/'([a-z]+)'/g).map((t) => t.slice(1, -1));
+    expect(words).toEqual(['malware', 'transportrule', 'filetype', 'datalossprevention']);
   });
 
   it('never releases an outbound message or one with a recipient off the node', () => {

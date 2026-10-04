@@ -266,18 +266,25 @@ export function createFakeTenantModel(options = {}) {
   };
   const isNotReleased = (row) => String(row.ReleaseStatus).toLowerCase() === 'notreleased';
 
-  // The worker's release guard (runner.lib.ps1 Test-ReleasableInbound): inbound, and every type the
-  // message carries one of high confidence phishing, phishing, spam, high confidence spam.
-  const RELEASABLE = ['highconfphish', 'phish', 'spam', 'highconfspam'];
+  // The worker's release guard (runner.lib.ps1 Test-ReleasableInbound): inbound; QuarantineTypes
+  // (or Type when it is empty) all releasable; no forbidden word in any of them.
+  const RELEASABLE = ['highconfphish', 'phish', 'spam', 'highconfspam', 'bulk'];
+  const FORBIDDEN = ['malware', 'transportrule', 'filetype', 'datalossprevention'];
   const token = (value) => {
     const t = String(value).toLowerCase().replace(/[^a-z]/g, '');
-    return { highconfidencephish: 'highconfphish', highconfidencespam: 'highconfspam' }[t] ?? t;
+    return {
+      highconfidencephish: 'highconfphish', highconfidencephishing: 'highconfphish', phishing: 'phish', highconfidencespam: 'highconfspam',
+    }[t] ?? t;
   };
+  const present = (value) => [value].flat().filter((v) => v != null && String(v).trim() !== '');
   const releasable = (row) => {
-    const types = [...[row.QuarantineTypes].flat(), ...[row.Type].flat()].filter((v) => v != null && String(v).trim() !== '').map(token);
-    return row.Direction === 'Inbound' && types.length > 0 && types.every((t) => RELEASABLE.includes(t));
+    const kinds = present(row.QuarantineTypes);
+    const typeText = present(row.Type);
+    if ([...kinds, ...typeText].map(token).some((t) => FORBIDDEN.some((w) => t.includes(w)))) return false;
+    const deciding = (kinds.length ? kinds : typeText.slice(0, 1)).map(token);
+    return row.Direction === 'Inbound' && deciding.length > 0 && deciding.every((t) => RELEASABLE.includes(t));
   };
-  const LISTED = ['HighConfPhish', 'Phish', 'Spam'];
+  const LISTED = ['HighConfPhish', 'Phish', 'Spam', 'Bulk'];
 
   // The Default anti-spam policy (R-28), as fixtures.json has it; the set operations of section 5.14
   // change one action each. writesIgnored: a write the tenant accepts without applying it (the
@@ -296,6 +303,7 @@ export function createFakeTenantModel(options = {}) {
     set_spam_action_junk: setAction('SpamAction'),
     set_high_confidence_spam_action_junk: setAction('HighConfidenceSpamAction'),
     set_phish_spam_action_junk: setAction('PhishSpamAction'),
+    set_bulk_spam_action_junk: setAction('BulkSpamAction'),
     // The summary: inbound high confidence phishing, phishing and spam not released, 100 per page;
     // no recipients.
     get_quarantine_messages: ({ page }) => {
