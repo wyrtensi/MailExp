@@ -131,14 +131,18 @@ $Ops = @{
     Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus', 'Direction',
       'MessageId', 'Expires', 'RecipientCount')
   }
+  # Learn: an -Identity that does not exist answers every message, so only the item with exactly
+  # that Identity is kept (Exact).
   get_quarantine_message = @{
-    Cmdlet = 'Get-QuarantineMessage'; Fixed = @{}; Args = @{ identity = @('Identity', $QuarantineIdPattern) }
+    Cmdlet = 'Get-QuarantineMessage'; Fixed = @{}; Args = @{ identity = @('Identity', $QuarantineIdPattern) }; Exact = 'Identity'
     Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'RecipientAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus',
       'Released', 'ReleasedUser', 'Direction', 'MessageId', 'Expires')
   }
+  # Guard: the message is read by its Identity first and released only if it is inbound high
+  # confidence phishing (quarantine_not_allowed otherwise): the worker can release nothing else.
   release_quarantine_message = @{
     Cmdlet = 'Release-QuarantineMessage'; Fixed = @{ ReleaseToAll = $true; Confirm = $false }
-    Args = @{ identity = @('Identity', $QuarantineIdPattern) }
+    Args = @{ identity = @('Identity', $QuarantineIdPattern) }; Guard = 'HighConfPhishInbound'
     Keep = @()
   }
 }
@@ -215,6 +219,16 @@ function Connect-Tenant($tenant, $commands) {
   $script:Session = $key
 }
 
+# The release guard: exactly one message with this Identity, inbound, high confidence phishing.
+function Test-HighConfPhishInbound([string]$identity) {
+  $found = @(Get-QuarantineMessage -Identity $identity | Where-Object { $null -ne $_ -and ([string]$_.Identity) -ieq $identity })
+  if ($found.Count -ne 1) { return $false }
+  $q = $found[0]
+  $types = (@($q.QuarantineTypes) | ForEach-Object { [string]$_ }) -join ' '
+  $phish = $types -match '\bHighConfPhish\b' -or ([string]$q.Type) -match 'High\s*Conf(idence)?\s*Phish'
+  return $phish -and (([string]$q.Direction) -ieq 'Inbound')
+}
+
 function Invoke-Op($request) {
   $op = [string]$request.op
   if (-not $Ops.ContainsKey($op)) { return @{ ok = $false; error = (Get-Failure 'unknown_op' 'Unknown operation') } }
@@ -244,13 +258,21 @@ function Invoke-Op($request) {
     return @{ ok = $false; error = (Get-Failure 'exo_connect_failed' $_.Exception.Message) }
   }
   if ($script:DryRun) {
+    if ($spec.Guard) { $commands.Add([ordered]@{ cmdlet = 'Get-QuarantineMessage'; parameters = [ordered]@{ Identity = $parameters.Identity } }) }
     $commands.Add([ordered]@{ cmdlet = $spec.Cmdlet; parameters = $parameters })
     return @{ ok = $true; result = [ordered]@{ dryRun = $true; commands = $commands } }
   }
   $cmdlet = $spec.Cmdlet
   for ($attempt = 1; ; $attempt++) {
     try {
+      if ($spec.Guard -eq 'HighConfPhishInbound' -and -not (Test-HighConfPhishInbound $parameters.Identity)) {
+        return @{ ok = $false; error = (Get-Failure 'quarantine_not_allowed' 'Only inbound high confidence phishing is released') }
+      }
       $items = @(& $cmdlet @parameters)
+      if ($spec.Exact) {
+        $want = [string]$parameters[$spec.Exact]
+        $items = @($items | Where-Object { $null -ne $_ -and ([string]$_.($spec.Exact)) -ieq $want })
+      }
       $rows = Select-Kept $items $spec.Keep
       return @{ ok = $true; result = $rows }
     } catch {

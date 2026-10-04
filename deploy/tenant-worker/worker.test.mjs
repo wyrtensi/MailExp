@@ -395,8 +395,11 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
       parameters: { QuarantineTypes: 'HighConfPhish', Direction: 'Inbound', ReleaseStatus: 'NotReleased', PageSize: 100, Page: '2' },
     }]);
     assert.deepEqual(await printed('get_quarantine_message', { identity: QID }), [{ cmdlet: 'Get-QuarantineMessage', parameters: { Identity: QID } }]);
-    assert.deepEqual(await printed('release_quarantine_message', { identity: QID }),
-      [{ cmdlet: 'Release-QuarantineMessage', parameters: { ReleaseToAll: true, Confirm: false, Identity: QID } }]);
+    // The release reads the message first (the guard: inbound HighConfPhish only).
+    assert.deepEqual(await printed('release_quarantine_message', { identity: QID }), [
+      { cmdlet: 'Get-QuarantineMessage', parameters: { Identity: QID } },
+      { cmdlet: 'Release-QuarantineMessage', parameters: { ReleaseToAll: true, Confirm: false, Identity: QID } },
+    ]);
     res = await post(base, '/ops/release_quarantine_message', { tenant, args: { identity: `${QID};whoami` } });
     assert.equal(res.status, 400);
     res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: "x' -Confirm", domain: 'example.com' } });
@@ -502,6 +505,22 @@ AskArgs 'gone' 'remove_mail_contact' ([pscustomobject]@{ address = 'info@example
 function Set-OutboundConnector { param($Identity, $RecipientDomains) $global:Seen = $RecipientDomains }
 AskArgs 'add' 'add_outbound_connector_domain' ([pscustomobject]@{ connector = '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a'; domain = 'example.com' })
 Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; type = $global:Seen.GetType().Name } }
+# Stage 7c: the quarantine. An -Identity that does not exist answers every message (Learn).
+$global:Q = @(
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\aaaaaaaa-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Phish'; Type = 'Phish'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Outbound' }
+)
+function Get-QuarantineMessage { param($Identity) $m = @($global:Q | Where-Object { $_.Identity -eq $Identity }); if ($m.Count) { $m } else { $global:Q } }
+$global:Released = [System.Collections.Generic.List[string]]::new()
+function Release-QuarantineMessage { param($Identity, $ReleaseToAll, $Confirm) $global:Released.Add($Identity) }
+AskArgs 'qread' 'get_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}' })
+AskArgs 'qmissing' 'get_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\cccccccc-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qok' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}' })
+AskArgs 'qphish' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\aaaaaaaa-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qout' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qnone' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\cccccccc-94ea-db3a-7eb8-3b63657d4db7' })
+Write-Answer @{ id = 'released'; ok = $true; result = @($global:Released) }
 `;
   fs.writeFileSync(file('lib.test.ps1'), script);
   const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', file('lib.test.ps1')], { encoding: 'utf8' });
@@ -523,6 +542,13 @@ Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; typ
   assert.equal(answers.gone.error.code, 'exo_not_found');
   assert.deepEqual(answers.add.result, []);
   assert.deepEqual(answers.seen.result, { add: 'example.com', type: 'Hashtable' });
+  // Stage 7c: a read by Identity answers that message only, an unknown one nothing; the release is
+  // refused unless the message is inbound high confidence phishing.
+  assert.deepEqual(answers.qread.result.map((r) => r.Identity), [QID]);
+  assert.deepEqual(answers.qmissing.result, []);
+  assert.equal(answers.qok.ok, true);
+  for (const id of ['qphish', 'qout', 'qnone']) assert.equal(answers[id].error.code, 'quarantine_not_allowed', id);
+  assert.deepEqual(answers.released.result, [QID]);
 });
 
 test('the runner gets no token, and a pinned tenant is the only one served', async () => {

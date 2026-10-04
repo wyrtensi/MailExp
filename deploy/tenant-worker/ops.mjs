@@ -96,8 +96,10 @@ export const OPS = Object.freeze({
   // Stage 7c, R-42 (decision D-2): the high confidence phishing EOP quarantined, released to the
   // node's mailboxes by the panel. The list is fixed to inbound HighConfPhish not yet released, a
   // page of 100 at a time; one message is read by its Identity (only then are its recipients
-  // shown) and released to all its original recipients. Nothing else of the quarantine (other
-  // types, -User, -AllowSender, the Tenant Allow/Block List of R-31) is reachable.
+  // shown; only the item with exactly that Identity is answered) and released to all its original
+  // recipients. The release reads the message again in runner.lib.ps1 and refuses
+  // (quarantine_not_allowed) unless it is inbound HighConfPhish, so no other quarantine type can be
+  // released; -User, -AllowSender and the Tenant Allow/Block List of R-31 are not reachable.
   get_quarantine_messages: { cmdlets: ['Get-QuarantineMessage'], params: { page: 'page' } },
   get_quarantine_message: { cmdlets: ['Get-QuarantineMessage'], params: { identity: 'quarantine_id' } },
   release_quarantine_message: { cmdlets: ['Release-QuarantineMessage'], params: { identity: 'quarantine_id' } },
