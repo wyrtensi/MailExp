@@ -6,7 +6,7 @@ import { THEMES } from '../themes.js';
 
 const THEME_NAMES = Object.keys(THEMES);
 
-function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId }) {
+function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId, isAdmin = false }) {
   const actions = [
     {
       id: 'compose',
@@ -33,6 +33,16 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
       run: () => { setShowAdmin(true); setAdminTab('appearance'); },
     },
   ];
+
+  // Administration -> "Mail node": the node, EOP and the Microsoft tenant, for administrators only.
+  if (isAdmin) {
+    actions.push({
+      id: 'mail-node',
+      label: t('commandPalette.actions.mailNode'),
+      icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg>,
+      run: () => { setShowAdmin(true); setAdminTab('mail-node'); },
+    });
+  }
 
   // "как в системе": one toggle command, kept apart from the per-theme switches below since
   // those already turn it off (setTheme does) — this is the only way back on from here.
@@ -74,14 +84,14 @@ function buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdm
 export default function CommandPalette({ open, onClose }) {
   const { t } = useTranslation();
   const isMobile = useMobile();
-  const { openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId } = useStore();
+  const { openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId, user } = useStore();
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [listScrolled, setListScrolled] = useState(false);
   const inputRef = useRef(null);
   const listRef = useRef(null);
 
-  const actions = buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId });
+  const actions = buildActions({ t, openCompose, setSelectedAccount, setShowAdmin, setAdminTab, theme, setTheme, themeFollowsSystem, setThemeFollowsSystem, accounts, selectedAccountId, isAdmin: !!user?.isAdmin });
 
   const filtered = query.trim()
     ? actions.filter(a => a.label.toLowerCase().includes(query.toLowerCase()))

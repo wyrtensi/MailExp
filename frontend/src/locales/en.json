@@ -6,6 +6,8 @@
     "edit": "Edit",
     "add": "Add",
     "remove": "Remove",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
     "copy": "Copy",
     "copyFailed": "Copy failed. Select the text and copy manually.",
     "back": "Back",
@@ -819,6 +821,7 @@
       "inbox": "Go to Inbox",
       "settings": "Open Settings",
       "themes": "Open Themes",
+      "mailNode": "Open the mail node",
       "switchTheme": "Switch to {{theme}} theme",
       "matchSystemTheme": "Match system theme",
       "accountInbox": "{{name}} — Inbox"
@@ -999,7 +1002,8 @@
       "groupSecurityIntegrations": "Security & Integrations",
       "groupAdmin": "Administration",
       "plugins": "Plugins",
-      "audit": "Audit log"
+      "audit": "Audit log",
+      "mailNode": "Mail node"
     },
     "rules": {
       "title": "Inbox rules",
@@ -1152,7 +1156,7 @@
         "domainNote": "The password is generated and kept by MailExpert only. If this address was deleted before, it comes back with its old letters.",
         "domainCreate": "Create mailbox",
         "domainCreating": "Creating…",
-        "domainNoDomains": "The mail node has no ready domain yet: an administrator adds one and brings it through onboarding in Settings, Integrations, Mail node.",
+        "domainNoDomains": "The mail node has no ready domain yet: an administrator adds one and brings it through onboarding in Settings, Administration, Mail node.",
         "domainErrorLocalPart": "Use letters, digits, dot, dash or underscore; no symbol at the start or the end.",
         "domainErrorPickDomain": "Pick a domain.",
         "domainErrorUnknown": "The mail node has no such active domain.",
@@ -1176,7 +1180,7 @@
         "domainConfirmSender": "Sends as",
         "domainConfirmSenderAlt": "Or as",
         "senderNameInvalid": "A sender name cannot contain line breaks.",
-        "domainErrorNotReady": "This domain has not finished its onboarding yet: an administrator marks it ready in Settings, Integrations, Mail node.",
+        "domainErrorNotReady": "This domain has not finished its onboarding yet: an administrator marks it ready in Settings, Administration, Mail node.",
         "domainErrorDisabledOnNode": "A mailbox with this address exists on the mail node but is disabled (by an earlier delete or by hand). An administrator can enable it in mailcow, so that it is taken over with its letters, or delete it there.",
         "domainErrorPendingDeletion": "This mailbox is pending deletion. Cancel the deletion in Settings, Accounts to keep it."
       },
@@ -1300,7 +1304,7 @@
       "addNameButton": "Add sender name",
       "nodeAddressHint": "A different address is a separate mailbox: create one in Add account.",
       "errorNodeAddress": "A mailbox on the mail node sends only from its own address. A different address is a separate mailbox: create one in Add account.",
-      "foreignNodeAlias": "Another address: letters are not sent from it. An administrator turns it into a separate mailbox or deletes it (Settings, Integrations).",
+      "foreignNodeAlias": "Another address: letters are not sent from it. An administrator turns it into a separate mailbox or deletes it (Settings, Mail node).",
       "foreignNodeAliasOpen": "Open the list"
     },
     "foreignAliases": {

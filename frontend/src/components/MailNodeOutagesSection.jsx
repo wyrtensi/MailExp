@@ -42,7 +42,7 @@ const NODE_LOG_KEYS = { seen: 'admin.outages.nodeLogSeen', missing: 'admin.outag
 const when = (at) => formatDateTime(at);
 const emptyForm = () => ({ start: '', end: '', reason: '', planned: false });
 
-// Settings -> Integrations -> "Mail node outages" (admins only), under "Node operations" (R-43):
+// Settings -> Mail node -> "Mail node outages" (admins only), under "Node operations" (R-43):
 // the windows during which the node could not take mail from EOP, found by the alert job every
 // five minutes or marked by hand (a planned maintenance, a panel-side outage), with what the
 // message trace says became of the letters EOP received meanwhile: delayed, still waiting in EOP's

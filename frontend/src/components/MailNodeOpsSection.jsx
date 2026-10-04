@@ -50,7 +50,7 @@ const settingsForm = (settings) => ({
   deferredMinutes: String(settings?.deferredMinutes ?? DEFAULT_DEFERRED_MINUTES),
 });
 
-// Settings -> Integrations -> "Node operations" (admins only), under the mail node and EOP
+// Settings -> Mail node -> "Node operations" (admins only), under the mail node and EOP
 // sections: the node's alerts (R-18: EOP refusals and mail around EOP in the node's log, the
 // deferred queue, the node's certificate, its containers, the tenant's TERRL budget), checked by
 // the server every five minutes and on "Check now", with the settings of their own Healthchecks

@@ -198,7 +198,7 @@ function AccountForm({ initial, onSave, onCancel }) {
       <Field label={t('admin.accounts.color')}>
         <div style={{ display: 'flex', gap: 6 }}>
           {COLORS.map(c => (
-            <button key={c} onClick={() => set('color', c)} style={{
+            <button key={c} type="button" onClick={() => set('color', c)} aria-label={`${t('admin.accounts.color')} ${c}`} aria-pressed={form.color === c} style={{
               width: 24, height: 24, borderRadius: '50%', background: c,
               border: `2px solid ${form.color === c ? 'white' : 'transparent'}`,
               cursor: 'pointer', outline: 'none', padding: 0,
@@ -280,7 +280,7 @@ function AccountForm({ initial, onSave, onCancel }) {
                 style={{ ...inputStyle, paddingRight: 36 }}
                 onFocus={e => e.target.style.borderColor = 'var(--accent)'}
                 onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-              <button onClick={() => setShowPass(!showPass)} style={{
+              <button type="button" onClick={() => setShowPass(!showPass)} aria-label={t(showPass ? 'common.hidePassword' : 'common.showPassword')} aria-pressed={showPass} style={{
                 position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
                 background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer',
                 display: 'flex', padding: 2,
@@ -300,6 +300,7 @@ function AccountForm({ initial, onSave, onCancel }) {
               <button
                 type="button"
                 onClick={() => set('imap_skip_tls_verify', !form.imap_skip_tls_verify)}
+                role="switch" aria-checked={!!(form.imap_skip_tls_verify)} aria-label={t('admin.accounts.skipTlsVerify')}
                 style={{
                   width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
                   background: form.imap_skip_tls_verify ? 'var(--amber)' : TOGGLE_OFF_BACKGROUND,
@@ -376,7 +377,7 @@ function AccountForm({ initial, onSave, onCancel }) {
                 style={{ ...inputStyle, paddingRight: 36 }}
                 onFocus={e => e.target.style.borderColor = 'var(--accent)'}
                 onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-              <button type="button" onClick={() => setShowSmtpPass(!showSmtpPass)} style={{
+              <button type="button" onClick={() => setShowSmtpPass(!showSmtpPass)} aria-label={t(showSmtpPass ? 'common.hidePassword' : 'common.showPassword')} aria-pressed={showSmtpPass} style={{
                 position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
                 background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer',
                 display: 'flex', padding: 2,
@@ -414,6 +415,7 @@ function AccountForm({ initial, onSave, onCancel }) {
               type="button"
               disabled={categorizationEnabled}
               onClick={() => !categorizationEnabled && set('categorization_enabled', !form.categorization_enabled)}
+              role="switch" aria-checked={!!(categorizationEnabled || form.categorization_enabled)} aria-label={t('admin.accounts.categorizationEnabled')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none',
                 cursor: categorizationEnabled ? 'not-allowed' : 'pointer', padding: 0,
@@ -1077,7 +1079,7 @@ export function AccountsTab() {
                     {isAdmin && (
                       <>
                         {' '}
-                        <button type="button" onClick={() => useStore.getState().setAdminTab('integrations')} style={{
+                        <button type="button" onClick={() => useStore.getState().setAdminTab('mail-node')} style={{
                           background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer',
                           fontSize: 11, textDecoration: 'underline',
                         }}>
@@ -2554,6 +2556,30 @@ export function LayoutsTab() {
   );
 }
 
+// ─── Mail node Tab ───────────────────────────────────────────────────────────
+// Administration -> "Mail node" (admins only): the mailcow node and its domains, the aliases with
+// another address, EOP with the Microsoft tenant, the node's operations, its outages and its
+// quarantine. Google apps and Microsoft 365 stay in Integrations.
+function MailNodeTab() {
+  const { t } = useTranslation();
+  // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
+  const [mailNodeRevision, setMailNodeRevision] = useState(0);
+  const mailNodeDomainsChanged = useCallback(() => setMailNodeRevision((n) => n + 1), []);
+  return (
+    <div data-admin-tab="mail-node">
+      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 16 }}>
+        {t('admin.tabs.mailNode')}
+      </div>
+      <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />
+      <MailNodeForeignAliases />
+      <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />
+      <MailNodeOpsSection />
+      <MailNodeOutagesSection />
+      <MailNodeQuarantine admin />
+    </div>
+  );
+}
+
 // ─── Integrations Tab ────────────────────────────────────────────────────────
 function IntegrationsTab() {
   const { t } = useTranslation();
@@ -2577,9 +2603,6 @@ function IntegrationsTab() {
   // The mailbox the running device-code flow reconnects (null: it adds one).
   const [deviceReconnectId, setDeviceReconnectId] = useState(null);
   const devicePollRef = useRef(null);
-  // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
-  const [mailNodeRevision, setMailNodeRevision] = useState(0);
-  const mailNodeDomainsChanged = useCallback(() => setMailNodeRevision((n) => n + 1), []);
 
   // Todoist state
   const [tdConnected, setTdConnected] = useState(false);
@@ -3129,12 +3152,6 @@ function IntegrationsTab() {
           </div>
 
           {isAdmin && <GoogleAppsSection />}
-          {isAdmin && <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
-          {isAdmin && <MailNodeForeignAliases />}
-          {isAdmin && <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />}
-          {isAdmin && <MailNodeOpsSection />}
-          {isAdmin && <MailNodeOutagesSection />}
-          {isAdmin && <MailNodeQuarantine admin />}
         </div>
       )}
         </div>
@@ -3579,6 +3596,7 @@ function SSOTab() {
           </div>
           <button
             onClick={handleToggleInternalAuth}
+            role="switch" aria-checked={!internalAuthDisabled} aria-label={t('admin.sso.passwordLoginTitle')}
             disabled={internalAuthSaving}
             style={{
               width: 44, height: 24, borderRadius: 12,
@@ -3855,6 +3873,7 @@ function SSOTab() {
             <button
               type="button"
               onClick={() => setForm(f => ({ ...f, enabled: !f.enabled }))}
+              role="switch" aria-checked={!!(form.enabled)} aria-label={t('admin.sso.enabled')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
                 background: form.enabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -3873,6 +3892,7 @@ function SSOTab() {
             <button
               type="button"
               onClick={() => setForm(f => ({ ...f, require_email_verified: !f.require_email_verified }))}
+              role="switch" aria-checked={!!(form.require_email_verified)} aria-label={t('admin.sso.requireEmailVerified')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
                 background: form.require_email_verified ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -3894,6 +3914,7 @@ function SSOTab() {
             <button
               type="button"
               onClick={() => setForm(f => ({ ...f, allow_insecure: !f.allow_insecure }))}
+              role="switch" aria-checked={!!(form.allow_insecure)} aria-label={t('admin.sso.allowInsecure')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
                 background: form.allow_insecure ? 'var(--amber)' : TOGGLE_OFF_BACKGROUND,
@@ -3915,6 +3936,7 @@ function SSOTab() {
             <button
               type="button"
               onClick={() => setForm(f => ({ ...f, rp_initiated_logout: !f.rp_initiated_logout }))}
+              role="switch" aria-checked={!!(form.rp_initiated_logout)} aria-label={t('admin.sso.rpLogout')}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
                 background: form.rp_initiated_logout ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -4543,6 +4565,7 @@ function CategoriesSection({ initialSubTab }) {
           type="button"
           disabled={!isAdmin}
           onClick={() => isAdmin && setCategorizationEnabled(!categorizationEnabled)}
+          role="switch" aria-checked={!!(categorizationEnabled)} aria-label={t('admin.categories.globalEnabled')}
           style={{
             width: 36, height: 20, borderRadius: 10, border: 'none', cursor: isAdmin ? 'pointer' : 'not-allowed', padding: 0,
             background: categorizationEnabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -4593,13 +4616,13 @@ function CategoriesSection({ initialSubTab }) {
                   {t('admin.categories.refresh')}
                 </button>
               )}
-              <button onClick={() => handleToggle(s.id, !s.enabled)} style={{
+              <button type="button" onClick={() => handleToggle(s.id, !s.enabled)} role="switch" aria-checked={!!s.enabled} aria-label={s.label} style={{
                 width: 32, height: 18, borderRadius: 9, border: 'none', cursor: 'pointer', padding: 0, flexShrink: 0,
                 background: s.enabled ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND, position: 'relative', transition: 'background 0.2s',
               }}>
                 <span style={{ position: 'absolute', top: 1, left: s.enabled ? 15 : 1, width: 16, height: 16, borderRadius: '50%', background: 'white', transition: 'left 0.2s' }} />
               </button>
-              <button onClick={() => handleDelete(s.id)} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', display: 'flex', padding: 2, flexShrink: 0 }}>
+              <button type="button" onClick={() => handleDelete(s.id)} aria-label={`${t('common.delete')}: ${s.label}`} title={t('common.delete')} style={{ background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', display: 'flex', padding: 2, flexShrink: 0 }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
               </button>
             </div>
@@ -5205,6 +5228,7 @@ function UsersAndInvitesPanel() {
         </div>
         <button
           onClick={handleToggleReg}
+          role="switch" aria-checked={!!(regOpen)} aria-label={t('admin.users.registrationOpen')}
           style={{
             width: 44, height: 24, borderRadius: 12,
             background: regOpen ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -6923,17 +6947,17 @@ function MailboxCleanupTab() {
   );
 }
 
-const TAB_GROUPS = [
+export const TAB_GROUPS = [
   { id: 'account-mail', labelKey: 'admin.tabs.groupAccountMail', tabIds: ['accounts', 'notifications', 'rules', 'categories', 'cleanup'] },
   { id: 'display', labelKey: 'admin.tabs.groupDisplay', tabIds: ['appearance', 'shortcuts'] },
   { id: 'security-integrations', labelKey: 'admin.tabs.groupSecurityIntegrations', tabIds: ['security', 'integrations', 'ai', 'ai-actions', 'plugins'] },
-  { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'audit', 'sso'] },
+  { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'mail-node', 'audit', 'sso'] },
 ];
 
 // A manager (not an administrator) sees only their own mail settings: accounts, notifications,
 // rules, appearance and shortcuts. Categories, cleanup, security (sign-in is Cloudflare Access),
 // integrations, AI actions, plugins and About are for administrators.
-const TABS = [
+export const TABS = [
   // Account & Mail
   {
     id: 'accounts', labelKey: 'admin.tabs.accounts',
@@ -6998,6 +7022,11 @@ const TABS = [
     id: 'users', labelKey: 'admin.tabs.users',
     adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>,
+  },
+  {
+    id: 'mail-node', labelKey: 'admin.tabs.mailNode',
+    adminOnly: true,
+    icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/><path d="M11 6.5h7M11 17.5h7"/></svg>,
   },
   {
     id: 'audit', labelKey: 'admin.tabs.audit',
@@ -7355,6 +7384,7 @@ function PrivacyTab() {
             try { await setBlockRemoteImages(!blockRemoteImages); }
             catch { addNotification({ title: t('message.whitelistFail.title') }); }
           }}
+          role="switch" aria-checked={!!blockRemoteImages} aria-label={t('admin.privacy.blockImages')}
           style={{
             width: 42, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
             background: blockRemoteImages ? 'var(--accent)' : TOGGLE_OFF_BACKGROUND,
@@ -7384,7 +7414,7 @@ function PrivacyTab() {
               {(imageWhitelist.addresses || []).map(addr => (
                 <span key={addr} style={pill}>
                   {addr}
-                  <button onClick={() => removeAddress(addr)} disabled={saving} style={{
+                  <button type="button" onClick={() => removeAddress(addr)} disabled={saving} aria-label={`${t('common.remove')}: ${addr}`} style={{
                     background: 'none', border: 'none', cursor: saving ? 'default' : 'pointer',
                     color: 'var(--text-tertiary)', padding: 0, lineHeight: 1,
                     display: 'flex', alignItems: 'center',
@@ -7425,7 +7455,7 @@ function PrivacyTab() {
               {(imageWhitelist.domains || []).map(domain => (
                 <span key={domain} style={pill}>
                   @{domain}
-                  <button onClick={() => removeDomain(domain)} disabled={saving} style={{
+                  <button type="button" onClick={() => removeDomain(domain)} disabled={saving} aria-label={`${t('common.remove')}: @${domain}`} style={{
                     background: 'none', border: 'none', cursor: saving ? 'default' : 'pointer',
                     color: 'var(--text-tertiary)', padding: 0, lineHeight: 1,
                     display: 'flex', alignItems: 'center',
@@ -7867,6 +7897,7 @@ function SecurityTab() {
               <button
                 type="button"
                 onClick={() => { const newVal = !val; set(newVal); toggleMailPolicy(key, newVal); }}
+                role="switch" aria-checked={!!val} aria-label={label}
                 style={{
                   width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
                   background: val ? 'var(--amber)' : TOGGLE_OFF_BACKGROUND,
@@ -8448,7 +8479,7 @@ function LinkedIdentitiesSection() {
   );
 }
 
-function makeSearchIndex(t) {
+export function makeSearchIndex(t) {
   const tabLabel = (id) => t(`admin.tabs.${id}`);
   const layoutCrumb = `${tabLabel('appearance')} › ${t('admin.appearance.layout')}`;
   const fontsCrumb = `${tabLabel('appearance')} › ${tabLabel('fontsAndLanguage')}`;
@@ -8510,6 +8541,17 @@ function makeSearchIndex(t) {
     // Admin-only
     { label: t('admin.systemEmail.tabUsers'), keywords: ['user', 'invite', 'admin', 'role', 'manage users', 'add user'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
     { label: t('admin.systemEmail.tabEmail'), keywords: ['system email', 'smtp', 'admin email', 'invite email', 'outgoing email'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
+    // Mail node (Administration)
+    ...[
+      [t('admin.tabs.mailNode'), ['mail node', 'mailcow', 'node', 'server', 'domain', 'mailbox quota', 'own domain']],
+      [t('admin.mailNode.title'), ['mail node', 'mailcow', 'domain', 'dkim', 'mx', 'dns', 'onboarding', 'quota']],
+      [t('admin.foreignAliases.title'), ['alias', 'aliases', 'another address', 'foreign alias', 'mail node']],
+      [t('admin.eop.title'), ['eop', 'exchange online protection', 'microsoft', 'next hop', 'tls', 'dkim', 'send limit', 'terrl', 'relay']],
+      [t('admin.tenant.title'), ['tenant', 'microsoft', 'exchange', 'certificate', 'connector', 'anti-spam', 'antispam', 'policy', 'phishing', 'quarantine release']],
+      [t('admin.nodeOps.title'), ['queue', 'alerts', 'node operations', 'postfix', 'deferred', 'ping', 'monitoring']],
+      [t('admin.outages.title'), ['outage', 'downtime', 'node down', 'eop queue', 'trace', 'lost letters']],
+      [t('admin.quarantine.title'), ['quarantine', 'spam', 'rspamd', 'release', 'held mail']],
+    ].map(([label, keywords]) => ({ label, keywords, tab: 'mail-node', adminOnly: true, breadcrumb: t('admin.tabs.mailNode') })),
     { label: tabLabel('audit'), keywords: ['audit', 'audit log', 'journal', 'history', 'who did', 'deleted', 'sent', 'mailbox changes'], tab: 'audit', adminOnly: true, breadcrumb: tabLabel('audit') },
     { label: t('admin.sso.title'), localAuthOnly: true, keywords: ['sso', 'oidc', 'single sign on', 'oauth', 'provider', 'identity provider'], tab: 'sso', adminOnly: true, breadcrumb: tabLabel('sso') },
   ];
@@ -8618,7 +8660,9 @@ export default function AdminPanel() {
       />
       {searchQuery && (
         <button
+          type="button"
           onClick={() => setSearchQuery('')}
+          aria-label={t('messageList.clearSearch')}
           style={{
             position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
             background: 'none', border: 'none', cursor: 'pointer',
@@ -8642,6 +8686,7 @@ export default function AdminPanel() {
       {shownTab === 'appearance' && <AppearanceTab initialSubTab={pendingSubTab} />}
       {shownTab === 'integrations' && <IntegrationsTab />}
       {shownTab === 'users' && <UsersTab />}
+      {shownTab === 'mail-node' && user?.isAdmin && <MailNodeTab />}
       {shownTab === 'audit' && user?.isAdmin && <AuditLogTab />}
       {shownTab === 'sso' && !isGoogleAuthMode(user) && <SSOTab />}
       {shownTab === 'security' && <SecurityPrivacyTab initialSubTab={pendingSubTab} />}
@@ -8672,7 +8717,9 @@ export default function AdminPanel() {
         }}>
           <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>{t('admin.title')}</span>
           <button
+            type="button"
             onClick={() => setShowAdmin(false)}
+            aria-label={t('admin.close')}
             style={{
               background: 'none', border: 'none', cursor: 'pointer',
               color: 'var(--text-tertiary)', padding: 6, display: 'flex',

@@ -58,7 +58,7 @@ const RATE_STATE_KEYS = {
   differs: 'admin.mailNode.rateLimitDiffers',
 };
 
-// Settings -> Integrations -> "Mail node" (admins only): the mailcow server MailExpert creates
+// Settings -> Administration -> "Mail node" (admins only): the mailcow server MailExpert creates
 // domain mailboxes on, the panel's own addresses for the node's fail2ban whitelist, its domains with
 // their onboarding, the mail disk, the node's DNS and certificate check (R-15) with "Check now" for
 // the node and every domain, and the quota and send limit of every mailbox made there. A domain
