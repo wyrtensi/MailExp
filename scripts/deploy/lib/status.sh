@@ -100,13 +100,14 @@ data_image_changes() {
   return 0
 }
 
-# update_notes <tenant profile on: 0|1> <edge services, comma-separated>: reads the paths changed
-# between two versions (git diff --name-only) on stdin and prints one line per part of the system
-# the change touches outside the panel's images: "next <text>" for a step a person has to take,
-# "info <text>" for what update.sh does by itself or what only matters for a rollback. Nothing for a
-# change inside the panel's images.
+# update_notes <tenant profile on: 0|1> <edge services, comma-separated> [<systemd units: 0|1>]:
+# reads the paths changed between two versions (git diff --name-only) on stdin and prints one line
+# per part of the system the change touches outside the panel's images: "next <text>" for a step a
+# person has to take, "info <text>" for what update.sh does by itself or what only matters for a
+# rollback. Nothing for a change inside the panel's images. The third argument is install.conf's
+# SYSTEM (default 1): without systemd (--no-system) install.sh installs no units.
 update_notes() {
-  local tenant=$1 edge=",${2:-},"
+  local tenant=$1 edge=",${2:-}," system=${3:-1}
   local paths
   paths=$(cat)
   if grep -q '^backend/migrations/' <<<"$paths"; then
@@ -130,7 +131,11 @@ update_notes() {
     echo "info edge: its compose file changed; install.sh (run by update.sh) copies it and recreates what changed"
   fi
   if grep -q '^deploy/systemd/' <<<"$paths"; then
-    echo "info timers: the systemd units changed; install.sh (run by update.sh) installs them"
+    if [ "$system" = 1 ]; then
+      echo "info timers: the systemd units changed; install.sh (run by update.sh) installs them"
+    else
+      echo "info timers: the systemd units changed; this install runs without systemd (--no-system), so install.sh does not install them"
+    fi
   fi
   return 0
 }

@@ -102,6 +102,13 @@ setup() {
   [ -z "$output" ]
 }
 
+@test "update_notes: without systemd the units are not said to be installed" {
+  run update_notes 0 "" 0 <<<"deploy/systemd/mailexpert-updater.path"
+  [ "$output" = "info timers: the systemd units changed; this install runs without systemd (--no-system), so install.sh does not install them" ]
+  run update_notes 0 "" 1 <<<"deploy/systemd/mailexpert-updater.path"
+  [ "$output" = "info timers: the systemd units changed; install.sh (run by update.sh) installs them" ]
+}
+
 @test "lines_json turns lines into a JSON array" {
   [ "$(printf 'a\nb "c"\n' | lines_json)" = '["a","b \"c\""]' ]
   [ "$(printf '' | lines_json)" = '[]' ]

@@ -123,7 +123,7 @@ print_update_notes() {
       "next "*) log "next: ${line#next }" ;;
       "info "*) log "info: ${line#info }" ;;
     esac
-  done < <(update_notes "$tenant" "$(edge_services | paste -sd, -)" <<<"$changed")
+  done < <(update_notes "$tenant" "$(edge_services | paste -sd, -)" "$CFG_SYSTEM" <<<"$changed")
 }
 
 # check_data_images <old commit> <new commit>: refuses a PostgreSQL major change, which update.sh
