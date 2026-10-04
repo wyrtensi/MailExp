@@ -97,6 +97,25 @@ request() {
   [ -z "$(rolled_back_version "$S")" ]
 }
 
+@test "forget_rolled_back_if_running drops the record only for the version that runs" {
+  S=$BATS_TEST_TMPDIR/s
+  mkdir -p "$S/update-spool/result"
+  record_rolled_back "$S" sha-0123456789ab
+  [ -z "$(forget_rolled_back_if_running "$S" sha-ba9876543210)" ]
+  [ "$(rolled_back_version "$S")" = sha-0123456789ab ]
+  # Without updater.json (no units) none is written.
+  [ "$(forget_rolled_back_if_running "$S" sha-0123456789ab)" = sha-0123456789ab ]
+  [ -z "$(rolled_back_version "$S")" ]
+  [ ! -e "$S/update-spool/result/updater.json" ]
+  # With updater.json the panel is told: rolledBack null, the running version.
+  record_rolled_back "$S" sha-0123456789ab
+  write_updater_installed "$S" sha-ba9876543210
+  [ "$(jq -r .rolledBack "$S/update-spool/result/updater.json")" = sha-0123456789ab ]
+  forget_rolled_back_if_running "$S" sha-0123456789ab >/dev/null
+  [ "$(jq -c '[.rolledBack, .version]' "$S/update-spool/result/updater.json")" = '[null,"sha-0123456789ab"]' ]
+  [ -z "$(forget_rolled_back_if_running "$S" sha-0123456789ab)" ]
+}
+
 @test "redact_url drops user information from a repository URL" {
   [ "$(redact_url https://user:t0ken@github.com/o/r.git)" = https://github.com/o/r.git ]
   [ "$(redact_url https://github.com/o/r.git)" = https://github.com/o/r.git ]
