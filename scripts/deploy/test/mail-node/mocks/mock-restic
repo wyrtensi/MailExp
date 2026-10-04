@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# restic for the mail node tests, run by the docker mock with MOCK_MOUNTS (the -v mounts, one per
+# line: <host path or volume>:<container path>[:ro]). The repository is $MOCK_DIR/repo: a backup
+# copies its sources there under a new snapshot id, ls lists one directory of a snapshot, restore
+# copies paths back through the mounts. Every call is recorded in $MOCK_DIR/restic.
+#   MOCK_RESTIC_CAT       exit status of `cat config` (default 0: the repository opens)
+#   MOCK_RESTIC_BACKUP    exit status of `backup` (3: saved, some files unreadable; else no snapshot)
+#   MOCK_RESTIC_CHECK     exit status of `check`
+#   MOCK_RESTIC_RESTORE   exit status of `restore`
+set -u
+printf '%s\n' "$*" >>"$MOCK_DIR/restic"
+REPO=$MOCK_DIR/repo
+mkdir -p "$REPO"
+
+# host_path <container path>: where it is on the host, through the longest matching mount.
+host_path() {
+  local path=$1 mount src dst best='' best_src=''
+  while IFS= read -r mount; do
+    [ -n "$mount" ] || continue
+    src=${mount%%:*} dst=${mount#*:} dst=${dst%%:*}
+    if [[ $path == "$dst" || $path == "$dst"/* ]] && [ "${#dst}" -gt "${#best}" ]; then
+      best=$dst best_src=$src
+    fi
+  done <<<"${MOCK_MOUNTS:-}"
+  [ -n "$best" ] || return 1
+  case $best_src in /*) ;; *) best_src=$MOCK_DIR/volumes/$best_src ;; esac
+  printf '%s%s\n' "$best_src" "${path#"$best"}"
+}
+
+snapshot_dir() { if [ "$1" = latest ]; then cat "$REPO/latest"; else ls -d "$REPO/$1"* | head -n 1; fi; }
+
+cmd=$1
+shift
+case $cmd in
+  cat) exit "${MOCK_RESTIC_CAT:-0}" ;;
+  init | forget) exit 0 ;;
+  check) exit "${MOCK_RESTIC_CHECK:-0}" ;;
+  backup)
+    status=${MOCK_RESTIC_BACKUP:-0}
+    if [ "$status" != 0 ] && [ "$status" != 3 ]; then echo "Fatal: unable to save snapshot" >&2 && exit "$status"; fi
+    host='' tags=() sources=()
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --host) host=$2 && shift 2 ;;
+        --tag) tags+=("$2") && shift 2 ;;
+        --json) shift ;;
+        *) sources+=("$1") && shift ;;
+      esac
+    done
+    n=$(find "$REPO" -mindepth 1 -maxdepth 1 -type d | wc -l)
+    id=$(printf '%08x' "$((n + 1))")$(printf 'c%.0s' $(seq 56))
+    mkdir -p "$REPO/$id"
+    for src in "${sources[@]}"; do
+      from=$(host_path "$src") || { echo "no mount for $src" >&2; exit 1; }
+      mkdir -p "$REPO/$id$(dirname "$src")"
+      cp -a "$from" "$REPO/$id$src"
+    done
+    printf '%s\n' "$host" >"$REPO/$id.host"
+    printf '%s\n' "${tags[@]}" >"$REPO/$id.tags"
+    echo "$REPO/$id" >"$REPO/latest"
+    echo '{"message_type":"status","percent_done":0.5}'
+    printf '{"message_type":"summary","snapshot_id":"%s","total_bytes_processed":4096,"data_added":1024}\n' "$id"
+    exit "$status"
+    ;;
+  snapshots)
+    host='' tag='' want=''
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --host) host=$2 && shift 2 ;;
+        --tag) tag=$2 && shift 2 ;;
+        --json) shift ;;
+        *) want=$1 && shift ;;
+      esac
+    done
+    first=1
+    printf '['
+    for dir in "$REPO"/*/; do
+      [ -d "$dir" ] || continue
+      id=$(basename "$dir")
+      [ -z "$want" ] || [[ $id == "$want"* ]] || continue
+      [ -z "$host" ] || [ "$(cat "$REPO/$id.host")" = "$host" ] || continue
+      [ -z "$tag" ] || grep -qx "$tag" "$REPO/$id.tags" || continue
+      [ "$first" = 1 ] || printf ','
+      first=0
+      printf '{"id":"%s","hostname":"%s","time":"2026-10-04T02:30:%02dZ"}' "$id" "$(cat "$REPO/$id.host")" "$((16#${id:0:8}))"
+    done
+    printf ']\n'
+    ;;
+  ls)
+    [ "$1" = --json ] && shift
+    dir=$(snapshot_dir "$1") || exit 1
+    echo '{"message_type":"snapshot","struct_type":"snapshot"}'
+    [ -d "$dir$2" ] || exit 0
+    for entry in "$dir$2"/*; do
+      [ -e "$entry" ] || continue
+      if [ -d "$entry" ]; then type=dir; else type=file; fi
+      printf '{"message_type":"node","struct_type":"node","type":"%s","path":"%s/%s"}\n' "$type" "$2" "$(basename "$entry")"
+    done
+    ;;
+  restore)
+    status=${MOCK_RESTIC_RESTORE:-0}
+    [ "$status" = 0 ] || exit "$status"
+    dir=$(snapshot_dir "$1") || exit 1
+    shift
+    target='' includes=() delete=0
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --target) target=$2 && shift 2 ;;
+        --include) includes+=("$2") && shift 2 ;;
+        --overwrite) shift 2 ;;
+        --delete) delete=1 && shift ;;
+        *) shift ;;
+      esac
+    done
+    [ "${#includes[@]}" -gt 0 ] || includes=(/backup /vmail)
+    for path in "${includes[@]}"; do
+      [ -e "$dir$path" ] || continue
+      to=$(host_path "${target%/}$path") || { echo "no mount for ${target%/}$path" >&2; exit 1; }
+      mkdir -p "$to"
+      # --delete: what the snapshot does not have goes (the directory itself stays: a volume).
+      if [ "$delete" = 1 ]; then find "$to" -mindepth 1 -delete; fi
+      cp -a "$dir$path/." "$to/"
+    done
+    ;;
+esac
+exit 0

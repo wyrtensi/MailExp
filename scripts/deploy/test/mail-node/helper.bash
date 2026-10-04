@@ -82,6 +82,45 @@ EOP_RANGES_PING_URL=https://hc.example.com/ping/eop-check
 EOF
 }
 
+# node_backup_setup: what node-backup.sh and node-restore.sh need on top of mail_node_setup: the
+# backup library, mailcow's compose project and its volumes (directories of the docker mock, vmail
+# with two mailboxes and mailcow's own _garbage), mailcow's backup script (the fixture), and the
+# node's backup directory under the test's temporary directory.
+node_backup_setup() {
+  export MAILEXPERT_NODE_BACKUP_DIR=$BATS_TEST_TMPDIR/backups
+  export MAILEXPERT_BACKUP_CRON_FILE=$BATS_TEST_TMPDIR/cron.d/mailexpert-node-backup
+  export MOCK_PROJECT=mailcowdockerized
+  printf 'COMPOSE_PROJECT_NAME=mailcowdockerized\n' >>"$MC/mailcow.conf"
+  mkdir -p "$MC/helper-scripts" "$MC/data/assets/ssl"
+  cp "$MOCK_FIXTURES/fake-backup-and-restore" "$MC/helper-scripts/backup_and_restore.sh"
+  chmod +x "$MC/helper-scripts/backup_and_restore.sh"
+  printf 'services: {}\n' >"$MC/docker-compose.yml"
+  printf 'certificate\n' >"$MC/data/assets/ssl/cert.pem"
+  local set vmail=$MOCK_DIR/volumes/mailcowdockerized_vmail-vol-1
+  for set in crypt redis rspamd postfix mysql; do
+    mkdir -p "$MOCK_DIR/volumes/mailcowdockerized_$set-vol-1"
+    printf 'data\n' >"$MOCK_DIR/volumes/mailcowdockerized_$set-vol-1/file"
+  done
+  mkdir -p "$vmail/example.com/alice/Maildir/cur" "$vmail/example.com/bob/Maildir/cur" "$vmail/_garbage"
+  printf 'Subject: one\n' >"$vmail/example.com/alice/Maildir/cur/1700000000.M1.mail:2,S"
+  printf 'Subject: two\n' >"$vmail/example.com/bob/Maildir/cur/1700000001.M2.mail:2,S"
+  # shellcheck source=/dev/null
+  source "$NODE_SCRIPTS/backup-lib.sh"
+}
+
+# A node.env with the backup keys, as setup.sh --backup-keys stores them.
+write_backup_keys() {
+  cat >>"$MAILEXPERT_NODE_CONF" <<'EOF'
+RESTIC_REPOSITORY=s3:https://s3.example.com/node-backups/node
+RESTIC_PASSWORD=correct-horse-battery-staple
+AWS_ACCESS_KEY_ID=AKIAEXAMPLEKEY
+AWS_SECRET_ACCESS_KEY=example-secret-access-key
+NODE_BACKUP_PING_URL=https://hc.example.com/ping/node-backup
+EOF
+}
+
+restic_calls() { cat "$MOCK_DIR/restic" 2>/dev/null; }
+
 # The recorded endpoints answer with the Exchange entry of TCP 25 changed by a jq filter.
 endpoints_with() {
   jq "map(if .serviceArea == \"Exchange\" and .tcpPorts == \"25\" then $1 else . end)" "$MOCK_FIXTURES/endpoints.json" >"$BATS_TEST_TMPDIR/endpoints.json"

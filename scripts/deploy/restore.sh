@@ -105,19 +105,6 @@ restore_redis() {
   log "redis: dump.rdb restored"
 }
 
-# pick_snapshot <latest|id> <host or ''>: prints "<id> <host> <time>" of the snapshot to restore:
-# the newest one (by time, whatever the time zone of the server that made it) or the one named.
-pick_snapshot() {
-  local -a filter=()
-  if [ -n "$2" ]; then filter=(--host "$2"); fi
-  if [ "$1" != latest ]; then filter+=("$1"); fi
-  restic_run -- snapshots --json "${filter[@]}" | jq -r '
-    def epoch: capture("^(?<d>[0-9-]+T[0-9:]+)(?<f>[.][0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
-      | (.d + "Z" | fromdateiso8601)
-        - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[4:6] | tonumber) * 60) end);
-    if length == 0 then empty else max_by([(.time | epoch), .time]) | "\(.id) \(.hostname) \(.time)" end'
-}
-
 # check_restored <counts json>: verify-restore.mjs in the backend image against the restored
 # database, with the restored ENCRYPTION_KEY: no pending migration, every credential decrypts.
 check_restored() {

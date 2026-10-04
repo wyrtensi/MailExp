@@ -311,7 +311,7 @@ setup_backups() {
     return 0
   fi
   if [ ! -f "$STATE_DIR/backup-since" ]; then date +%s >"$STATE_DIR/backup-since"; fi
-  show_recovery_key_once
+  show_recovery_key_once "$APP_DIR/scripts/deploy/backup.sh --prefix $OPT_PREFIX --show-recovery-key"
 }
 
 main() {
@@ -329,7 +329,7 @@ main() {
   [ "$(id -u)" = 0 ] || die "run install.sh as root"
   prepare_dirs
   lock_install
-  load_restic_host
+  load_restic_host mailexpert
   if panel_ready; then PANEL_WAS_RUNNING=1; fi
   if [ "$CFG_SYSTEM" = 1 ]; then
     check_os

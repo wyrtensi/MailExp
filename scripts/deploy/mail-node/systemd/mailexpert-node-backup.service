@@ -1,0 +1,13 @@
+[Unit]
+Description=MailExpert: mail node backup (mailcow dump and vmail to restic)
+Wants=docker.service network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=@DIR@/node-backup.sh
+Nice=10
+IOSchedulingClass=idle
+# An outer bound only: node-backup.sh stops mailcow's dump after NODE_BACKUP_DUMP_TIMEOUT and the
+# upload after NODE_BACKUP_PUSH_TIMEOUT (node.env) with a clear message and a /fail ping.
+TimeoutStartSec=16h

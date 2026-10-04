@@ -94,6 +94,15 @@ send_ping() {
   fi
 }
 
+# ensure_image <image>: pulls the image unless it is present locally (an emergency build from
+# source tags a local image that a pull must not replace). Shared by the panel's scripts and the
+# mail node's backup.
+ensure_image() {
+  if docker image inspect "$1" >/dev/null 2>&1; then return 0; fi
+  log "pulling $1"
+  docker pull --quiet "$1" >/dev/null || die "cannot pull $1 (the panel's own images can be built from source: see deploy/compose.prod.yml)"
+}
+
 # gen_hex <bytes>: random bytes as lowercase hex, two characters per byte.
 gen_hex() {
   head -c "$1" /dev/urandom | od -A n -v -t x1 | tr -d ' \n'

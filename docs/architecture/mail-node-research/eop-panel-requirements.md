@@ -1833,6 +1833,31 @@ Confidence Spam`, `Bulk`, `HighConfPhish` с `Type` `High Confidence Phishing`, 
 Что подтверждает только живой тенант: эксперименты 16 (роль для `Set-HostedContentFilterPolicy`), 17 (типы
 и формы ответа карантина, `CAT` выпущенного спама) и 25 ниже.
 
+### 5.15. Бэкап и переезд узла (2026-10-04)
+
+Не требование R-xx, а недостающая часть эксплуатации узла: до этого раздел 7 runbook был заметкой «cron с
+`backup_and_restore.sh` и копия куда-нибудь». Код — `scripts/deploy/mail-node/node-backup.sh`,
+`node-restore.sh`, общая `backup-lib.sh`, юниты `mailexpert-node-backup.service`/`.timer` и cron-файл;
+ставит `setup.sh` (ключи restic — `--backup-keys` на stdin). Код restic общий с бэкапом панели
+(`scripts/deploy/lib/backup.sh`: контейнер restic, открытие и создание репозитория, ключ восстановления,
+пинги); `load_restic_host` получил префикс (`mailexpert-node`), `pick_snapshot` переехал туда из
+`restore.sh`, `ensure_image` — из `lib/app.sh` в `lib/common.sh`. Порядок для владельца —
+[runbook, разделы 7 и 8](../../operations/mail-node.md).
+
+| Решение | Почему |
+|---|---|
+| vmail — `restic backup` тома напрямую (только чтение), остальное — скриптом mailcow (`crypt redis rspamd postfix mysql`) | скрипт mailcow пишет vmail одним локальным `tar.zst` (вторая полная копия почты на диске узла), а сжатый архив почти не дедуплицируется; файлы maildir неизменяемы |
+| свой репозиторий restic со своим паролем, хост `mailexpert-node-<hex>`, теги `mailcow` и запуска | один пароль на репозиторий; `forget --host --tag mailcow` трогает только снапшоты своего узла |
+| ежедневной `restic check --read-data-subset` нет, по воскресеньям — чтение части (`NODE_BACKUP_READ_SUBSET`, 5%) и восстановление дампа и одного ящика | трафик из хранилища при большом объёме почты |
+| в панели состояния бэкапа нет, только Healthchecks (период 1 день, grace 2 часа) | панель достаёт до узла только через API mailcow; нового канала к хосту ради этого не заводили |
+| `node-restore.sh` отвечает на вопросы `backup_and_restore.sh restore` и сначала проверяет, что вопросы те же (6 `read -p`, тексты) | у скрипта mailcow нет неинтерактивного режима восстановления |
+| переезд: `--rehearsal` (без очереди Postfix) заранее, затем `--update` со снапшота `move` (`--overwrite if-changed --delete`) | простой — только разница с ночным снапшотом, а не вся почта; очередь старого узла не уходит второй раз |
+| `--tag move` только при остановленных `postfix-mailcow` и `dovecot-mailcow`, после него узел standby | письмо после бэкапа осталось бы только на старом узле; ночной бэкап старого узла не пишет замороженные данные |
+
+Тесты: `scripts/deploy/test/mail-node-backup.bats` (заглушки `docker` с restic внутри — `mock-restic`,
+`git`, и скрипт mailcow `fake-backup-and-restore` с его раскладкой и вопросами). С настоящими mailcow и
+restic не запускалось: Docker на машине разработки не был запущен, e2e со стендом не трогался.
+
 ## 6. Что требует живого тенанта
 
 Нужен платный или пробный тенант с add-on (в E5 developer Inbound connector не создать) и пробный домен

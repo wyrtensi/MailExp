@@ -1,13 +1,52 @@
 #!/usr/bin/env bash
-# docker for the mail node tests: records `docker compose` calls with the directory they ran in.
+# docker for the mail node tests: records every call (with the directory `docker compose` ran in).
 # MOCK_RUNNING lists the mailcow services that run (space separated).
+# Volumes are directories under $MOCK_DIR/volumes; `docker compose up` creates mailcow's when
+# MOCK_PROJECT names its compose project. `docker run` of the restic image goes to mock-restic,
+# with the mounts (-v) passed on; the mailcow backup image exits MOCK_TAR_STATUS (default 0).
 printf 'docker %s (in %s)\n' "$*" "$PWD" >>"$MOCK_DIR/calls"
 # MOCK_RESTART_FAIL lists the services whose restart fails.
 if [ "$1 $2" = "compose ps" ] && [ "$3" = -q ]; then
-  [[ " ${MOCK_RUNNING:-} " != *" $4 "* ]] || echo "0123456789ab"
+  if [ -n "${4:-}" ]; then
+    [[ " ${MOCK_RUNNING:-} " != *" $4 "* ]] || echo "0123456789ab"
+  elif [ -n "${MOCK_RUNNING:-}" ]; then
+    echo "0123456789ab"
+  fi
 fi
 if [ "$1 $2" = "compose restart" ] && [[ " ${MOCK_RESTART_FAIL:-} " == *" $3 "* ]]; then
   echo "Error response from daemon: restart failed" >&2
   exit 1
 fi
+if [ "$1 $2" = "compose up" ] && [ -n "${MOCK_PROJECT:-}" ]; then
+  for set in vmail crypt redis rspamd postfix mysql; do mkdir -p "$MOCK_DIR/volumes/${MOCK_PROJECT}_$set-vol-1"; done
+fi
+case $1 in
+  volume)
+    [ "$2" = inspect ] || exit 0
+    if [ "$3" = -f ]; then name=$5; else name=$3; fi
+    [ -d "$MOCK_DIR/volumes/$name" ] || { echo "Error: No such volume: $name" >&2; exit 1; }
+    if [ "$3" = -f ]; then echo "$MOCK_DIR/volumes/$name"; else echo '[{}]'; fi
+    ;;
+  run)
+    shift
+    mounts=() image=''
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -v) mounts+=("$2") && shift 2 ;;
+        -e | --network | --name | --label | -u) shift 2 ;;
+        --entrypoint) entrypoint=$2 && shift 2 ;;
+        --rm | -i | -t | -d) shift ;;
+        *) image=$1 && shift && break ;;
+      esac
+    done
+    case $image in
+      restic/*)
+        # restic_run -t: the image's timeout runs restic: "<seconds> restic <args>".
+        if [ "${entrypoint:-}" = /usr/bin/timeout ]; then shift 2; fi
+        MOCK_MOUNTS=$(printf '%s\n' "${mounts[@]}") exec mock-restic "$@"
+        ;;
+      ghcr.io/mailcow/backup*) exit "${MOCK_TAR_STATUS:-0}" ;;
+    esac
+    ;;
+esac
 exit 0

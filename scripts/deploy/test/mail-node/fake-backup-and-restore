@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# mailcow's helper-scripts/backup_and_restore.sh for the mail node tests, installed into the test's
+# mailcow directory: the same arguments, the same layout of a backup (mailcow-<date>/ with
+# backup_<set>.tar.zst, mailcow.conf and the architecture marker) and the same questions on restore,
+# read from stdin. Like the real one it exits 0 after a step failed.
+#   MOCK_MAILCOW_STATUS   exit status of a backup (it then writes nothing)
+#   MOCK_MAILCOW_DROP     the data set whose archive a backup leaves out (a step that failed)
+#   MOCK_MAILCOW_RESTORE_ERROR  a line the restore prints, as the real one does for a missing archive
+printf 'mailcow %s\n' "$*" >>"$MOCK_DIR/calls"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+BACKUP_LOCATION=${MAILCOW_BACKUP_LOCATION:-}
+if [ -z "$BACKUP_LOCATION" ]; then
+  read -ep "Backup location (absolute path, starting with /): " BACKUP_LOCATION
+fi
+if [ ! -d "$BACKUP_LOCATION" ]; then
+  read -p "Create it now? [y|N] " CREATE_BACKUP_LOCATION
+  exit 1
+fi
+
+if [ "$1" = backup ]; then
+  [ "${MOCK_MAILCOW_STATUS:-0}" = 0 ] || exit "$MOCK_MAILCOW_STATUS"
+  dir=$BACKUP_LOCATION/mailcow-2026-10-04-02-30-00
+  mkdir -p "$dir"
+  cp "$SCRIPT_DIR/../mailcow.conf" "$dir/"
+  touch "$dir/.x86_64"
+  shift
+  for set in "$@"; do
+    name=$set
+    [ "$set" != mysql ] || name=mariadb
+    [ "$set" != "${MOCK_MAILCOW_DROP:-}" ] || continue
+    printf 'archive of %s\n' "$set" >"$dir/backup_$name.tar.zst"
+    echo "/$set/some/file"
+  done
+  exit 0
+fi
+
+if [ "$1" = restore ]; then
+  for folder in "$BACKUP_LOCATION"/mailcow-*/; do echo "[ 1 ] - $folder"; done
+  read -p "Select a restore point: " point
+  echo "[ 0 ] - all"
+  read -p "Select a dataset to restore: " dataset
+  read -p "mailcow will be stopped and the currently active mailcow.conf will be modified to use the DB parameters found in it - do you want to proceed? [Y|n] " proceed
+  printf 'mailcow restore answers: %s %s %s\n' "$point" "$dataset" "${proceed:-}" >>"$MOCK_DIR/calls"
+  if [ -n "${MOCK_MAILCOW_RESTORE_ERROR:-}" ]; then printf '\e[31m%s\e[0m\n' "$MOCK_MAILCOW_RESTORE_ERROR"; fi
+  mkdir -p "$MOCK_DIR/mailcow-restored"
+  cp -a "$BACKUP_LOCATION"/mailcow-*/. "$MOCK_DIR/mailcow-restored/"
+  if false; then read -p "Force a resync now? [y|N] " FORCE_RESYNC; fi
+fi
+exit 0

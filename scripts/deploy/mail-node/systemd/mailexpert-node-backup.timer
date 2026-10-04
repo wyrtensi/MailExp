@@ -1,0 +1,10 @@
+[Unit]
+Description=MailExpert: mail node backup every night at 02:30 server time
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

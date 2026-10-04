@@ -202,7 +202,7 @@ main() {
 
   stage_files "$STAGING" "$redis"
   load_restic_env
-  load_restic_host
+  load_restic_host mailexpert
   ensure_image "$RESTIC_IMAGE"
   snapshot=$(restic_run -v "$STAGING:/backup:ro" -- backup --json --host "$RESTIC_HOST" --tag "$tag" /backup |
     jq -r 'select(.message_type == "summary") | .snapshot_id')

@@ -103,7 +103,7 @@ credential() {
 # `on`).
 snapshots_here() {
   load_restic_env
-  load_restic_host
+  load_restic_host mailexpert
   restic_run -- snapshots --json --host "$RESTIC_HOST" "$@"
 }
 

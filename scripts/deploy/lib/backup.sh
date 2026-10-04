@@ -96,17 +96,18 @@ restic_host_ok() {
   [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
 }
 
-# load_restic_host: RESTIC_HOST from state/restic-host, which is written once, the first time it
-# is needed (install.sh, or the first backup.sh of a server installed before the file existed),
-# and never replaced: state/ describes this server and is not part of a snapshot, so a server
-# restored from another one's snapshot keeps its own host. The first writer wins (ln fails on an
-# existing file), so two scripts starting at once agree on one name.
+# load_restic_host [prefix, default mailexpert]: RESTIC_HOST from state/restic-host, which is
+# written once, the first time it is needed (install.sh, or the first backup.sh of a server
+# installed before the file existed), and never replaced: state/ describes this server and is not
+# part of a snapshot, so a server restored from another one's snapshot keeps its own host. The
+# first writer wins (ln fails on an existing file), so two scripts starting at once agree on one
+# name. The mail node's backup (mail-node/node-backup.sh) uses the prefix mailexpert-node.
 load_restic_host() {
-  local file=$STATE_DIR/restic-host tmp host
+  local file=$STATE_DIR/restic-host prefix=${1:-mailexpert} tmp host
   if [ ! -e "$file" ]; then
     tmp=$(mktemp "$file.XXXXXX")
     chmod 600 "$tmp"
-    printf 'mailexpert-%s\n' "$(gen_hex 8)" >"$tmp"
+    printf '%s-%s\n' "$prefix" "$(gen_hex 8)" >"$tmp"
     if ln "$tmp" "$file" 2>/dev/null; then log "backups: the restic host of this server is $(<"$file")"; fi
     rm -f "$tmp"
   fi
@@ -194,6 +195,22 @@ restic_run() {
     -e RESTIC_CACHE_DIR=/cache -v "$STATE_DIR/restic-cache:/cache" "${mounts[@]}" "${run[@]}" "$@"
 }
 
+# pick_snapshot <latest|id> <host or ''> [tag]: prints "<id> <host> <time>" of the snapshot to
+# restore: the newest one (by time, whatever the time zone of the server that made it) or the one
+# named, among the snapshots of that host and with that tag when they are given. Shared by
+# restore.sh and the mail node's node-restore.sh.
+pick_snapshot() {
+  local -a filter=()
+  if [ -n "$2" ]; then filter=(--host "$2"); fi
+  if [ -n "${3:-}" ]; then filter+=(--tag "$3"); fi
+  if [ "$1" != latest ]; then filter+=("$1"); fi
+  restic_run -- snapshots --json "${filter[@]}" | jq -r '
+    def epoch: capture("^(?<d>[0-9-]+T[0-9:]+)(?<f>[.][0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
+      | (.d + "Z" | fromdateiso8601)
+        - (if .z == "Z" then 0 else (.z[0:1] + "1" | tonumber) * ((.z[1:3] | tonumber) * 3600 + (.z[4:6] | tonumber) * 60) end);
+    if length == 0 then empty else max_by([(.time | epoch), .time]) | "\(.id) \(.hostname) \(.time)" end'
+}
+
 # ensure_backup_repo: opens the repository, creating it (format v2, compressed) only when restic
 # reports that it does not exist. A password that does not open an existing repository is never
 # answered with a new repository. The probe and init are bounded by RESTIC_PROBE_TIMEOUT and
@@ -234,8 +251,9 @@ print_recovery_key() {
   } >&2
 }
 
-# show_recovery_key_once: prints the recovery key the first time, and only to a terminal:
-# cloud-init and CI logs must not keep it.
+# show_recovery_key_once <command that shows it later>: prints the recovery key the first time,
+# and only to a terminal: cloud-init and CI logs must not keep it. install.sh names backup.sh, the
+# mail node's setup.sh node-backup.sh.
 show_recovery_key_once() {
   local marker=$STATE_DIR/recovery-key.shown
   [ ! -f "$marker" ] || return 0
@@ -243,7 +261,7 @@ show_recovery_key_once() {
     print_recovery_key
     : >"$marker"
   else
-    log "the recovery key has not been shown yet (no terminal); show it with: $APP_DIR/scripts/deploy/backup.sh --prefix $OPT_PREFIX --show-recovery-key"
+    log "the recovery key has not been shown yet (no terminal); show it with: $1"
   fi
 }
 
