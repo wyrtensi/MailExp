@@ -1851,7 +1851,7 @@
         "errorNotConfigured": "Microsoft sign-in is not configured by an administrator.",
         "errorEmailNotVerified": "Microsoft did not confirm this account's email address (the app registration needs the email + xms_edov or upn optional claims). The mailbox was not connected.",
         "errorAuthenticationFailed": "Microsoft authorization failed. Please try again.",
-        "errorAlreadyConnected": "A mailbox with this address is already connected. To renew its sign-in, use Reconnect on that mailbox.",
+        "errorAlreadyConnected": "A mailbox with this address is already connected. Nothing was changed.",
         "errorAccountMismatch": "You signed in with another Microsoft account than the one this mailbox belongs to. Nothing was changed.",
         "userNoteConfigured": "Your administrator has set up Microsoft 365 sign-in. Connect your Outlook.com, Hotmail, or Microsoft 365 account below.",
         "userNoteNotConfigured": "Microsoft 365 sign-in has not been set up by an administrator yet. Please ask your administrator to configure it.",

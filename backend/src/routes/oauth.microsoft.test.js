@@ -257,7 +257,7 @@ describe('reconnecting a Microsoft mailbox', () => {
     const [sql, params] = updateCall();
     expect(sql).toMatch(/oauth_reconnect_required\s*=\s*false/);
     expect(sql).toMatch(/sync_error\s*=\s*NULL/);
-    expect(sql).toMatch(/WHERE id = \$6 AND oauth_provider = 'microsoft' AND mail_node IS NOT TRUE/);
+    expect(sql).toMatch(/WHERE id = \$6 AND oauth_provider = 'microsoft' AND mail_node IS NOT TRUE\s+AND \(oauth_subject IS NULL OR oauth_subject = \$5\)/);
     expect(sql).not.toMatch(/\bname\s*=/);
     expect(params[4]).toBe(SUBJECT);
     expect(params[5]).toBe(ACCOUNT_ID);
@@ -296,6 +296,19 @@ describe('reconnecting a Microsoft mailbox', () => {
     row = { ...MS_ROW, ...patch };
     expect((await callback()).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
     expect(wroteAccount()).toBe(false);
+  });
+
+  it('records nothing when the mailbox changed before the update', async () => {
+    installDb();
+    const original = withTransaction.getMockImplementation();
+    withTransaction.mockImplementation(async (fn) => original(async (client) => {
+      const inner = client.query;
+      client.query = vi.fn(async (sql, params) => (/^\s*UPDATE email_accounts/.test(sql) ? { rows: [], rowCount: 0 } : inner(sql, params)));
+      return fn(client);
+    }));
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
+    expect(recordAudit).not.toHaveBeenCalled();
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
   });
 
   it('binds the subject of a mailbox connected before subjects were stored', async () => {

@@ -2806,6 +2806,7 @@ export async function demoRequest(method, path, body = {}) {
     const rule = {
       id: `demo-rule-${nextRuleSequence++}`,
       created_by: 'demo-user',
+      created_by_name: 'demo@mailexpert.local',
       account_id: body?.accountId ?? null,
       name: String(body?.name ?? '').trim() || 'Untitled rule',
       enabled: body?.enabled !== false,

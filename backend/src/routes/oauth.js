@@ -237,7 +237,8 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
       id = row.id;
       // A fresh consent clears a reconnect flag set by the token manager on invalid_grant;
       // otherwise the flag would refuse every later refresh of the new refresh token.
-      await client.query(`
+      // The WHERE repeats the checks above, so a row changed meanwhile is left alone.
+      const updated = await client.query(`
         UPDATE email_accounts SET
           oauth_access_token = $1, oauth_refresh_token = COALESCE($2, oauth_refresh_token), oauth_token_expiry = $3,
           oauth_public_client = $4, oauth_subject = $5,
@@ -246,7 +247,9 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
           smtp_host = 'smtp.office365.com', smtp_port = 587, smtp_tls = 'STARTTLS',
           oauth_reconnect_required = false, sync_error = NULL
         WHERE id = $6 AND oauth_provider = 'microsoft' AND mail_node IS NOT TRUE
+          AND (oauth_subject IS NULL OR oauth_subject = $5)
       `, [encrypt(access_token), refresh_token ? encrypt(refresh_token) : null, expiry, publicClient, subject, id]);
+      if (!updated.rowCount) throw new MicrosoftOAuthError('invalid_state');
     } else {
       // Adding never takes over an existing mailbox, whatever it is.
       if (row) throw new MicrosoftOAuthError('already_connected');
