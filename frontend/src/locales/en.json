@@ -2067,7 +2067,7 @@
       "checkRateLimited": "GitHub is limiting requests right now; the promoted version will be checked again later",
       "checkUnavailable": "GitHub could not be reached; the promoted version will be checked again later",
       "notInstalledTitle": "The update mechanism is not installed",
-      "notInstalledHint": "Updating from the panel needs the updater that install.sh sets up with systemd on the server. Until then, update from the command line.",
+      "notInstalledHint": "Updating from the panel needs the update service on the server; install.sh sets it up where the server has systemd. Until then, update from the command line.",
       "notInstalledDocs": "Operations guide, section 9",
       "checkTitle": "Check of {{target}}",
       "checkNone": "Not checked yet. The check looks for problems before anything is changed.",

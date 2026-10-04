@@ -307,7 +307,7 @@ describe('the panel update section', () => {
     await i18n.changeLanguage('ru');
     answers['GET /api/admin/update'] = state({ updater: { spool: true, installed: true, version: A, rolledBack: B } });
     const root = await mount();
-    assert.match(text(root, '[data-rolled-back]'), new RegExp(`Версия ${B} была откачена`));
+    assert.match(text(root, '[data-rolled-back]'), new RegExp(`С версии ${B} сервер уже откатывался`));
     assert.doesNotMatch(root.textContent, /admin\.panelUpdate/);
   });
 
