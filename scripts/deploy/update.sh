@@ -49,7 +49,7 @@ exit_on_unexpected_failure
 # 1 from the moment install.sh is started: before that every failure leaves the server unchanged
 # and exits 3 (nothing_changed_exit), whatever failed (die, ensure_image, the ERR trap).
 SWITCHED=0
-# shellcheck disable=SC2329 # run by the EXIT trap below
+# shellcheck disable=SC2317,SC2329 # run by the EXIT trap below (SC2317 in older shellcheck)
 nothing_changed_exit() {
   if [ "$SWITCHED" = 0 ] && [ "$1" = 1 ]; then
     printf '[mailexpert] nothing was changed: the old version still runs\n' >&2
