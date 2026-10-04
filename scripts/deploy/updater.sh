@@ -200,7 +200,12 @@ check_target() {
   if is_standby; then echo "standby server: the panel does not run here"; return 0; fi
   if lock_held "$STATE_DIR/update.lock"; then echo "an update, rollback or restore is running now"; return 0; fi
   if ! git -C "$APP_DIR" fetch --quiet origin 2>/dev/null; then echo "git fetch failed in $APP_DIR"; return 0; fi
-  fetch_latest_tag 2>/dev/null || true
+  # A tag left in the checkout by an earlier fetch is not what origin promotes now (the owner may
+  # have moved or withdrawn it): without a fresh fetch nothing counts as latest.
+  if ! fetch_latest_tag 2>/dev/null; then
+    echo "cannot fetch the tag latest from $(redact_url "$CFG_REPO_URL"): the panel installs only the build the tag names now"
+    return 0
+  fi
   full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null) || {
     echo "commit $commit is not in $(redact_url "$CFG_REPO_URL")"
     return 0

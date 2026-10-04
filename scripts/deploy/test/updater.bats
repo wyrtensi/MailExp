@@ -351,6 +351,20 @@ id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }
   [[ $(result "$ID1" .message) == "the tag latest names a commit outside main"* ]]
 }
 
+@test "a tag latest left in the checkout counts for nothing when origin no longer has it" {
+  stub_install
+  # origin: a copy of the repository whose owner withdrew the promotion; the checkout keeps its tag.
+  git clone -q --bare "$P/app" "$BATS_TEST_TMPDIR/origin.git"
+  git -C "$BATS_TEST_TMPDIR/origin.git" tag -d latest >/dev/null
+  git -C "$P/app" remote set-url origin "$BATS_TEST_TMPDIR/origin.git"
+  [ "$(git -C "$P/app" rev-parse latest)" = "$MIG" ]
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  run_updater
+  [ "$(result "$ID1" .state)" = refused ]
+  [[ $(result "$ID1" .message) == "cannot fetch the tag latest from "* ]]
+  [ ! -e "$UPDATE_LOG" ]
+}
+
 @test "a request with the id of an existing result is dropped and the result stays as it was" {
   stub_install
   printf '{"id":"%s","action":"update","state":"succeeded","terminal":true}\n' "$ID1" >"$RES/$ID1.json"
