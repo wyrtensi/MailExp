@@ -42,11 +42,22 @@ export async function authorizeSocketUser(req, {
   return user && user.email && !user.disabled_at ? user.id : null;
 }
 
-// Close every live socket of a user whose access just ended.
-export function closeUserSockets(wss, userId) {
-  for (const ws of wss.clients) {
-    if (ws.userId === userId && ws.readyState === 1) ws.close(1008, 'Session ended');
-  }
+// Close the live sockets of a user whose access just ended: every one of them, or with
+// `sessionId` only those that session opened (logout, lock). A socket is authenticated once,
+// at upgrade, so nothing else stops broadcasts reaching it after its session ends or locks.
+// No userId closes nothing: a socket still in its session lookup has no userId either.
+// The close waits a turn: an upgrade whose session lookup was answered in the same Redis read
+// as the write that ended the session authenticates a microtask after that write's callback,
+// and closing at once would miss it.
+export function closeUserSockets(wss, userId, { sessionId = null, reason = 'Session ended' } = {}) {
+  if (!wss || !userId) return;
+  setImmediate(() => {
+    for (const ws of wss.clients) {
+      if (ws.userId !== userId || ws.readyState !== 1) continue;
+      if (sessionId && ws.sessionId !== sessionId) continue;
+      ws.close(1008, reason);
+    }
+  });
 }
 
 export function setupWebSocket(wss, sessionMiddleware, { authorize = authorizeSocketUser } = {}) {
@@ -93,11 +104,13 @@ export function setupWebSocket(wss, sessionMiddleware, { authorize = authorizeSo
           }
           if (req.session.locked) {
             // Screen lock (#235) is server-enforced: don't stream live mail to a locked
-            // session. The client closes its own socket on lock; this blocks a new one.
+            // session. POST /auth/lock closes the sockets already open; this blocks a new one.
             ws.close(1008, 'Locked');
             return;
           }
           ws.userId = userId;
+          // The session that opened the socket, so logout and lock can close just its sockets.
+          ws.sessionId = req.sessionID;
           recordWsConnect();
           ws._diagCounted = true;
           console.log(`WebSocket connected for user ${userId}`);

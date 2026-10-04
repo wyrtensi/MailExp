@@ -8420,7 +8420,8 @@ export class ImapManager {
     recordBroadcast(data?.type);
     const msg = JSON.stringify(data);
     this.wss.clients.forEach(ws => {
-      if (ws.readyState === 1 && (!userId || ws.userId === userId)) {
+      // Only authenticated sockets: one still in its session lookup has no userId yet.
+      if (ws.readyState === 1 && ws.userId && (!userId || ws.userId === userId)) {
         try { ws.send(msg); } catch (err) {
           console.error('WebSocket broadcast send error:', err.message);
         }
