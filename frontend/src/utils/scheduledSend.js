@@ -84,7 +84,12 @@ const FAILURE_KEYS = Object.freeze({
   gmail_api_auth_failed: 'compose.gmailApiAuthFailed',
   author_disabled: 'scheduled.failure.authorDisabled',
   node_alias_stale: 'compose.errorNodeAliasStale',
+  delivered_unrecorded: 'scheduled.failure.deliveredUnrecorded',
 });
+
+// A letter the mail server accepted although its job could not be recorded as sent (backend
+// services/sendQueue.js DELIVERED_UNRECORDED): it went out, so it is never offered to send again.
+export const DELIVERED_UNRECORDED = 'delivered_unrecorded';
 
 export function sendFailureKey(code) {
   return Object.hasOwn(FAILURE_KEYS, code) ? FAILURE_KEYS[code] : null;
@@ -106,6 +111,7 @@ export const SCHEDULED_STATUS_LABEL_KEYS = Object.freeze({
   sending: 'scheduled.status.sending',
   failed: 'scheduled.status.failed',
   needsAttention: 'scheduled.status.needsAttention',
+  delivered: 'scheduled.status.delivered',
 });
 
 export const SCHEDULED_ACTION_LABEL_KEYS = Object.freeze({
@@ -121,7 +127,7 @@ export function scheduledStatusKey(letter) {
   switch (letter?.status) {
     case 'running': return 'sending';
     case 'failed': return 'failed';
-    case 'needs_attention': return 'needsAttention';
+    case 'needs_attention': return letter.errorCode === DELIVERED_UNRECORDED ? 'delivered' : 'needsAttention';
     case 'queued':
       if (letter.errorCode) return 'retrying';
       return letter.scheduled ? 'scheduled' : 'sendingSoon';
@@ -137,6 +143,8 @@ export function scheduledActions(letter) {
     case 'queued': return ['edit', 'reschedule', 'cancel'];
     case 'failed':
     case 'needs_attention':
+      // Delivered already: only dismissing it is left (Edit would invite sending it twice).
+      if (letter.errorCode === DELIVERED_UNRECORDED) return ['discard'];
       // Sending again goes out as its author, which cannot work without one (Edit sends it as you),
       // nor from an alias a mail node mailbox cannot send from (Edit lets you pick another From).
       return letter.errorCode === 'author_disabled' || letter.errorCode === 'node_alias_stale' || !letter.author

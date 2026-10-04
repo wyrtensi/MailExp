@@ -24,7 +24,8 @@
     "adminOnly": "Only an administrator can change this.",
     "mailboxBusy": "The mailbox is busy, try again in a few seconds",
     "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.",
-    "movePending": "The letter is still being moved, try again in a few seconds"
+    "movePending": "The letter is still being moved, try again in a few seconds",
+    "close": "Close"
   },
   "login": {
     "google": {
@@ -664,7 +665,12 @@
       "summaryLost_other": "{{count}} of {{total}} did not arrive: their senders received a non-delivery report.",
       "summaryDelayed_one": "{{count}} letter arrived late. Nothing is missing.",
       "summaryDelayed_other": "{{count}} letters arrived late. Nothing is missing."
-    }
+    },
+    "menu": "Menu",
+    "layout": "Layout",
+    "changeLayout": "Change layout",
+    "scrollTabsLeft": "Scroll tabs left",
+    "scrollTabsRight": "Scroll tabs right"
   },
   "lockScreen": {
     "subtitle": "Enter your PIN to unlock",
@@ -720,7 +726,9 @@
       "hide": "Hide folder",
       "unhide": "Unhide folder",
       "empty": "Empty folder",
-      "delete": "Delete folder"
+      "delete": "Delete folder",
+      "favorite": "Add to Favorites",
+      "unfavorite": "Remove from Favorites"
     },
     "accountMenu": {
       "newFolder": "New folder",
@@ -747,7 +755,9 @@
     "pinned": "Pinned",
     "updateAvailable": "Update available: v{{version}}",
     "pendingDeletion": "Deleted on {{date}}",
-    "tenantPending": "Waiting for the tenant: mail to it is rejected for now"
+    "tenantPending": "Waiting for the tenant: mail to it is rejected for now",
+    "favorites": "Favorites",
+    "reorderFolder": "Drag to reorder folder"
   },
   "contextMenu": {
     "find": "Find",
@@ -2195,7 +2205,8 @@
       "detailTenantQuarantineReleasedNoType": "From {{sender}} to {{recipients}} ({{messageId}})",
       "detailTenantPhishReleaseOn": "Turned on",
       "detailTenantPhishReleaseOff": "Paused",
-      "detailTenantMessageTraced": "Letter {{messageId}}"
+      "detailTenantMessageTraced": "Letter {{messageId}}",
+      "detailSendDeliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -3235,7 +3246,8 @@
       "rejected": "The mail server rejected the letter.",
       "auth": "The mail server did not accept the mailbox's credentials.",
       "reconnect": "Access to this mailbox was revoked or has expired. Reconnect it to send mail.",
-      "authorDisabled": "Its author can no longer send mail."
+      "authorDisabled": "Its author can no longer send mail.",
+      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. It went out: do not send it again."
     },
     "undoFailedTitle": "Could not undo",
     "undoTooLate": "The letter is already being sent and can no longer be stopped.",
@@ -3260,7 +3272,8 @@
       "retrying": "Will try again",
       "sending": "Sending",
       "failed": "Not sent",
-      "needsAttention": "Needs attention"
+      "needsAttention": "Needs attention",
+      "delivered": "Sent"
     },
     "needsAttentionHint": "The connection broke while this letter was being sent, so it may have been delivered. Check Sent before sending it again.",
     "actions": {
@@ -3279,6 +3292,8 @@
     "sendAt": "Send at {{time}}",
     "sendNow": "Send now instead",
     "keptUntil": "Kept until {{date}}, then deleted.",
-    "conflict": "This letter was already sent with another time, or cancelled. Reopen it and send it again."
+    "conflict": "This letter was already sent with another time, or cancelled. Reopen it and send it again.",
+    "deliveredUnrecordedTitle": "A letter was sent",
+    "discardDeliveredBody": "The letter went out already: only this entry is removed from the list."
   }
 }

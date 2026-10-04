@@ -65,6 +65,14 @@ test('a letter refused for a stale node alias is edited, not sent again as it is
   assert.equal(sendFailureKey('node_alias_stale'), 'compose.errorNodeAliasStale');
 });
 
+test('a letter the server accepted but that was not recorded is never offered to send again', () => {
+  const letter = { status: 'needs_attention', canManage: true, errorCode: 'delivered_unrecorded', author: { id: 'u' } };
+  assert.deepEqual(scheduledActions(letter), ['discard']);
+  assert.equal(scheduledStatusKey(letter), 'delivered');
+  assert.equal(scheduledStatusKey({ ...letter, errorCode: 'lease_expired' }), 'needsAttention');
+  assert.equal(sendFailureKey('delivered_unrecorded'), 'scheduled.failure.deliveredUnrecorded');
+});
+
 test('failure codes map to their messages and statuses to outcomes', () => {
   assert.equal(sendFailureKey('send_uncertain'), 'scheduled.failure.uncertain');
   assert.equal(sendFailureKey('gmail_invalid_recipient'), 'compose.gmailInvalidRecipient');

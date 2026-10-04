@@ -25,6 +25,11 @@
  *   excluding the locale files themselves. A key counts as referenced if it
  *   appears literally in the source — even in a comment or property assignment.
  *
+ *   The reverse check runs here too: every key written out in a t() call of
+ *   the source (t('a.b'), t("a.b"), t(`a.b`), t(c ? 'a.b' : 'c.d'), even with
+ *   a fallback string) must exist in every locale; a dynamic key t(`a.b.${x}`)
+ *   must name a section (a.b.) that has keys. Fix: add the key, translated.
+ *
  * SUITE 2 — key coverage
  *   Every key present in any locale file must exist in all locale files.
  *
@@ -423,6 +428,51 @@ function loadLiteralSourceTranslationKeys(prefix) {
   return [...keys].sort();
 }
 
+// Every t() call of the source (tests excluded) whose key is written out: a quoted literal or a
+// template literal. A template literal with ${...} is dynamic: only its static head (up to the
+// first ${) is known, kept as a prefix. Only dotted keys count (a namespaced key, as every key of
+// the locale files is). Returns [{ file, key, prefix }] where prefix is true for a dynamic head.
+const DOTTED_KEY_RE = /^[\w-]+(\.[\w-]+)+$/;
+function loadSourceTranslationCalls() {
+  const srcRoot = resolve(dir, '..');
+  const calls = [];
+  const call = /(?:(?<![\w$.])|\bi18n(?:ext)?\.)t\(\s*(?:'([^'\n]*)'|"([^"\n]*)"|`([^`]*)`)/g;
+  const ternaryCall = /(?:(?<![\w$.])|\bi18n(?:ext)?\.)t\(\s*[^'"`()\n]{1,80}?\?\s*(['"])([\w.-]+)\1\s*:\s*(['"])([\w.-]+)\3/g;
+  function walk(d) {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name);
+      if (entry.isDirectory()) {
+        if (full === dir) continue; // skip locales/
+        walk(full);
+      } else if ((entry.name.endsWith('.js') || entry.name.endsWith('.jsx')) && !entry.name.includes('.test.')) {
+        const source = readFileSync(full, 'utf8');
+        for (const match of source.matchAll(call)) {
+          const file = full.slice(srcRoot.length + 1).replace(/\\/g, '/');
+          const template = match[3];
+          if (template === undefined) {
+            const key = match[1] ?? match[2];
+            if (DOTTED_KEY_RE.test(key)) calls.push({ file, key, prefix: false });
+          } else if (!template.includes('${')) {
+            if (DOTTED_KEY_RE.test(template)) calls.push({ file, key: template, prefix: false });
+          } else {
+            // `a.b.${x}`: the head up to its last dot must name a section with keys in it.
+            const head = template.slice(0, template.indexOf('${'));
+            const section = head.slice(0, head.lastIndexOf('.') + 1);
+            if (section && DOTTED_KEY_RE.test(section.slice(0, -1))) calls.push({ file, key: section, prefix: true });
+          }
+        }
+        // t(cond ? 'a.b' : 'c.d'): both keys are written out.
+        for (const match of source.matchAll(ternaryCall)) {
+          const file = full.slice(srcRoot.length + 1).replace(/\\/g, '/');
+          for (const key of [match[2], match[4]]) if (DOTTED_KEY_RE.test(key)) calls.push({ file, key, prefix: false });
+        }
+      }
+    }
+  }
+  walk(srcRoot);
+  return calls;
+}
+
 function isAllowedPair(key, lang1, lang2) {
   const rule = SAME_VALUE_ALLOWED[key];
   if (!rule) return false;
@@ -482,6 +532,29 @@ describe('i18n locale files', () => {
       }
       assert.equal(missing.length, 0,
         `Literal source translation keys missing from locale files:\n${missing.join('\n')}`);
+    });
+
+    it('every key written out in a t() call of the source exists in every locale', () => {
+      // A fallback (t('key', 'Text')) hides a missing key in English but shows English in every
+      // other language, so a key with a fallback must exist too. A dynamic key (`a.b.${x}`) must
+      // name a section that has keys; which ones it reaches is DYNAMIC_KEYS' and the other tests' job.
+      const calls = loadSourceTranslationCalls();
+      assert.ok(calls.length > 1000, `expected the source's t() calls, found ${calls.length}`);
+      const missing = new Set();
+      for (const lang of langs) {
+        const keys = Object.keys(locales[lang]);
+        const present = new Set(keys);
+        for (const { file, key, prefix } of calls) {
+          const found = prefix
+            ? keys.some(k => k.startsWith(key))
+            : present.has(key)
+              || PLURAL_SUFFIXES.some(suffix => present.has(`${key}${suffix}`))
+              || keys.some(k => k.startsWith(`${key}.`)); // t(key, { returnObjects: true })
+          if (!found) missing.add(`  - ${lang}: ${key}${prefix ? '*' : ''} (${file})`);
+        }
+      }
+      assert.equal(missing.size, 0,
+        `Translation keys used in the source but missing from locale files:\n${[...missing].sort().join('\n')}`);
     });
 
     it('every OAuth result key mapped in utils/googleOAuth.js exists in every locale', () => {

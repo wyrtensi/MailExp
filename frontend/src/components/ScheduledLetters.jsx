@@ -6,7 +6,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import { accountLabel } from '../utils/accountLabel.js';
 import { formatDateTime } from '../utils/formatDate.js';
 import {
-  SCHEDULED_ACTION_LABEL_KEYS, SCHEDULED_STATUS_LABEL_KEYS, scheduledActions, scheduledStatusKey,
+  DELIVERED_UNRECORDED, SCHEDULED_ACTION_LABEL_KEYS, SCHEDULED_STATUS_LABEL_KEYS, scheduledActions, scheduledStatusKey,
 } from '../utils/scheduledSend.js';
 import { refreshScheduledSummary, restoreCompose, sendFailureText } from '../utils/sendTracker.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
@@ -138,9 +138,14 @@ function ScheduledDialog() {
     if (compose) restoreCompose(compose, { sendAt });
   });
 
+  // A letter the server accepted (delivered_unrecorded) went out: only its entry is removed.
+  const discardBodyKey = (letter) => {
+    if (letter.status === 'queued') return 'scheduled.cancelBody';
+    return letter.errorCode === DELIVERED_UNRECORDED ? 'scheduled.discardDeliveredBody' : 'scheduled.discardBody';
+  };
   const discard = (letter) => setConfirm({
     title: t(letter.status === 'queued' ? 'scheduled.cancelTitle' : 'scheduled.discardTitle'),
-    message: t(letter.status === 'queued' ? 'scheduled.cancelBody' : 'scheduled.discardBody'),
+    message: t(discardBodyKey(letter)),
     confirmLabel: t(letter.status === 'queued' ? 'scheduled.actions.cancel' : 'scheduled.actions.discard'),
     onConfirm: async () => {
       await api.scheduled.cancel(letter.id, 'discard');
@@ -286,8 +291,8 @@ function ScheduledDialog() {
                       {letter.attachmentCount > 0 ? ` · ${t('scheduled.attachments', { count: letter.attachmentCount })}` : ''}
                       {byOther ? ` · ${t('scheduled.by', { author: letter.author.email || '' })}` : ''}
                     </div>
-                    {(statusKey === 'failed' || statusKey === 'needsAttention' || statusKey === 'retrying') && (
-                      <div style={{ fontSize: 12, color: statusKey === 'retrying' ? 'var(--text-secondary)' : 'var(--red)', marginTop: 6, lineHeight: 1.4 }}>
+                    {(statusKey === 'failed' || statusKey === 'needsAttention' || statusKey === 'retrying' || statusKey === 'delivered') && (
+                      <div style={{ fontSize: 12, color: statusKey === 'retrying' || statusKey === 'delivered' ? 'var(--text-secondary)' : 'var(--red)', marginTop: 6, lineHeight: 1.4 }}>
                         {statusKey === 'needsAttention' ? t('scheduled.needsAttentionHint') : sendFailureText(letter.errorCode, letter.error)}
                       </div>
                     )}

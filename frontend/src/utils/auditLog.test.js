@@ -139,6 +139,7 @@ describe('auditDetail', () => {
     assert.deepEqual(auditDetail({ action: 'message.send_cancelled', details: {} }), { key: 'admin.audit.detailSendCancelledDiscard', values: {} });
     assert.deepEqual(auditDetail({ action: 'message.send_rescheduled', details: { resend: true } }), { key: 'admin.audit.detailSendResent', values: {} });
     assert.deepEqual(auditDetail({ action: 'message.send_failed', details: { status: 'needs_attention' } }), { key: 'admin.audit.detailSendUncertain', values: {} });
+    assert.deepEqual(auditDetail({ action: 'message.send_failed', details: { status: 'needs_attention', code: 'delivered_unrecorded' } }), { key: 'admin.audit.detailSendDeliveredUnrecorded', values: {} });
     assert.deepEqual(auditDetail({ action: 'message.send_failed', details: { status: 'failed', code: 'smtp_rejected' } }), { key: 'admin.audit.detailSendFailed', values: { code: 'smtp_rejected' } });
   });
 
