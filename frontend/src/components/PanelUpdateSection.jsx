@@ -5,7 +5,7 @@ import { formatDateTime } from '../utils/formatDate.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import {
   POLL_GRACE_MS, POLL_INTERVAL_MS,
-  canCheck, checkErrorKey, isRestartingError, logTail, migrationsInfo, needsAutoCheck, needsPolling, needsRunbook,
+  canCheck, checkErrorKey, isRestartingError, isRolledBack, logTail, migrationsInfo, needsAutoCheck, needsPolling, needsRunbook,
   requestErrorKey, rollbackCommand, rollbackInfo, safeGithubUrl, shouldOfferReload, stateInfo, textList,
   updateBlockReason, updateStatus, updateTarget,
 } from '../utils/panelUpdate.js';
@@ -340,7 +340,16 @@ export default function PanelUpdateSection() {
             </div>
           )}
 
-          {data.updateAvailable && target && <CheckResult check={check} target={target} t={t} />}
+          {installed && isRolledBack(data) && (
+            <div role="status" data-rolled-back style={{
+              marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(245,158,11,0.12)', border: '1px solid var(--amber)',
+              fontSize: 12, lineHeight: 1.5,
+            }}>
+              {t('admin.panelUpdate.rolledBack', { version: data.updater.rolledBack })}
+            </div>
+          )}
+
+          {data.updateAvailable && target && !isRolledBack(data) && <CheckResult check={check} target={target} t={t} />}
 
           {actionError && (
             <div role="alert" data-panel-update-error style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>

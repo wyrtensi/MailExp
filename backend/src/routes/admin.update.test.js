@@ -22,6 +22,10 @@ vi.mock('../services/auditLog.js', async (importOriginal) => ({
   ...(await importOriginal()), recordAudit: vi.fn(async () => {}),
 }));
 vi.mock('../services/panelUpdate/latest.js', () => ({ getLatestStatus: vi.fn() }));
+vi.mock('../services/panelUpdate/spool.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, getSpool: vi.fn(actual.getSpool) };
+});
 vi.mock('../services/panelUpdate/reconcile.js', () => ({ reconcileUpdateAudit: vi.fn(async () => {}) }));
 
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
@@ -33,12 +37,14 @@ import { query } from '../services/db.js';
 import { recordAudit } from '../services/auditLog.js';
 import { getLatestStatus } from '../services/panelUpdate/latest.js';
 import { reconcileUpdateAudit } from '../services/panelUpdate/reconcile.js';
+import { SpoolError, getSpool } from '../services/panelUpdate/spool.js';
 
 const ADMIN_ID = '22222222-2222-4222-8222-222222222222';
 const RID = '33333333-3333-4333-8333-333333333333';
 const CUR = 'a'.repeat(40);
 const LATEST = '0123456789abcdef0123456789abcdef01234567';
 const TARGET = 'sha-0123456789ab';
+const realGetSpool = getSpool.getMockImplementation();
 
 const status = (over = {}) => ({
   current: { sha: CUR, version: 'sha-aaaaaaaaaaaa' },
@@ -85,8 +91,9 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'admin-update-'));
   await mkdir(join(dir, 'request'));
   await mkdir(join(dir, 'result'));
-  await writeFile(join(dir, 'result', 'updater.json'), JSON.stringify({ installed: true, version: 'sha-bbbbbbbbbbbb', updatedAt: '2026-10-05T10:00:00Z' }));
+  await writeFile(join(dir, 'result', 'updater.json'), JSON.stringify({ installed: true, version: 'sha-bbbbbbbbbbbb', updatedAt: '2026-10-05T10:00:00Z', rolledBack: null }));
   vi.stubEnv('UPDATE_SPOOL_DIR', dir);
+  getSpool.mockImplementation(realGetSpool);
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -126,7 +133,7 @@ describe('/api/admin/update', () => {
       expect(getLatestStatus).toHaveBeenCalledWith({ refresh: false });
       expect(body).toEqual({
         ...status(),
-        updater: { spool: true, installed: true, version: 'sha-bbbbbbbbbbbb' },
+        updater: { spool: true, installed: true, version: 'sha-bbbbbbbbbbbb', rolledBack: null },
         busy: false,
         pending: null,
         check: expect.objectContaining({ id: checkId, action: 'check', state: 'ready', target: TARGET }),
@@ -158,9 +165,48 @@ describe('/api/admin/update', () => {
     it('without a spool the feature is off', async () => {
       vi.stubEnv('UPDATE_SPOOL_DIR', '');
       const { body } = await call('GET', '');
-      expect(body.updater).toEqual({ spool: false, installed: false, version: null });
+      expect(body.updater).toEqual({ spool: false, installed: false, version: null, rolledBack: null });
       expect(body.busy).toBe(false);
       expect(body.run).toBeNull();
+    });
+  });
+
+  describe('rolled back versions', () => {
+    const rollBack = (version) => writeFile(join(dir, 'result', 'updater.json'), JSON.stringify({ installed: true, version: 'sha-bbbbbbbbbbbb', rolledBack: version }));
+
+    it('GET exposes updater.rolledBack, null unless it is exactly sha-<12>', async () => {
+      await rollBack(TARGET);
+      expect((await call('GET', '')).body.updater.rolledBack).toBe(TARGET);
+      await rollBack('SHA-0123456789AB');
+      expect((await call('GET', '')).body.updater.rolledBack).toBeNull();
+    });
+
+    it('refuses a check and an update of the rolled back target', async () => {
+      await rollBack(TARGET);
+      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 409, body: { error: 'rolled_back' } });
+      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'rolled_back' } });
+      expect(await requests()).toEqual([]);
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('reports not_latest before rolled_back', async () => {
+      await rollBack('sha-111111111111');
+      expect((await call('POST', '/check', { target: 'sha-111111111111' })).body).toEqual({ error: 'not_latest' });
+    });
+
+    it('lets a different target through', async () => {
+      await rollBack('sha-111111111111');
+      expect((await call('POST', '/check', { target: TARGET })).status).toBe(202);
+    });
+  });
+
+  describe('a spool the backend cannot write', () => {
+    it.each([['/check', { target: TARGET }], ['', { target: TARGET, confirm: TARGET }]])('POST %s answers 503 spool_not_writable', async (path, body) => {
+      getSpool.mockImplementation(() => ({
+        ...realGetSpool(), writeRequest: async () => { throw new SpoolError('spool_not_writable'); },
+      }));
+      expect(await call('POST', path, body)).toEqual({ status: 503, body: { error: 'spool_not_writable' } });
+      expect(recordAudit).not.toHaveBeenCalled();
     });
   });
 

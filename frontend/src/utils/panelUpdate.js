@@ -42,6 +42,8 @@ const REQUEST_ERROR_KEYS = Object.freeze({
   not_latest: 'admin.panelUpdate.errorNotLatest',
   no_update: 'admin.panelUpdate.errorNoUpdate',
   updater_not_installed: 'admin.panelUpdate.errorNotInstalled',
+  rolled_back: 'admin.panelUpdate.errorRolledBack',
+  spool_not_writable: 'admin.panelUpdate.errorSpoolNotWritable',
 });
 
 export function isTerminalState(state) {
@@ -141,9 +143,16 @@ export function rollbackInfo(check) {
   return check.autoRollback ? 'auto' : 'manual';
 }
 
+// The promoted version is one somebody rolled back from: the host refuses it as a target until a
+// newer build is promoted.
+export function isRolledBack(data) {
+  const rolledBack = data?.updater?.rolledBack;
+  return isValidVersion(rolledBack) && rolledBack === data?.latest?.version;
+}
+
 // A check of the promoted version is wanted and not running or recorded yet: do it once, by itself.
 export function needsAutoCheck(data) {
-  if (!data || data.disabled || data.checkError) return false;
+  if (!data || data.disabled || data.checkError || isRolledBack(data)) return false;
   if (!data.updateAvailable || !updateTarget(data)) return false;
   if (!data.updater?.installed) return false;
   if (data.busy || data.pending) return false;
@@ -156,6 +165,7 @@ export function updateBlockReason(data, { starting = false } = {}) {
   if (!data) return 'loading';
   if (starting || data.busy || data.pending) return 'busy';
   if (!data.updater?.installed) return 'not_installed';
+  if (isRolledBack(data)) return 'rolled_back';
   if (!data.updateAvailable || !updateTarget(data)) return 'no_update';
   if (data.check?.state === 'blocked' || data.check?.state === 'refused') return 'blocked';
   return null;
@@ -163,7 +173,7 @@ export function updateBlockReason(data, { starting = false } = {}) {
 
 export function canCheck(data, { starting = false } = {}) {
   return !!data && !starting && !data.busy && !data.pending && !data.disabled && !data.checkError
-    && !!data.updater?.installed && !!data.updateAvailable && !!updateTarget(data);
+    && !!data.updater?.installed && !isRolledBack(data) && !!data.updateAvailable && !!updateTarget(data);
 }
 
 // <PREFIX> of the install, from the host's log path (<PREFIX>/state/updater/<id>.log); null when

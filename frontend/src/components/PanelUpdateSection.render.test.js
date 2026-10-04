@@ -293,6 +293,46 @@ describe('the panel update section', () => {
     assert.match(text(root, '[data-panel-update-error]'), /already in progress/);
   });
 
+  test('a rolled back latest version shows a notice, disables both buttons and checks nothing (en)', async () => {
+    answers['GET /api/admin/update'] = state({ updater: { spool: true, installed: true, version: A, rolledBack: B } });
+    const root = await mount();
+    assert.match(text(root, '[data-rolled-back]'), new RegExp(`Version ${B} was rolled back`));
+    assert.match(text(root, '[data-rolled-back]'), /until the owner promotes a newer build/);
+    assert.equal(get(root, '[data-panel-update-button]').disabled, true);
+    assert.equal(get(root, '[data-panel-update-check-button]').disabled, true);
+    assert.equal(posts().length, 0, 'no automatic check');
+  });
+
+  test('a rolled back latest version in Russian', async () => {
+    await i18n.changeLanguage('ru');
+    answers['GET /api/admin/update'] = state({ updater: { spool: true, installed: true, version: A, rolledBack: B } });
+    const root = await mount();
+    assert.match(text(root, '[data-rolled-back]'), new RegExp(`Версия ${B} была откачена`));
+    assert.doesNotMatch(root.textContent, /admin\.panelUpdate/);
+  });
+
+  test('a rolled back version that is not the latest changes nothing', async () => {
+    answers['GET /api/admin/update'] = state({ check: READY, updater: { spool: true, installed: true, version: A, rolledBack: 'sha-cccccccccccc' } });
+    const root = await mount();
+    assert.equal(get(root, '[data-rolled-back]'), null);
+    assert.equal(get(root, '[data-panel-update-button]').disabled, false);
+  });
+
+  test('the rolled_back and spool_not_writable refusals are shown in words', async () => {
+    answers['GET /api/admin/update'] = state({ check: READY });
+    answers['POST /api/admin/update'] = { status: 409, body: { error: 'rolled_back' } };
+    const root = await mount();
+    await click(get(root, '[data-panel-update-button]'));
+    await click(dom.window.document.querySelector('[data-confirm-button]'));
+    assert.match(text(root, '[data-panel-update-error]'), /was rolled back/);
+
+    answers['POST /api/admin/update'] = { status: 503, body: { error: 'spool_not_writable' } };
+    await click(get(root, '[data-panel-update-button]'));
+    await click(dom.window.document.querySelector('[data-confirm-button]'));
+    assert.match(text(root, '[data-panel-update-error]'), /cannot write to the update request directory/);
+    assert.match(text(root, '[data-panel-update-error]'), /install\.sh/);
+  });
+
   test('an update in progress shows the state and the log tail, keeps polling and blocks the buttons', async () => {
     answers['GET /api/admin/update'] = state({ busy: true, check: READY, run: RUN });
     const root = await mount();

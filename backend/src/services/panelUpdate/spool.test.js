@@ -59,7 +59,7 @@ describe('spool directory', () => {
     await expect(off.writeRequest({ action: 'check', target: 'sha-0123456789ab', requestedBy: 'a@example.com' }))
       .rejects.toMatchObject({ code: 'updater_not_installed' });
     expect(await off.readResults()).toEqual([]);
-    expect(await off.readUpdater()).toEqual({ installed: false, version: null });
+    expect(await off.readUpdater()).toEqual({ installed: false, version: null, rolledBack: null });
   });
 });
 
@@ -86,6 +86,25 @@ describe('writeRequest', () => {
     expect(mode).toBe(0o600);
     if (process.platform !== 'win32') {
       expect((await stat(join(dir, 'request', `${id}.json`))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('tells a missing spool directory from one the backend cannot write', async () => {
+    const req = { action: 'check', target: 'sha-0123456789ab', requestedBy: 'a' };
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      open.mockRejectedValueOnce(Object.assign(new Error('nope'), { code: 'ENOENT' }));
+      await expect(spool.writeRequest(req)).rejects.toMatchObject({ code: 'updater_not_installed' });
+      for (const code of ['EACCES', 'EPERM']) {
+        open.mockRejectedValueOnce(Object.assign(new Error('secret /path'), { code }));
+        await expect(spool.writeRequest(req)).rejects.toMatchObject({ code: 'spool_not_writable' });
+      }
+      const logged = log.mock.calls.flat().join(' ');
+      expect(logged).toContain('EACCES');
+      expect(logged).toContain('install.sh');
+      expect(logged).not.toContain('secret');
+    } finally {
+      log.mockRestore();
     }
   });
 
@@ -175,15 +194,24 @@ describe('results', () => {
 describe('updater.json', () => {
   it('reads the installed updater', async () => {
     await putResult('updater.json', { installed: true, version: 'sha-0123456789ab', updatedAt: '2026-10-05T10:00:00Z' });
-    expect(await spool.readUpdater()).toEqual({ installed: true, version: 'sha-0123456789ab' });
+    expect(await spool.readUpdater()).toEqual({ installed: true, version: 'sha-0123456789ab', rolledBack: null });
+  });
+
+  it('reads the rolled back version, and only when it is exactly sha-<12>', async () => {
+    await putResult('updater.json', { installed: true, version: 'sha-0123456789ab', rolledBack: 'sha-fedcba987654' });
+    expect((await spool.readUpdater()).rolledBack).toBe('sha-fedcba987654');
+    for (const bad of ['sha-FEDCBA987654', 'sha-fedcba98765', 'sha-fedcba987654\n', 'v1', 7, {}, null]) {
+      await putResult('updater.json', { installed: true, version: 'sha-0123456789ab', rolledBack: bad });
+      expect((await spool.readUpdater()).rolledBack).toBeNull();
+    }
   });
 
   it('absent or junk means not installed', async () => {
-    expect(await spool.readUpdater()).toEqual({ installed: false, version: null });
+    expect(await spool.readUpdater()).toEqual({ installed: false, version: null, rolledBack: null });
     await putResult('updater.json', '{"installed": "yes"');
-    expect(await spool.readUpdater()).toEqual({ installed: false, version: null });
+    expect(await spool.readUpdater()).toEqual({ installed: false, version: null, rolledBack: null });
     await putResult('updater.json', { installed: true, version: 'v1' });
-    expect(await spool.readUpdater()).toEqual({ installed: true, version: null });
+    expect(await spool.readUpdater()).toEqual({ installed: true, version: null, rolledBack: null });
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  canCheck, installPrefix, isActiveResult, isRestartingError, isTerminalState, logTail, migrationsInfo,
+  canCheck, installPrefix, isActiveResult, isRestartingError, isRolledBack, isTerminalState, logTail, migrationsInfo,
   needsAutoCheck, needsPolling, needsRunbook, requestErrorKey, rollbackCommand, rollbackInfo, safeGithubUrl,
   shouldOfferReload, stateInfo, updateBlockReason, updateStatus, updateTarget,
 } from './panelUpdate.js';
@@ -94,6 +94,29 @@ describe('updateBlockReason', () => {
     assert.equal(updateBlockReason(base({ updateAvailable: false })), 'no_update');
     assert.equal(updateBlockReason(base({ check: { state: 'blocked' } })), 'blocked');
     assert.equal(updateBlockReason(base({ check: { state: 'refused' } })), 'blocked');
+  });
+});
+
+describe('rolled back latest', () => {
+  const rolled = (extra = {}) => base({ updater: { spool: true, installed: true, version: 'sha-aaaaaaaaaaaa', rolledBack: 'sha-bbbbbbbbbbbb' }, ...extra });
+
+  it('is true only when the latest version is the rolled back one', () => {
+    assert.equal(isRolledBack(rolled()), true);
+    assert.equal(isRolledBack(base()), false);
+    assert.equal(isRolledBack(base({ updater: { installed: true, rolledBack: 'sha-cccccccccccc' } })), false);
+    assert.equal(isRolledBack(base({ updater: { installed: true, rolledBack: null }, latest: { version: null } })), false);
+    assert.equal(isRolledBack(null), false);
+  });
+
+  it('blocks the update, the check and the automatic check', () => {
+    assert.equal(updateBlockReason(rolled()), 'rolled_back');
+    assert.equal(canCheck(rolled()), false);
+    assert.equal(needsAutoCheck(rolled()), false);
+  });
+
+  it('names the rolled_back refusal', () => {
+    assert.equal(requestErrorKey(new Error('rolled_back')), 'admin.panelUpdate.errorRolledBack');
+    assert.equal(requestErrorKey(new Error('spool_not_writable')), 'admin.panelUpdate.errorSpoolNotWritable');
   });
 });
 

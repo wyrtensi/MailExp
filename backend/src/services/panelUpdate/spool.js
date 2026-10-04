@@ -178,7 +178,13 @@ export function createSpool(dir) {
     } catch (err) {
       await handle?.close().catch(() => {});
       await unlink(tmp).catch(() => {});
+      // ENOENT: the spool directories are not there, the mechanism is not installed. EACCES/EPERM:
+      // they are there but this process may not write them (another uid than install.sh recorded).
       if (err?.code === 'ENOENT') throw new SpoolError('updater_not_installed');
+      if (err?.code === 'EACCES' || err?.code === 'EPERM') {
+        console.error(`[panel-update] Spool request directory is not writable (${err.code}): the backend's uid cannot write it; install.sh records the uid of the backend image, re-run install.sh.`);
+        throw new SpoolError('spool_not_writable');
+      }
       throw err;
     }
     return id;
@@ -209,11 +215,11 @@ export function createSpool(dir) {
   }
 
   async function readUpdater() {
-    const none = { installed: false, version: null };
+    const none = { installed: false, version: null, rolledBack: null };
     if (!enabled) return none;
     const file = await readJsonFile(join(resultDir, 'updater.json'), MAX_REQUEST_BYTES);
     if (!isObject(file?.value) || file.value.installed !== true) return none;
-    return { installed: true, version: versionOrNull(file.value.version) };
+    return { installed: true, version: versionOrNull(file.value.version), rolledBack: versionOrNull(file.value.rolledBack) };
   }
 
   // The requests not taken by the host yet: how many *.json there are, the oldest readable one,

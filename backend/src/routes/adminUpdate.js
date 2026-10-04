@@ -64,7 +64,9 @@ export function createAdminUpdateRouter({
       updateAvailable: status.updateAvailable,
       disabled: status.disabled,
       checkError: status.checkError,
-      updater: { spool: spool.enabled, installed: state.updater.installed, version: state.updater.version },
+      updater: {
+        spool: spool.enabled, installed: state.updater.installed, version: state.updater.version, rolledBack: state.updater.rolledBack,
+      },
       busy: state.busy,
       pending: state.requests.pending,
       check: (latestVersion && state.results.find((r) => r.action === 'check' && r.target === latestVersion)) || null,
@@ -76,7 +78,8 @@ export function createAdminUpdateRouter({
   // Validates and writes a request: { id, status } or an answer already sent (null).
   async function request(req, res, action) {
     const spool = getSpool();
-    if (!spool.enabled || !(await spool.readUpdater()).installed) {
+    const updater = await spool.readUpdater();
+    if (!spool.enabled || !updater.installed) {
       res.status(503).json({ error: 'updater_not_installed' });
       return null;
     }
@@ -94,6 +97,11 @@ export function createAdminUpdateRouter({
       res.status(409).json({ error: 'not_latest' });
       return null;
     }
+    // The host refuses a version somebody rolled back from until a newer build is promoted.
+    if (updater.rolledBack && updater.rolledBack === target) {
+      res.status(409).json({ error: 'rolled_back' });
+      return null;
+    }
     if (action === 'update' && !status.updateAvailable) {
       res.status(409).json({ error: 'no_update' });
       return null;
@@ -108,8 +116,8 @@ export function createAdminUpdateRouter({
         const id = await spool.writeRequest({ action, target, requestedBy, now: new Date(now()) });
         return { id, status };
       } catch (err) {
-        if (err instanceof SpoolError && err.code === 'updater_not_installed') {
-          res.status(503).json({ error: 'updater_not_installed' });
+        if (err instanceof SpoolError && (err.code === 'updater_not_installed' || err.code === 'spool_not_writable')) {
+          res.status(503).json({ error: err.code });
           return null;
         }
         throw err;
