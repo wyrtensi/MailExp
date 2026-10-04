@@ -20,7 +20,7 @@ import {
 import {
   EOP_EXPIRY_MS, forceOutageTrace, mailboxLetters, waitingSummary, windowLetters,
 } from '../services/mailNode/outageTrace.js';
-import { getTraceSource } from '../services/mailNode/traceSource.js';
+import { resolveTraceSource } from '../services/mailNode/traceSource.js';
 import { MailNodeError, getMailNodeConfig } from '../services/mailNode/mailcow.js';
 import { readPostfixLog } from '../services/mailNode/postfixLog.js';
 
@@ -59,7 +59,7 @@ function refuse(res, code) {
 // says there were more). traceConnected false: no message trace is set up, so nothing new can be
 // known and no letter shows as still waiting.
 router.get('/outage-letters', async (req, res) => {
-  const traceConnected = !!getTraceSource();
+  const traceConnected = !!(await resolveTraceSource());
   const [{ letters, truncated }, cfg] = await Promise.all([mailboxLetters({ withWaiting: traceConnected }), getMailNodeConfig()]);
   res.json({ traceConnected, node: !!cfg, letters, truncated });
 });
@@ -67,7 +67,7 @@ router.get('/outage-letters', async (req, res) => {
 // The windows (newest 50), the last check, the letters waiting in EOP's queue (none without a
 // trace: nobody can tell they still wait) and the settings.
 router.get('/outages', requireAdmin, async (req, res) => {
-  const traceConnected = !!getTraceSource();
+  const traceConnected = !!(await resolveTraceSource());
   const [windows, state, stored, settings] = await Promise.all([listOutages(), getOutageState(), waitingSummary(), getOutageSettings()]);
   const waiting = traceConnected ? stored : { waiting: 0, soonestExpiresAt: null, asOf: null };
   res.json({

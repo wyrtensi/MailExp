@@ -1,6 +1,6 @@
 import { query, withTransaction } from '../db.js';
 import { correlateByQueueId } from './postfixLog.js';
-import { getTraceSource } from './traceSource.js';
+import { resolveTraceSource } from './traceSource.js';
 import { FOLLOW_MS, TRACE_MARGIN_MS, getOutageSettings, isStalled } from './outages.js';
 
 export { TRACE_MARGIN_MS };
@@ -316,9 +316,11 @@ export function forceOutageTrace({ log = null } = {}) {
 }
 
 async function tracePass({
-  source = getTraceSource(), now = Date.now(), log = null, force = false, deadline = Date.now() + PASS_DEADLINE_MS,
+  source: given, now = Date.now(), log = null, force = false, deadline = Date.now() + PASS_DEADLINE_MS,
 } = {}) {
   await pruneOutageLetters(now);
+  // undefined: the configured one (a test's, the stand's, or the tenant driver's); null: none.
+  const source = given === undefined ? await resolveTraceSource() : given;
   if (!source) return { connected: false, windows: [] };
   const { rows: windows } = await query(
     `SELECT * FROM mail_node_outages WHERE started_at <= $1 AND (ended_at IS NULL OR ended_at > $2) ORDER BY started_at`,

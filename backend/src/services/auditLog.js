@@ -8,7 +8,9 @@ import { query } from './db.js';
 // mail node's quarantine or writing its settings, and a mail node outage window opened or closed by
 // the alert job or added, changed, closed or deleted by an administrator, and a test of the
 // connection to the Microsoft tenant, the DBEB recipients the tenant driver made or removed and an
-// administrator taking the connectors as the reference. Mail sync and inbox rules never write here.
+// administrator taking the connectors as the reference, and (stage 7c) a message the panel released
+// from EOP's quarantine, the release paused or resumed, and a letter's message trace asked for.
+// Mail sync and inbox rules never write here.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
@@ -26,6 +28,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'mail_node.outage_deleted',
   'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
   'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
+  'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 

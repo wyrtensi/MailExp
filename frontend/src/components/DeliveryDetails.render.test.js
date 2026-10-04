@@ -134,6 +134,48 @@ describe('DeliveryDetails', () => {
     assert.equal(calls.length, 1);
   });
 
+  test('R-30: asks Microsoft\'s trace on request and shows each recipient with EOP\'s words', async () => {
+    answers['GET /api/mail/messages/m-9/delivery'] = { ...ACCEPTED, eopTrace: { available: true, reason: null, trace: null } };
+    answers['POST /api/mail/messages/m-9/eop-trace'] = { queued: true, trace: { state: 'queued', recipients: [] } };
+    const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-9' }));
+    await click(toggle(host));
+    assert.equal(host.querySelector('[data-eop-trace]').getAttribute('data-eop-trace'), 'none');
+    // The answer after the job: one delivered, one refused by the remote server.
+    answers['GET /api/mail/messages/m-9/delivery'] = {
+      ...ACCEPTED,
+      eopTrace: {
+        available: true, reason: null,
+        trace: {
+          state: 'done', checkedAt: '2026-10-02T09:40:00.000Z', error: null,
+          recipients: [
+            { recipient: 'test@example.com', status: 'delivered', receivedAt: '2026-10-02T09:35:40.000Z', deliveredAt: '2026-10-02T09:35:42.000Z', statusCode: null, detail: null },
+            { recipient: 'gone@example.net', status: 'failed', receivedAt: '2026-10-02T09:35:40.000Z', statusCode: '5.1.1', detail: '550 5.1.1 RESOLVER.ADR.RecipNotFound' },
+          ],
+        },
+      },
+    };
+    await click([...host.querySelectorAll('button')].find((b) => b.textContent === 'message.delivery.eop.ask'));
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail/messages/m-9/eop-trace'));
+    assert.equal(host.querySelector('[data-eop-trace]').getAttribute('data-eop-trace'), 'done');
+    const failed = host.querySelector('[data-eop-recipient="gone@example.net"]');
+    assert.ok(failed.textContent.includes('message.delivery.eop.status.failed (5.1.1)'));
+    assert.equal(failed.querySelector('[data-delivery-remote-words]').textContent, '550 5.1.1 RESOLVER.ADR.RecipNotFound');
+    assert.ok(host.querySelector('[data-eop-recipient="test@example.com"]').textContent.includes('message.delivery.eop.status.delivered'));
+    assert.ok([...host.querySelectorAll('button')].some((b) => b.textContent === 'message.delivery.eop.askAgain'));
+  });
+
+  test('R-30: says nothing without a connected trace, and why an old letter cannot be asked', async () => {
+    answers['GET /api/mail/messages/m-10/delivery'] = { ...ACCEPTED, eopTrace: { available: false, reason: 'trace_not_connected', trace: null } };
+    let host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-10' }));
+    await click(toggle(host));
+    assert.equal(host.querySelector('[data-eop-trace]'), null);
+    answers['GET /api/mail/messages/m-11/delivery'] = { ...ACCEPTED, eopTrace: { available: false, reason: 'trace_too_old', trace: null } };
+    host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-11' }));
+    await click(toggle(host));
+    assert.equal(host.querySelector('[data-eop-trace-unavailable]').textContent, 'message.delivery.eop.tooOld');
+    assert.ok(![...host.querySelectorAll('button')].some((b) => b.textContent === 'message.delivery.eop.ask'));
+  });
+
   test('says a refused recipient in words with the code explained, and TLS not in the log', async () => {
     answers['GET /api/mail/messages/m-2/delivery'] = REFUSED;
     const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-2', deliveryState: 'failed' }));

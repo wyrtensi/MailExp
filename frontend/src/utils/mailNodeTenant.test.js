@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ALERT_KEYS, POLICY_FIELDS, TENANT_STEPS, alertDetail, alertSourceKey, alertTitleKey, mailNodeErrorKey, normalizeEopSettings,
-  policyConflictKey, policyFieldKey, tenantCertificateLevel, tenantFailureKey, tenantJobActive, tenantStepKey,
+  phishHeld, phishReasonKey, phishStateKey, policyConflictKey, policyFieldKey, tenantCertificateLevel, tenantFailureKey, tenantJobActive, tenantStepKey,
 } from './mailNode.js';
 
 const NOW = Date.parse('2026-10-03T12:00:00Z');
@@ -67,5 +67,35 @@ describe('the tenant codes', () => {
     assert.equal(tenantJobActive({ status: 'running' }), true);
     assert.equal(tenantJobActive({ status: 'failed' }), false);
     assert.equal(tenantJobActive(null), false);
+  });
+});
+
+describe('the phishing release (R-42, stage 7c)', () => {
+  it('names each state and guard, and what stays held', () => {
+    assert.equal(phishStateKey('released'), 'admin.tenant.phishStateReleased');
+    assert.equal(phishStateKey('other'), 'admin.tenant.phishStateOther');
+    assert.equal(phishReasonKey('foreign_recipients'), 'admin.tenant.phishReasonForeign');
+    assert.equal(phishReasonKey('attempts_exhausted'), 'admin.tenant.phishReasonAttempts');
+    assert.equal(phishReasonKey('new_reason'), 'admin.tenant.phishReasonOther');
+    assert.equal(phishReasonKey('read_failed'), 'admin.tenant.phishReasonReadFailed');
+    assert.equal(phishReasonKey('not_found'), 'admin.tenant.phishReasonNotFound');
+    assert.equal(phishReasonKey('worker_refused'), 'admin.tenant.phishReasonWorkerRefused');
+    assert.equal(tenantFailureKey('quarantine_not_allowed'), 'admin.tenant.failQuarantineNotAllowed');
+    assert.equal(phishReasonKey(null), null);
+    assert.equal(phishHeld({ state: 'skipped', reason: 'outbound' }), true);
+    assert.equal(phishHeld({ state: 'skipped', reason: 'gone' }), false);
+    assert.equal(phishHeld({ state: 'failed', reason: 'attempts_exhausted' }), true);
+    assert.equal(phishHeld({ state: 'failed', reason: null }), false);
+    assert.equal(phishHeld({ state: 'released' }), false);
+  });
+
+  it('the held alert and the refusals have their words', () => {
+    assert.ok(ALERT_KEYS.includes('tenant_phish_held'));
+    assert.equal(alertTitleKey('tenant_phish_held'), 'admin.nodeOps.alertTenantPhishHeld');
+    assert.deepEqual(alertDetail({ key: 'tenant_phish_held', details: { count: 2, soonestExpiresAt: 'x' } }), {
+      key: 'admin.nodeOps.alertDetailTenantPhishHeld', values: { count: 2 }, at: 'x',
+    });
+    assert.equal(mailNodeErrorKey('phish_release_paused'), 'admin.tenant.phishPausedError');
+    assert.equal(mailNodeErrorKey('trace_too_old'), 'message.delivery.eop.tooOld');
   });
 });

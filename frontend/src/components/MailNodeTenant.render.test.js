@@ -119,6 +119,61 @@ async function click(element) {
   await flush();
 }
 
+describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
+  const QID = ['c14401cf-aa9a-465b-cfd5-08d0f0ca37c5', '4c2ca98e-94ea-db3a-7eb8-3b63657d4db7'].join('\\');
+  const RELEASE = {
+    enabled: true, changedAt: null,
+    run: { at: '2026-10-03T08:00:00.000Z', ok: true, counts: { released: 1, skipped: 1, failed: 0 }, left: false },
+    held: { count: 1, soonestExpiresAt: null },
+    releases: [
+      { identity: QID, state: 'released', reason: null, sender: 'billing@phish.example.net', recipients: ['info@example.com'], subject: 'Invoice', receivedAt: '2026-10-03T07:40:00.000Z' },
+      { identity: `${QID}x`, state: 'skipped', reason: 'foreign_recipients', sender: 'x@phish.example.net', recipients: ['info@example.com', 'a@other.example.org'], subject: 'Reset', receivedAt: null },
+      {
+        identity: `${QID}y`, state: 'failed', reason: 'read_failed', error: 'exo_failed: Something went wrong', errorCode: 'exo_failed',
+        sender: null, recipients: [], subject: null, receivedAt: null,
+      },
+    ],
+    job: null,
+  };
+
+  test('shows the last run, the rows with their reason and what stays held; pauses and runs now', async () => {
+    answers['GET /api/mail-node/tenant/phish-release'] = RELEASE;
+    answers['PUT /api/mail-node/tenant/phish-release'] = (opts) => ({ enabled: JSON.parse(opts.body).enabled, changedAt: '2026-10-03T09:00:00.000Z' });
+    answers['POST /api/mail-node/tenant/phish-release/run'] = { job: { id: '77', kind: 'tenant_quarantine_release', status: 'done' }, created: true };
+    const root = await mount(React.createElement(MailNodeTenant));
+    assert.match(root.querySelector('[data-phish-run]').textContent, /admin\.tenant\.phishRunCounts/);
+    assert.match(root.querySelector('[data-phish-held]').textContent, /admin\.tenant\.phishHeld/);
+    const rows = [...root.querySelectorAll('[data-phish-row]')];
+    assert.deepEqual(rows.map((r) => r.getAttribute('data-phish-row')), ['released', 'skipped', 'failed']);
+    // EXO's words are a detail under a translated reason, not the message itself.
+    const failure = rows[2].querySelector('[data-phish-error]');
+    assert.equal(failure.getAttribute('data-phish-error'), 'exo_failed');
+    assert.ok(failure.textContent.startsWith('admin.tenant.failExo'));
+    assert.match(rows[2].textContent, /admin\.tenant\.phishReasonReadFailed/);
+    assert.match(rows[1].textContent, /admin\.tenant\.phishReasonForeign/);
+    assert.equal(rows[1].getAttribute('data-phish-held-row'), 'true');
+    assert.match(rows[1].textContent, /a@other\.example\.org/);
+
+    await click(buttons(root, 'admin.tenant.phishRunNow')[0]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/phish-release/run'));
+
+    answers['GET /api/mail-node/tenant/phish-release'] = { ...RELEASE, enabled: false };
+    const box = root.querySelector('[data-phish-release] input[type="checkbox"]');
+    await React.act(async () => { box.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await flush();
+    assert.ok(calls.some((c) => c.method === 'PUT' && c.path === '/api/mail-node/tenant/phish-release'));
+    assert.match(root.querySelector('[data-phish-paused]').textContent, /admin\.tenant\.phishPaused/);
+    assert.equal(buttons(root, 'admin.tenant.phishRunNow')[0].disabled, true);
+  });
+
+  test('is not shown without a driver or a configured tenant', async () => {
+    answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: false, state: {}, jobs: {} };
+    const root = await mount(React.createElement(MailNodeTenant));
+    assert.equal(root.querySelector('[data-phish-release]'), null);
+    assert.ok(!calls.some((c) => c.path.includes('/phish-release')));
+  });
+});
+
 describe('MailNodeTenant — the connectors (R-25, stage 7b)', () => {
   const connectors = { at: '2026-10-03T08:10:00.000Z', ok: true, inbound: [{ name: 'From mail node', properties: {} }], outbound: [{ name: 'To mail node', properties: {} }] };
   test('shows what changed since the reference and takes the connectors as the reference again', async () => {
@@ -158,7 +213,8 @@ describe('MailNodeTenant', () => {
     assert.equal(buttons(root, 'admin.tenant.testRunning').length, 1);
     await React.act(async () => { await new Promise((r) => setTimeout(r, 1700)); });
     await flush();
-    assert.deepEqual(calls.filter((c) => c.path.includes('/tenant/')).map((c) => `${c.method} ${c.path}`), [
+    // The phishing release (stage 7c) reads its own part once; the button asks only for its job.
+    assert.deepEqual(calls.filter((c) => c.path.includes('/tenant/') && !c.path.includes('/phish-release')).map((c) => `${c.method} ${c.path}`), [
       'POST /api/mail-node/tenant/test', 'GET /api/mail-node/tenant/jobs/42',
     ]);
     assert.match(root.querySelector('[data-tenant-connection]').textContent, /admin\.tenant\.connectionOk/);

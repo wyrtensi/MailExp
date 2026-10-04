@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../safeFetch.js', () => ({ safeFetch: vi.fn() }));
+const eop = vi.hoisted(() => ({ settings: {} }));
+vi.mock('./eopSettings.js', () => ({ getEopSettings: vi.fn(async () => eop.settings) }));
 
 const {
   TRACE_MAX_BYTES, TraceSourceError, createFixtureTraceSource, createGraphTraceSource, getTraceSource, graphTime, keepRows,
-  normalizeTraceRow, readJsonCapped, resetTraceSourceWarning, setTraceSource, traceRanges,
+  normalizeTraceRow, readJsonCapped, resetTraceSourceWarning, resolveTraceSource, setTraceSource, tenantTraceSource, traceRanges,
 } = await import('./traceSource.js');
+const { createFakeTenantDriver, setTenantDriver } = await import('../tenant/driver.js');
+const { TENANT_FIXTURES } = await import('../tenant/fakes.js');
 const { TRACE_DETAILS, TRACE_ROWS } = await import('./traceSource.fixtures.js');
 
 const BASE = 'http://eop.test.local:8080/v1.0';
@@ -142,5 +146,82 @@ describe('createFixtureTraceSource and getTraceSource', () => {
     setTraceSource(fixture);
     expect(getTraceSource({ env: {} })).toBe(fixture);
     setTraceSource(null);
+  });
+});
+
+describe('the tenant driver as the trace (stage 7c)', () => {
+  const TENANT = {
+    tenantId: '11111111-2222-4333-8444-555555555555', appId: '66666666-7777-4888-9999-aaaaaaaaaaaa',
+    organization: 'contoso.onmicrosoft.com', thumbprint: TENANT_FIXTURES.worker.certificate.thumbprint,
+  };
+  const at = new Date(Date.now() - 3600 * 1000).toISOString();
+
+  it('lists and reads details through the driver: its Graph base, its fetch and its token', async () => {
+    const driver = createFakeTenantDriver();
+    driver.fake.model.traces = [{ ...TENANT_FIXTURES.graph.messageTraces.value[0], receivedDateTime: at }];
+    driver.fake.model.traceDetails = { '4451a062-48cb-e80d-e8c0-196330437ae6|partner@example.org': TENANT_FIXTURES.graph.messageTraceDetails.value };
+    const source = tenantTraceSource(driver, TENANT);
+    expect(source.kind).toBe('tenant');
+    const listed = await source.list({ start: Date.now() - 2 * 3600 * 1000, end: Date.now() });
+    expect(listed).toMatchObject({ complete: true, requests: 1 });
+    expect(listed.rows.map((r) => r.recipientAddress)).toEqual(['partner@example.org']);
+    const { events } = await source.details(listed.rows[0]);
+    expect(events.map((e) => e.event)).toEqual(['Receive', 'Send external']);
+    const requests = driver.fake.graph.requests;
+    expect(requests.filter((r) => r.kind === 'token')).toHaveLength(1);
+    expect(requests.filter((r) => r.kind === 'graph').map((r) => r.path)).toEqual([
+      '/admin/exchange/tracing/messageTraces',
+      "/admin/exchange/tracing/messageTraces/4451a062-48cb-e80d-e8c0-196330437ae6/getDetailsByRecipient(recipientAddress='partner%40example.org')",
+    ]);
+  });
+
+  it('a refused token is dropped: the next request asks for a new one', async () => {
+    const driver = createFakeTenantDriver();
+    let refuse = true;
+    driver.fake.model.listTraces = () => (refuse
+      ? { status: 401, body: { error: { code: 'InvalidAuthenticationToken' } } }
+      : { status: 200, body: { value: [] } });
+    const source = tenantTraceSource(driver, TENANT);
+    await expect(source.list({ start: Date.now() - 3600 * 1000, end: Date.now() })).rejects.toMatchObject({ code: 'trace_auth' });
+    refuse = false;
+    await source.list({ start: Date.now() - 3600 * 1000, end: Date.now() });
+    expect(driver.fake.graph.requests.filter((r) => r.kind === 'token')).toHaveLength(2);
+  });
+
+  it('a 403 (a missing right) keeps the token; a failed listing says how many requests it sent', async () => {
+    const driver = createFakeTenantDriver();
+    let calls = 0;
+    driver.fake.model.listTraces = (target) => {
+      calls += 1;
+      if (calls === 1) {
+        const next = new URL(target.href);
+        next.searchParams.set('$skiptoken', '1');
+        return { status: 200, body: { value: [], '@odata.nextLink': next.href } };
+      }
+      return { status: 403, body: { error: { code: 'Forbidden' } } };
+    };
+    const source = tenantTraceSource(driver, TENANT);
+    await expect(source.list({ start: Date.now() - 3600 * 1000, end: Date.now() })).rejects.toMatchObject({ code: 'trace_auth', requests: 2 });
+    await expect(source.list({ start: Date.now() - 3600 * 1000, end: Date.now() })).rejects.toMatchObject({ code: 'trace_auth' });
+    expect(driver.fake.graph.requests.filter((r) => r.kind === 'token')).toHaveLength(1);
+    await expect(source.details({ id: 'x', recipientAddress: 'a@example.org' })).rejects.toMatchObject({ requests: 1 });
+  });
+
+  it('resolveTraceSource: a test\'s or the stand\'s first, then the driver with a configured tenant, else none', async () => {
+    setTenantDriver(createFakeTenantDriver());
+    try {
+      eop.settings = {};
+      expect(await resolveTraceSource({ env: {} })).toBeNull();
+      eop.settings = {
+        tenantId: TENANT.tenantId, appId: TENANT.appId, tenantDomain: TENANT.organization, certThumbprint: TENANT.thumbprint,
+      };
+      expect((await resolveTraceSource({ env: {} })).kind).toBe('tenant');
+      resetTraceSourceWarning();
+      expect((await resolveTraceSource({ env: { MAIL_NODE_TRACE_URL: BASE }, warn: () => {} })).kind).toBe('graph');
+      setTenantDriver(null);
+      expect(await resolveTraceSource({ env: {} })).toBeNull();
+    } finally {
+      setTenantDriver(undefined);
+    }
   });
 });

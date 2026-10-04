@@ -47,10 +47,20 @@ export function parseConnectorName(value) {
 }
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const parseGuid = (value) => (typeof value === 'string' && GUID_RE.test(value.trim().toLowerCase()) ? value.trim().toLowerCase() : null);
-const KINDS = { domain: parseHostName, address: parseAddress, guid: parseGuid };
+// Stage 7c (R-42): a quarantined message's Identity, GUID1\GUID2, and a page number (1 to 1000)
+// as a digit string (the worker splats strings only).
+const QUARANTINE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const parseQuarantineId = (value) => (typeof value === 'string' && QUARANTINE_ID_RE.test(value.trim().toLowerCase()) ? value.trim().toLowerCase() : null);
+const parsePage = (value) => {
+  const text = typeof value === 'number' && Number.isInteger(value) ? String(value) : value;
+  return typeof text === 'string' && /^(?:[1-9][0-9]{0,2}|1000)$/.test(text) ? text : null;
+};
+const KINDS = {
+  domain: parseHostName, address: parseAddress, guid: parseGuid, quarantine_id: parseQuarantineId, page: parsePage,
+};
 
 // The operations of the worker, by stage (the same table as deploy/tenant-worker/ops.mjs OPS; a
-// test keeps them equal). 7c adds its own to both.
+// test keeps them equal).
 export const EXO_OPS = Object.freeze({
   whoami: { params: {} },
   get_blocked_connector: { params: {} },
@@ -71,6 +81,11 @@ export const EXO_OPS = Object.freeze({
   set_mail_contact_external: { params: { address: 'address', external: 'address' } },
   hide_mail_contact: { params: { address: 'address' } },
   remove_mail_contact: { params: { address: 'address' } },
+  // Stage 7c, R-42 (D-2): inbound high confidence phishing not yet released (a page of 100), one
+  // message by its Identity, and its release to all its original recipients.
+  get_quarantine_messages: { params: { page: 'page' } },
+  get_quarantine_message: { params: { identity: 'quarantine_id' } },
+  release_quarantine_message: { params: { identity: 'quarantine_id' } },
 });
 
 // The checked arguments of an operation; throws a TenantError (exo_op_unknown, exo_args_invalid).

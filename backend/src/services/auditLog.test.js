@@ -33,6 +33,7 @@ describe('recordAudit', () => {
       'mail_node.outage_deleted',
       'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
       'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
+      'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
     ]);
   });
 

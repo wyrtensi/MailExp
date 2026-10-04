@@ -15,7 +15,9 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain, parseGuid } from './ops.mjs';
+import {
+  COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain, parseGuid, parsePage, parseQuarantineId,
+} from './ops.mjs';
 import { MARKER, certificateFrom, certificateInfo, createHandler, createRunner, runnerEnv, signAssertion, startProblem } from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -39,6 +41,10 @@ const certificate = certificateFrom({
 });
 const tenant = { tenantId: TENANT_ID, appId: APP_ID, organization: ORG, thumbprint: certificate.thumbprint };
 
+// A quarantined message's Identity as Learn shows it: GUID1\GUID2.
+const QID_PARTS = ['c14401cf-aa9a-465b-cfd5-08d0f0ca37c5', '4c2ca98e-94ea-db3a-7eb8-3b63657d4db7'];
+const QID = QID_PARTS.join('\\');
+
 // Values that must never reach pwsh.
 const HOSTILE = [
   'example.com;Remove-MailContact x', 'example.com; whoami', '$(Get-Process).example.com', 'exam$(1)ple.com',
@@ -49,14 +55,15 @@ const HOSTILE = [
 test('the whitelist: every op loads only its own cmdlets', () => {
   assert.deepEqual(Object.keys(OPS).sort(), [
     'add_outbound_connector_domain', 'enable_dkim_signing_config', 'get_accepted_domain', 'get_blocked_connector',
-    'get_content_filter_policy', 'get_dkim_signing_config', 'get_inbound_connectors', 'get_outbound_connectors', 'get_recipients',
-    'hide_mail_contact', 'new_dkim_signing_config', 'new_mail_contact', 'remove_mail_contact', 'set_accepted_domain_authoritative',
-    'set_accepted_domain_internal_relay', 'set_mail_contact_external', 'whoami',
+    'get_content_filter_policy', 'get_dkim_signing_config', 'get_inbound_connectors', 'get_outbound_connectors',
+    'get_quarantine_message', 'get_quarantine_messages', 'get_recipients',
+    'hide_mail_contact', 'new_dkim_signing_config', 'new_mail_contact', 'release_quarantine_message', 'remove_mail_contact',
+    'set_accepted_domain_authoritative', 'set_accepted_domain_internal_relay', 'set_mail_contact_external', 'whoami',
   ]);
   assert.deepEqual(COMMAND_NAMES, [
     'Get-AcceptedDomain', 'Get-BlockedConnector', 'Get-DkimSigningConfig', 'Get-HostedContentFilterPolicy', 'Get-InboundConnector',
-    'Get-OrganizationConfig', 'Get-OutboundConnector', 'Get-Recipient', 'New-DkimSigningConfig', 'New-MailContact',
-    'Remove-MailContact', 'Set-AcceptedDomain', 'Set-DkimSigningConfig', 'Set-MailContact', 'Set-OutboundConnector',
+    'Get-OrganizationConfig', 'Get-OutboundConnector', 'Get-QuarantineMessage', 'Get-Recipient', 'New-DkimSigningConfig', 'New-MailContact',
+    'Release-QuarantineMessage', 'Remove-MailContact', 'Set-AcceptedDomain', 'Set-DkimSigningConfig', 'Set-MailContact', 'Set-OutboundConnector',
   ]);
   const runner = fs.readFileSync(path.join(HERE, 'runner.lib.ps1'), 'utf8');
   for (const [op, spec] of Object.entries(OPS)) {
@@ -98,6 +105,18 @@ test('R-36: unknown operations and hostile values are refused before pwsh', () =
   assert.deepEqual(checkOp('get_accepted_domain', { domain: 'Example.COM' }), { domain: 'example.com' });
   assert.deepEqual(checkOp('whoami', undefined), {});
   assert.equal(parseAddress('Info.Desk@Example.com'), 'info.desk@example.com');
+  // Stage 7c: a quarantined message's Identity (GUID1\GUID2) and a page number as digits.
+  assert.deepEqual(checkOp('release_quarantine_message', { identity: QID.toUpperCase() }), { identity: QID });
+  const [G1, G2] = QID_PARTS;
+  for (const value of [...HOSTILE, G1, `${QID};whoami`, `${QID}\n`, ` ${QID}`, `${G1}/${G2}`, `${QID}\\${G2}`, `${G1}\\\\${G2}`]) {
+    assert.throws(() => checkOp('release_quarantine_message', { identity: value }), { code: 'invalid_args' }, JSON.stringify(value));
+    assert.equal(parseQuarantineId(value), null, JSON.stringify(value));
+  }
+  assert.deepEqual(checkOp('get_quarantine_messages', { page: '1' }), { page: '1' });
+  for (const value of ['0', '1001', '01', '1;x', ' 1', 1, '', null, '1e3']) {
+    assert.equal(parsePage(value), null, JSON.stringify(value));
+  }
+  assert.throws(() => checkOp('get_quarantine_messages', {}), { code: 'invalid_args' });
 });
 
 test('the tenant is checked field by field', () => {
@@ -370,6 +389,19 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
       [{ cmdlet: 'Set-MailContact', parameters: { HiddenFromAddressListsEnabled: true, Identity: 'info@example.com' } }]);
     assert.deepEqual(await printed('remove_mail_contact', { address: 'info@example.com' }),
       [{ cmdlet: 'Remove-MailContact', parameters: { Confirm: false, Identity: 'info@example.com' } }]);
+    // Stage 7c (R-42): the quarantine list is pinned to inbound HighConfPhish not yet released.
+    assert.deepEqual(await printed('get_quarantine_messages', { page: '2' }), [{
+      cmdlet: 'Get-QuarantineMessage',
+      parameters: { QuarantineTypes: 'HighConfPhish', Direction: 'Inbound', ReleaseStatus: 'NotReleased', PageSize: 100, Page: '2' },
+    }]);
+    assert.deepEqual(await printed('get_quarantine_message', { identity: QID }), [{ cmdlet: 'Get-QuarantineMessage', parameters: { Identity: QID } }]);
+    // The release reads the message first (the guard: inbound HighConfPhish only).
+    assert.deepEqual(await printed('release_quarantine_message', { identity: QID }), [
+      { cmdlet: 'Get-QuarantineMessage', parameters: { Identity: QID } },
+      { cmdlet: 'Release-QuarantineMessage', parameters: { ReleaseToAll: true, Confirm: false, Identity: QID } },
+    ]);
+    res = await post(base, '/ops/release_quarantine_message', { tenant, args: { identity: `${QID};whoami` } });
+    assert.equal(res.status, 400);
     res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: "x' -Confirm", domain: 'example.com' } });
     assert.equal(res.status, 400);
     res = await post(base, '/ops/add_outbound_connector_domain', { tenant, args: { connector: 'To mail node', domain: 'example.com' } });
@@ -408,6 +440,8 @@ test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not
     { id: 7, op: 'add_outbound_connector_domain', tenant: { appId: APP_ID, organization: ORG }, args: { connector: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a;whoami', domain: 'example.com' } },
     { id: 8, op: 'new_mail_contact', tenant: { appId: APP_ID, organization: ORG }, args: { address: 'a..b@example.com', external: 'a@example.com' } },
     { id: 9, op: 'remove_mail_contact', tenant: { appId: APP_ID, organization: ORG }, args: { address: 'Info@example.com' } },
+    { id: 10, op: 'release_quarantine_message', tenant: { appId: APP_ID, organization: ORG }, args: { identity: 'c14401cf-aa9a-465b-cfd5-08d0f0ca37c5;whoami' } },
+    { id: 11, op: 'get_quarantine_messages', tenant: { appId: APP_ID, organization: ORG }, args: { page: 2 } },
   ].map((l) => JSON.stringify(l)).join('\n');
   const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'runner.ps1'), '-DryRun'], {
     input: `${lines}\n`, encoding: 'utf8',
@@ -424,6 +458,9 @@ test('runner.ps1 checks again what reaches it', { skip: !hasPwsh && 'pwsh is not
   assert.equal(byId[8].error.code, 'invalid_args');
   // The server lower-cases addresses before they reach the runner; one that is not is refused here.
   assert.equal(byId[9].error.code, 'invalid_args');
+  assert.equal(byId[10].error.code, 'invalid_args');
+  // A page reaches the runner as digits only; a JSON number is refused here.
+  assert.equal(byId[11].error.code, 'invalid_args');
   // \z, not $: a value with a trailing line break is refused too.
   const trailing = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(HERE, 'runner.ps1'), '-DryRun'], {
     input: `${JSON.stringify({ id: 6, op: 'get_accepted_domain', tenant: { appId: APP_ID, organization: ORG }, args: { domain: 'example.com\n' } })}\n`, encoding: 'utf8',
@@ -468,6 +505,22 @@ AskArgs 'gone' 'remove_mail_contact' ([pscustomobject]@{ address = 'info@example
 function Set-OutboundConnector { param($Identity, $RecipientDomains) $global:Seen = $RecipientDomains }
 AskArgs 'add' 'add_outbound_connector_domain' ([pscustomobject]@{ connector = '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a'; domain = 'example.com' })
 Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; type = $global:Seen.GetType().Name } }
+# Stage 7c: the quarantine. An -Identity that does not exist answers every message (Learn).
+$global:Q = @(
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\aaaaaaaa-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Phish'; Type = 'Phish'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Outbound' }
+)
+function Get-QuarantineMessage { param($Identity) $m = @($global:Q | Where-Object { $_.Identity -eq $Identity }); if ($m.Count) { $m } else { $global:Q } }
+$global:Released = [System.Collections.Generic.List[string]]::new()
+function Release-QuarantineMessage { param($Identity, $ReleaseToAll, $Confirm) $global:Released.Add($Identity) }
+AskArgs 'qread' 'get_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}' })
+AskArgs 'qmissing' 'get_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\cccccccc-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qok' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}' })
+AskArgs 'qphish' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\aaaaaaaa-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qout' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qnone' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\cccccccc-94ea-db3a-7eb8-3b63657d4db7' })
+Write-Answer @{ id = 'released'; ok = $true; result = @($global:Released) }
 `;
   fs.writeFileSync(file('lib.test.ps1'), script);
   const run = spawnSync('pwsh', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', file('lib.test.ps1')], { encoding: 'utf8' });
@@ -489,6 +542,13 @@ Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; typ
   assert.equal(answers.gone.error.code, 'exo_not_found');
   assert.deepEqual(answers.add.result, []);
   assert.deepEqual(answers.seen.result, { add: 'example.com', type: 'Hashtable' });
+  // Stage 7c: a read by Identity answers that message only, an unknown one nothing; the release is
+  // refused unless the message is inbound high confidence phishing.
+  assert.deepEqual(answers.qread.result.map((r) => r.Identity), [QID]);
+  assert.deepEqual(answers.qmissing.result, []);
+  assert.equal(answers.qok.ok, true);
+  for (const id of ['qphish', 'qout', 'qnone']) assert.equal(answers[id].error.code, 'quarantine_not_allowed', id);
+  assert.deepEqual(answers.released.result, [QID]);
 });
 
 test('the runner gets no token, and a pinned tenant is the only one served', async () => {

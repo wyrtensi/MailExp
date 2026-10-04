@@ -177,6 +177,13 @@ const ERROR_KEYS = {
   trace_cooldown: 'admin.outages.errorCooldown',
   node_alias_address_mismatch: 'admin.aliases.errorNodeAddress',
   address_is_node_alias: 'admin.accounts.add.domainErrorNodeAlias',
+  phish_release_paused: 'admin.tenant.phishPausedError',
+  enabled_invalid: 'admin.mailNode.errorFailed',
+  trace_not_sent: 'message.delivery.eop.errorNotSent',
+  trace_not_node: 'message.delivery.eop.errorNotNode',
+  trace_not_connected: 'message.delivery.eop.notConnected',
+  trace_sent_at_unknown: 'message.delivery.eop.sentAtUnknown',
+  trace_too_old: 'message.delivery.eop.tooOld',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -961,6 +968,7 @@ const ALERT_TITLE_KEYS = {
   tenant_poll_failing: 'admin.nodeOps.alertTenantPollFailing',
   tenant_connector_drift: 'admin.nodeOps.alertTenantConnectorDrift',
   tenant_domain_authoritative: 'admin.nodeOps.alertTenantDomainAuthoritative',
+  tenant_phish_held: 'admin.nodeOps.alertTenantPhishHeld',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -982,6 +990,7 @@ const ALERT_SOURCE_KEYS = {
   tenant_poll: 'admin.nodeOps.sourceTenant',
   tenant_connectors: 'admin.nodeOps.sourceTenant',
   tenant_domains: 'admin.nodeOps.sourceTenant',
+  tenant_quarantine: 'admin.nodeOps.sourceTenant',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1041,6 +1050,9 @@ export function alertDetail(alert) {
         : { key: 'admin.nodeOps.alertDetailTenantCertExpiring', values: { days: d.daysLeft ?? '—' }, at: d.notAfter ?? null };
     // The poll failing several times in a row, or not running at all (backend nodeAlerts.js).
     // A domain the tenant had as Authoritative waits for an administrator (stage 7b).
+    // Phishing the panel keeps in EOP's quarantine (R-42, stage 7c).
+    case 'tenant_phish_held':
+      return { key: 'admin.nodeOps.alertDetailTenantPhishHeld', values: { count: d.count ?? 0 }, at: d.soonestExpiresAt ?? null };
     case 'tenant_domain_authoritative':
       return { key: 'admin.nodeOps.alertDetailTenantDomainAuthoritative', values: { count: d.count ?? 0, domains: (d.domains ?? []).join(', ') || '—' } };
     // A connector changed since its reference (R-25, stage 7b).
@@ -1168,6 +1180,9 @@ const TENANT_FAILURE_KEYS = {
   authoritative_in_tenant: 'admin.tenant.failAuthoritativeInTenant',
   address_taken: 'admin.tenant.failAddressTaken',
   connector_guid_missing: 'admin.tenant.failConnectorGuidMissing',
+  // Stage 7c: the phishing release (backend services/tenant/quarantineRelease.js).
+  list_failed: 'admin.tenant.failExo',
+  quarantine_not_allowed: 'admin.tenant.failQuarantineNotAllowed',
   mail_node_not_configured: 'admin.mailNode.errorNotConfigured',
   mail_node_unreachable: 'admin.mailNode.errorUnreachable',
   mail_node_auth: 'admin.mailNode.errorAuth',
@@ -1202,4 +1217,36 @@ const POLICY_FIELD_KEYS = {
 export const POLICY_FIELDS = Object.keys(POLICY_FIELD_KEYS);
 export function policyFieldKey(field) {
   return POLICY_FIELD_KEYS[field] ?? 'admin.tenant.policyOther';
+}
+
+// R-42 (stage 7c): what became of a message the phishing release looked at (backend
+// services/tenant/quarantineRelease.js), and why a guard kept it in EOP's quarantine.
+const PHISH_STATE_KEYS = {
+  releasing: 'admin.tenant.phishStateReleasing',
+  released: 'admin.tenant.phishStateReleased',
+  skipped: 'admin.tenant.phishStateSkipped',
+  failed: 'admin.tenant.phishStateFailed',
+};
+export function phishStateKey(state) {
+  return Object.hasOwn(PHISH_STATE_KEYS, state ?? '') ? PHISH_STATE_KEYS[state] : 'admin.tenant.phishStateOther';
+}
+const PHISH_REASON_KEYS = {
+  foreign_recipients: 'admin.tenant.phishReasonForeign',
+  outbound: 'admin.tenant.phishReasonOutbound',
+  no_recipients: 'admin.tenant.phishReasonNoRecipients',
+  not_high_conf_phish: 'admin.tenant.phishReasonType',
+  release_denied: 'admin.tenant.phishReasonDenied',
+  gone: 'admin.tenant.phishReasonGone',
+  attempts_exhausted: 'admin.tenant.phishReasonAttempts',
+  read_failed: 'admin.tenant.phishReasonReadFailed',
+  not_found: 'admin.tenant.phishReasonNotFound',
+  worker_refused: 'admin.tenant.phishReasonWorkerRefused',
+};
+export function phishReasonKey(reason) {
+  if (!reason) return null;
+  return Object.hasOwn(PHISH_REASON_KEYS, reason) ? PHISH_REASON_KEYS[reason] : 'admin.tenant.phishReasonOther';
+}
+// A row that stays in the quarantine for an administrator (the alert tenant_phish_held counts them).
+export function phishHeld(row) {
+  return (row?.state === 'skipped' && row.reason !== 'gone') || (row?.state === 'failed' && row.reason === 'attempts_exhausted');
 }

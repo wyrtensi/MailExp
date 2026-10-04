@@ -8,6 +8,8 @@ import { TenantError, asRows } from './exoRunner.js';
 import { policyConflicts, summarizePolicy } from './antispam.js';
 import { readConnectors } from './connectors.js';
 import { enqueueDueDomainSyncs } from './tenantDomains.js';
+import { enqueueReleaseSlot, registerQuarantineReleaseKind } from './quarantineRelease.js';
+import { pruneMessageTraces, registerMessageTraceKind } from './messageTrace.js';
 
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
 // docs/architecture/job-queue.md) instead of a table of their own (R-22 planned `tenant_jobs`):
@@ -24,6 +26,9 @@ import { enqueueDueDomainSyncs } from './tenantDomains.js';
 // The domains' tenant steps and the recipient mirror (stage 7b) are jobs of their own, one per
 // domain (services/tenant/tenantDomains.js); the poll's timer queues them in the same slot.
 //   tenant_antispam_read    Get-HostedContentFilterPolicy -Identity Default (R-28), on demand
+//
+// Stage 7c adds tenant_quarantine_release (R-42, services/tenant/quarantineRelease.js), queued in
+// the same slot, and tenant_message_trace (R-30, services/tenant/messageTrace.js), on request.
 //
 // What they learn is kept in integration_config 'mail_node_tenant_state', one key per part
 // ({ certificate, connection, blockedConnectors, antispam, connectors, connectorReference }), written
@@ -217,6 +222,9 @@ export function registerTenantJobKinds() {
       await ctx.complete((tx) => saveTenantState({ antispam }, tx));
     },
   });
+  // Stage 7c: R-42 (the phishing EOP quarantined, released to the node) and R-30 (a letter's trace).
+  registerQuarantineReleaseKind();
+  registerMessageTraceKind();
 }
 
 // Queues a job of a kind for an administrator's button, or answers the one of that kind still
@@ -266,6 +274,8 @@ export function startTenantPoll() {
   const run = () => {
     enqueuePoll().catch((err) => console.error('Tenant poll could not be queued:', err?.code || err?.message));
     enqueueDueDomainSyncs().catch((err) => console.error('Tenant domain syncs could not be queued:', err?.code || err?.message));
+    enqueueReleaseSlot(Date.now(), POLL_INTERVAL_MS).catch((err) => console.error('Tenant phish release could not be queued:', err?.code || err?.message));
+    pruneMessageTraces().catch((err) => console.error('Old message traces were not deleted:', err?.code || err?.message));
   };
   firstPoll = setTimeout(run, FIRST_POLL_DELAY_MS);
   firstPoll.unref?.();

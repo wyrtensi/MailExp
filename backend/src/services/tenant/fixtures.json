@@ -1,5 +1,5 @@
 {
-  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6). Stage 7b: the shapes of the domain, connector, DKIM and recipient answers; the fake tenant (fakes.js createFakeTenantModel) answers in them. Shapes marked Inferred in eop-panel-requirements.md section 5.12 wait for a live tenant.",
+  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6). Stage 7b: the shapes of the domain, connector, DKIM and recipient answers; the fake tenant (fakes.js createFakeTenantModel) answers in them. Shapes marked Inferred in eop-panel-requirements.md section 5.12 wait for a live tenant. Stage 7c: the quarantine (Get-QuarantineMessage summary and by Identity, with Learn's example Identity) and the message trace (Graph exchangeMessageTrace and exchangeMessageTraceDetail); the quarantine property values (Type, ReleaseStatus casing, RecipientAddress as an array) are Inferred.",
   "worker": {
     "certificate": {
       "thumbprint": "3F2A9C4D5E6B7A8C9D0E1F2A3B4C5D6E7F8A9B0C",
@@ -119,7 +119,42 @@
         "RecipientTypeDetails": "MailContact",
         "HiddenFromAddressListsEnabled": true
       }
-    ]
+    ],
+    "get_quarantine_messages": [
+      {
+        "Identity": "c14401cf-aa9a-465b-cfd5-08d0f0ca37c5\\4c2ca98e-94ea-db3a-7eb8-3b63657d4db7",
+        "ReceivedTime": "2026-10-03T07:40:12.0000000Z",
+        "SenderAddress": "billing@phish.example.net",
+        "Subject": "Your invoice is overdue",
+        "Type": "High Confidence Phish",
+        "QuarantineTypes": "HighConfPhish",
+        "ReleaseStatus": "NOTRELEASED",
+        "Direction": "Inbound",
+        "MessageId": "<5c695d7e-6642-4681-a4b0-9e7a86613cb7@phish.example.net>",
+        "Expires": "2026-11-02T07:40:12.0000000Z",
+        "RecipientCount": 1
+      }
+    ],
+    "get_quarantine_message": [
+      {
+        "Identity": "c14401cf-aa9a-465b-cfd5-08d0f0ca37c5\\4c2ca98e-94ea-db3a-7eb8-3b63657d4db7",
+        "ReceivedTime": "2026-10-03T07:40:12.0000000Z",
+        "SenderAddress": "billing@phish.example.net",
+        "Subject": "Your invoice is overdue",
+        "Type": "High Confidence Phish",
+        "QuarantineTypes": "HighConfPhish",
+        "ReleaseStatus": "NOTRELEASED",
+        "Direction": "Inbound",
+        "MessageId": "<5c695d7e-6642-4681-a4b0-9e7a86613cb7@phish.example.net>",
+        "Expires": "2026-11-02T07:40:12.0000000Z",
+        "RecipientAddress": [
+          "info@example.com"
+        ],
+        "Released": false,
+        "ReleasedUser": []
+      }
+    ],
+    "release_quarantine_message": []
   },
   "graph": {
     "token": {
@@ -221,6 +256,45 @@
         }
       ]
     },
-    "mxNewForm": "example-com.n-v1.mx.microsoft"
+    "mxNewForm": "example-com.n-v1.mx.microsoft",
+    "messageTraces": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#admin/exchange/tracing/messageTraces",
+      "value": [
+        {
+          "id": "4451a062-48cb-e80d-e8c0-196330437ae6",
+          "senderAddress": "info@example.com",
+          "recipientAddress": "partner@example.org",
+          "messageId": "<d9683b4c-127b-413a-ae2e-fa7dfb32c69d@example.com>",
+          "receivedDateTime": "2026-10-03T08:00:05Z",
+          "subject": "Quarterly report",
+          "size": 45678,
+          "fromIP": "192.0.2.10",
+          "toIP": "198.51.100.20",
+          "status": "delivered"
+        }
+      ]
+    },
+    "messageTraceDetails": {
+      "value": [
+        {
+          "id": "a1b2c3d4-0001-4000-8000-000000000001",
+          "messageId": "<d9683b4c-127b-413a-ae2e-fa7dfb32c69d@example.com>",
+          "dateTime": "2026-10-03T08:00:05Z",
+          "event": "Receive",
+          "action": "",
+          "description": "Message received by: AM0PR01MB0001.eurprd01.prod.outlook.com",
+          "data": ""
+        },
+        {
+          "id": "a1b2c3d4-0002-4000-8000-000000000002",
+          "messageId": "<d9683b4c-127b-413a-ae2e-fa7dfb32c69d@example.com>",
+          "dateTime": "2026-10-03T08:00:07Z",
+          "event": "Send external",
+          "action": "",
+          "description": "Message sent to mx.example.org at 198.51.100.20 using TLS1.2 with AES256",
+          "data": ""
+        }
+      ]
+    }
   }
 }

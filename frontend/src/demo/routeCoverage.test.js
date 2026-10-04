@@ -76,6 +76,7 @@ const CONCRETE_PATH = {
   '/mail-node/eop/budget': '/mail-node/eop/budget',
   '/mail-node/tenant': '/mail-node/tenant',
   '/mail-node/tenant/jobs/:param': '/mail-node/tenant/jobs/9001',
+  '/mail-node/tenant/phish-release': '/mail-node/tenant/phish-release',
   '/mail-node/quarantine': '/mail-node/quarantine',
   '/mail-node/quarantine/:param': '/mail-node/quarantine/41',
   '/mail-node/quarantine/settings': '/mail-node/quarantine/settings',
@@ -575,6 +576,16 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   const held = await answer('/mail-node/tenant/domains/:param/hold', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/hold', { hold: false });
   assert.equal(held.holdInternalRelay, true);
   await reject('/mail-node/tenant/domains/:param/internal-relay', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/internal-relay', {}, /does not wait/);
+  // Stage 7c: the phishing release (R-42) and a letter's trace (R-30).
+  // Off as on a new install (until experiment 17): "Release now" is refused until it is turned on.
+  assert.equal((await demoRequest('GET', '/mail-node/tenant/phish-release')).enabled, false);
+  await reject('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run', {}, /paused/);
+  const on = await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: true });
+  assert.equal(on.enabled, true);
+  const ran = await answer('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run');
+  assert.equal(ran.job.kind, 'tenant_quarantine_release');
+  await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: false });
+  await reject('/mail/messages/:param/eop-trace', 'POST', '/mail/messages/demo-001/eop-trace', {}, /this mailbox sent/);
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {

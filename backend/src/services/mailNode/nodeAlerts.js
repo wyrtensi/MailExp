@@ -12,10 +12,11 @@ import { readPostfixLog, relayKind } from './postfixLog.js';
 import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from './terrl.js';
 import { classifyCheck, recordCheck, updateEvidence } from './outages.js';
 import { runOutageTrace, waitingSignal, waitingSummary } from './outageTrace.js';
-import { getTraceSource } from './traceSource.js';
+import { getTraceSource, resolveTraceSource } from './traceSource.js';
 import { getTenantDriver, tenantOf } from '../tenant/driver.js';
 import { POLL_INTERVAL_MS, TENANT_FAILING_POLLS, getTenantState } from '../tenant/tenantJobs.js';
 import { connectorDrift } from '../tenant/connectors.js';
+import { heldSummary } from '../tenant/quarantineRelease.js';
 
 // The mail node's alerts (R-18): what an administrator must hear about before the employees notice,
 // checked every five minutes and shown in the panel, and pinged to a Healthchecks-style check URL
@@ -91,6 +92,7 @@ export const ALERTS = Object.freeze({
   tenant_poll_failing: ['tenant_poll', 'warning'],
   tenant_connector_drift: ['tenant_connectors', 'warning'],
   tenant_domain_authoritative: ['tenant_domains', 'warning'],
+  tenant_phish_held: ['tenant_quarantine', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -447,8 +449,11 @@ async function outageStep({ check, log, now, userId, fresh, failed }) {
   }
   // The alert comes from what earlier passes stored (a cheap query); the pass itself runs after the
   // ping (startOutageTrace), so a slow trace never holds up the job or its ping.
-  const source = getTraceSource();
+  // The trace is the tenant driver's since stage 7c: resolving it reads the EOP settings, and a
+  // failed read keeps the alert as it was.
+  let source = null;
   try {
+    source = await resolveTraceSource();
     if (source) fresh.push(...waitingSignal(await waitingSummary(now)));
   } catch (err) {
     console.error(`Mail node outage letters could not be counted: ${err?.code || err?.message || 'error'}`);
@@ -470,7 +475,7 @@ async function tenantStep({ eop, now, fresh, failed }) {
     if (connectorsStale) failed.push('tenant_connectors');
   } catch (err) {
     console.error(`Mail node tenant alerts were not read: ${err?.code || err?.message || 'error'}`);
-    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors', 'tenant_domains');
+    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors', 'tenant_domains', 'tenant_quarantine');
     return;
   }
   // Stage 7b: a domain the tenant had as Authoritative waits for an administrator's decision. Its
@@ -484,6 +489,15 @@ async function tenantStep({ eop, now, fresh, failed }) {
   } catch (err) {
     console.error(`Mail node tenant domain alerts were not read: ${err?.code || err?.message || 'error'}`);
     failed.push('tenant_domains');
+  }
+  // Stage 7c, R-42: phishing the panel keeps in EOP's quarantine (a guard or a failed release) and
+  // that is still there: the recipients do not see it unless an administrator acts.
+  try {
+    const held = await heldSummary(now);
+    if (held.count) fresh.push({ key: 'tenant_phish_held', severity: 'warning', details: held });
+  } catch (err) {
+    console.error(`Mail node tenant quarantine alerts were not read: ${err?.code || err?.message || 'error'}`);
+    failed.push('tenant_quarantine');
   }
 }
 
@@ -520,6 +534,7 @@ function summaryOf(alert) {
     case 'connector_blocked_tenant': return { count: d.count, connectorIds: (d.connectors ?? []).map((c) => c.connectorId) };
     case 'tenant_certificate': return { code: d.code, daysLeft: d.daysLeft };
     case 'tenant_poll_failing': return { failures: d.failures, code: d.code };
+    case 'tenant_phish_held': return { count: d.count, soonestExpiresAt: d.soonestExpiresAt };
     default: return { count: d.count };
   }
 }

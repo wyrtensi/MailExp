@@ -105,3 +105,52 @@ export function coverageKey(log) {
 export function tlsLevelKey(level) {
   return own(TLS_LEVEL_KEYS, level);
 }
+
+// --- R-30: Microsoft's message trace of the letter (backend services/tenant/messageTrace.js) ---
+
+// Graph's exchangeMessageTrace statuses in words; another (a newer one) is said as unknown.
+const EOP_STATUS_KEYS = Object.freeze({
+  delivered: 'message.delivery.eop.status.delivered',
+  failed: 'message.delivery.eop.status.failed',
+  pending: 'message.delivery.eop.status.pending',
+  quarantined: 'message.delivery.eop.status.quarantined',
+  filteredAsSpam: 'message.delivery.eop.status.filteredAsSpam',
+  expanded: 'message.delivery.eop.status.expanded',
+  gettingStatus: 'message.delivery.eop.status.gettingStatus',
+});
+export const EOP_TRACE_STATUSES = Object.freeze(Object.keys(EOP_STATUS_KEYS));
+
+export function eopStatusKey(status) {
+  return own(EOP_STATUS_KEYS, status) ?? 'message.delivery.eop.status.other';
+}
+
+// The tone of a trace row: failed and quarantined or filtered are not delivered; pending waits.
+export function eopStatusTone(status) {
+  if (status === 'delivered' || status === 'expanded') return 'ok';
+  if (status === 'failed' || status === 'quarantined' || status === 'filteredAsSpam') return 'failed';
+  if (status === 'pending' || status === 'gettingStatus') return 'delayed';
+  return 'neutral';
+}
+
+// Why a trace could not be asked or failed, in words.
+const EOP_ERROR_KEYS = Object.freeze({
+  trace_not_connected: 'message.delivery.eop.notConnected',
+  trace_too_old: 'message.delivery.eop.tooOld',
+  trace_sent_at_unknown: 'message.delivery.eop.sentAtUnknown',
+  trace_throttled: 'message.delivery.eop.errorThrottled',
+  graph_throttled: 'message.delivery.eop.errorThrottled',
+  trace_budget: 'message.delivery.eop.errorThrottled',
+  trace_auth: 'message.delivery.eop.errorAuth',
+  graph_token_failed: 'message.delivery.eop.errorAuth',
+  graph_forbidden: 'message.delivery.eop.errorAuth',
+  trace_unreachable: 'message.delivery.eop.errorUnreachable',
+  graph_unreachable: 'message.delivery.eop.errorUnreachable',
+});
+export function eopTraceErrorKey(code) {
+  return own(EOP_ERROR_KEYS, code) ?? 'message.delivery.eop.errorFailed';
+}
+
+// Whether a trace is still being asked (the screen asks again until it is not).
+export function eopTraceActive(trace) {
+  return trace?.state === 'queued' || trace?.state === 'running';
+}
