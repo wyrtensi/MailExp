@@ -72,7 +72,7 @@ export function recordAudit(entries) {
   if (!list.length) return Promise.resolve();
 
   const rows = list.map(toRow);
-  return (async () => {
+  const write = (async () => {
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
       try {
         await query(INSERT_SQL, [JSON.stringify(rows.slice(i, i + CHUNK_SIZE))]);
@@ -81,6 +81,18 @@ export function recordAudit(entries) {
       }
     }
   })();
+  pending.add(write);
+  write.finally(() => pending.delete(write));
+  return write;
+}
+
+// The writes recordAudit started and that have not ended yet.
+const pending = new Set();
+
+// Resolves when every journal write started so far has ended (they never reject). A short-lived
+// process (the panel CLI) waits for it before it closes its database pool, or the entries are lost.
+export function auditWritesSettled() {
+  return Promise.all([...pending]).then(() => undefined);
 }
 
 // Records journal entries inside the caller's transaction (client: the transaction's client), so

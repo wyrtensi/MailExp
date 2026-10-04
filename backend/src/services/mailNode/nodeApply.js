@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { recordAudit } from '../auditLog.js';
+import { auditOf } from '../actor.js';
 import {
   MailNodeError,
   addDkim,
@@ -724,17 +725,18 @@ async function saveDomainResult({ domain, items, dkim }, at) {
 // The journal entry of a run that changed or failed something: which items, with what they were
 // and became (none of it secret: hosts, policies, selectors, counts). Nothing for a run that found
 // everything in place.
-function journal({ userId, trigger, scope, domain, items }) {
+// actor (services/actor.js) names who asked when it is not a route's user (the panel CLI).
+function journal({ userId, actor = null, trigger, scope, domain, items }) {
   const changed = items.filter((i) => i.status === 'changed')
     .map(({ item, target, from, to, counts }) => ({ item, target, ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}), ...(counts ? { counts } : {}) }));
   // A failed item that changed something first (forwarding hosts added before a refusal) says what.
   const failed = items.filter((i) => i.status === 'failed')
     .map(({ item, target, code, from, to }) => ({ item, target, code, ...(from !== undefined ? { from } : {}), ...(to !== undefined ? { to } : {}) }));
   if (!changed.length && !failed.length) return;
-  recordAudit({
-    actorUserId: userId, action: 'mail_node.applied',
+  recordAudit(auditOf(actor ?? { userId }, {
+    action: 'mail_node.applied',
     details: { scope, ...(domain ? { domain } : {}), trigger, changed, failed },
-  });
+  }));
 }
 
 // The rule's state as a run's prefilter item shows it (a failed item tells nothing new).
@@ -785,7 +787,7 @@ export function applyNode({ userId, trigger = 'manual' }) {
 // "Apply" for one domain the panel knows. confirmDkimDelete: the administrator confirmed deleting
 // mailcow's DKIM key of a domain the tenant signs for. A relayhost it has to add is recorded as the
 // panel's, like a node run's.
-export function applyDomain({ domain, userId, trigger = 'manual', confirmDkimDelete = false }) {
+export function applyDomain({ domain, userId, actor = null, trigger = 'manual', confirmDkimDelete = false }) {
   return serialized(async () => {
     const cfg = await getMailNodeConfig();
     if (!cfg) throw notConfigured();
@@ -800,7 +802,7 @@ export function applyDomain({ domain, userId, trigger = 'manual', confirmDkimDel
       await saveNodeResult({ owned: result.owned });
     }
     await saveDomainResult(done, at);
-    journal({ userId, trigger, scope: 'domain', domain, items: done.items });
+    journal({ userId, actor, trigger, scope: 'domain', domain, items: done.items });
     return { at, ...done };
   });
 }
