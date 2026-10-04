@@ -75,7 +75,13 @@ function installDb() {
     query: vi.fn(async (sql, params) => {
       dbCalls.push([sql, params]);
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
-      if (/^\s*SELECT id, oauth_provider, oauth_subject, mail_node FROM email_accounts/.test(sql)) return { rows: row ? [row] : [] };
+      // Reconnect: the mailbox named by id. Add: any mailbox with the address.
+      if (/^\s*SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts WHERE id = \$1/.test(sql)) {
+        return { rows: row && row.id === params[0] ? [row] : [] };
+      }
+      if (/^\s*SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts\s+WHERE lower\(email_address\)/.test(sql)) {
+        return { rows: row && row.email_address === params[0] ? [row] : [] };
+      }
       if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [], rowCount: 1 };
       if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ id: 'ms-new' }] };
       if (/^\s*SELECT \* FROM email_accounts WHERE id = \$1/.test(sql)) {
@@ -113,7 +119,7 @@ const headers = { 'x-test-user': USER_ID };
 const callback = () => fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, { redirect: 'manual', headers });
 const startReconnect = () => { session = { oauthNonce: NONCE, oauthUserId: USER_ID, oauthMode: 'reconnect', oauthAccountId: ACCOUNT_ID }; };
 const startAdd = () => { session = { oauthNonce: NONCE, oauthUserId: USER_ID, oauthMode: 'add', oauthAccountId: null }; };
-const MS_ROW = { id: ACCOUNT_ID, oauth_provider: 'microsoft', oauth_subject: SUBJECT, mail_node: false };
+const MS_ROW = { id: ACCOUNT_ID, email_address: 'user@contoso.com', oauth_provider: 'microsoft', oauth_subject: SUBJECT, mail_node: false };
 
 let logSpies;
 beforeEach(() => {
@@ -175,6 +181,21 @@ describe('starting a Microsoft flow', () => {
     expect(session.oauthNonce).toBeUndefined();
   });
 
+  it('answers a code, not a 500, when only the device-code flow is set up', async () => {
+    delete process.env.MS_REDIRECT_URI;
+    session = {};
+    expect((await start()).headers.get('location')).toBe('/?oauth_error=redirect_not_configured&oauth_provider=microsoft');
+    // A reconnect names its mailbox, so the panel can run the device-code flow for it.
+    expect((await start(`?account=${ACCOUNT_ID}`)).headers.get('location'))
+      .toBe(`/?oauth_error=redirect_not_configured&oauth_provider=microsoft&oauth_account=${ACCOUNT_ID}`);
+    expect(session.oauthNonce).toBeUndefined();
+  });
+
+  it('answers not_configured without a client id', async () => {
+    delete process.env.MS_CLIENT_ID;
+    expect((await start()).headers.get('location')).toBe('/?oauth_error=not_configured&oauth_provider=microsoft');
+  });
+
   it('refuses a malformed account id', async () => {
     session = {};
     expect((await start('?account=nope')).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
@@ -208,6 +229,13 @@ describe('the mailbox address comes only from a verified claim', () => {
     expect(recordAudit).not.toHaveBeenCalled();
   });
 
+  it('takes verified_primary_email only when MS_TENANT_ID names one tenant', async () => {
+    process.env.MS_TENANT_ID = 'common';
+    claims = { tid: TID, oid: OID, iss: `https://login.microsoftonline.com/${TID}/v2.0`, verified_primary_email: ['user@contoso.com'] };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=email_not_verified&oauth_provider=microsoft');
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
   it('refuses a token without its tenant and object ids', async () => {
     claims = { email: 'user@contoso.com', xms_edov: true };
     expect((await callback()).headers.get('location')).toBe('/?oauth_error=authentication_failed&oauth_provider=microsoft');
@@ -237,9 +265,9 @@ describe('adding a Microsoft mailbox', () => {
 
   it.each([
     ['a Microsoft mailbox', MS_ROW],
-    ['a password mailbox', { id: 'pw', oauth_provider: null, oauth_subject: null, mail_node: false }],
-    ['a Gmail mailbox', { id: 'gm', oauth_provider: 'google', oauth_subject: 'google-sub', mail_node: false }],
-    ['a mail node mailbox', { id: 'node', oauth_provider: null, oauth_subject: null, mail_node: true }],
+    ['a password mailbox', { id: 'pw', email_address: 'user@contoso.com', oauth_provider: null, oauth_subject: null, mail_node: false }],
+    ['a Gmail mailbox', { id: 'gm', email_address: 'user@contoso.com', oauth_provider: 'google', oauth_subject: 'google-sub', mail_node: false }],
+    ['a mail node mailbox', { id: 'node', email_address: 'user@contoso.com', oauth_provider: null, oauth_subject: null, mail_node: true }],
   ])('never overwrites %s with the same address', async (_label, existing) => {
     row = existing;
     expect((await callback()).headers.get('location')).toBe('/?oauth_error=already_connected&oauth_provider=microsoft');
@@ -281,11 +309,23 @@ describe('reconnecting a Microsoft mailbox', () => {
     expect(wroteAccount()).toBe(false);
   });
 
-  it('refuses a sign-in to another mailbox than the one being reconnected', async () => {
-    row = { ...MS_ROW, id: '44444444-4444-4444-8444-444444444444' };
+  it('refuses a sign-in to another address than the mailbox being reconnected has', async () => {
+    row = { ...MS_ROW, email_address: 'Shared@Contoso.com' };
+    claims = { ...VERIFIED, email: 'other@contoso.com' };
     expect((await callback()).headers.get('location')).toBe('/?oauth_error=account_mismatch&oauth_provider=microsoft');
+    expect(wroteAccount()).toBe(false);
+  });
+
+  it('reads the mailbox to reconnect by its id, not by the address', async () => {
+    row = { ...MS_ROW, email_address: 'User@Contoso.com' };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_success=microsoft');
+    expect(dbCalls.some(([sql, params]) => /WHERE id = \$1/.test(sql) && params[0] === ACCOUNT_ID)).toBe(true);
+    expect(dbCalls.some(([sql]) => /lower\(email_address\)/.test(sql))).toBe(false);
+  });
+
+  it('refuses a mailbox that is gone', async () => {
     row = null;
-    expect((await (startReconnect(), callback())).headers.get('location')).toBe('/?oauth_error=account_mismatch&oauth_provider=microsoft');
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
     expect(wroteAccount()).toBe(false);
   });
 

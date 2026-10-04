@@ -25,6 +25,7 @@ import accountRoutes from './accounts.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
+import { recordAudit } from '../services/auditLog.js';
 
 const ID = '77777777-7777-4777-8777-777777777777';
 const STORED = {
@@ -54,6 +55,7 @@ beforeEach(() => {
   query.mockReset().mockImplementation(async (sql) => {
     if (sql.startsWith('SELECT id, disabled_at FROM users')) return { rows: [{ id: 'user-1', disabled_at: null }] };
     if (sql.startsWith('SELECT is_admin, disabled_at FROM users')) return { rows: [{ is_admin: isAdmin, disabled_at: null }] };
+    if (sql.includes('SET oauth_subject = NULL')) return { rows: stored.oauth_provider ? [{ id: ID, oauth_provider: stored.oauth_provider }] : [] };
     if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [stored] };
     if (sql === 'SELECT * FROM email_accounts WHERE id = $1') return { rows: [stored] };
     return { rows: [] };
@@ -130,5 +132,31 @@ describe('server settings of a mailbox are admin-only', () => {
     await put({ name: 'Team' });
     const [, ctx] = pluginRegistry.collectHook.mock.calls[0];
     expect(Object.isFrozen(ctx.updates)).toBe(true);
+  });
+});
+
+describe('resetting the OAuth binding of a mailbox', () => {
+  const reset = () => fetch(`${base}/api/accounts/${ID}/oauth-subject/reset`, { method: 'POST' });
+
+  it('is refused to a user who is not an administrator', async () => {
+    expect((await reset()).status).toBe(403);
+    expect(query.mock.calls.some(([sql]) => sql.includes('oauth_subject = NULL'))).toBe(false);
+  });
+
+  it('clears the subject of a Google or Microsoft mailbox and journals it', async () => {
+    isAdmin = true;
+    expect((await reset()).status).toBe(200);
+    const [sql] = query.mock.calls.find(([q]) => q.includes('oauth_subject = NULL'));
+    expect(sql).toMatch(/oauth_provider IN \('google', 'microsoft'\) AND mail_node IS NOT TRUE/);
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: 'user-1', accountId: ID, action: 'mailbox.oauth_subject_reset', details: { oauthProvider: 'microsoft' },
+    });
+  });
+
+  it('answers 404 for a mailbox without OAuth', async () => {
+    isAdmin = true;
+    stored = { ...STORED, oauth_provider: null };
+    expect((await reset()).status).toBe(404);
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 });

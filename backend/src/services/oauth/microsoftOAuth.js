@@ -24,12 +24,16 @@ export function getMsConfig() {
 // Accepted, in this order:
 //   1. `email` when `xms_edov` is true: the email domain's owner was verified by the user's own
 //      tenant (or the account is a Microsoft account). Both are optional claims of the app
-//      registration (token configuration: email, xms_edov).
-//   2. `verified_primary_email`, "sourced from the user's PrimaryAuthoritativeEmail" (optional).
-//   3. `upn` (optional claim) of a member user: Entra only lets a UPN carry a domain the tenant
+//      registration (token configuration: email, xms_edov). For personal Microsoft accounts the
+//      documentation does not say when xms_edov is sent: check it with a live sign-in before
+//      relying on personal accounts.
+//   2. `upn` (optional claim) of a member user: Entra only lets a UPN carry a domain the tenant
 //      verified, else it rewrites it to the tenant's own <name>.onmicrosoft.com
 //      (https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/plan-connect-userprincipalname).
 //      A guest's UPN (with #EXT#) names the resource tenant, not the user, and is refused.
+//   3. `verified_primary_email` (optional, "sourced from the user's PrimaryAuthoritativeEmail") only
+//      when MS_TENANT_ID names one tenant: the documentation gives no domain-ownership guarantee
+//      for it, so it is trusted only from the organisation's own tenant.
 // None of them: the sign-in is refused (email_not_verified) rather than guessed.
 //
 // The user is identified by `tid` + `oid`, "immutable claim values ... as a combined key"
@@ -43,21 +47,24 @@ function cleanAddress(value) {
   return ADDRESS_RE.test(address) && address.length <= 320 ? address : null;
 }
 
-// The verified mailbox address of an ID token's claims, or null.
-export function verifiedMicrosoftAddress(claims) {
+// The verified mailbox address of an ID token's claims, or null. `singleTenant`: MS_TENANT_ID
+// names one tenant (not common/organizations/consumers), whose issuer the token was checked against.
+export function verifiedMicrosoftAddress(claims, { singleTenant = false } = {}) {
   const c = claims ?? {};
   if (c.xms_edov === true || c.xms_edov === 'true' || c.xms_edov === 1 || c.xms_edov === '1') {
     const email = cleanAddress(c.email);
     if (email) return email;
   }
-  const verified = Array.isArray(c.verified_primary_email) ? c.verified_primary_email : [c.verified_primary_email];
-  for (const value of verified) {
-    const address = cleanAddress(value);
-    if (address) return address;
-  }
   if (typeof c.upn === 'string' && !c.upn.includes('#')) {
     const upn = cleanAddress(c.upn);
     if (upn) return upn;
+  }
+  if (singleTenant) {
+    const verified = Array.isArray(c.verified_primary_email) ? c.verified_primary_email : [c.verified_primary_email];
+    for (const value of verified) {
+      const address = cleanAddress(value);
+      if (address) return address;
+    }
   }
   return null;
 }

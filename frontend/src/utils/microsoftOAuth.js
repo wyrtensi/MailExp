@@ -17,7 +17,17 @@ const MICROSOFT_ERROR_KEYS = {
   authentication_failed: 'admin.integrations.microsoft.errorAuthenticationFailed',
   already_connected: 'admin.integrations.microsoft.errorAlreadyConnected',
   account_mismatch: 'admin.integrations.microsoft.errorAccountMismatch',
+  redirect_not_configured: 'admin.integrations.microsoft.errorRedirectNotConfigured',
 };
+
+// The Microsoft mailbox to reconnect by device code, from an OAuth result (a popup message or the
+// callback's query values): the server answers redirect_not_configured with oauth_account when only
+// the device-code flow is set up. Null for anything else.
+export function microsoftDeviceReconnectTarget(data) {
+  if (!data || typeof data !== 'object') return null;
+  if (data.type !== 'oauth_error' || data.provider !== 'microsoft' || data.error !== 'redirect_not_configured') return null;
+  return typeof data.account === 'string' && data.account.trim() ? data.account.trim() : null;
+}
 const MICROSOFT_ERROR_FALLBACK_KEY = 'admin.integrations.microsoft.errorAuthenticationFailed';
 
 export function microsoftOAuthErrorKey(code) {

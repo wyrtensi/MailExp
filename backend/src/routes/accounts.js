@@ -586,6 +586,24 @@ router.post('/:id/reconnect', async (req, res) => {
   res.json({ ok: true });
 });
 
+// Forgets which Google or Microsoft account an OAuth mailbox is bound to (oauth_subject): its next
+// reconnect binds whoever signs in with the mailbox's verified address. For a mailbox whose owner's
+// provider account was recreated, or one bound to the wrong account. Admin-only, journaled.
+router.post('/:id/oauth-subject/reset', requireAdmin, async (req, res) => {
+  const { rows } = await query(
+    `UPDATE email_accounts SET oauth_subject = NULL
+      WHERE id = $1 AND oauth_provider IN ('google', 'microsoft') AND mail_node IS NOT TRUE
+      RETURNING id, oauth_provider`,
+    [req.params.id],
+  );
+  if (!rows.length) return res.status(404).json({ error: 'OAuth mailbox not found', code: 'oauth_mailbox_not_found' });
+  recordAudit({
+    actorUserId: req.session.userId, accountId: rows[0].id, action: 'mailbox.oauth_subject_reset',
+    details: { oauthProvider: rows[0].oauth_provider },
+  });
+  res.json({ ok: true });
+});
+
 // ── Alias CRUD ─────────────────────────────────────────────────────────────
 
 // The aliases live in services/accountAliases.js (shared with the panel CLI): a node mailbox's

@@ -12,11 +12,12 @@ import { query } from './db.js';
 // from EOP's quarantine, the release paused or resumed, and a letter's message trace asked for.
 // Creating, changing or deleting an inbox rule is recorded too (who did it, the rule's actions
 // and where it forwards to), since a rule can forward a mailbox's mail outside; mail sync and the
-// rules running never write here.
+// rules running write only rule.run, when someone starts a run by hand.
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
   'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
+  'mailbox.oauth_subject_reset',
   'message.sent', 'message.deleted', 'message.move_reverted',
   'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
   'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
@@ -33,7 +34,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
   // Section 5.14 (the owner's decisions after stage 7).
   'tenant.antispam_enforced', 'tenant.alias_contacts_removal_approved',
-  'rule.created', 'rule.updated', 'rule.deleted',
+  'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 

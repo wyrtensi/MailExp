@@ -647,6 +647,11 @@ export const useStore = create((set, get) => ({
     set({ showContacts: true, showAdmin: false, contactsFocus: { email, name: name || '' } });
   },
   clearContactsFocus: () => set({ contactsFocus: null }),
+  // A Microsoft mailbox to reconnect with the device-code flow (the redirect flow is not set up):
+  // opens Settings → Integrations, whose Microsoft section starts the flow for it and clears this.
+  msDeviceReconnectRequested: null,
+  requestMsDeviceReconnect: (accountId) => set({ msDeviceReconnectRequested: accountId, adminTab: 'integrations', showAdmin: true }),
+  clearMsDeviceReconnect: () => set({ msDeviceReconnectRequested: null }),
   rulesPreFill: null, // { accountId, fromEmail, fromName } — transient, set by context menu
   setRulesPreFill: (v) => set({ rulesPreFill: v }),
 

@@ -9,6 +9,7 @@ import { updateFaviconBadge } from '../themes.js';
 import { installResumeRefresh } from '../utils/resumeRefresh.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { oauthMessageToSearchParams, parseOAuthResult } from '../utils/googleOAuth.js';
+import { microsoftDeviceReconnectTarget } from '../utils/microsoftOAuth.js';
 import { setPending, pendingMarkReadMap, completedMarkReadMap } from '../utils/pendingReads.js';
 import { readDeepLink } from '../utils/deepLink.js';
 import { buildKeyMap, buildModKeyMap, getEffectiveShortcuts, getGroupedActions, parseModKey, modLabel, SPECIAL_KEYS, SPECIAL_KEY_LABELS } from '../utils/defaultShortcuts.js';
@@ -726,6 +727,11 @@ export default function MailApp() {
 
     if (oauthError) {
       window.history.replaceState({}, '', '/');
+      // The Microsoft redirect flow is not set up: reconnect that mailbox by device code instead.
+      const deviceReconnect = microsoftDeviceReconnectTarget({
+        type: 'oauth_error', error: oauthError, provider: params.get('oauth_provider'), account: params.get('oauth_account'),
+      });
+      if (deviceReconnect) useStore.getState().requestMsDeviceReconnect(deviceReconnect);
     } else if (provider) {
       window.history.replaceState({}, '', '/');
       api.getAccounts()
@@ -752,6 +758,11 @@ export default function MailApp() {
   useEffect(() => {
     const handleMessage = (e) => {
       if (e.origin !== window.location.origin) return;
+      const deviceReconnect = microsoftDeviceReconnectTarget(e.data);
+      if (deviceReconnect) {
+        useStore.getState().requestMsDeviceReconnect(deviceReconnect);
+        return;
+      }
       const result = parseOAuthResult(oauthMessageToSearchParams(e.data));
       if (result?.provider !== 'google') return;
       addNotification({

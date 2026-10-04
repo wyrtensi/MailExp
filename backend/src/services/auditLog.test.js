@@ -20,6 +20,7 @@ describe('recordAudit', () => {
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
       'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
+      'mailbox.oauth_subject_reset',
       'message.sent', 'message.deleted', 'message.move_reverted',
       'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
@@ -35,7 +36,7 @@ describe('recordAudit', () => {
       'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
       'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
       'tenant.antispam_enforced', 'tenant.alias_contacts_removal_approved',
-      'rule.created', 'rule.updated', 'rule.deleted',
+      'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
     ]);
   });
 

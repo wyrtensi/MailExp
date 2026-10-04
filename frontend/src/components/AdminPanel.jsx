@@ -102,6 +102,11 @@ const PRESETS = {
 };
 
 // ─── Account Form (Add or Edit) ───────────────────────────────────────────────
+// A Google or Microsoft OAuth mailbox (not on the mail node): it is bound to one provider account.
+function isOAuthBound(account) {
+  return (account?.oauth_provider === 'google' || account?.oauth_provider === 'microsoft') && !account?.mail_node;
+}
+
 function isMicrosoftImapHost(host) {
   const h = (host || '').toLowerCase();
   return h.includes('.outlook.com') || h.includes('office365.com') || h.includes('.hotmail.com') || h.includes('.live.com');
@@ -718,6 +723,18 @@ export function AccountsTab() {
       ? t('admin.accounts.threading.switchToGmail')
       : t('admin.accounts.threading.switchToRfc'));
   };
+
+  // Admin: forget which Google/Microsoft account the mailbox is bound to; its next reconnect binds
+  // whoever signs in with the mailbox's verified address (backend POST /accounts/:id/oauth-subject/reset).
+  const handleResetOAuthSubject = (account) => setConfirmDialog({
+    title: t('admin.accounts.oauthSubjectResetTitle'),
+    message: t('admin.accounts.oauthSubjectResetConfirm', { email: account.email_address }),
+    confirmLabel: t('admin.accounts.oauthSubjectReset'),
+    onConfirm: async () => {
+      await api.resetOAuthSubject(account.id);
+      addNotification({ type: 'info', title: t('admin.accounts.oauthSubjectResetTitle'), body: t('admin.accounts.oauthSubjectResetDone') });
+    },
+  });
 
   const handleRecomputeThreading = (account) =>
     confirmThreadingMode(account, threadModeOf(account), t('admin.accounts.threading.recompute'));
@@ -1399,6 +1416,13 @@ export function AccountsTab() {
                 </>
               )}
             </div>
+            {isAdmin && isOAuthBound(account) && (
+              <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button onClick={() => handleResetOAuthSubject(account)} style={threadingBtnStyle}>
+                  {t('admin.accounts.oauthSubjectReset')}
+                </button>
+              </div>
+            )}
             {threadRecomputeText(account.thread_recompute, t) && (
               <div style={{
                 fontSize: 11,
@@ -2533,7 +2557,7 @@ export function LayoutsTab() {
 // ─── Integrations Tab ────────────────────────────────────────────────────────
 function IntegrationsTab() {
   const { t } = useTranslation();
-  const { setAccounts, setTodoistConnected, user } = useStore();
+  const { setAccounts, setTodoistConnected, user, accounts, msDeviceReconnectRequested, clearMsDeviceReconnect } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subTab, setSubTab] = useState('emailProviders');
   const [configs, setConfigs] = useState({});
@@ -2550,6 +2574,8 @@ function IntegrationsTab() {
   const [deviceStatus, setDeviceStatus] = useState(null); // 'pending'|'success'|'declined'|'expired'|'error'
   // Why the device-code sign-in was refused (a stable code's message), when the server said.
   const [deviceErrorKey, setDeviceErrorKey] = useState(null);
+  // The mailbox the running device-code flow reconnects (null: it adds one).
+  const [deviceReconnectId, setDeviceReconnectId] = useState(null);
   const devicePollRef = useRef(null);
   // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
   const [mailNodeRevision, setMailNodeRevision] = useState(0);
@@ -2661,13 +2687,16 @@ function IntegrationsTab() {
     setDeviceFlow(null);
     setDeviceStatus(null);
     setDeviceErrorKey(null);
+    setDeviceReconnectId(null);
   };
 
-  const handleStartDeviceFlow = async () => {
+  // accountId: the Microsoft mailbox to reconnect; without it the flow adds a mailbox.
+  const handleStartDeviceFlow = async (accountId = null) => {
     stopDeviceFlow();
     setDeviceStatus('pending');
+    setDeviceReconnectId(accountId);
     try {
-      const data = await api.startMsDeviceFlow();
+      const data = await api.startMsDeviceFlow(accountId);
       setDeviceFlow(data);
       const intervalMs = (data.interval || 5) * 1000;
       devicePollRef.current = setInterval(async () => {
@@ -2694,6 +2723,17 @@ function IntegrationsTab() {
       setSaveMsg('Error: ' + err.message);
     }
   };
+
+  // A reconnect asked for elsewhere (sidebar, Accounts) while only the device-code flow is set up
+  // (MailApp, store.requestMsDeviceReconnect): run it here for that mailbox.
+  useEffect(() => {
+    if (!msDeviceReconnectRequested) return;
+    const accountId = msDeviceReconnectRequested;
+    clearMsDeviceReconnect();
+    setSubTab('emailProviders');
+    setMsExpanded(true);
+    handleStartDeviceFlow(accountId);
+  }, [msDeviceReconnectRequested]); // eslint-disable-line react-hooks/exhaustive-deps -- handleStartDeviceFlow is a plain function recreated each render
 
   const handleConnectMs = () => {
     setConnectingMs(true);
@@ -2990,10 +3030,20 @@ function IntegrationsTab() {
                   <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10, lineHeight: 1.5 }}>
                     {t('admin.integrations.microsoft.deviceCodeNote')}
                   </div>
+                  <div style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 10, lineHeight: 1.5 }}>
+                    {t('admin.integrations.microsoft.deviceCodePhishingNote')}
+                  </div>
+                  {deviceFlow && deviceReconnectId && (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10, overflowWrap: 'anywhere' }}>
+                      {t('admin.integrations.microsoft.deviceCodeReconnecting', {
+                        email: accounts.find(a => a.id === deviceReconnectId)?.email_address ?? '',
+                      })}
+                    </div>
+                  )}
 
                   {!deviceFlow && (
                     <button
-                      onClick={handleStartDeviceFlow}
+                      onClick={() => handleStartDeviceFlow()}
                       disabled={!msConfigured}
                       title={!msConfigured ? t('admin.integrations.microsoft.save') : ''}
                       style={{

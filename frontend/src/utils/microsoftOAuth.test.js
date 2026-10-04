@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { MICROSOFT_OAUTH_PATH, buildMicrosoftReconnectUrl, microsoftOAuthErrorKey } from './microsoftOAuth.js';
+import {
+  MICROSOFT_OAUTH_PATH, buildMicrosoftReconnectUrl, microsoftDeviceReconnectTarget, microsoftOAuthErrorKey,
+} from './microsoftOAuth.js';
 
 describe('microsoftOAuthErrorKey', () => {
   it('maps every stable code to its own key', () => {
@@ -15,6 +17,24 @@ describe('microsoftOAuthErrorKey', () => {
   it('falls back for anything else, inherited names included', () => {
     for (const code of ['Authentication failed', '__proto__', 'toString', '', null, undefined]) {
       assert.equal(microsoftOAuthErrorKey(code), 'admin.integrations.microsoft.errorAuthenticationFailed');
+    }
+  });
+});
+
+describe('microsoftDeviceReconnectTarget', () => {
+  const base = { type: 'oauth_error', provider: 'microsoft', error: 'redirect_not_configured', account: 'acc-1' };
+
+  it('names the mailbox when only the device-code flow is set up', () => {
+    assert.equal(microsoftDeviceReconnectTarget(base), 'acc-1');
+    assert.equal(microsoftOAuthErrorKey('redirect_not_configured'), 'admin.integrations.microsoft.errorRedirectNotConfigured');
+  });
+
+  it('is null for any other result', () => {
+    for (const data of [
+      null, 'x', { ...base, account: '' }, { ...base, account: undefined }, { ...base, provider: 'google' },
+      { ...base, error: 'access_denied' }, { ...base, type: 'oauth_success' },
+    ]) {
+      assert.equal(microsoftDeviceReconnectTarget(data), null);
     }
   });
 });

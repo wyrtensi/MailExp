@@ -18,6 +18,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.rate_limit_changed': 'admin.audit.actionMailboxRateLimitChanged',
   'mailbox.deletion_requested': 'admin.audit.actionMailboxDeletionRequested',
   'mailbox.deletion_cancelled': 'admin.audit.actionMailboxDeletionCancelled',
+  'mailbox.oauth_subject_reset': 'admin.audit.actionMailboxOauthSubjectReset',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
   'message.move_reverted': 'admin.audit.actionMessageMoveReverted',
@@ -63,6 +64,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'rule.created': 'admin.audit.actionRuleCreated',
   'rule.updated': 'admin.audit.actionRuleUpdated',
   'rule.deleted': 'admin.audit.actionRuleDeleted',
+  'rule.run': 'admin.audit.actionRuleRun',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -286,8 +288,12 @@ export function auditDetail(entry) {
         ? { key: 'admin.audit.detailRuleForward', values: { name, address: to } }
         : { key: 'admin.audit.detailRule', values: { name } };
     }
+    // A hand-started run of a mailbox's rules (backend POST /rules/run): how many it ran.
+    case 'rule.run':
+      return { key: 'admin.audit.detailRuleRun', values: { count: Array.isArray(details.ruleIds) ? details.ruleIds.length : 0 } };
     case 'mailbox.added':
     case 'mailbox.reconnected':
+    case 'mailbox.oauth_subject_reset':
       return details.oauthProvider
         ? { key: 'admin.audit.detailProvider', values: { provider: details.oauthProvider } }
         : null;

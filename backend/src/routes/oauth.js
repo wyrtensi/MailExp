@@ -37,7 +37,7 @@ const PROVIDER = 'microsoft';
 // the device-code poll answers with; provider text never reaches the browser.
 const CALLBACK_ERROR_CODES = new Set([
   'access_denied', 'invalid_state', 'not_configured', 'email_not_verified',
-  'authentication_failed', 'already_connected', 'account_mismatch',
+  'authentication_failed', 'already_connected', 'account_mismatch', 'redirect_not_configured',
 ]);
 
 class MicrosoftOAuthError extends Error {
@@ -73,15 +73,20 @@ router.get('/microsoft', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
 
   const { clientId, tenantId, redirectUri } = getMsConfig();
-  if (!clientId || !tenantId || !redirectUri) {
-    return res.status(500).json({ error: 'Microsoft OAuth not configured. Set MS_CLIENT_ID, MS_CLIENT_SECRET, MS_TENANT_ID, MS_REDIRECT_URI in .env' });
-  }
+  if (!clientId || !tenantId) return res.redirect(errorRedirect('not_configured'));
 
   let flow;
   try {
     flow = await resolveFlow(req.query.account);
   } catch (err) {
     return res.redirect(errorRedirect(stableCode(err)));
+  }
+
+  // Only the device-code flow is set up (no redirect URI): say so, with the mailbox to reconnect,
+  // so the panel runs the device-code flow for it instead (POST /microsoft/device { account }).
+  if (!redirectUri) {
+    const account = flow.accountId ? `&oauth_account=${encodeURIComponent(flow.accountId)}` : '';
+    return res.redirect(`${errorRedirect('redirect_not_configured')}${account}`);
   }
 
   // Generate a random CSRF nonce for the state parameter and store it alongside
@@ -196,7 +201,7 @@ async function microsoftIdentity(idToken, { tenantId, clientId }) {
   }
   const subject = microsoftSubject(payload);
   if (!subject) throw new MicrosoftOAuthError('authentication_failed');
-  const email = verifiedMicrosoftAddress(payload);
+  const email = verifiedMicrosoftAddress(payload, { singleTenant: !fixedTenants.has(tenantId) });
   if (!email) throw new MicrosoftOAuthError('email_not_verified');
   return { email, subject, displayName: typeof payload.name === 'string' ? payload.name : null };
 }
@@ -218,18 +223,25 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
   const { account, created } = await withTransaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${email}`]);
 
-    const existing = await client.query(
-      `SELECT id, oauth_provider, oauth_subject, mail_node FROM email_accounts
-        WHERE lower(email_address) = lower($1) ORDER BY created_at LIMIT 1`,
-      [email]
-    );
+    // A reconnect reads the mailbox it names, by id, and compares its address; an add looks for
+    // any mailbox with the address.
+    const existing = mode === 'reconnect'
+      ? await client.query(
+        'SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts WHERE id = $1',
+        [accountId],
+      )
+      : await client.query(
+        `SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts
+          WHERE lower(email_address) = lower($1) ORDER BY created_at LIMIT 1`,
+        [email],
+      );
     const row = existing.rows[0] || null;
 
     let id;
     if (mode === 'reconnect') {
+      if (!row || row.oauth_provider !== PROVIDER || row.mail_node) throw new MicrosoftOAuthError('invalid_state');
       // The person picked another account on Microsoft's page than the mailbox being reconnected.
-      if (!row || row.id !== accountId) throw new MicrosoftOAuthError('account_mismatch');
-      if (row.oauth_provider !== PROVIDER || row.mail_node) throw new MicrosoftOAuthError('invalid_state');
+      if (String(row.email_address).toLowerCase() !== email) throw new MicrosoftOAuthError('account_mismatch');
       // Same address, other Microsoft user (another tenant claiming the domain, or a recreated
       // account): never hand it this mailbox. A mailbox connected before the subject was stored
       // takes the subject of its first verified reconnect.

@@ -143,6 +143,19 @@ router.post('/run', async (req, res) => {
   const userId = req.session.userId;
   res.status(202).json({ ok: true, started: true });
 
+  // A hand-started run applies (forwarding included) to mail already in the inbox: journal it per
+  // mailbox, with the rules it runs.
+  query('SELECT id, account_id FROM inbox_rules WHERE enabled = true AND account_id = ANY($1) ORDER BY priority, created_at', [accountIds])
+    .then(({ rows }) => {
+      const byAccount = new Map();
+      for (const rule of rows) byAccount.set(rule.account_id, [...(byAccount.get(rule.account_id) ?? []), rule.id]);
+      const entries = [...byAccount].map(([mailboxId, ruleIds]) => ({
+        actorUserId: userId, accountId: mailboxId, action: 'rule.run', details: { ruleIds, allMailboxes: !accountId },
+      }));
+      if (entries.length) recordAudit(entries);
+    })
+    .catch(err => console.error('POST /rules/run audit error:', err.message));
+
   (async () => {
     try {
       const { processed, matched } = await runRulesSweep(accountIds, imapMgr);

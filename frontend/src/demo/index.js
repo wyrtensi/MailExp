@@ -2129,6 +2129,7 @@ export async function demoRequest(method, path, body = {}) {
     if (account) account.health = 'healthy';
     return { ok: true };
   }
+  if (verb === 'POST' && /^\/accounts\/[^/]+\/oauth-subject\/reset$/.test(pathname)) return { ok: true };
   const reindexMatch = pathname.match(/^\/accounts\/([^/]+)\/reindex$/);
   if (verb === 'POST' && reindexMatch) return { ok: true, alreadyRunning: false };
   const threadingPreviewMatch = pathname.match(/^\/accounts\/([^/]+)\/threading\/preview$/);

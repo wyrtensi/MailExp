@@ -46,6 +46,10 @@ describe('inbox rules are visible and journaled', () => {
         return { rows: [{ id: 'rule-1', created_by: 'user-3', created_by_name: 'author@example.com' }] };
       }
       if (sql.startsWith('DELETE FROM inbox_rules')) return { rows: stored ? [stored] : [] };
+      if (sql.startsWith('SELECT id, account_id FROM inbox_rules WHERE enabled = true')) {
+        return { rows: [{ id: 'rule-1', account_id: MAILBOX }, { id: 'rule-2', account_id: MAILBOX }, { id: 'rule-3', account_id: OTHER }] };
+      }
+      if (sql === 'SELECT id FROM email_accounts') return { rows: [{ id: MAILBOX }, { id: OTHER }] };
       if (sql.includes('FROM inbox_rules r LEFT JOIN users')) {
         return { rows: [{ id: 'rule-1', created_by: 'user-1', created_by_name: 'someone@example.com', actions: stored.actions }] };
       }
@@ -113,5 +117,21 @@ describe('inbox rules are visible and journaled', () => {
       actorUserId: 'user-3', accountId: MAILBOX, action: 'rule.deleted',
       details: { ruleId: 'rule-1', name: 'Copy invoices', actions: ['forward'], forwardTo: 'old@example.org' },
     });
+  });
+
+  it('journals a hand-started run per mailbox with the rules it runs', async () => {
+    expect((await send('POST', '/run', { accountId: MAILBOX })).status).toBe(202);
+    await vi.waitFor(() => expect(recordAudit).toHaveBeenCalled());
+    const [entries] = recordAudit.mock.calls.find(([arg]) => Array.isArray(arg));
+    expect(query.mock.calls.find(([sql]) => sql.startsWith('SELECT id, account_id FROM inbox_rules'))[1]).toEqual([[MAILBOX]]);
+    expect(entries).toContainEqual({ actorUserId: 'user-3', accountId: MAILBOX, action: 'rule.run', details: { ruleIds: ['rule-1', 'rule-2'], allMailboxes: false } });
+  });
+
+  it('marks a run over every mailbox', async () => {
+    expect((await send('POST', '/run', {})).status).toBe(202);
+    await vi.waitFor(() => expect(recordAudit).toHaveBeenCalled());
+    const [entries] = recordAudit.mock.calls.find(([arg]) => Array.isArray(arg));
+    expect(entries.map((e) => e.accountId).sort()).toEqual([MAILBOX, OTHER].sort());
+    expect(entries.every((e) => e.details.allMailboxes === true)).toBe(true);
   });
 });
