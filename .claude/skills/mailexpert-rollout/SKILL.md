@@ -1,17 +1,26 @@
 ---
 name: mailexpert-rollout
-description: Use when installing, updating, verifying or rolling back a MailExpert deployment over SSH - the panel (install.sh, update.sh, status.sh), the tenant worker, the edge, or the mailcow mail node (setup.sh, node-backup, node-restore). Triggers - "deploy MailExpert", "roll out sha-...", "update the panel", "раскатай", "обнови панель", "обнови узел", "откати обновление", "check the server before updating".
+description: Use when installing MailExpert on a fresh server, or updating, verifying or rolling back a MailExpert deployment over SSH - the panel (install.sh, update.sh, status.sh), the tenant worker, the edge, or the mailcow mail node (setup.sh, node-backup, node-restore). Triggers - "install MailExpert on <host>", "поставь MailExpert на сервер", "deploy MailExpert", "roll out sha-...", "update the panel", "раскатай", "обнови панель", "обнови узел", "откати обновление", "check the server before updating".
 ---
 
 # MailExpert rollout
 
 ## Overview
 
+MailExpert is a self-hosted panel for a team working shared mailboxes (Gmail, Microsoft 365, IMAP,
+and optionally mailboxes on the owner's domains on a mailcow **mail node** behind Microsoft EOP).
+A deployment is: the **panel** on one server (docker compose project: frontend, backend, postgres,
+redis, optional tenant-worker; a separate `edge` project with Caddy and/or cloudflared; systemd
+timers for backup and health; the updater units behind the panel's "Обновить" button) and an
+optional **mail node** on a second server. `AGENTS.md` is the project primer.
+
 Deploying MailExpert is running the scripts in `scripts/deploy/` on the servers, in the order the
 operator docs give, with a human approving every change. This skill is how an agent does that
-safely. The human-readable map is `docs/operations/README.md`; the modules, what may be split
-across servers and the version rules are in `docs/architecture/deployment-system.md`. Read both
-before the first rollout in a session.
+safely, for a first install ("First install" below) and for updates and rollbacks (Phases 1-4).
+The human-readable map is `docs/operations/README.md`, the shortest install
+`docs/operations/quickstart.md`; the modules, what may be split across servers and the version
+rules are in `docs/architecture/deployment-system.md`. Read them before the first rollout in a
+session.
 
 **Core rule:** look first, write the plan down, get a "yes", run the repo's scripts (never
 hand-rolled docker commands), verify, report what the commands printed.
@@ -51,6 +60,127 @@ If any is missing, ask. Do not guess host names, IPs, emails or versions.
 - Touch a test stand you were not pointed at, or containers of other compose projects.
 - Update mailcow and the panel in the same window.
 - Report "done" because a command exited 0: confirm with the post-checks below.
+
+## First install (fresh server)
+
+The human-facing version of this flow, with the copy-paste prompt that starts it, is
+`docs/operations/quickstart.md`. Flags and sign-in modes: `docs/operations/deployment.md`,
+sections 2-3.
+
+### F1. Ask the human (do not guess any of it)
+
+- `<PANEL_HOST>`: SSH target (root, or a user with passwordless `sudo`; key-based). `<PREFIX>`
+  stays `/opt/mailexpert` unless they say otherwise.
+- Sign-in mode: `direct` (Caddy on `<DIRECT_HOST>`, "Войти через Google"), `cf` (Cloudflare Tunnel
+  to `<CF_HOST>` and Cloudflare Access) or `both`; the host names; admin emails (`--admin-email`,
+  required unless `--local-auth`). `--local-auth` is for test stands only: say so if they ask for it.
+- Version: `latest` (default) or a `sha-<12>` they name.
+- Backups now or later (an S3-compatible bucket at a different provider) and a Healthchecks check.
+- Mail node yes/no; if yes, `<MAIL_HOST>`, SSH access to it and `<PANEL_IP>`.
+
+Tell them which secrets they will have to prepare themselves, by name only (this is
+`required_owner_secrets` in `scripts/deploy/lib/config.sh`):
+
+| Mode | Keys |
+|---|---|
+| `direct` | `DNS_API_TOKEN` (Cloudflare, DNS edit on the zone; not with `--edge-tls internal`), `AUTH_GOOGLE_CLIENT_ID`, `AUTH_GOOGLE_CLIENT_SECRET` (a Google OAuth "Web application" client with redirect URI `https://<DIRECT_HOST>/oauth/login/google/callback`) |
+| `cf` | `TUNNEL_TOKEN`, `CF_ACCESS_ISSUER` (`https://<TEAM>.cloudflareaccess.com`), `CF_ACCESS_AUDIENCE` |
+| `both` | all of the above |
+| `--local-auth` | no sign-in keys; only the edge keys of the mode |
+| optional | `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RESTIC_PASSWORD` (16+ characters), `AWS_DEFAULT_REGION` if the storage needs one, `HEALTHCHECK_PING_URL`, `BACKUP_PING_URL` |
+
+You never create these, never see their values and never ask for them in chat.
+
+### F2. Discovery (read-only, no confirmation needed)
+
+```bash
+ssh root@<PANEL_HOST> "grep -E '^(ID|VERSION_ID)=' /etc/os-release; nproc; awk '/^MemTotal:/ {print \$2\" kB\"}' /proc/meminfo; df -Ph /opt 2>/dev/null || df -Ph /"
+ssh root@<PANEL_HOST> "ss -ltnpH '( sport = :80 or sport = :443 or sport = :8080 )'; docker compose version 2>&1 | head -1; dpkg -s docker.io >/dev/null 2>&1 && echo 'docker.io installed'"
+ssh root@<PANEL_HOST> "ls -d <PREFIX> <PREFIX>/install.conf 2>&1; ufw status 2>&1 | head -1; ip -4 -o addr show scope global"
+getent hosts <DIRECT_HOST>        # from your machine: must be the server's public IPv4 (direct/both)
+```
+
+What `install.sh` will insist on (`scripts/deploy/lib/system.sh`): Ubuntu 24.04 (anything else only
+with `--no-system`, then Docker Engine with Compose 2.24.4+ is the human's job), at least 2 vCPU,
+about 4 GB RAM, 20 GB free disk; ports 80/443 free when Caddy runs; no `docker.io` package with an
+old Compose. Stop and report when any of it fails. If `<PREFIX>/install.conf` exists this is not a
+first install: switch to Phase 1.
+
+### F3. Plan, shown to the human (wait for an explicit "yes")
+
+```
+Server: <PANEL_HOST>, Ubuntu 24.04, <cpu>/<ram>/<disk>; ports 80/443 free; <PREFIX> absent
+Version: latest -> sha-<12> (resolved after the clone) | sha-<12> named by you
+Mode: direct, <DIRECT_HOST> -> <server IPv4> (DNS checked), admins <emails>
+Changes on the server: apt packages (git, curl, jq, ufw, ...), Docker Engine + Compose from
+  download.docker.com, 2 GB swap if none, unattended-upgrades, ufw (SSH ports, 80, 443),
+  systemd timers mailexpert-backup/-health, mailexpert-updater.path, <PREFIX>
+Steps:
+  1. clone the tag latest into <PREFIX>/app, check it is on main, resolve sha-<12>      [GATE]
+  2. install.sh first run, detached; expected to stop with exit 3 and the list of keys
+  3. you: put the keys into a 0600 file and feed configure.sh (command below)            [human]
+  4. install.sh again, detached                                                           [GATE]
+  5. post-checks; you sign in as <admin>; you fetch the restic recovery key yourself
+  6. (mail node) separate plan                                                            [GATE]
+```
+
+### F4. Execute
+
+Clone and resolve the version (GATE 1):
+
+```bash
+ssh root@<PANEL_HOST> "apt-get update -qq && apt-get install -y -qq git >/dev/null && git clone --quiet --branch latest https://github.com/wyrtensi/MailExpert.git <PREFIX>/app"
+ssh root@<PANEL_HOST> "cd <PREFIX>/app && git merge-base --is-ancestor HEAD origin/main && echo on-main && git rev-parse HEAD | cut -c1-12"
+```
+
+For a named version clone without `--branch` and `git -C <PREFIX>/app checkout --detach <12>`.
+`install.sh --version` accepts only `sha-<12>`, never `latest`. Clone as root (`install.sh` runs git
+in that directory as root).
+
+Run `install.sh` detached (never over `ssh -t`, never in the foreground). Set `S=sha-<12>` in your
+local shell (the double quotes expand it before `ssh` sends the command); the flags are the
+human's:
+
+```bash
+ssh root@<PANEL_HOST> "systemctl reset-failed mailexpert-install 2>/dev/null; systemd-run --unit=mailexpert-install --property=RemainAfterExit=yes <PREFIX>/app/scripts/deploy/install.sh --version $S --signin direct --direct-host <DIRECT_HOST> --admin-email <ADMIN_EMAIL>"
+ssh root@<PANEL_HOST> "journalctl -u mailexpert-install -o cat --no-pager -n 100"
+ssh root@<PANEL_HOST> "systemctl show mailexpert-install -p SubState -p ExecMainStatus"
+```
+
+Exit 3 with `waiting for secrets: <KEYS>` is the expected first result: relay the key names. The
+human then runs on the server (or lets you run the `configure.sh` line on the file they created;
+you never open or print it):
+
+```bash
+install -m 600 /dev/null /root/mailexpert-secrets.env    # the human edits it: KEY=VALUE lines
+<PREFIX>/app/scripts/deploy/configure.sh --prefix <PREFIX> < /root/mailexpert-secrets.env
+shred -u /root/mailexpert-secrets.env
+```
+
+`configure.sh` exits 0 stored, 2 invalid input (it lists the problems, nothing stored). Then rerun
+the same `systemd-run` (GATE 4; `systemctl reset-failed mailexpert-install` first). `install.sh` is
+idempotent: rerunning after a failure or a dropped connection is the fix, not a risk. Exit 0 ends
+with `done`; exit 1 shows the failing step (`docker compose -p mailexpert logs backend`, `-p edge
+logs caddy`); exit 2 is invalid flags.
+
+Run detached, `install.sh` has no terminal and does **not** print the restic recovery key; it logs
+how to show it. Tell the human to run `<PREFIX>/app/scripts/deploy/backup.sh --show-recovery-key`
+in their own SSH session and store it in a password manager. Never run it yourself.
+
+### F5. Verify and hand over
+
+Phase 4 post-checks (`status.sh`: `ready`, `running` = the version, `problems` empty;
+`healthcheck.sh` exit 0, or exit 1 with only `backup: not configured` when backups were left for
+later; `/api/version`). Then the human signs in at `https://<APP_HOST>` with an admin email. Report
+the version, the commands with exit codes, the warnings `install.sh` printed (`backups are off`,
+ufw), and what is left to the human: recovery key, Google apps for Gmail mailboxes
+(`docs/operations/google-oauth.md`), the mail node.
+
+Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sections 3-5. mailcow's
+`generate_config.sh` is interactive: the human runs it. The node's MailExpert scripts are cloned
+to `/opt/mailexpert-node-src` at the **panel's commit**, then `setup.sh --dry-run` (show the diff)
+and `setup.sh` with `--panel-ip <PANEL_IP>`; the API key and the node settings are entered by the
+human in "Настройки → Администрирование → Почтовый узел".
 
 ## Reading status.sh
 
@@ -216,10 +346,7 @@ the Rollback section below, by a person's decision. A version left by a rollback
 (`<PREFIX>/state/rolled-back-version`) is not offered again until a newer build is promoted; do not
 delete that file to get around it.
 
-First install of a panel: `docs/operations/deployment.md`, section 2. Run `install.sh` with the
-human's flags (detached); exit 3 lists the missing secrets: hand the list to the human, who feeds
-`configure.sh` from a file; then rerun `install.sh`. First install of a node: `mail-node.md`,
-sections 3-4 (mailcow itself is the human's step: `generate_config.sh` asks questions).
+First install of a panel or a node: the "First install" section above.
 
 ## Phase 4 - Post-checks (report the actual output)
 
