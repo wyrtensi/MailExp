@@ -1215,6 +1215,7 @@
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
       "deleteMailNodeMessage": "The mailbox {{email}} keeps working until {{date}}. Then it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Mail sent to the address afterwards is refused. Anyone can cancel the deletion until then.",
       "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here.",
+      "serverAdminOnlyNote": "The server settings of this mailbox (servers, ports, encryption, sign-in) are managed by an administrator.",
       "mailNodeBadge": "Mail node",
       "deleteMailNodeTypeLabel": "Type {{email}} to confirm.",
       "deleteMailNodeConfirm": "Schedule deletion",

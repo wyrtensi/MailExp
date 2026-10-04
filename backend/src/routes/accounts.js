@@ -1,7 +1,7 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
 import { query } from '../services/db.js';
-import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { isAdminRequest, requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
 import { encrypt, decrypt } from '../services/encryption.js';
@@ -145,8 +145,12 @@ router.get('/', async (req, res) => {
   res.json(enriched);
 });
 
-// Server and credential settings whose change the audit log records, by name only. The settings
-// form sends every server field on each save, so a field counts only when its value differs.
+// Server and credential settings: where the mailbox connects and what it signs in with. Their
+// change is the audit log's (by name only) and an administrator's alone, since a host, a port or a
+// TLS switch decides where the stored password or OAuth token is sent. The settings form sends
+// every server field on each save, so a field counts only when its value differs. Nothing else
+// writes these columns from a request: a new manual mailbox is admin-only (POST /), the OAuth
+// callbacks set their provider's fixed servers, a node mailbox takes the node's.
 const CONNECTION_FIELDS = [
   'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
   'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass',
@@ -278,6 +282,16 @@ router.put('/:id', async (req, res) => {
     return res.status(400).json({ error: 'A mail node mailbox cannot be disabled: delete it instead', code: 'mail_node_disable_unsupported' });
   }
 
+  // Everyone may rename a mailbox, recolour it, edit its signature or folder mappings; only an
+  // administrator may point it at another server or change how it signs in. The unchanged values a
+  // stale form resends are dropped so they cannot start a reconnect either.
+  if (!(await isAdminRequest(req))) {
+    if (changedConnectionFields(stored, updates).length) {
+      return res.status(403).json({ error: 'Only an administrator can change the server settings of a mailbox', code: 'connection_admin_only' });
+    }
+    for (const key of CONNECTION_FIELDS) delete updates[key];
+  }
+
   if ('name' in updates && hasHeaderInjectionChars(updates.name)) {
     return res.status(400).json({ error: 'Name cannot contain control characters' });
   }
@@ -315,8 +329,10 @@ router.put('/:id', async (req, res) => {
   // write of a plugin's fields happens in persistAccountSettings below (into the plugin's own store,
   // not a column). This is the generic account-scoped settings surface; core knows nothing
   // GTD-specific here.
+  // Plugins see a frozen copy: a hook cannot add a field (a host, say) past the checks above.
+  const pluginUpdates = Object.freeze({ ...updates });
   const settingsResults = await pluginRegistry.collectHook('validateAccountSettings', {
-    updates, accountId: id,
+    updates: pluginUpdates, accountId: id,
   });
   const rejectedByField = {};
   let pluginRequiresReconnect = false;
@@ -361,7 +377,7 @@ router.put('/:id', async (req, res) => {
   // Persist plugin-owned fields into their own stores; each returns { patch } (the saved values) to
   // echo back on the response so the client sees them as if they were columns.
   const persistResults = await pluginRegistry.collectHook('persistAccountSettings', {
-    accountId: id, updates,
+    accountId: id, updates: pluginUpdates,
   });
   const pluginPatch = {};
   let pluginPersisted = false;

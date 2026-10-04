@@ -6,6 +6,7 @@ vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 // to run a request as an ordinary signed-in user.
 const session = vi.hoisted(() => ({ isAdmin: true }));
 vi.mock('../middleware/auth.js', () => ({
+  isAdminRequest: async () => !!session.isAdmin,
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
   requireAdmin: (_req, res, next) => (
     session.isAdmin ? next() : res.status(403).json({ error: 'Admin access required' })

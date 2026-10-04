@@ -46,6 +46,7 @@ import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
+import { accountUpdateFromForm } from '../utils/accountUpdate.js';
 import {
   canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, mailNodeErrorKey, nodeMailboxDeleteDialog,
   pendingDeletion,
@@ -107,9 +108,12 @@ function isMicrosoftImapHost(host) {
 
 function AccountForm({ initial, onSave, onCancel }) {
   const { t } = useTranslation();
-  const { categorizationEnabled } = useStore();
+  const { categorizationEnabled, user } = useStore();
 
   const isEdit = !!initial?.id;
+  // The server settings of an existing mailbox are an administrator's to change (the backend
+  // refuses them from anyone else): other users see a note in their place.
+  const serverLocked = isEdit && !user?.isAdmin;
   const [form, setForm] = useState(initial || {
     name: '', email_address: '', color: '#6366f1', protocol: 'imap',
     imap_host: '', imap_port: 993, imap_skip_tls_verify: false,
@@ -143,7 +147,7 @@ function AccountForm({ initial, onSave, onCancel }) {
   };
 
   const handleSubmit = async () => {
-    if (!form.email_address || !form.auth_user || !form.imap_host) {
+    if (!form.email_address || (!serverLocked && (!form.auth_user || !form.imap_host))) {
       setError(t('admin.accounts.errorRequired'));
       return;
     }
@@ -225,6 +229,10 @@ function AccountForm({ initial, onSave, onCancel }) {
       {initial?.mail_node ? (
         <div style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '16px 0 0', lineHeight: 1.5 }}>
           {t('admin.accounts.mailNodeServerNote')}
+        </div>
+      ) : serverLocked ? (
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '16px 0 0', lineHeight: 1.5 }}>
+          {t('admin.accounts.serverAdminOnlyNote')}
         </div>
       ) : (
         <>
@@ -565,18 +573,7 @@ export function AccountsTab() {
   };
 
   const handleEdit = async (form) => {
-    const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled };
-    if (form.auth_pass) updates.auth_pass = form.auth_pass;
-    if (form.auth_user) updates.auth_user = form.auth_user;
-    // Separate SMTP credentials (optional). A username sends both (a blank password on
-    // edit keeps the stored one); a blank username clears both back to the IMAP login.
-    if (form.smtp_auth_user) {
-      updates.smtp_auth_user = form.smtp_auth_user;
-      if (form.smtp_auth_pass) updates.smtp_auth_pass = form.smtp_auth_pass;
-    } else {
-      updates.smtp_auth_user = null;
-      updates.smtp_auth_pass = null;
-    }
+    const updates = accountUpdateFromForm(form, { isAdmin });
     const updated = await api.updateAccount(editTarget.id, updates);
     updateAccount(editTarget.id, updated);
     api.getUnreadCounts().then(setUnreadCounts).catch(console.error);

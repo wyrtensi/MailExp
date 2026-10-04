@@ -8,6 +8,7 @@ vi.mock('../services/db.js', () => {
 });
 // Every request runs as an ordinary signed-in user: the domain mailbox is open to everyone.
 vi.mock('../middleware/auth.js', () => ({
+  isAdminRequest: async () => false,
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
   requireAdmin: (_req, res) => res.status(403).json({ error: 'Admin access required' }),
 }));
