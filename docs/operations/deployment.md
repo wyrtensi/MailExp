@@ -107,6 +107,17 @@ sudo /opt/mailexpert/app/scripts/deploy/backup.sh --show-recovery-key
 | `cf` | `cloudflared` — исходящий туннель к `<CF_HOST>`, вход через Cloudflare Access | `TUNNEL_TOKEN`; `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE`, если не `--local-auth` | не нужен: вход обрабатывает Access, а не клиент MailExpert |
 | `both` | оба хоста разом: `<CF_HOST>` — основной (`APP_URL`), `<DIRECT_HOST>` — дополнительный (`APP_ALT_URLS`) | все перечисленные выше | `https://<DIRECT_HOST>/oauth/login/google/callback` |
 
+**Адрес клиента и лимит входа.** Во всех трёх режимах перед бэкендом два прокси: край (Caddy
+или `cloudflared`) и nginx контейнера `frontend`, и оба дописывают адрес в `X-Forwarded-For`.
+Поэтому `deploy/compose.prod.yml` задаёт `TRUST_PROXY=2`: бэкенд берёт адрес клиента на два
+шага от себя. Через Cloudflare это тот же адрес, что в `CF-Connecting-IP` (Cloudflare дописывает
+адрес посетителя последним); сам заголовок `CF-Connecting-IP` не читается, потому что в режиме
+`both` его может прислать посетитель хоста Caddy. Лимит неудачных попыток входа (`auth_max_attempts`
+за `auth_window_minutes`) считается по учётной записи; с одного адреса допускается в 10 раз
+больше попыток, чтобы офис за одним NAT не блокировался целиком. Менять `TRUST_PROXY` в `.env`
+нужно только при другой цепочке прокси: значение больше реального числа прокси позволяет
+клиенту подставить чужой адрес. Без overlay (`docker-compose.yml`, nginx снаружи) действует `1`.
+
 Этот клиент Google — только для входа в саму панель; OAuth-приложения, через которые
 MailExpert подключает Gmail-ящики пользователей, настраиваются отдельно и описаны в
 [google-oauth.md](google-oauth.md).

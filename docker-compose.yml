@@ -47,6 +47,9 @@ services:
       SESSION_SECRET: ${SESSION_SECRET}
       APP_URL: ${APP_URL:-}
       APP_ALT_URLS: ${APP_ALT_URLS:-}
+      # Proxies in front of the backend that append to X-Forwarded-For: nginx alone here; the
+      # overlays with an edge in front of nginx set 2 (backend/src/utils/trustProxy.js).
+      TRUST_PROXY: ${TRUST_PROXY:-1}
       FRONTEND_URL: ${APP_URL:-}
       DB_HOST: ${DB_HOST:-postgres}
       DB_PORT: ${DB_PORT:-5432}

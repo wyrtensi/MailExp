@@ -27,6 +27,10 @@ services:
     mem_limit: 1536m
     environment:
       NODE_OPTIONS: --max-old-space-size=1024
+      # The edge (Caddy or cloudflared) and the frontend's nginx both append to X-Forwarded-For:
+      # two hops to the client's address, which the sign-in rate limit keys on
+      # (backend/src/utils/trustProxy.js).
+      TRUST_PROXY: ${TRUST_PROXY:-2}
 
   # Optional (profile "tenant", docker-compose.yml): pulled and started only with
   # COMPOSE_PROFILES=tenant.

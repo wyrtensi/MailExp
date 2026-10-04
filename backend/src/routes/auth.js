@@ -9,7 +9,7 @@ import { pushConfigured } from '../services/pushNotifications.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
 import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
-import { authLimiterConfig } from '../services/authLimiter.js';
+import { authLimiterConfig, createAuthRateLimit, limitedIdentity } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
 import { sendSystemEmail } from '../services/mailer.js';
 import { buildEndSessionUrl } from './oidc.js';
@@ -97,20 +97,15 @@ async function createTrustedDevice(userId, req, res) {
   });
 }
 
-function rateLimit(config) {
-  return async (req, res, next) => {
-    const { maxRequests, windowMs } = config;
-    const key = `auth:${req.ip}`;
-    const { limited, resetMs } = await rlConsume(key, maxRequests, windowMs);
-    if (limited) {
-      res.setHeader('Retry-After', Math.ceil(resetMs / 1000));
-      return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
-    }
-    res.locals.resetRateLimit = () => rlReset(key);
-    next();
-  };
-}
-const authLimiter = rateLimit(authLimiterConfig);
+const rateLimitStore = { consume: rlConsume, reset: rlReset };
+const authLimiter = createAuthRateLimit(authLimiterConfig, rateLimitStore);
+// Sign-in and password-reset requests are also counted per account (services/authLimiter.js).
+const loginLimiter = createAuthRateLimit(authLimiterConfig, {
+  ...rateLimitStore, identity: (req) => limitedIdentity(req.body?.username),
+});
+const forgotLimiter = createAuthRateLimit(authLimiterConfig, {
+  ...rateLimitStore, identity: (req) => limitedIdentity(req.body?.email),
+});
 
 // Public: which sign-in screen to show. Only switches, never the configured values.
 router.get('/config', (req, res) => {
@@ -236,7 +231,7 @@ router.post('/register', authLimiter, async (req, res) => {
   }
 });
 
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
@@ -1046,7 +1041,7 @@ router.patch('/profile/recovery-email', async (req, res) => {
 // POST /api/auth/forgot-password — public, rate-limited
 // Looks up a user by recovery_email and sends a reset link.
 // Always returns 200 to avoid leaking whether a recovery email exists.
-router.post('/forgot-password', authLimiter, async (req, res) => {
+router.post('/forgot-password', forgotLimiter, async (req, res) => {
   const authSetting = await query(
     "SELECT value FROM system_settings WHERE key = 'internal_auth_disabled'"
   );

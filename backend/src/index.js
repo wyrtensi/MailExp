@@ -8,6 +8,7 @@ import { RedisStore } from 'connect-redis';
 import './loadEnv.js';
 import { redisClient } from './services/redis.js';
 import { buildSessionOptions } from './utils/sessionConfig.js';
+import { parseTrustProxy } from './utils/trustProxy.js';
 
 import sendRoutes from './routes/send.js';
 import draftRoutes from './routes/draft.js';
@@ -76,10 +77,11 @@ try {
 const APP_VERSION = (process.env.APP_VERSION || buildMeta.version || packageMeta.version).replace(/^v[.]?/, '');
 
 const app = express();
-// Trust the nginx reverse proxy so req.secure reflects HTTPS correctly.
-// Without this, express-session sees HTTP (from nginx) and refuses to set
-// the Secure cookie, meaning the session cookie is never sent to the browser.
-app.set('trust proxy', 1);
+// Trust the reverse proxies in front of the backend so req.secure reflects HTTPS correctly
+// (without this, express-session sees HTTP from nginx and never sets the Secure cookie) and
+// req.ip is the client's address, which the sign-in rate limit keys on. How many there are
+// depends on the deployment: TRUST_PROXY, see utils/trustProxy.js.
+app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
 const httpServer = createServer(app);
 const wss = new WebSocketServer({ server: httpServer });
 
