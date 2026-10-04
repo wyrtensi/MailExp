@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import {
   DEFAULT_DEFERRED_COUNT,
@@ -40,7 +41,8 @@ const SEVERITY_COLORS = { error: 'var(--red)', warning: 'var(--amber)', info: 'v
 // oldest ones and the counts.
 const MAX_QUEUE_ROWS = 200;
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at);
 
 const settingsForm = (settings) => ({
   pingUrl: settings?.pingUrl ?? '',

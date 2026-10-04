@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import { mailNodeErrorDetail, mailNodeErrorKey } from '../utils/mailNode.js';
 import {
@@ -37,7 +38,8 @@ const FORM_KEYS = { add: 'admin.outages.formAdd', edit: 'admin.outages.formEdit'
 const RESULT_KEYS = { good: 'admin.outages.resultGood', failed: 'admin.outages.resultFailed', unknown: 'admin.outages.resultUnknown' };
 const NODE_LOG_KEYS = { seen: 'admin.outages.nodeLogSeen', missing: 'admin.outages.nodeLogMissing', not_covered: 'admin.outages.nodeLogNotCovered' };
 
-const when = (at) => (at ? new Date(at).toLocaleString() : '');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (at) => formatDateTime(at);
 const emptyForm = () => ({ start: '', end: '', reason: '', planned: false });
 
 // Settings -> Integrations -> "Mail node outages" (admins only), under "Node operations" (R-43):

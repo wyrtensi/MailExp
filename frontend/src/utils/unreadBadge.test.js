@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { unreadBadge } from './unreadBadge.js';
+import { formatDateTime } from './formatDate.js';
 
 describe('unreadBadge: the ghost badge it exists to prevent', () => {
   test('a stale count of zero renders nothing', () => {
@@ -38,7 +39,7 @@ describe('unreadBadge: what it does show', () => {
 
   test('the stale title names the observation time when there is one', () => {
     const at = '2026-09-09T12:45:20.000Z';
-    assert.ok(unreadBadge({ count: 1, stale: true, observedAt: at }).title.includes(new Date(at).toLocaleString()));
+    assert.ok(unreadBadge({ count: 1, stale: true, observedAt: at }).title.includes(formatDateTime(at)));
     assert.match(unreadBadge({ count: 1, stale: true }).title, /Last observed unread count; awaiting/,
       'no timestamp must not leave a dangling empty parenthesis');
   });

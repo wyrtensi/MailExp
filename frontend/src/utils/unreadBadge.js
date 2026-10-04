@@ -14,6 +14,8 @@
 //
 // One helper rather than four inline conditions, so the invariant has a single home and a test.
 
+import { formatDateTime } from './formatDate.js';
+
 /**
  * @param count      unread count; null/undefined/NaN mean not yet observed
  * @param known      false when no server observation exists yet
@@ -32,7 +34,7 @@ export function unreadBadge({ count, known = true, stale = false, observedAt = n
     text: shown,
     stale: !!stale,
     title: stale
-      ? `Last observed unread count${observedAt ? ` (${new Date(observedAt).toLocaleString()})` : ''}; awaiting server refresh`
+      ? `Last observed unread count${observedAt ? ` (${formatDateTime(observedAt)})` : ''}; awaiting server refresh`
       : 'Unread messages',
   };
 }

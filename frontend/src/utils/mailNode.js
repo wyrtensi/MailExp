@@ -1,6 +1,8 @@
 // Mail node (mailcow) screens: the domain mailbox form and the admin section. Pure functions: no
 // DOM, no store, no network, so they run under `node --test`.
 
+import { formatDateTime } from './formatDate.js';
+
 // Same checks as the backend (services/mailNode/mailcow.js).
 export const LOCAL_PART_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
 export const HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
@@ -1040,7 +1042,7 @@ export function alertDetail(alert) {
     case 'outage_letters_waiting':
       return {
         key: d.asOf ? 'admin.nodeOps.alertDetailOutageWaitingAsOf' : 'admin.nodeOps.alertDetailOutageWaiting',
-        values: { count: d.waiting ?? 0, asOf: d.asOf ? new Date(d.asOf).toLocaleString() : '' },
+        values: { count: d.waiting ?? 0, asOf: formatDateTime(d.asOf) },
         at: d.soonestExpiresAt ?? null,
       };
     // The tenant poll (backend services/tenant/tenantJobs.js): Get-BlockedConnector, R-27.

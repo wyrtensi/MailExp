@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
 import { api } from '../utils/api.js';
 import {
   POLICY_FIELDS,
@@ -34,7 +35,8 @@ const SEVERITY_COLORS = { error: 'var(--red)', warning: '#b45309', info: 'var(--
 const POLL_MS = 1500;
 const POLL_LIMIT = 200;
 
-const when = (iso) => (iso ? new Date(iso).toLocaleString() : '—');
+// In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
+const when = (iso) => formatDateTime(iso) || '—';
 
 // One failure line: the translated reason, with the server's short message when it has one.
 function Failure({ failure }) {
