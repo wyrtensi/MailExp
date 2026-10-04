@@ -697,20 +697,22 @@ test('eop.mjs: inbound send, list, retry, config, trace and ndr', T, async () =>
 
 test('runInboundPass: each recipient on its own; the trace shows each one\'s status and events', T, async () => {
   const { dir, ndrDir } = inboundDirs('pass-3');
-  const item = letter(dir, { to: ['anna@stage.test', 'nobody@stage.test'] });
+  const now = new Date('2026-10-02T10:00:00Z');
+  const item = letter(dir, { to: ['anna@stage.test', 'nobody@stage.test'], now });
   const summary = await runInboundPass({
-    dir, ndrDir, now: new Date('2026-10-02T10:00:00Z'),
+    dir, ndrDir, now,
     deliver: async (_one, _raw, [rcpt]) => (rcpt === 'nobody@stage.test' ? { ok: false, reply: '550 5.1.1 User unknown' } : { ok: true, reply: '250 2.0.0 Ok' }),
   });
   assert.deepEqual(summary, { tried: 2, delivered: 1, deferred: 0, failed: 1, expired: 0 });
   const stored = loadInbound(dir, item.id).item;
   assert.equal(stored.recipients['anna@stage.test'].status, 'delivered');
   assert.equal(stored.recipients['nobody@stage.test'].status, 'failed');
-  const rows = traceAnswer(dir, new URL('http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces')).body.value;
+  // The trace's default window is the last 48 hours of `now`; pin it to the letter's clock.
+  const rows = traceAnswer(dir, new URL('http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces'), now).body.value;
   assert.deepEqual(rows.map((r) => [r.recipientAddress, r.status]), [['anna@stage.test', 'delivered'], ['nobody@stage.test', 'failed']]);
   const base = `http://eop.test.local:8080/v1.0/admin/exchange/tracing/messageTraces/${item.traceId}/getDetailsByRecipient`;
-  assert.deepEqual(traceAnswer(dir, new URL(`${base}(recipientAddress='anna@stage.test')`)).body.value.map((e) => e.event), ['Receive', 'Send']);
-  assert.deepEqual(traceAnswer(dir, new URL(`${base}(recipientAddress='nobody@stage.test')`)).body.value.map((e) => e.event), ['Receive', 'Fail']);
+  assert.deepEqual(traceAnswer(dir, new URL(`${base}(recipientAddress='anna@stage.test')`), now).body.value.map((e) => e.event), ['Receive', 'Send']);
+  assert.deepEqual(traceAnswer(dir, new URL(`${base}(recipientAddress='nobody@stage.test')`), now).body.value.map((e) => e.event), ['Receive', 'Fail']);
 });
 
 test('smtpSend: a message the server accepted is delivered even if the connection drops before QUIT is answered', T, async () => {
