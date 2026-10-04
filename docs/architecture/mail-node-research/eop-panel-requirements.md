@@ -1784,7 +1784,7 @@ DKIM, catch-all, пустой ответ узла, пачки, отказ зап
 (`not_high_conf_phish`, `worker_refused`). Новые записи журнала: `tenant.antispam_enforced`,
 `tenant.alias_contacts_removal_approved`; новые оповещения: `spam_rule_outdated`,
 `tenant_antispam_not_enforced`, `tenant_alias_contacts_held`. Полного CLI панели здесь нет: это отдельный
-этап. Порядок для администратора и порядок обновления — [runbook, разделы 6 и 6е](../../operations/mail-node.md).
+этап (сделан позже, [panel-cli.md](../panel-cli.md)). Порядок для администратора и порядок обновления — [runbook, разделы 6 и 6е](../../operations/mail-node.md).
 
 | Что | Сделано | Отличия и оговорки |
 |---|---|---|

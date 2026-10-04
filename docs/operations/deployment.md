@@ -1,7 +1,7 @@
 # Развёртывание MailExpert
 
 Практическое руководство для владельца: установка панели на VPS, режимы входа, повседневные
-операции, обновление, откат и переезд на другой сервер. Дизайн и обоснование решений — в
+операции и CLI панели, обновление, откат и переезд на другой сервер. Дизайн и обоснование решений — в
 [2026-09-21-deployment-design.md](../superpowers/specs/2026-09-21-deployment-design.md). Настройка
 Google-приложений для ящиков Gmail — отдельно, в [google-oauth.md](google-oauth.md).
 
@@ -137,6 +137,77 @@ MailExpert подключает Gmail-ящики пользователей, н�
   journalctl -u mailexpert-backup               # прогоны ночного бэкапа
   journalctl -u mailexpert-health                # прогоны проверки здоровья
   ```
+
+### CLI панели
+
+Для случаев, когда экран неудобен (массовые действия, скрипты, работа по SSH), у панели есть
+командная строка `mailexpert`. Это та же панель: команды вызывают те же сервисы backend, что и
+HTTP-маршруты экранов, с теми же проверками, кодами отказов и записями журнала. В обход панели
+(напрямую в mailcow или тенант) CLI ничего не делает. Устройство — в
+[panel-cli.md](../architecture/panel-cli.md).
+
+Запуск с хоста — обёртка, которая находит установленную панель и выполняет CLI в контейнере
+`backend`:
+
+```bash
+sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh <группа> <команда> [параметры]
+sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --help            # обёртка
+sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh domain --help     # команды группы
+sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> domain list
+```
+
+`--prefix` — параметр самой обёртки, он идёт первым (по умолчанию `/opt/mailexpert`). Внутри
+контейнера то же самое — `node src/cli/mailexpert.js ...` (в `package.json` backend это `bin`
+`mailexpert`).
+
+| Группа | Команды |
+|---|---|
+| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>` |
+| `domain` | `list`, `show <DOMAIN>`, `restart <DOMAIN>`, `sync <DOMAIN>`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN>`, `approve-alias-removal <DOMAIN>` |
+| `tenant` | `status`, `test`, `antispam` |
+| `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
+| `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
+
+Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
+(`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`
+(синоним `--en`) — второе имя с тем же адресом, `""` убирает его. Алиаса с другим адресом CLI не
+делает (D-16): другой адрес — отдельный ящик. Новый ящик backend подключает сам в течение
+90 секунд (его проверка соединений).
+
+Общие параметры:
+
+- `--json` — ответ в виде JSON, в тех же формах, что отвечает API панели; ошибка —
+  `{ "error": "...", "code": "..." }` на stdout.
+- `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
+  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `quarantine pause`. Без
+  терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
+  `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
+  ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,
+  причина (`--reason`) обязательна.
+- `--as <ADMIN_EMAIL>` — записать действие в журнал от имени администратора (он должен быть
+  включённым администратором панели). Без него в журнале исполнитель `cli`; в обоих случаях
+  `details.via = "cli"`.
+- `--wait [--timeout <SEC>]` у команд, которые ставят задание тенанта (`domain sync`,
+  `internal-relay`, `approve-alias-removal`, `tenant test`, `tenant antispam`,
+  `quarantine release`): дождаться, пока воркер backend выполнит задание (по умолчанию до
+  120 секунд). Сам CLI заданий не выполняет.
+
+Коды выхода: `0` — сделано; `1` — отказ (печатается код ошибки API, например
+`domain_not_ready`), или ответ «нет» на вопрос; `2` — ошибка в командной строке или
+подтверждение, которое CLI не смог спросить; `3` — сбой почтового узла, тенанта, задания или
+самой панели. Обёртка возвращает код CLI как есть.
+
+Примеры:
+
+```bash
+cli=/opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh
+sudo $cli domain list
+sudo $cli domain show <DOMAIN>
+sudo $cli mailbox create <LOCAL>@<DOMAIN> --sender-name "<NAME>" --second-sender-name "<NAME_LATIN>"
+sudo $cli mailbox delete <LOCAL>@<DOMAIN> --reason "<REASON>"          # спросит адрес
+sudo $cli jobs list --status problems --json | jq '.jobs[].id'
+sudo $cli quarantine release --wait --as <ADMIN_EMAIL>
+```
 
 ## 5. Обновление
 
