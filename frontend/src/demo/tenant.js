@@ -6,7 +6,8 @@
 // application certificate expires in 25 days, so the warning and its alert show. Stage 7b: the
 // poll reads both connectors (the first read is the reference, nothing drifted), "Take as the
 // reference" works, and a domain's "Run the tenant steps now" finishes at once without changing
-// it: the demo's domains keep their manual onboarding.
+// it: the demo's domains keep their manual onboarding (tenantDriverActive false, unlike the backend
+// with a driver and a filled tenant).
 
 const DAY_MS = 86400000;
 const STARTED = Date.now();
@@ -132,31 +133,36 @@ function finish(kind, settings) {
 const latest = (kind) => [...jobs.values()].filter((job) => job.kind === kind).at(-1) ?? null;
 
 // Stage 7c (R-42), widened in section 5.14: the release of quarantined spam and phishing, on as on
-// a new install, with an earlier run of 8 minutes ago: high confidence phishing and spam released
-// to demo mailboxes, a message kept because a recipient is not on the node (it raises the
-// tenant_phish_held alert), one that left the quarantine.
+// a new install, with an earlier run of 8 minutes ago. The demo's node starts without the spam
+// filing rule (demo/index.js demoNode.prefilterWritten), so that run released high confidence
+// phishing only, as the backend does (quarantineRelease.js decide, RULE_GATED_TYPES): the spam
+// waits in the quarantine (counted, no row) until the rule is applied and "Release now" runs again.
+// A message is kept because a recipient is not on the node (it raises the tenant_phish_held
+// alert), one left the quarantine.
 const QID = (n) => [`c14401cf-aa9a-465b-cfd5-00000000000${n}`, `4c2ca98e-94ea-db3a-7eb8-00000000000${n}`].join('\\');
 const heldRow = (row) => (row.state === 'skipped' && row.reason !== 'gone') || (row.state === 'failed' && row.reason === 'attempts_exhausted');
+// Spam, phishing and bulk in the quarantine that wait for the node's spam rule: no row until released.
+let ruleGated = [
+  {
+    identity: QID(4), type: 'Spam', messageId: '<offer-12@deals.example.com>', sender: 'offers@deals.example.com', subject: 'Limited offer for your team',
+    recipients: ['sales@demo.mailexpert.local'], receivedAt: iso(STARTED - 40 * 60000), expiresAt: iso(STARTED + 29 * DAY_MS),
+  },
+];
 let phish = {
   enabled: true,
   changedAt: null,
   run: {
-    at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 2, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0, ruleWaiting: 0 }, left: false,
-    rule: { state: 'ok' },
+    at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 1, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0, checked: 0, ruleWaiting: ruleGated.length }, left: false,
+    rule: { state: 'missing' },
   },
   rows: [
-    {
-      identity: QID(4), type: 'Spam', messageId: '<offer-12@deals.example.com>', sender: 'offers@deals.example.com', subject: 'Limited offer for your team',
-      recipients: ['sales@demo.mailexpert.local'], receivedAt: iso(STARTED - 40 * 60000), expiresAt: iso(STARTED + 29 * DAY_MS),
-      state: 'released', reason: null, error: null, attempts: 1, byPanel: true, releasedAt: iso(STARTED - 8 * 60000), updatedAt: iso(STARTED - 8 * 60000),
-    },
     {
       identity: QID(1), type: 'HighConfPhish', messageId: '<invoice-7781@billing.example.net>', sender: 'billing@billing.example.net', subject: 'Your invoice is overdue',
       recipients: ['info@demo.mailexpert.local'], receivedAt: iso(STARTED - 50 * 60000), expiresAt: iso(STARTED + 29 * DAY_MS),
       state: 'released', reason: null, error: null, attempts: 1, byPanel: true, releasedAt: iso(STARTED - 8 * 60000), updatedAt: iso(STARTED - 8 * 60000),
     },
     {
-      identity: QID(2), type: 'Phish', messageId: '<reset-55@login.example.org>', sender: 'security@login.example.org', subject: 'Password reset required',
+      identity: QID(2), type: 'HighConfPhish', messageId: '<reset-55@login.example.org>', sender: 'security@login.example.org', subject: 'Password reset required',
       recipients: ['info@demo.mailexpert.local', 'partner@example.org'], receivedAt: iso(STARTED - 3 * 3600000), expiresAt: iso(STARTED + 29 * DAY_MS),
       state: 'skipped', reason: 'foreign_recipients', error: null, attempts: 0, byPanel: false, releasedAt: null, updatedAt: iso(STARTED - 3 * 3600000),
     },
@@ -194,8 +200,8 @@ export function demoTenantAlerts(settings, now = Date.now()) {
 }
 
 // Answers a /mail-node/tenant request, or undefined when the path is not one. error(message,
-// code) builds the demo's refusal.
-export function demoTenantRequest(verb, pathname, settings, error, body = null) {
+// code) builds the demo's refusal. spamRule: the demo node's spam filing rule ('ok' or 'missing').
+export function demoTenantRequest(verb, pathname, settings, error, body = null, { spamRule = 'missing' } = {}) {
   if (verb === 'GET' && pathname === '/mail-node/tenant') {
     return clone({
       driver: 'fake', profileWithoutDriver: false, configured: configured(settings), state, connectorDrift: [],
@@ -248,7 +254,22 @@ export function demoTenantRequest(verb, pathname, settings, error, body = null) 
       throw error('Fill in the tenant ID, its onmicrosoft.com domain, the application ID and the certificate thumbprint first', 'tenant_not_configured');
     }
     if (!phish.enabled) throw error('The release of quarantined spam and phishing is paused', 'phish_release_paused');
-    phish = { ...phish, run: { ...phish.run, at: iso(Date.now()), counts: { released: 0, skipped: 0, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false } };
+    // Section 5.14: what waited for the spam rule is released once the node holds it.
+    const at = iso(Date.now());
+    const ruleOk = spamRule === 'ok';
+    const released = ruleOk ? ruleGated : [];
+    if (ruleOk) ruleGated = [];
+    phish = {
+      ...phish,
+      rows: [
+        ...released.map((row) => ({ ...row, state: 'released', reason: null, error: null, attempts: 1, byPanel: true, releasedAt: at, updatedAt: at })),
+        ...phish.rows,
+      ],
+      run: {
+        at, ok: true, left: false, rule: { state: spamRule },
+        counts: { released: released.length, skipped: 0, failed: 0, waiting: 0, gone: 0, busy: 0, checked: 0, ruleWaiting: ruleGated.length },
+      },
+    };
     return clone({ job: finish(KINDS.phish, settings), created: true });
   }
   const job = /^\/mail-node\/tenant\/jobs\/([^/]+)$/.exec(pathname);

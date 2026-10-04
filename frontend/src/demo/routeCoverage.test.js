@@ -206,6 +206,49 @@ test('/auth/me answers the signed-in role (admin by default, plain user via demo
   }
 });
 
+// "Watch as a user": the admin routes answer 403 as the backend's requireAdmin does, and what an
+// ordinary user may read still answers.
+test('as a plain user the admin routes answer 403, the user routes still answer', async () => {
+  const originalStorage = globalThis.localStorage;
+  globalThis.localStorage = { getItem: () => 'user', setItem: () => {} };
+  try {
+    const denied = [
+      ['PUT', '/mail-node/tenant/phish-release', { enabled: false }],
+      ['GET', '/mail-node/tenant'],
+      ['GET', '/mail-node/eop'],
+      ['GET', '/mail-node/config'],
+      ['POST', '/mail-node/apply'],
+      ['GET', '/mail-node/quarantine/settings'],
+      ['POST', '/mail-node/quarantine/1/release'],
+      ['GET', '/mail-node/outages'],
+      ['GET', '/admin/users'],
+      ['GET', '/admin/ai'],
+      ['GET', '/integrations'],
+      ['POST', '/integrations/microsoft', {}],
+      ['POST', '/categories/sources', {}],
+      ['POST', '/accounts', { name: 'x' }],
+      ['POST', '/accounts/demo-gmail/threading/preview', {}],
+    ];
+    for (const [method, requestPath, body] of denied) {
+      await assert.rejects(() => demoRequest(method, requestPath, body), (err) => {
+        assert.equal(err.status, 403, `${method} ${requestPath}`);
+        assert.equal(err.message, 'Admin access required');
+        return true;
+      });
+    }
+    // Refused before any change: the switch is still on for the administrator.
+    globalThis.localStorage = { getItem: () => 'admin', setItem: () => {} };
+    assert.equal((await demoRequest('GET', '/mail-node/tenant/phish-release')).enabled, true);
+    globalThis.localStorage = { getItem: () => 'user', setItem: () => {} };
+
+    for (const requestPath of ['/mail-node/domains', '/mail-node/outage-letters', '/integrations/status', '/categories/sources', '/accounts']) {
+      await demoRequest('GET', requestPath);
+    }
+  } finally {
+    globalThis.localStorage = originalStorage;
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Write coverage (POST/PUT/PATCH/DELETE)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,9 +629,17 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   // On as on a new install; "Release now" is refused while it is off.
   const release = await demoRequest('GET', '/mail-node/tenant/phish-release');
   assert.equal(release.enabled, true);
-  assert.deepEqual([...new Set(release.releases.map(r => r.type))].sort(), ['HighConfPhish', 'Phish', 'Spam']);
+  // The earlier run had no spam rule on the node: high confidence phishing only, the spam waits.
+  assert.equal(release.run.rule.state, 'missing');
+  assert.equal(release.run.counts.ruleWaiting, 1);
+  assert.deepEqual([...new Set(release.releases.map(r => r.type))], ['HighConfPhish']);
+  // The rule was applied above (/mail-node/apply/prefilter): the next run releases the spam.
   const ran = await answer('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run');
   assert.equal(ran.job.kind, 'tenant_quarantine_release');
+  const after = await demoRequest('GET', '/mail-node/tenant/phish-release');
+  assert.equal(after.run.rule.state, 'ok');
+  assert.equal(after.run.counts.ruleWaiting, 0);
+  assert.equal(after.releases.find(r => r.type === 'Spam')?.state, 'released');
   const off = await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: false });
   assert.equal(off.enabled, false);
   await reject('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run', {}, /paused/);
