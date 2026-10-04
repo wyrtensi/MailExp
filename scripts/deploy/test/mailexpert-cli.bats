@@ -43,18 +43,90 @@ setup() {
   [ "$status" -eq 2 ]
 }
 
-@test "--help after the group belongs to the CLI, not the wrapper" {
-  # Not root in the test shell: the wrapper goes on to the container instead of printing its own
-  # usage, and stops at the root check.
+@test "not root is a wrapper error: exit 2" {
   if [ "$(id -u)" = 0 ]; then skip "runs as root"; fi
   run bash "$SCRIPT" domain --help
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 2 ]
   [[ $output == *"run mailexpert-cli.sh as root"* ]]
 }
 
 @test "a missing installation is reported with exit 2" {
-  if [ "$(id -u)" != 0 ]; then skip "needs root to get past the root check"; fi
+  stub_root
   run bash "$SCRIPT" --prefix "$BATS_TEST_TMPDIR/none" domain list
   [ "$status" -eq 2 ]
   [[ $output == *"install.conf is missing"* ]]
+}
+
+# --- past the root check and install.conf, with docker and id stubbed on PATH ---
+
+# id -u answers 0; docker logs its arguments and answers as the STUB_* variables say.
+stub_root() {
+  STUB=$BATS_TEST_TMPDIR/bin
+  mkdir -p "$STUB"
+  printf '#!/usr/bin/env bash\n[ "$1" = -u ] && echo 0 || command -p id "$@"\n' >"$STUB/id"
+  cat >"$STUB/docker" <<'STUB_EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$DOCKER_LOG"
+case " $* " in
+  *" ps "*) printf '%s\n' "${STUB_SERVICES-backend}"; exit "${STUB_PS_STATUS:-0}" ;;
+  *" test -f "*) exit "${STUB_TEST_STATUS:-0}" ;;
+  *" node "*) echo "cli says hi"; echo "cli warns" >&2; exit "${STUB_CLI_STATUS:-0}" ;;
+esac
+exit 0
+STUB_EOF
+  chmod +x "$STUB/id" "$STUB/docker"
+  export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log
+  P=$BATS_TEST_TMPDIR/p
+  mkdir -p "$P"
+  printf '%s\n' VERSION=sha-0123456789ab SIGNIN=direct DIRECT_HOST=panel.example.com LOCAL_AUTH=1 \
+    PROJECT=me-test HTTP_PORT=18090 >"$P/install.conf"
+}
+
+@test "runs the CLI in the backend container with -T without a terminal and passes the arguments through" {
+  stub_root
+  run bash "$SCRIPT" --prefix "$P" mailbox show 'a b@example.com' --json
+  [ "$status" -eq 0 ]
+  [[ $output == *"cli says hi"* ]]
+  grep -q -- "exec -T backend node src/cli/mailexpert.js mailbox show a b@example.com --json" "$DOCKER_LOG"
+  grep -q -- "-p me-test" "$DOCKER_LOG"
+}
+
+@test "the CLI's exit codes 1, 2 and 3 pass through unchanged" {
+  stub_root
+  for code in 1 2 3; do
+    STUB_CLI_STATUS=$code run bash "$SCRIPT" --prefix "$P" domain list
+    [ "$status" -eq "$code" ]
+    [[ $output != *"a command failed"* ]]
+  done
+}
+
+@test "a backend container that is not running is exit 3 before the CLI" {
+  stub_root
+  STUB_SERVICES=postgres run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 3 ]
+  [[ $output == *"backend container is not running"* ]]
+  ! grep -q " node " "$DOCKER_LOG"
+}
+
+@test "an image without the CLI is exit 3 with a hint to update" {
+  stub_root
+  STUB_TEST_STATUS=1 run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 3 ]
+  [[ $output == *"has no CLI"* ]]
+}
+
+@test "docker failing to start the command (125-127) is exit 3" {
+  stub_root
+  STUB_CLI_STATUS=126 run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 3 ]
+  [[ $output == *"docker could not run the CLI"* ]]
+}
+
+@test "the container gets a terminal only with one on both ends and without --json" {
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  [ "$(exec_tty_flag 1 1 domain list)" = "" ]
+  [ "$(exec_tty_flag 1 1 domain list --json)" = "-T" ]
+  [ "$(exec_tty_flag 0 1 domain list)" = "-T" ]
+  [ "$(exec_tty_flag 1 0 domain list)" = "-T" ]
 }
