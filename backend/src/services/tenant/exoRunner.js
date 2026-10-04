@@ -65,6 +65,10 @@ export const EXO_OPS = Object.freeze({
   whoami: { params: {} },
   get_blocked_connector: { params: {} },
   get_content_filter_policy: { params: {} },
+  // After stage 7 (section 5.14): one Default policy action set to MoveToJmf, fixed by the op.
+  set_spam_action_junk: { params: {} },
+  set_high_confidence_spam_action_junk: { params: {} },
+  set_phish_spam_action_junk: { params: {} },
   get_accepted_domain: { params: { domain: 'domain' } },
   // Stage 7b: R-24 and R-29 (the accepted domain's type), R-25 (connectors), R-26 (EOP DKIM), R-29
   // (the DBEB mail contacts).
@@ -81,8 +85,9 @@ export const EXO_OPS = Object.freeze({
   set_mail_contact_external: { params: { address: 'address', external: 'address' } },
   hide_mail_contact: { params: { address: 'address' } },
   remove_mail_contact: { params: { address: 'address' } },
-  // Stage 7c, R-42 (D-2): inbound high confidence phishing not yet released (a page of 100), one
-  // message by its Identity, and its release to all its original recipients.
+  // Stage 7c, R-42 (D-2) and section 5.14: inbound high confidence phishing, phishing and spam not
+  // yet released (a page of 100), one message by its Identity, and its release to all its original
+  // recipients (the worker refuses any other quarantine type).
   get_quarantine_messages: { params: { page: 'page' } },
   get_quarantine_message: { params: { identity: 'quarantine_id' } },
   release_quarantine_message: { params: { identity: 'quarantine_id' } },

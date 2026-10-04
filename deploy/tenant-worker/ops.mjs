@@ -69,8 +69,15 @@ export const OPS = Object.freeze({
   whoami: { cmdlets: ['Get-OrganizationConfig'], params: {} },
   // R-27: blocked inbound connectors (an empty list is the normal answer).
   get_blocked_connector: { cmdlets: ['Get-BlockedConnector'], params: {} },
-  // R-28: the default anti-spam policy, read only.
+  // R-28: the default anti-spam policy, read.
   get_content_filter_policy: { cmdlets: ['Get-HostedContentFilterPolicy'], params: {} },
+  // R-28, owner's decision after stage 7 (section 5.14): the Default policy's action for one
+  // verdict set to MoveToJmf (deliver with the verdict headers, the node files it into Junk). One
+  // op per field, nothing but the field and the value fixed in runner.lib.ps1, no arguments.
+  // HighConfidencePhishAction cannot take MoveToJmf (Learn) and has no op.
+  set_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
+  set_high_confidence_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
+  set_phish_spam_action_junk: { cmdlets: ['Set-HostedContentFilterPolicy'], params: {} },
   // Read only, for stage 7b (R-24): whether a domain is an accepted domain and of which type.
   get_accepted_domain: { cmdlets: ['Get-AcceptedDomain'], params: { domain: 'domain' } },
   // Stage 7b. R-24 and R-29: the accepted domain's type (the type is fixed by the operation).
@@ -93,13 +100,16 @@ export const OPS = Object.freeze({
   set_mail_contact_external: { cmdlets: ['Set-MailContact'], params: { address: 'address', external: 'address' } },
   hide_mail_contact: { cmdlets: ['Set-MailContact'], params: { address: 'address' } },
   remove_mail_contact: { cmdlets: ['Remove-MailContact'], params: { address: 'address' } },
-  // Stage 7c, R-42 (decision D-2): the high confidence phishing EOP quarantined, released to the
-  // node's mailboxes by the panel. The list is fixed to inbound HighConfPhish not yet released, a
-  // page of 100 at a time; one message is read by its Identity (only then are its recipients
-  // shown; only the item with exactly that Identity is answered) and released to all its original
-  // recipients. The release reads the message again in runner.lib.ps1 and refuses
-  // (quarantine_not_allowed) unless it is inbound HighConfPhish, so no other quarantine type can be
-  // released; -User, -AllowSender and the Tenant Allow/Block List of R-31 are not reachable.
+  // Stage 7c, R-42 (decision D-2), widened by the owner's decision after stage 7 (section 5.14):
+  // the spam and phishing EOP quarantined, released to the node's mailboxes by the panel. The list
+  // is fixed to inbound HighConfPhish, Phish and Spam (high confidence spam is listed as Spam:
+  // Learn's QuarantineTypes has no value of its own for it) not yet released, a page of 100 at a
+  // time; one message is read by its Identity (only then are its recipients shown; only the item
+  // with exactly that Identity is answered) and released to all its original recipients. The
+  // release reads the message again in runner.lib.ps1 and refuses (quarantine_not_allowed) unless
+  // it is inbound and every type it carries is HighConfPhish, Phish, Spam or HighConfSpam, so
+  // malware, bulk, mail flow rule, file type and DLP quarantine are never released; -User,
+  // -AllowSender and the Tenant Allow/Block List of R-31 are not reachable.
   get_quarantine_messages: { cmdlets: ['Get-QuarantineMessage'], params: { page: 'page' } },
   get_quarantine_message: { cmdlets: ['Get-QuarantineMessage'], params: { identity: 'quarantine_id' } },
   release_quarantine_message: { cmdlets: ['Release-QuarantineMessage'], params: { identity: 'quarantine_id' } },

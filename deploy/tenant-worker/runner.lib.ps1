@@ -50,6 +50,21 @@ $Ops = @{
       'HighConfidencePhishAction', 'BulkSpamAction', 'BulkThreshold', 'QuarantineRetentionPeriod',
       'RedirectToRecipients', 'WhenChanged')
   }
+  # After stage 7 (section 5.14): one action of the Default policy set to MoveToJmf; the field and
+  # the value are fixed here, the op takes no argument. HighConfidencePhishAction has no op: it
+  # takes only Quarantine and Redirect (Learn).
+  set_spam_action_junk = @{
+    Cmdlet = 'Set-HostedContentFilterPolicy'; Fixed = @{ Identity = 'Default'; SpamAction = 'MoveToJmf' }; Args = @{}
+    Keep = @()
+  }
+  set_high_confidence_spam_action_junk = @{
+    Cmdlet = 'Set-HostedContentFilterPolicy'; Fixed = @{ Identity = 'Default'; HighConfidenceSpamAction = 'MoveToJmf' }; Args = @{}
+    Keep = @()
+  }
+  set_phish_spam_action_junk = @{
+    Cmdlet = 'Set-HostedContentFilterPolicy'; Fixed = @{ Identity = 'Default'; PhishSpamAction = 'MoveToJmf' }; Args = @{}
+    Keep = @()
+  }
   get_accepted_domain = @{
     Cmdlet = 'Get-AcceptedDomain'; Fixed = @{}; Args = @{ domain = @('Identity', $DomainPattern) }
     Keep = @('DomainName', 'DomainType', 'Default', 'Identity')
@@ -122,11 +137,13 @@ $Ops = @{
     Cmdlet = 'Remove-MailContact'; Fixed = @{ Confirm = $false }; Args = @{ address = @('Identity', $AddressPattern) }
     Keep = @()
   }
-  # Stage 7c, R-42 (D-2): inbound high confidence phishing not yet released, a page at a time; one
-  # message by its Identity (its recipients are shown only then); released to all its recipients.
+  # Stage 7c, R-42 (D-2) and section 5.14: inbound high confidence phishing, phishing and spam not
+  # yet released, a page at a time (high confidence spam is listed as Spam: QuarantineTypes has no
+  # value of its own for it); one message by its Identity (its recipients are shown only then);
+  # released to all its recipients.
   get_quarantine_messages = @{
     Cmdlet = 'Get-QuarantineMessage'
-    Fixed = @{ QuarantineTypes = 'HighConfPhish'; Direction = 'Inbound'; ReleaseStatus = 'NotReleased'; PageSize = 100 }
+    Fixed = @{ QuarantineTypes = @('HighConfPhish', 'Phish', 'Spam'); Direction = 'Inbound'; ReleaseStatus = 'NotReleased'; PageSize = 100 }
     Args = @{ page = @('Page', $PagePattern) }
     Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus', 'Direction',
       'MessageId', 'Expires', 'RecipientCount')
@@ -138,11 +155,12 @@ $Ops = @{
     Keep = @('Identity', 'ReceivedTime', 'SenderAddress', 'RecipientAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus',
       'Released', 'ReleasedUser', 'Direction', 'MessageId', 'Expires')
   }
-  # Guard: the message is read by its Identity first and released only if it is inbound high
-  # confidence phishing (quarantine_not_allowed otherwise): the worker can release nothing else.
+  # Guard: the message is read by its Identity first and released only if it is inbound and every
+  # type it carries is a releasable one ($ReleasableTypes; quarantine_not_allowed otherwise): the
+  # worker can release no malware, bulk, mail flow rule, file type or DLP quarantine.
   release_quarantine_message = @{
     Cmdlet = 'Release-QuarantineMessage'; Fixed = @{ ReleaseToAll = $true; Confirm = $false }
-    Args = @{ identity = @('Identity', $QuarantineIdPattern) }; Guard = 'HighConfPhishInbound'
+    Args = @{ identity = @('Identity', $QuarantineIdPattern) }; Guard = 'ReleasableInbound'
     Keep = @()
   }
 }
@@ -219,14 +237,31 @@ function Connect-Tenant($tenant, $commands) {
   $script:Session = $key
 }
 
-# The release guard: exactly one message with this Identity, inbound, high confidence phishing.
-function Test-HighConfPhishInbound([string]$identity) {
+# The quarantine types the worker may release (owner's decision after stage 7, section 5.14): high
+# confidence phishing, phishing, spam and high confidence spam, as tokens: lower case, letters only,
+# Get-QuarantineMessage's two spellings of a type made one ('High Confidence Phish' = HighConfPhish).
+# Matched whole, never as a part: 'Phish, Malware' is not 'phish'.
+$ReleasableTypes = @('highconfphish', 'phish', 'spam', 'highconfspam')
+function ConvertTo-QuarantineType([string]$value) {
+  $token = $value.ToLowerInvariant() -replace '[^a-z]', ''
+  if ($token -ceq 'highconfidencephish') { return 'highconfphish' }
+  if ($token -ceq 'highconfidencespam') { return 'highconfspam' }
+  return $token
+}
+
+# The release guard: exactly one message with this Identity, inbound, and every type it carries
+# (QuarantineTypes, one or several, and Type) releasable; a message with no type is refused.
+function Test-ReleasableInbound([string]$identity) {
   $found = @(Get-QuarantineMessage -Identity $identity | Where-Object { $null -ne $_ -and ([string]$_.Identity) -ieq $identity })
   if ($found.Count -ne 1) { return $false }
   $q = $found[0]
-  $types = (@($q.QuarantineTypes) | ForEach-Object { [string]$_ }) -join ' '
-  $phish = $types -match '\bHighConfPhish\b' -or ([string]$q.Type) -match 'High\s*Conf(idence)?\s*Phish'
-  return $phish -and (([string]$q.Direction) -ieq 'Inbound')
+  $types = [System.Collections.Generic.List[string]]::new()
+  foreach ($value in @($q.QuarantineTypes) + @($q.Type)) {
+    if ($null -ne $value -and ([string]$value).Trim() -ne '') { $types.Add((ConvertTo-QuarantineType ([string]$value))) }
+  }
+  if ($types.Count -eq 0) { return $false }
+  foreach ($type in $types) { if ($ReleasableTypes -cnotcontains $type) { return $false } }
+  return (([string]$q.Direction) -ieq 'Inbound')
 }
 
 function Invoke-Op($request) {
@@ -265,8 +300,8 @@ function Invoke-Op($request) {
   $cmdlet = $spec.Cmdlet
   for ($attempt = 1; ; $attempt++) {
     try {
-      if ($spec.Guard -eq 'HighConfPhishInbound' -and -not (Test-HighConfPhishInbound $parameters.Identity)) {
-        return @{ ok = $false; error = (Get-Failure 'quarantine_not_allowed' 'Only inbound high confidence phishing is released') }
+      if ($spec.Guard -eq 'ReleasableInbound' -and -not (Test-ReleasableInbound $parameters.Identity)) {
+        return @{ ok = $false; error = (Get-Failure 'quarantine_not_allowed' 'Only inbound spam and phishing are released') }
       }
       $items = @(& $cmdlet @parameters)
       if ($spec.Exact) {
