@@ -42,7 +42,8 @@ const SEVERITY_COLORS = { error: 'var(--red)', warning: 'var(--amber)', info: 'v
 const MAX_QUEUE_ROWS = 200;
 
 // In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
-const when = (at) => formatDateTime(at);
+// With seconds: queue entries and alerts a few seconds apart stay apart.
+const when = (at) => formatDateTime(at, { seconds: true });
 
 const settingsForm = (settings) => ({
   pingUrl: settings?.pingUrl ?? '',

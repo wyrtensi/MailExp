@@ -196,9 +196,9 @@ function AccountForm({ initial, onSave, onCancel }) {
 
       {/* Color */}
       <Field label={t('admin.accounts.color')}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {COLORS.map(c => (
-            <button key={c} type="button" onClick={() => set('color', c)} aria-label={`${t('admin.accounts.color')} ${c}`} aria-pressed={form.color === c} style={{
+        <div role="group" aria-label={t('admin.accounts.color')} style={{ display: 'flex', gap: 6 }}>
+          {COLORS.map((c, i) => (
+            <button key={c} type="button" onClick={() => set('color', c)} aria-label={`${t('admin.accounts.colorPick')} ${i + 1}`} aria-pressed={form.color === c} style={{
               width: 24, height: 24, borderRadius: '50%', background: c,
               border: `2px solid ${form.color === c ? 'white' : 'transparent'}`,
               cursor: 'pointer', outline: 'none', padding: 0,
@@ -1079,7 +1079,7 @@ export function AccountsTab() {
                     {isAdmin && (
                       <>
                         {' '}
-                        <button type="button" onClick={() => useStore.getState().setAdminTab('mail-node')} style={{
+                        <button type="button" onClick={openForeignAliases} style={{
                           background: 'none', border: 'none', padding: 0, color: 'var(--accent)', cursor: 'pointer',
                           fontSize: 11, textDecoration: 'underline',
                         }}>
@@ -2556,20 +2556,34 @@ export function LayoutsTab() {
   );
 }
 
+// Opens Administration -> Mail node and brings "Aliases with another address" into view once the
+// tab has rendered it (the alias editor's "Open the list").
+function openForeignAliases() {
+  useStore.getState().setAdminTab('mail-node');
+  let tries = 0;
+  const seek = () => {
+    const section = document.querySelector('[data-section="node-foreign-aliases"]');
+    if (section) {
+      section.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    tries += 1;
+    if (tries < 30) setTimeout(seek, 100);
+  };
+  setTimeout(seek, 0);
+}
+
 // ─── Mail node Tab ───────────────────────────────────────────────────────────
 // Administration -> "Mail node" (admins only): the mailcow node and its domains, the aliases with
 // another address, EOP with the Microsoft tenant, the node's operations, its outages and its
 // quarantine. Google apps and Microsoft 365 stay in Integrations.
 function MailNodeTab() {
-  const { t } = useTranslation();
   // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
   const [mailNodeRevision, setMailNodeRevision] = useState(0);
   const mailNodeDomainsChanged = useCallback(() => setMailNodeRevision((n) => n + 1), []);
   return (
+    // The first section's own title, "Mail node", heads the tab: no second heading above it.
     <div data-admin-tab="mail-node">
-      <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 16 }}>
-        {t('admin.tabs.mailNode')}
-      </div>
       <MailNodeSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />
       <MailNodeForeignAliases />
       <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />
@@ -3595,6 +3609,7 @@ function SSOTab() {
             </div>
           </div>
           <button
+            type="button"
             onClick={handleToggleInternalAuth}
             role="switch" aria-checked={!internalAuthDisabled} aria-label={t('admin.sso.passwordLoginTitle')}
             disabled={internalAuthSaving}
@@ -4767,7 +4782,8 @@ function PluginsSection({ onNavigate }) {
               type="button"
               onClick={() => toggle(p.id, !on)}
               disabled={busy}
-              aria-pressed={on}
+              role="switch"
+              aria-checked={on}
               aria-label={p.name}
               style={{
                 width: 36, height: 20, borderRadius: 10, border: 'none', cursor: busy ? 'default' : 'pointer', padding: 0,
@@ -6855,7 +6871,7 @@ function MailboxCleanupTab() {
         <>
           <div style={card}>
             <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-              {t('admin.cleanup.summary', { bulk: (data.bulkTotal ?? 0).toLocaleString(), total: (data.inboxTotal ?? 0).toLocaleString(), pct: bloatPct })}
+              {t('admin.cleanup.summary', { bulk: (data.bulkTotal ?? 0).toLocaleString(localeTag()), total: (data.inboxTotal ?? 0).toLocaleString(localeTag()), pct: bloatPct })}
             </div>
           </div>
 
@@ -6903,7 +6919,7 @@ function MailboxCleanupTab() {
                     <div style={{ fontSize: 13, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.fromName || s.fromEmail}</div>
                     {s.fromName && <div style={{ ...muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.fromEmail}</div>}
                   </div>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', flexShrink: 0 }}>{s.count.toLocaleString()}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', flexShrink: 0 }}>{s.count.toLocaleString(localeTag())}</div>
                   <button
                     type="button"
                     disabled={!!busySender}
@@ -6921,7 +6937,7 @@ function MailboxCleanupTab() {
                     }}
                   >
                     {busySender === s.fromEmail
-                      ? (progress ? `${progress.done.toLocaleString()}/${progress.total.toLocaleString()}` : '...')
+                      ? (progress ? `${progress.done.toLocaleString(localeTag())}/${progress.total.toLocaleString(localeTag())}` : '...')
                       : t(action === 'archive' ? 'admin.cleanup.archive' : 'admin.cleanup.moveToTrash')}
                   </button>
                 </div>
@@ -6934,7 +6950,7 @@ function MailboxCleanupTab() {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
             {data.tier2Keywords.filter(k => k.count > 0).map(k => (
               <span key={k.keyword} style={{ fontSize: 12, padding: '4px 10px', borderRadius: 20, background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
-                {k.keyword} <span style={{ color: 'var(--text-tertiary)' }}>({k.count.toLocaleString()})</span>
+                {k.keyword} <span style={{ color: 'var(--text-tertiary)' }}>({k.count.toLocaleString(localeTag())})</span>
               </span>
             ))}
           </div>
@@ -8543,8 +8559,7 @@ export function makeSearchIndex(t) {
     { label: t('admin.systemEmail.tabEmail'), keywords: ['system email', 'smtp', 'admin email', 'invite email', 'outgoing email'], tab: 'users', adminOnly: true, breadcrumb: tabLabel('users') },
     // Mail node (Administration)
     ...[
-      [t('admin.tabs.mailNode'), ['mail node', 'mailcow', 'node', 'server', 'domain', 'mailbox quota', 'own domain']],
-      [t('admin.mailNode.title'), ['mail node', 'mailcow', 'domain', 'dkim', 'mx', 'dns', 'onboarding', 'quota']],
+      [t('admin.mailNode.title'), ['mail node', 'mailcow', 'node', 'server', 'domain', 'own domain', 'dkim', 'mx', 'dns', 'onboarding', 'quota', 'mailbox quota']],
       [t('admin.foreignAliases.title'), ['alias', 'aliases', 'another address', 'foreign alias', 'mail node']],
       [t('admin.eop.title'), ['eop', 'exchange online protection', 'microsoft', 'next hop', 'tls', 'dkim', 'send limit', 'terrl', 'relay']],
       [t('admin.tenant.title'), ['tenant', 'microsoft', 'exchange', 'certificate', 'connector', 'anti-spam', 'antispam', 'policy', 'phishing', 'quarantine release']],

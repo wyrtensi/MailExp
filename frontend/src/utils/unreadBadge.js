@@ -22,9 +22,10 @@ import { formatDateTime } from './formatDate.js';
  * @param stale      true when the observation is older than the freshness threshold
  * @param observedAt ISO timestamp of the observation, used in the stale title
  * @param max        clamp above which the text becomes `${max}+`
+ * @param t          i18next's t for the title (the raw key without it, as in tests)
  * @returns {{text: string, stale: boolean, title: string} | null} null means render nothing
  */
-export function unreadBadge({ count, known = true, stale = false, observedAt = null, max = null } = {}) {
+export function unreadBadge({ count, known = true, stale = false, observedAt = null, max = null, t = (key) => key } = {}) {
   if (!known) return null;
   if (!Number.isFinite(count) || count <= 0) return null;
   const shown = max != null && count > max ? `${max}+` : String(count);
@@ -34,7 +35,9 @@ export function unreadBadge({ count, known = true, stale = false, observedAt = n
     text: shown,
     stale: !!stale,
     title: stale
-      ? `Last observed unread count${observedAt ? ` (${formatDateTime(observedAt)})` : ''}; awaiting server refresh`
-      : 'Unread messages',
+      ? (observedAt
+        ? t('sidebar.unreadStaleAt', { time: formatDateTime(observedAt) })
+        : t('sidebar.unreadStale'))
+      : t('sidebar.unreadTitle'),
   };
 }

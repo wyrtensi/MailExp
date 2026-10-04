@@ -18,7 +18,7 @@ const warningStyle = {
 };
 
 // In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
-const when = (at) => formatDateTime(at);
+const when = (at) => formatDateTime(at, { seconds: true });
 const list = (items) => (items ?? []).join(', ');
 
 // A failed part of the run: the translated reason and the server's short message.

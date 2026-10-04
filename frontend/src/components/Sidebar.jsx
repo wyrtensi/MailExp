@@ -1161,7 +1161,7 @@ export default function Sidebar() {
                 const accountFolders = folders[accountId] || [];
                 const folderObj = accountFolders.find(f => f.path === path);
                 const isActive = selectedAccountId === accountId && selectedFolder === path;
-                const favBadge = unreadBadge({ count: folderObj?.unread_count, known: folderObj?.counts_known !== false,
+                const favBadge = unreadBadge({ t, count: folderObj?.unread_count, known: folderObj?.counts_known !== false,
                   stale: folderObj?.counts_stale, observedAt: folderObj?.server_counts_at });
                 const isRenamingThis = renamingFav?.accountId === accountId && renamingFav?.path === path;
                 const isDragging = favDragIdx === idx;
@@ -1416,7 +1416,7 @@ export default function Sidebar() {
         )}
         {visibleAccounts.map(account => {
           const countSnapshot = unreadCounts.snapshots?.[account.id];
-          const accountBadge = unreadBadge({ count: unreadCounts.byAccount[account.id],
+          const accountBadge = unreadBadge({ t, count: unreadCounts.byAccount[account.id],
             known: Number.isFinite(unreadCounts.byAccount[account.id]) && countSnapshot?.known !== false,
             stale: countSnapshot?.stale, observedAt: countSnapshot?.observedAt, max: 999 });
           const expanded = expandedAccounts[account.id];
@@ -1870,7 +1870,7 @@ export default function Sidebar() {
                           </div>
                         ) : (
                           !folder.no_select && (() => {
-                            const b = unreadBadge({ count: folder.unread_count, known: folder.counts_known !== false,
+                            const b = unreadBadge({ t, count: folder.unread_count, known: folder.counts_known !== false,
                               stale: folder.counts_stale, observedAt: folder.server_counts_at });
                             return b && (
                               <span title={b.title} style={{ fontSize: 10, color: 'var(--text-tertiary)', background: 'var(--bg-elevated)', padding: '1px 5px', borderRadius: 8, flexShrink: 0 }}>
@@ -2444,7 +2444,8 @@ export default function Sidebar() {
 }
 
 function NavItem({ icon, label, active, collapsed, badge, badgeStale = false, onClick }) {
-  const navBadge = unreadBadge({ count: badge, stale: badgeStale, max: 999 });
+  const { t } = useTranslation();
+  const navBadge = unreadBadge({ t, count: badge, stale: badgeStale, max: 999 });
   return (
     <div
       className={active ? 'nav-item nav-item-active' : 'nav-item'}

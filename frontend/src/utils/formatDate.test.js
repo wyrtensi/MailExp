@@ -63,3 +63,11 @@ test('the interface language set by i18n is the default, and anything unknown re
   assert.equal(localeTag(), 'en-US');
   assert.equal(formatDay('nope'), '');
 });
+
+test('a date and time with seconds, where they tell events apart', () => {
+  const at = new Date(new Date().getFullYear() - 1, 9, 4, 21, 12, 9);
+  assert.equal(formatDateTime(at, { seconds: true, lang: 'ru' }), `4 окт. ${at.getFullYear()}, 21:12:09`);
+  assert.equal(formatDateTime(at, { seconds: true, lang: 'en' }), `Oct 4, ${at.getFullYear()} 9:12:09 PM`);
+  assert.equal(formatDateTime(at, { seconds: true, withYear: false, lang: 'ru' }), '4 окт., 21:12:09');
+  assert.equal(formatDateTime('nope', { seconds: true }), '');
+});
