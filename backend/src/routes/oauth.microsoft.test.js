@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } 
 vi.mock('../index.js', () => ({
   imapManager: {
     connectAccount: vi.fn(async () => true),
+    disconnectAccount: vi.fn(async () => {}),
     clearConnectCooldown: vi.fn(),
   },
 }));
@@ -17,27 +18,37 @@ vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }
 // ID-token signature checks are out of scope here; the route only needs the claims.
 vi.mock('jose', () => ({
   createRemoteJWKSet: vi.fn(() => ({})),
-  jwtVerify: vi.fn(async () => ({ payload: { email: 'user@contoso.com', name: 'User' } })),
+  jwtVerify: vi.fn(),
 }));
 
 import express from 'express';
+import { jwtVerify } from 'jose';
 import oauthRoutes from './oauth.js';
 import { imapManager } from '../index.js';
-import { withTransaction } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 import { recordAudit } from '../services/auditLog.js';
 
 const USER_ID = '22222222-2222-2222-2222-222222222222';
+const ACCOUNT_ID = '33333333-3333-4333-8333-333333333333';
 const TENANT_ID = 'contoso-tenant';
+const TID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const OID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const SUBJECT = `${TID}:${OID}`;
 const NONCE = 'test-nonce';
 const TOKENS = { access_token: 'ms-at', refresh_token: 'ms-rt', expires_in: 3600, id_token: 'ms-id-token' };
+// A verified address: email vouched for by xms_edov.
+const VERIFIED = { tid: TID, oid: OID, email: 'user@contoso.com', xms_edov: true, name: 'User' };
 
+let claims;
+let session;
 function buildApp() {
   const app = express();
-  // Test-only session: the x-test-user header stands in for the session cookie and
-  // carries the nonce the auth-code callback expects from GET /oauth/microsoft.
+  app.use(express.json());
+  // Test-only session: the x-test-user header stands in for the session cookie. `session` holds
+  // what GET /oauth/microsoft would have stored (the nonce and the flow).
   app.use((req, _res, next) => {
     const userId = req.get('x-test-user');
-    req.session = userId ? { userId, oauthNonce: NONCE, oauthUserId: userId } : {};
+    req.session = userId ? Object.assign(session, { userId, save: (cb) => cb() }) : {};
     next();
   });
   app.use('/oauth', oauthRoutes);
@@ -55,15 +66,16 @@ afterAll(async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-// Transaction client for the mailbox the consent names; it already exists unless told otherwise.
+// Transaction client. `row` is the mailbox already stored under the signed-in address, if any.
 let dbCalls;
-function installDb({ existing = true } = {}) {
+let row;
+function installDb() {
   dbCalls = [];
   const client = {
     query: vi.fn(async (sql, params) => {
       dbCalls.push([sql, params]);
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
-      if (/^\s*SELECT id FROM email_accounts/.test(sql)) return { rows: existing ? [{ id: 'ms-acc' }] : [] };
+      if (/^\s*SELECT id, oauth_provider, oauth_subject, mail_node FROM email_accounts/.test(sql)) return { rows: row ? [row] : [] };
       if (/^\s*UPDATE email_accounts/.test(sql)) return { rows: [], rowCount: 1 };
       if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ id: 'ms-new' }] };
       if (/^\s*SELECT \* FROM email_accounts WHERE id = \$1/.test(sql)) {
@@ -74,14 +86,17 @@ function installDb({ existing = true } = {}) {
   };
   withTransaction.mockImplementation(async (fn) => fn(client));
 }
-const updateSql = () => dbCalls.find(([sql]) => /^\s*UPDATE email_accounts/.test(sql))?.[0];
+const updateCall = () => dbCalls.find(([sql]) => /^\s*UPDATE email_accounts/.test(sql));
+const insertCall = () => dbCalls.find(([sql]) => /^\s*INSERT INTO email_accounts/.test(sql));
+const wroteAccount = () => !!(updateCall() || insertCall());
 
-// Reconsent must lift the auth cooldown left by the old grant before reconnecting.
-function expectCooldownClearedBeforeConnect() {
-  expect(imapManager.clearConnectCooldown).toHaveBeenCalledWith('ms-acc');
-  expect(imapManager.connectAccount).toHaveBeenCalledWith(expect.objectContaining({ id: 'ms-acc' }));
-  expect(imapManager.clearConnectCooldown.mock.invocationCallOrder[0])
-    .toBeLessThan(imapManager.connectAccount.mock.invocationCallOrder[0]);
+// The mailbox a reconnect names, as GET /oauth/microsoft?account= and the device start read it.
+let target;
+function installQuery() {
+  query.mockReset().mockImplementation(async (sql) => {
+    if (sql.startsWith('SELECT id, email_address, oauth_provider, mail_node FROM email_accounts')) return { rows: target ? [target] : [] };
+    return { rows: [] };
+  });
 }
 
 // Requests to the test server go through; Microsoft endpoints get canned responses.
@@ -89,10 +104,16 @@ function stubMicrosoft(handler) {
   vi.stubGlobal('fetch', vi.fn(async (url, init) => {
     const href = String(url);
     if (href.startsWith(base)) return realFetch(url, init);
-    return handler(href);
+    return handler(href, init);
   }));
 }
 const json = (ok, body) => ({ ok, json: async () => body });
+
+const headers = { 'x-test-user': USER_ID };
+const callback = () => fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, { redirect: 'manual', headers });
+const startReconnect = () => { session = { oauthNonce: NONCE, oauthUserId: USER_ID, oauthMode: 'reconnect', oauthAccountId: ACCOUNT_ID }; };
+const startAdd = () => { session = { oauthNonce: NONCE, oauthUserId: USER_ID, oauthMode: 'add', oauthAccountId: null }; };
+const MS_ROW = { id: ACCOUNT_ID, oauth_provider: 'microsoft', oauth_subject: SUBJECT, mail_node: false };
 
 let logSpies;
 beforeEach(() => {
@@ -102,9 +123,17 @@ beforeEach(() => {
   process.env.MS_REDIRECT_URI = 'https://mail.example.com/oauth/microsoft/callback';
   withTransaction.mockReset();
   imapManager.connectAccount.mockClear();
+  imapManager.disconnectAccount.mockClear();
   imapManager.clearConnectCooldown.mockClear();
   recordAudit.mockClear();
+  claims = { ...VERIFIED };
+  jwtVerify.mockReset().mockImplementation(async () => ({ payload: claims }));
+  row = { ...MS_ROW };
+  target = { id: ACCOUNT_ID, email_address: 'user@contoso.com', oauth_provider: 'microsoft', mail_node: false };
   installDb();
+  installQuery();
+  startReconnect();
+  stubMicrosoft(() => json(true, TOKENS));
   logSpies = ['log', 'warn', 'error', 'info'].map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
 });
 afterEach(() => {
@@ -116,91 +145,224 @@ afterEach(() => {
   logSpies.forEach((s) => s.mockRestore());
 });
 
-describe('Microsoft reconsent clears the reconnect flag and connect cooldown', () => {
-  it('auth-code callback resets oauth_reconnect_required and sync_error on an existing account', async () => {
-    stubMicrosoft(() => json(true, TOKENS));
+describe('starting a Microsoft flow', () => {
+  const start = (query = '') => fetch(`${base}/oauth/microsoft${query}`, { redirect: 'manual', headers });
 
-    const res = await fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, {
-      redirect: 'manual',
-      headers: { 'x-test-user': USER_ID },
-    });
-
+  it('adds a mailbox without ?account', async () => {
+    session = {};
+    const res = await start();
     expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toMatch(/^https:\/\/login\.microsoftonline\.com\/contoso-tenant\/oauth2\/v2\.0\/authorize\?/);
+    expect(session).toMatchObject({ oauthMode: 'add', oauthAccountId: null });
+  });
+
+  it('reconnects the Microsoft mailbox ?account names, hinting its address', async () => {
+    session = {};
+    const res = await start(`?account=${ACCOUNT_ID}`);
+    expect(new URL(res.headers.get('location')).searchParams.get('login_hint')).toBe('user@contoso.com');
+    expect(session).toMatchObject({ oauthMode: 'reconnect', oauthAccountId: ACCOUNT_ID });
+  });
+
+  it.each([
+    ['a mailbox of another provider', { oauth_provider: 'google' }],
+    ['a password mailbox', { oauth_provider: null }],
+    ['a mail node mailbox', { mail_node: true }],
+  ])('refuses to reconnect %s', async (_label, patch) => {
+    session = {};
+    target = { ...target, ...patch };
+    const res = await start(`?account=${ACCOUNT_ID}`);
+    expect(res.headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
+    expect(session.oauthNonce).toBeUndefined();
+  });
+
+  it('refuses a malformed account id', async () => {
+    session = {};
+    expect((await start('?account=nope')).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
+  });
+});
+
+describe('the mailbox address comes only from a verified claim', () => {
+  it.each([
+    ['email with xms_edov', { email: 'User@Contoso.com', xms_edov: true }, 'user@contoso.com'],
+    ['verified_primary_email', { verified_primary_email: ['user@contoso.com'] }, 'user@contoso.com'],
+    ['a member UPN', { upn: 'user@contoso.com' }, 'user@contoso.com'],
+  ])('accepts %s', async (_label, verifiedClaims, expected) => {
+    startAdd();
+    row = null;
+    claims = { tid: TID, oid: OID, preferred_username: 'someone-else@fabrikam.com', ...verifiedClaims };
+    const res = await callback();
     expect(res.headers.get('location')).toBe('/?oauth_success=microsoft');
-    const sql = updateSql();
-    expect(sql).toMatch(/oauth_reconnect_required\s*=\s*false/);
-    expect(sql).toMatch(/sync_error\s*=\s*NULL/);
-    expectCooldownClearedBeforeConnect();
+    expect(insertCall()[1][2]).toBe(expected);
   });
 
-  it('device-code poll resets oauth_reconnect_required and sync_error on an existing account', async () => {
-    stubMicrosoft((href) => (href.endsWith('/devicecode')
-      ? json(true, { device_code: 'dc', user_code: 'UC', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900 })
-      : json(true, TOKENS)));
-    const headers = { 'x-test-user': USER_ID };
-
-    const start = await fetch(`${base}/oauth/microsoft/device`, { method: 'POST', headers });
-    expect(start.status).toBe(200);
-    const poll = await fetch(`${base}/oauth/microsoft/device/poll`, { headers });
-
-    expect(await poll.json()).toEqual({ status: 'success' });
-    const sql = updateSql();
-    expect(sql).toMatch(/oauth_reconnect_required\s*=\s*false/);
-    expect(sql).toMatch(/sync_error\s*=\s*NULL/);
-    expectCooldownClearedBeforeConnect();
+  it.each([
+    ['email without xms_edov', { email: 'victim@fabrikam.com' }],
+    ['email with xms_edov false', { email: 'victim@fabrikam.com', xms_edov: false }],
+    ['preferred_username alone', { preferred_username: 'victim@fabrikam.com' }],
+    ['a guest UPN', { upn: 'victim_fabrikam.com#EXT#@contoso.onmicrosoft.com' }],
+  ])('refuses %s', async (_label, unverifiedClaims) => {
+    claims = { tid: TID, oid: OID, ...unverifiedClaims };
+    const res = await callback();
+    expect(res.headers.get('location')).toBe('/?oauth_error=email_not_verified&oauth_provider=microsoft');
+    expect(withTransaction).not.toHaveBeenCalled();
+    expect(recordAudit).not.toHaveBeenCalled();
   });
-});
 
-describe('Microsoft consent on a mailbox added with a password', () => {
-  it('turns the existing mailbox into a Microsoft OAuth mailbox', async () => {
-    // Storing tokens without the provider left the mailbox signing in with its old password,
-    // so the consent had no effect.
-    stubMicrosoft(() => json(true, TOKENS));
-    const res = await fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, {
-      redirect: 'manual',
-      headers: { 'x-test-user': USER_ID },
-    });
-    expect(res.status).toBe(302);
-    const sql = updateSql();
-    expect(sql).toMatch(/oauth_provider = 'microsoft'/);
-    expect(sql).toMatch(/auth_user = email_address/);
-    expect(sql).toMatch(/imap_host = 'outlook.office365.com'/);
-    expect(sql).toMatch(/smtp_host = 'smtp.office365.com'/);
+  it('refuses a token without its tenant and object ids', async () => {
+    claims = { email: 'user@contoso.com', xms_edov: true };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=authentication_failed&oauth_provider=microsoft');
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('refuses tokens without an ID token', async () => {
+    stubMicrosoft(() => json(true, { ...TOKENS, id_token: undefined }));
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=authentication_failed&oauth_provider=microsoft');
+    expect(withTransaction).not.toHaveBeenCalled();
   });
 });
 
-describe('Microsoft consent is journaled', () => {
-  const callback = () => fetch(`${base}/oauth/microsoft/callback?code=auth-code&state=${NONCE}`, {
-    redirect: 'manual', headers: { 'x-test-user': USER_ID },
-  });
+describe('adding a Microsoft mailbox', () => {
+  beforeEach(() => { startAdd(); stubMicrosoft(() => json(true, TOKENS)); });
 
-  it('records a reconsent of an existing mailbox as a reconnect', async () => {
-    stubMicrosoft(() => json(true, TOKENS));
-    await callback();
-    expect(recordAudit).toHaveBeenCalledWith({
-      actorUserId: USER_ID, accountId: 'ms-acc', action: 'mailbox.reconnected', details: { oauthProvider: 'microsoft' },
-    });
-  });
-
-  it('records a new mailbox as added', async () => {
-    installDb({ existing: false });
-    stubMicrosoft(() => json(true, TOKENS));
-    await callback();
+  it('creates it with the Microsoft subject', async () => {
+    row = null;
+    expect((await callback()).headers.get('location')).toBe('/?oauth_success=microsoft');
+    const [sql, params] = insertCall();
+    expect(sql).toMatch(/oauth_subject/);
+    expect(params).toContain(SUBJECT);
     expect(recordAudit).toHaveBeenCalledWith({
       actorUserId: USER_ID, accountId: 'ms-new', action: 'mailbox.added', details: { protocol: 'imap', oauthProvider: 'microsoft' },
     });
   });
 
+  it.each([
+    ['a Microsoft mailbox', MS_ROW],
+    ['a password mailbox', { id: 'pw', oauth_provider: null, oauth_subject: null, mail_node: false }],
+    ['a Gmail mailbox', { id: 'gm', oauth_provider: 'google', oauth_subject: 'google-sub', mail_node: false }],
+    ['a mail node mailbox', { id: 'node', oauth_provider: null, oauth_subject: null, mail_node: true }],
+  ])('never overwrites %s with the same address', async (_label, existing) => {
+    row = existing;
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=already_connected&oauth_provider=microsoft');
+    expect(wroteAccount()).toBe(false);
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
+  });
+});
+
+describe('reconnecting a Microsoft mailbox', () => {
+  beforeEach(() => { stubMicrosoft(() => json(true, TOKENS)); });
+
+  it('renews the tokens, clears the reconnect flag and the cooldown, and keeps the name', async () => {
+    const res = await callback();
+    expect(res.headers.get('location')).toBe('/?oauth_success=microsoft');
+    const [sql, params] = updateCall();
+    expect(sql).toMatch(/oauth_reconnect_required\s*=\s*false/);
+    expect(sql).toMatch(/sync_error\s*=\s*NULL/);
+    expect(sql).toMatch(/WHERE id = \$6 AND oauth_provider = 'microsoft' AND mail_node IS NOT TRUE/);
+    expect(sql).not.toMatch(/\bname\s*=/);
+    expect(params[4]).toBe(SUBJECT);
+    expect(params[5]).toBe(ACCOUNT_ID);
+    await vi.waitFor(() => expect(imapManager.connectAccount).toHaveBeenCalled());
+    expect(imapManager.clearConnectCooldown.mock.invocationCallOrder[0])
+      .toBeLessThan(imapManager.connectAccount.mock.invocationCallOrder[0]);
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorUserId: USER_ID, accountId: ACCOUNT_ID, action: 'mailbox.reconnected', details: { oauthProvider: 'microsoft' },
+    });
+  });
+
+  it('refuses another Microsoft user with the same address', async () => {
+    claims = { ...VERIFIED, oid: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=account_mismatch&oauth_provider=microsoft');
+    expect(wroteAccount()).toBe(false);
+  });
+
+  it('refuses the same object id from another tenant', async () => {
+    claims = { ...VERIFIED, tid: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=account_mismatch&oauth_provider=microsoft');
+    expect(wroteAccount()).toBe(false);
+  });
+
+  it('refuses a sign-in to another mailbox than the one being reconnected', async () => {
+    row = { ...MS_ROW, id: '44444444-4444-4444-8444-444444444444' };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=account_mismatch&oauth_provider=microsoft');
+    row = null;
+    expect((await (startReconnect(), callback())).headers.get('location')).toBe('/?oauth_error=account_mismatch&oauth_provider=microsoft');
+    expect(wroteAccount()).toBe(false);
+  });
+
+  it.each([
+    ['a password mailbox', { oauth_provider: null, oauth_subject: null }],
+    ['a mail node mailbox', { oauth_provider: 'microsoft', mail_node: true }],
+  ])('never touches %s', async (_label, patch) => {
+    row = { ...MS_ROW, ...patch };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
+    expect(wroteAccount()).toBe(false);
+  });
+
+  it('binds the subject of a mailbox connected before subjects were stored', async () => {
+    row = { ...MS_ROW, oauth_subject: null };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_success=microsoft');
+    expect(updateCall()[1][4]).toBe(SUBJECT);
+  });
+
+  it('refuses a callback whose session names no flow', async () => {
+    session = { oauthNonce: NONCE, oauthUserId: USER_ID };
+    expect((await callback()).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
   it('records nothing when the token exchange fails', async () => {
-    stubMicrosoft(() => json(false, { error: 'invalid_grant' }));
-    await callback();
+    stubMicrosoft(() => json(false, { error: 'invalid_grant', error_description: 'AADSTS70000 provider text' }));
+    const res = await callback();
+    expect(res.headers.get('location')).toBe('/?oauth_error=authentication_failed&oauth_provider=microsoft');
     expect(recordAudit).not.toHaveBeenCalled();
+  });
+
+  it('never echoes a provider error description', async () => {
+    const res = await fetch(`${base}/oauth/microsoft/callback?error=server_error&error_description=AADSTS50000%20text`, { redirect: 'manual', headers });
+    expect(res.headers.get('location')).toBe('/?oauth_error=authentication_failed&oauth_provider=microsoft');
+  });
+});
+
+describe('Microsoft device-code flow', () => {
+  const startOk = () => json(true, { device_code: 'dc-secret', user_code: 'UC', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900 });
+  const startDevice = (body) => fetch(`${base}/oauth/microsoft/device`, {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}),
+  });
+  const poll = () => fetch(`${base}/oauth/microsoft/device/poll`, { headers });
+
+  it('reconnects the mailbox the start names', async () => {
+    stubMicrosoft((href) => (href.endsWith('/devicecode') ? startOk() : json(true, TOKENS)));
+    expect((await startDevice({ account: ACCOUNT_ID })).status).toBe(200);
+    expect(await (await poll()).json()).toEqual({ status: 'success' });
+    expect(updateCall()[0]).toMatch(/oauth_reconnect_required\s*=\s*false/);
+    expect(updateCall()[1][3]).toBe(true); // public client
+  });
+
+  it('adds without an account, and refuses an existing address', async () => {
+    stubMicrosoft((href) => (href.endsWith('/devicecode') ? startOk() : json(true, TOKENS)));
+    expect((await startDevice()).status).toBe(200);
+    expect(await (await poll()).json()).toEqual({ status: 'error', error: 'Microsoft sign-in refused', code: 'already_connected' });
+    expect(wroteAccount()).toBe(false);
+  });
+
+  it('refuses to start a reconnect of a mailbox that is not a Microsoft one', async () => {
+    target = { ...target, oauth_provider: 'google' };
+    stubMicrosoft(() => startOk());
+    const res = await startDevice({ account: ACCOUNT_ID });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_state');
+  });
+
+  it('answers an unverified address with a stable code', async () => {
+    claims = { tid: TID, oid: OID, email: 'victim@fabrikam.com' };
+    stubMicrosoft((href) => (href.endsWith('/devicecode') ? startOk() : json(true, TOKENS)));
+    await startDevice({ account: ACCOUNT_ID });
+    expect(await (await poll()).json()).toEqual({ status: 'error', error: 'Microsoft sign-in refused', code: 'email_not_verified' });
   });
 });
 
 describe('Microsoft device-code errors never echo provider text', () => {
   const PROVIDER_TEXT = 'AADSTS700016: Application with identifier ms-client was not found. Trace ID: abc';
-  const headers = { 'x-test-user': USER_ID };
   const loggedText = () => logSpies.flatMap((s) => s.mock.calls.flat()).map(String).join('\n');
   const startOk = () => json(true, { device_code: 'dc-secret', user_code: 'UC', verification_uri: 'https://microsoft.com/devicelogin', expires_in: 900 });
 
@@ -223,8 +385,8 @@ describe('Microsoft device-code errors never echo provider text', () => {
       ? startOk()
       : json(false, { error: 'invalid_grant', error_description: PROVIDER_TEXT })));
     expect((await fetch(`${base}/oauth/microsoft/device`, { method: 'POST', headers })).status).toBe(200);
-    const poll = await fetch(`${base}/oauth/microsoft/device/poll`, { headers });
-    expect(await poll.json()).toEqual({ status: 'error', error: 'Token exchange failed', code: 'device_code_token_failed' });
+    const res = await fetch(`${base}/oauth/microsoft/device/poll`, { headers });
+    expect(await res.json()).toEqual({ status: 'error', error: 'Token exchange failed', code: 'device_code_token_failed' });
     expect(loggedText()).not.toContain('AADSTS700016');
   });
 
@@ -232,8 +394,8 @@ describe('Microsoft device-code errors never echo provider text', () => {
     stubMicrosoft((href) => (href.endsWith('/devicecode') ? startOk() : json(true, TOKENS)));
     withTransaction.mockImplementation(async () => { throw new Error(`db exploded ${PROVIDER_TEXT}`); });
     expect((await fetch(`${base}/oauth/microsoft/device`, { method: 'POST', headers })).status).toBe(200);
-    const poll = await fetch(`${base}/oauth/microsoft/device/poll`, { headers });
-    expect(await poll.json()).toEqual({ status: 'error', error: 'Token exchange failed', code: 'device_code_token_failed' });
+    const res = await fetch(`${base}/oauth/microsoft/device/poll`, { headers });
+    expect(await res.json()).toEqual({ status: 'error', error: 'Token exchange failed', code: 'device_code_token_failed' });
     expect(loggedText()).not.toContain('ms-at');
     expect(loggedText()).not.toContain('dc-secret');
   });

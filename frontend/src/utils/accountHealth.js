@@ -6,6 +6,7 @@
 // WebSocket account events. Both test suites read
 // backend/src/services/accountHealth.fixtures.json to keep the two rules in parity.
 import { buildGoogleReconnectUrl } from './googleOAuth.js';
+import { MICROSOFT_OAUTH_PATH, buildMicrosoftReconnectUrl } from './microsoftOAuth.js';
 
 export const STALE_AFTER_MS = 15 * 60 * 1000;
 
@@ -23,8 +24,9 @@ export const HEALTH_LABEL_KEYS = Object.freeze({
   disabled: 'sidebar.health.disabled',
 });
 
-// Existing Microsoft connect entry (AdminPanel → Integrations uses the same route).
-export const MICROSOFT_OAUTH_PATH = '/oauth/microsoft';
+// Microsoft connect entry (AdminPanel → Integrations adds a mailbox through it; a reconnect names
+// the mailbox, utils/microsoftOAuth.js).
+export { MICROSOFT_OAUTH_PATH };
 
 // Priority: disabled → oauth_reconnect_required → failed → stale → healthy.
 // Keep in sync with the backend; the shared fixture test fails on drift.
@@ -70,7 +72,7 @@ export function accountEventPatch(type, data) {
 // account, or null when the account has no OAuth provider.
 export function reconnectUrlFor(account) {
   if (account?.oauth_provider === 'google') return buildGoogleReconnectUrl(account.id);
-  if (account?.oauth_provider === 'microsoft') return MICROSOFT_OAUTH_PATH;
+  if (account?.oauth_provider === 'microsoft') return buildMicrosoftReconnectUrl(account.id);
   return null;
 }
 

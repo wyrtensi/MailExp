@@ -97,9 +97,11 @@ describe('reconnectUrlFor', () => {
     assert.equal(reconnectUrlFor({ oauth_provider: 'google', email_address: 'box@gmail.com' }), null);
   });
 
-  it('uses the existing Microsoft connect entry', () => {
+  it('reconnects a Microsoft mailbox by its id', () => {
     assert.equal(MICROSOFT_OAUTH_PATH, '/oauth/microsoft');
-    assert.equal(reconnectUrlFor({ oauth_provider: 'microsoft', email_address: 'box@outlook.com' }), '/oauth/microsoft');
+    assert.equal(reconnectUrlFor({ id: 'acc-2', oauth_provider: 'microsoft', email_address: 'box@outlook.com' }), '/oauth/microsoft?account=acc-2');
+    // Without an id the flow would add a mailbox instead, so there is no reconnect URL.
+    assert.equal(reconnectUrlFor({ oauth_provider: 'microsoft', email_address: 'box@outlook.com' }), null);
   });
 
   it('returns null for accounts without an OAuth provider', () => {
@@ -130,8 +132,8 @@ describe('reconnectMenuAction', () => {
   it('offers the OAuth consent flow for a reconnect-required OAuth account', () => {
     const google = { id: 'acc-1', oauth_provider: 'google', email_address: 'a@gmail.com', health: 'oauth_reconnect_required' };
     assert.deepEqual(reconnectMenuAction(google), { kind: 'oauth', url: reconnectUrlFor(google) });
-    const microsoft = { oauth_provider: 'microsoft', health: 'oauth_reconnect_required' };
-    assert.deepEqual(reconnectMenuAction(microsoft), { kind: 'oauth', url: MICROSOFT_OAUTH_PATH });
+    const microsoft = { id: 'acc-2', oauth_provider: 'microsoft', health: 'oauth_reconnect_required' };
+    assert.deepEqual(reconnectMenuAction(microsoft), { kind: 'oauth', url: `${MICROSOFT_OAUTH_PATH}?account=acc-2` });
   });
 
   it('keeps the IMAP reconnect for every other account', () => {

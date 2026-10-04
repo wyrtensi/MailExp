@@ -13,6 +13,64 @@ export function getMsConfig() {
   };
 }
 
+// --- who signed in -----------------------------------------------------------------------------
+//
+// The mailbox address must come from a claim Microsoft vouches for. `email` alone is not one: it
+// "isn't guaranteed to be correct, and is mutable over time - never use it for authorization", and
+// `preferred_username` is display text a tenant administrator controls; with the `common` tenant
+// any tenant's token verifies, so either could name someone else's mailbox (the nOAuth class).
+//   https://learn.microsoft.com/en-us/entra/identity-platform/optional-claims-reference
+//   https://learn.microsoft.com/en-us/entra/identity-platform/claims-validation
+// Accepted, in this order:
+//   1. `email` when `xms_edov` is true: the email domain's owner was verified by the user's own
+//      tenant (or the account is a Microsoft account). Both are optional claims of the app
+//      registration (token configuration: email, xms_edov).
+//   2. `verified_primary_email`, "sourced from the user's PrimaryAuthoritativeEmail" (optional).
+//   3. `upn` (optional claim) of a member user: Entra only lets a UPN carry a domain the tenant
+//      verified, else it rewrites it to the tenant's own <name>.onmicrosoft.com
+//      (https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/plan-connect-userprincipalname).
+//      A guest's UPN (with #EXT#) names the resource tenant, not the user, and is refused.
+// None of them: the sign-in is refused (email_not_verified) rather than guessed.
+//
+// The user is identified by `tid` + `oid`, "immutable claim values ... as a combined key"
+// (claims-validation), stored as the mailbox's oauth_subject.
+
+const ADDRESS_RE = /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/;
+
+function cleanAddress(value) {
+  if (typeof value !== 'string') return null;
+  const address = value.trim().toLowerCase();
+  return ADDRESS_RE.test(address) && address.length <= 320 ? address : null;
+}
+
+// The verified mailbox address of an ID token's claims, or null.
+export function verifiedMicrosoftAddress(claims) {
+  const c = claims ?? {};
+  if (c.xms_edov === true || c.xms_edov === 'true' || c.xms_edov === 1 || c.xms_edov === '1') {
+    const email = cleanAddress(c.email);
+    if (email) return email;
+  }
+  const verified = Array.isArray(c.verified_primary_email) ? c.verified_primary_email : [c.verified_primary_email];
+  for (const value of verified) {
+    const address = cleanAddress(value);
+    if (address) return address;
+  }
+  if (typeof c.upn === 'string' && !c.upn.includes('#')) {
+    const upn = cleanAddress(c.upn);
+    if (upn) return upn;
+  }
+  return null;
+}
+
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// "<tid>:<oid>" of an ID token's claims, or null when either is missing.
+export function microsoftSubject(claims) {
+  const tid = typeof claims?.tid === 'string' ? claims.tid.toLowerCase() : '';
+  const oid = typeof claims?.oid === 'string' ? claims.oid.toLowerCase() : '';
+  return GUID_RE.test(tid) && GUID_RE.test(oid) ? `${tid}:${oid}` : null;
+}
+
 // Serialize refreshes per account so concurrent callers share one token-endpoint
 // call — AAD rotates the refresh token on each refresh, and two racing refreshes
 // would strand a superseded refresh token and lock the account out.

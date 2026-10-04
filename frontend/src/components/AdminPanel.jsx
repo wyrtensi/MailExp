@@ -55,6 +55,7 @@ import MailboxDeletionNotice, { TenantPendingLine } from './MailboxDeletionNotic
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
+import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
 import { isValidForwardAddress, ruleForwardTarget } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
@@ -2547,6 +2548,8 @@ function IntegrationsTab() {
   const [connectingMs, setConnectingMs] = useState(false);
   const [deviceFlow, setDeviceFlow] = useState(null); // { userCode, verificationUri, interval }
   const [deviceStatus, setDeviceStatus] = useState(null); // 'pending'|'success'|'declined'|'expired'|'error'
+  // Why the device-code sign-in was refused (a stable code's message), when the server said.
+  const [deviceErrorKey, setDeviceErrorKey] = useState(null);
   const devicePollRef = useRef(null);
   // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
   const [mailNodeRevision, setMailNodeRevision] = useState(0);
@@ -2618,7 +2621,8 @@ function IntegrationsTab() {
         api.getAccounts().then(setAccounts).catch(console.error);
       } else if (e.data?.type === 'oauth_error' && (!e.data?.provider || e.data.provider === 'microsoft')) {
         // Google errors carry provider 'google' and are announced by MailApp.
-        setSaveMsg('Error: ' + e.data.error);
+        // A stable code from the callback (routes/oauth.js), never shown as is.
+        setSaveMsg('Error: ' + t(microsoftOAuthErrorKey(e.data.error)));
         setConnectingMs(false);
       }
     };
@@ -2656,6 +2660,7 @@ function IntegrationsTab() {
     if (devicePollRef.current) { clearInterval(devicePollRef.current); devicePollRef.current = null; }
     setDeviceFlow(null);
     setDeviceStatus(null);
+    setDeviceErrorKey(null);
   };
 
   const handleStartDeviceFlow = async () => {
@@ -2672,6 +2677,7 @@ function IntegrationsTab() {
           clearInterval(devicePollRef.current);
           devicePollRef.current = null;
           setDeviceStatus(result.status);
+          setDeviceErrorKey(result.status === 'error' && result.code ? microsoftOAuthErrorKey(result.code) : null);
           if (result.status === 'success') {
             setSaveMsg(t('admin.integrations.microsoft.connectedNote'));
             api.getAccounts().then(setAccounts).catch(console.error);
@@ -2849,6 +2855,7 @@ function IntegrationsTab() {
                     <li>{t('admin.integrations.microsoft.step4')}</li>
                     <li>{t('admin.integrations.microsoft.step5')}</li>
                     <li>{t('admin.integrations.microsoft.step6')}</li>
+                    <li>{t('admin.integrations.microsoft.step7')}</li>
                   </ol>
                 </div>
 
@@ -3015,7 +3022,11 @@ function IntegrationsTab() {
                       ) : deviceStatus === 'expired' ? (
                         <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('admin.integrations.microsoft.deviceCodeExpired')}</div>
                       ) : deviceStatus === 'error' ? (
-                        <div style={{ color: 'var(--red)', fontSize: 13 }}>{t('admin.integrations.microsoft.deviceCodeError')}</div>
+                        <div style={{ color: 'var(--red)', fontSize: 13 }}>
+                          {deviceErrorKey && deviceErrorKey !== 'admin.integrations.microsoft.errorAuthenticationFailed'
+                            ? t(deviceErrorKey)
+                            : t('admin.integrations.microsoft.deviceCodeError')}
+                        </div>
                       ) : (
                         <>
                           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
