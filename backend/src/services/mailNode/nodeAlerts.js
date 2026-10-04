@@ -17,6 +17,7 @@ import { getTenantDriver, tenantOf } from '../tenant/driver.js';
 import { POLL_INTERVAL_MS, TENANT_FAILING_POLLS, getTenantState } from '../tenant/tenantJobs.js';
 import { connectorDrift } from '../tenant/connectors.js';
 import { heldSummary } from '../tenant/quarantineRelease.js';
+import { checkSpamRule } from './nodeApply.js';
 
 // The mail node's alerts (R-18): what an administrator must hear about before the employees notice,
 // checked every five minutes and shown in the panel, and pinged to a Healthchecks-style check URL
@@ -43,7 +44,8 @@ import { heldSummary } from '../tenant/quarantineRelease.js';
 //   (services/tenant/tenantJobs.js, every 10 minutes): a blocked inbound connector in
 //   Get-BlockedConnector (R-27, connector_blocked_tenant, error) and the application certificate in
 //   the tenant worker expiring (tenant_certificate: a warning from 30 days left, an error from 14
-//   and once expired). The run reads only the stored state, never the tenant. A poll that failed or
+//   and once expired), and the anti-spam actions the panel could not set to MoveToJmf (section
+//   5.14, tenant_antispam_not_enforced, warning). The run reads only the stored state, never the tenant. A poll that failed or
 //   is older than TENANT_STALE_MS keeps the connector alert as it was (source tenant not read), and
 //   from TENANT_FAILING_POLLS failed polls in a row, or no poll for TENANT_STALE_MS, a warning
 //   tenant_poll_failing says so. None of this touches the node's ping: a tenant problem (a timeout,
@@ -86,13 +88,16 @@ export const ALERTS = Object.freeze({
   certificate: ['certificate', 'warning'],
   containers: ['containers', 'error'],
   terrl_budget: ['terrl', 'warning'],
+  spam_rule_outdated: ['spam_rule', 'warning'],
   outage_letters_waiting: ['trace', 'warning'],
   connector_blocked_tenant: ['tenant', 'error'],
   tenant_certificate: ['tenant_certificate', 'warning'],
   tenant_poll_failing: ['tenant_poll', 'warning'],
   tenant_connector_drift: ['tenant_connectors', 'warning'],
+  tenant_antispam_not_enforced: ['tenant_antispam', 'warning'],
   tenant_domain_authoritative: ['tenant_domains', 'warning'],
   tenant_phish_held: ['tenant_quarantine', 'warning'],
+  tenant_alias_contacts_held: ['tenant_domains', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -177,6 +182,12 @@ export function containerSignal(containers) {
   return down.length ? [{ key: 'containers', severity: 'error', details: { down } }] : [];
 }
 
+// The node holds an older version of the spam rule, or none (section 5.14).
+export function spamRuleSignal(rule) {
+  if (rule?.state !== 'outdated' && rule?.state !== 'missing') return [];
+  return [{ key: 'spam_rule_outdated', severity: 'warning', details: { state: rule.state, checkedAt: rule.at ?? null } }];
+}
+
 export function terrlSignal(budget) {
   if (!budget?.warn) return [];
   return [{
@@ -249,7 +260,25 @@ export function tenantSignals(state, now = Date.now()) {
       });
     }
   }
-  return { alerts, stale, connectorsStale };
+  // Section 5.14: the panel could not set the spam, high confidence spam or phishing action of the
+  // Default policy to MoveToJmf; such letters may stay in EOP's quarantine (the release job is the
+  // fallback). A read that failed before any write keeps the alert as it was (antispamStale).
+  const antispam = state?.antispam;
+  const antispamStale = !!antispam && antispam.ok === false && !antispam.enforcement;
+  const enforcement = antispam?.enforcement;
+  if (enforcement && enforcement.ok === false) {
+    alerts.push({
+      key: 'tenant_antispam_not_enforced',
+      severity: 'warning',
+      // unconfirmed: the read after the writes failed, so they may have gone through; code
+      // unknown_op: the tenant-worker image predates the operation (rebuild it).
+      details: {
+        fields: enforcement.failed ?? [], code: enforcement.error?.code ?? null, unconfirmed: enforcement.unconfirmed === true,
+        checkedAt: enforcement.at ?? antispam.at ?? null,
+      },
+    });
+  }
+  return { alerts, stale, connectorsStale, antispamStale };
 }
 
 // The alerts of this run (fresh: those the sources that were read gave) merged with the previous
@@ -391,6 +420,19 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   if (!failed.includes('certificate')) fresh.push(...certificateSignal(nodeDns));
   const containers = await read('containers', () => getContainers(cfg));
   if (containers) fresh.push(...containerSignal(containers));
+  // Section 5.14: the spam rule on the node, once mail goes through EOP. Until this version is
+  // written, spam and phishing released from EOP's quarantine would land in the Inbox, so the
+  // release holds them and this alert asks for the rule. An unknown answer keeps the alert as it was.
+  if (eop.eopHost) {
+    try {
+      const rule = await checkSpamRule({ cfg, now });
+      if (rule.state === 'unknown') failed.push('spam_rule');
+      else fresh.push(...spamRuleSignal(rule));
+    } catch (err) {
+      console.error(`Mail node spam rule was not read: ${err?.code || err?.message || 'error'}`);
+      failed.push('spam_rule');
+    }
+  }
   const traceSource = await outageStep({
     check: classifyCheck({ containers, errorCode: errors.find((e) => e.source === 'containers')?.code ?? null }),
     log, now, userId, fresh, failed,
@@ -469,13 +511,14 @@ async function outageStep({ check, log, now, userId, fresh, failed }) {
 async function tenantStep({ eop, now, fresh, failed }) {
   if (!getTenantDriver() || !tenantOf(eop)) return;
   try {
-    const { alerts, stale, connectorsStale } = tenantSignals(await getTenantState(), now);
+    const { alerts, stale, connectorsStale, antispamStale } = tenantSignals(await getTenantState(), now);
     fresh.push(...alerts);
     if (stale) failed.push('tenant');
     if (connectorsStale) failed.push('tenant_connectors');
+    if (antispamStale) failed.push('tenant_antispam');
   } catch (err) {
     console.error(`Mail node tenant alerts were not read: ${err?.code || err?.message || 'error'}`);
-    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors', 'tenant_domains', 'tenant_quarantine');
+    failed.push('tenant', 'tenant_certificate', 'tenant_poll', 'tenant_connectors', 'tenant_antispam', 'tenant_domains', 'tenant_quarantine');
     return;
   }
   // Stage 7b: a domain the tenant had as Authoritative waits for an administrator's decision. Its
@@ -485,6 +528,17 @@ async function tenantStep({ eop, now, fresh, failed }) {
       WHERE tenant_sync->'acceptedDomain'->>'code' = 'authoritative_in_tenant' ORDER BY domain`);
     if (rows.length) {
       fresh.push({ key: 'tenant_domain_authoritative', severity: 'warning', details: { count: rows.length, domains: rows.slice(0, 5).map((r) => r.domain) } });
+    }
+    // Section 5.14: contacts of mailcow aliases the mirror keeps on an Authoritative domain until an
+    // administrator allows their removal.
+    const { rows: held } = await query(`SELECT domain, tenant_sync->'mirror'->'heldAliasContacts' AS addresses FROM mail_node_domains
+      WHERE jsonb_array_length(COALESCE(tenant_sync->'mirror'->'heldAliasContacts', '[]'::jsonb)) > 0 ORDER BY domain`);
+    if (held.length) {
+      const addresses = held.flatMap((r) => r.addresses ?? []);
+      fresh.push({
+        key: 'tenant_alias_contacts_held', severity: 'warning',
+        details: { count: addresses.length, domains: held.slice(0, 5).map((r) => r.domain), addresses: addresses.slice(0, 5) },
+      });
     }
   } catch (err) {
     console.error(`Mail node tenant domain alerts were not read: ${err?.code || err?.message || 'error'}`);
@@ -535,6 +589,9 @@ function summaryOf(alert) {
     case 'tenant_certificate': return { code: d.code, daysLeft: d.daysLeft };
     case 'tenant_poll_failing': return { failures: d.failures, code: d.code };
     case 'tenant_phish_held': return { count: d.count, soonestExpiresAt: d.soonestExpiresAt };
+    case 'tenant_antispam_not_enforced': return { fields: d.fields ?? [], code: d.code, unconfirmed: d.unconfirmed === true };
+    case 'spam_rule_outdated': return { state: d.state };
+    case 'tenant_alias_contacts_held': return { count: d.count, domains: d.domains ?? [] };
     default: return { count: d.count };
   }
 }

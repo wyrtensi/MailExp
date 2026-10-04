@@ -20,8 +20,20 @@ describe('AUDIT_ACTIONS', () => {
       'mail_node.outage_deleted',
       'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
       'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
-      'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
+      'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced', 'tenant.antispam_enforced',
+      'tenant.alias_contacts_removal_approved',
     ]);
+    // Section 5.14: the type in words, as EOP wrote it for one the panel does not name.
+    assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { type: 'Spam', sender: 's@x.test', recipients: ['a@example.com'], messageId: '<m@x>' } }), {
+      key: 'admin.audit.detailTenantQuarantineReleased', values: { sender: 's@x.test', recipients: 'a@example.com', messageId: '<m@x>' }, valueKeys: { type: 'admin.tenant.qtypeSpam' },
+    });
+    assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { type: 'Odd', sender: '', recipients: [], messageId: '' } }).values.type, 'Odd');
+    assert.deepEqual(auditDetail({ action: 'tenant.alias_contacts_removal_approved', details: { domain: 'example.com', addresses: ['sales@example.com'] } }), {
+      key: 'admin.audit.detailTenantAliasContactsApproved', values: { domain: 'example.com', addresses: 'sales@example.com' },
+    });
+    assert.deepEqual(auditDetail({ action: 'tenant.antispam_enforced', details: { changed: [{ field: 'PhishSpamAction', from: 'Quarantine', to: 'MoveToJmf' }] } }), {
+      key: 'admin.audit.detailTenantAntispamEnforced', values: { fields: 'PhishSpamAction: Quarantine → MoveToJmf' },
+    });
     assert.deepEqual(auditDetail({ action: 'tenant.domain_hold_changed', details: { domain: 'example.com', hold: false } }), {
       key: 'admin.audit.detailTenantHoldOff', values: { domain: 'example.com' },
     });
@@ -38,7 +50,7 @@ describe('AUDIT_ACTIONS', () => {
     });
     // Stage 7c: a release from EOP's quarantine, the pause switch, a trace asked for.
     assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { sender: 'x@phish.example.net', recipients: ['a@example.com', 'b@example.com'], messageId: '<m@x>' } }), {
-      key: 'admin.audit.detailTenantQuarantineReleased', values: { sender: 'x@phish.example.net', recipients: 'a@example.com, b@example.com', messageId: '<m@x>' },
+      key: 'admin.audit.detailTenantQuarantineReleasedNoType', values: { sender: 'x@phish.example.net', recipients: 'a@example.com, b@example.com', messageId: '<m@x>' },
     });
     assert.deepEqual(auditDetail({ action: 'tenant.phish_release_changed', details: { enabled: false } }), { key: 'admin.audit.detailTenantPhishReleaseOff', values: {} });
     assert.deepEqual(auditDetail({ action: 'tenant.message_traced', details: { messageId: '<m@x>' } }), { key: 'admin.audit.detailTenantMessageTraced', values: { messageId: '<m@x>' } });

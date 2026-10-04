@@ -41,7 +41,23 @@ describe('quarantine helpers', () => {
 
   it('follows the panel\'s filing rule for EOP verdicts', () => {
     assert.equal(eopSendsToSpam({ verdict: 'SPM', category: 'SPM' }), true);
-    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPM' }), false);
+    // Released from quarantine (section 5.14): spam, high confidence spam and spoofing still go to
+    // Spam, bulk does not.
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPM' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'HSPM' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPOOF' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'BULK' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'NONE' }), false);
+    // The node's rule as it is (M2): the rule before section 5.14 keeps released spam, bulk and
+    // spoofing in the Inbox; without a rule nothing goes to Spam.
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPM' }, 'outdated'), false);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'BULK' }, 'outdated'), false);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'PHSH' }, 'outdated'), true);
+    assert.equal(eopSendsToSpam({ verdict: 'NSPM', category: 'BULK' }, 'outdated'), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SPM', category: 'SPM' }, 'missing'), false);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPM' }, 'ok'), true);
+    assert.equal(releaseEopNoteShown('reject', { verdict: 'SKQ', category: 'SPM' }, 'outdated'), false);
+    assert.equal(releaseEopNoteShown('reject', { verdict: 'SKQ', category: 'SPM' }, 'ok'), true);
     assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'PHSH' }), true);
     assert.equal(eopSendsToSpam({ verdict: 'NSPM', category: 'NONE' }), false);
     assert.equal(eopSendsToSpam({ category: 'BULK' }), true);

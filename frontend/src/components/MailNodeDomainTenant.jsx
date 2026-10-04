@@ -46,6 +46,7 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
   const [queued, setQueued] = useState(false);
   const [error, setError] = useState(null);
   const [confirmRelay, setConfirmRelay] = useState(false);
+  const [confirmAliases, setConfirmAliases] = useState(false);
   const sync = domain.tenantSync;
 
   const act = (action, { queues = false } = {}) => async () => {
@@ -55,6 +56,7 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
       await action();
       if (queues) setQueued(true);
       setConfirmRelay(false);
+      setConfirmAliases(false);
       await onChanged?.();
     } catch (err) {
       setError(mailNodeErrorKey(err?.code));
@@ -66,9 +68,11 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
   const hold = domain.holdInternalRelay !== false;
   const toggleHold = act(() => api.mailNode.setTenantDomainHold(domain.domain, !hold));
   const approveRelay = act(() => api.mailNode.approveTenantInternalRelay(domain.domain), { queues: true });
+  const removeAliasContacts = act(() => api.mailNode.removeTenantAliasContacts(domain.domain), { queues: true });
 
   const graph = sync?.graph;
   const accepted = sync?.acceptedDomain;
+  const authoritative = domain.state === 'authoritative' || accepted?.type === 'Authoritative';
   const connector = sync?.connector;
   const dkim = sync?.dkim;
   const mirror = sync?.mirror;
@@ -163,7 +167,40 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
               {mirror.conflicts?.length > 0 && (
                 <div role="status" style={warningStyle}>{t('admin.mailNode.tenantMirrorConflicts', { addresses: list(mirror.conflicts) })}</div>
               )}
-              {mirror.nodeOnly?.length > 0 && <div>{t('admin.mailNode.tenantNodeOnly')}: <span style={monoStyle}>{list(mirror.nodeOnly)}</span></div>}
+              {/* Section 5.14: mailboxes made in mailcow, not in the panel: still mirrored, shown as made outside the panel. */}
+              {mirror.nodeOnly?.length > 0 && (
+                <div data-tenant-node-only>
+                  {t('admin.mailNode.tenantNodeOnly')}: <span style={monoStyle}>{list(mirror.nodeOnly)}</span>
+                  <div style={{ color: 'var(--text-tertiary)' }}>{t('admin.mailNode.tenantNodeOnlyNote')}</div>
+                </div>
+              )}
+              {/* Section 5.14: aliases made by hand in mailcow are not mirrored; listed with what that means. */}
+              {mirror.nodeAliases?.length > 0 && (
+                <div role="status" data-tenant-node-aliases style={warningStyle}>
+                  {t('admin.mailNode.tenantNodeAliases')}: <span style={monoStyle}>{list(mirror.nodeAliases)}</span>
+                  <div>{t(authoritative ? 'admin.mailNode.tenantNodeAliasesNoteAuthoritative' : 'admin.mailNode.tenantNodeAliasesNote')}</div>
+                </div>
+              )}
+              {/* Section 5.14: on an Authoritative domain the contacts made for them earlier stay until an administrator allows their removal. */}
+              {mirror.heldAliasContacts?.length > 0 && (
+                <div role="status" data-tenant-alias-contacts-held style={warningStyle}>
+                  <div>{t('admin.mailNode.tenantAliasContactsHeld', { addresses: list(mirror.heldAliasContacts) })}</div>
+                  {active && !confirmAliases && (
+                    <button type="button" onClick={() => setConfirmAliases(true)} disabled={busy} style={{ ...buttonStyle, marginTop: 6 }}>
+                      {t('admin.mailNode.tenantRemoveAliasContacts')}
+                    </button>
+                  )}
+                  {confirmAliases && (
+                    <div style={{ marginTop: 6 }}>
+                      <div>{t('admin.mailNode.tenantRemoveAliasContactsConfirm', { addresses: list(mirror.heldAliasContacts) })}</div>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                        <button type="button" onClick={removeAliasContacts} disabled={busy} style={buttonStyle}>{t('admin.mailNode.tenantRemoveAliasContacts')}</button>
+                        <button type="button" onClick={() => setConfirmAliases(false)} disabled={busy} style={buttonStyle}>{t('common.cancel')}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {mirror.panelOnly?.length > 0 && <div>{t('admin.mailNode.tenantPanelOnly')}: <span style={monoStyle}>{list(mirror.panelOnly)}</span></div>}
             </div>
           )}

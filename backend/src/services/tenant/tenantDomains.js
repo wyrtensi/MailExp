@@ -330,18 +330,25 @@ export function externalOf(address, externalDomain) {
 //   mailboxes: the node's mailboxes of the domain ({ email, state }); aliases: its aliases
 //   ({ address, active }); panel: the panel's mailboxes there ({ email, deleting }); recipients:
 //   the tenant's (Get-Recipient rows). Returns { desired, create, retarget, remove, hide, present,
-//   conflicts, catchAll, nodeOnly, panelOnly, suspicious }. retarget: contacts of the other D-7
-//   variant, changed in place (Set-MailContact -ExternalEmailAddress), never removed and made again:
-//   on an Authoritative domain that would reject the address in between.
+//   conflicts, catchAll, nodeAliases, nodeOnly, panelOnly, suspicious }. retarget: contacts of the
+//   other D-7 variant, changed in place (Set-MailContact -ExternalEmailAddress), never removed and
+//   made again: on an Authoritative domain that would reject the address in between.
+//
+// Aliases (the owner's decision after stage 7, section 5.14, which undoes the stage 7b
+// clarification of D-16): everything goes through the panel, and the mirror covers only addresses
+// the panel owns. An alias made by hand in mailcow gets no contact; nodeAliases lists the active
+// ones for the administrators (once the domain is Authoritative, EOP rejects mail to them), and a
+// contact the 7b mirror made for one is removed like any contact nobody needs.
 export function planMirror({ domain, mailboxes, aliases, panel, recipients, externalDomain = null }) {
   const deleting = new Set(panel.filter((p) => p.deleting).map((p) => p.email));
   const desired = new Set();
-  // Every mailbox that takes mail (active, or receiving without login) and every active alias but a
-  // catch-all, except a mailbox being deleted: its contact goes first (BEFORE_NODE_DELETE).
+  // Every mailbox that takes mail (active, or receiving without login), except a mailbox being
+  // deleted: its contact goes first (BEFORE_NODE_DELETE).
   for (const m of mailboxes) if (m.state !== 0 && domainOf(m.email) === domain && !deleting.has(m.email)) desired.add(m.email);
   // An active catch-all only: a disabled one takes no mail (D-6).
   const catchAll = aliases.find((a) => a.active && a.address.startsWith('@'))?.address ?? null;
-  for (const a of aliases) if (a.active && !a.address.startsWith('@') && !deleting.has(a.address)) desired.add(a.address);
+  const nodeAliases = [...new Set(aliases.filter((a) => a.active && !a.address.startsWith('@') && domainOf(a.address) === domain)
+    .map((a) => a.address))].sort();
   const contacts = new Map();
   const taken = new Set();
   for (const r of recipients) {
@@ -388,6 +395,7 @@ export function planMirror({ domain, mailboxes, aliases, panel, recipients, exte
     present,
     conflicts: [...desired].filter((a) => taken.has(a)).sort(),
     catchAll,
+    nodeAliases,
     nodeOnly: [...onNode].filter((e) => !inPanel.has(e)).sort(),
     panelOnly: [...inPanel].filter((e) => !onNode.has(e)).sort(),
     suspicious,
@@ -427,9 +435,18 @@ async function syncMirror({ session, settings }, row, out) {
   const plan = planMirror({
     domain, mailboxes: node.mailboxes, aliases: node.aliases, panel, recipients, externalDomain: settings.dbebExternalDomain ?? null,
   });
-  // Complete on a fresh read: nothing to make, move or remove, no active catch-all (D-6), a node
-  // answer to trust.
-  const complete = !plan.create.length && !plan.retarget.length && !plan.remove.length && !plan.catchAll && !plan.suspicious;
+  // Section 5.14: on an Authoritative domain a contact stage 7b made for a mailcow alias still on the
+  // node is the only thing that lets mail to the alias in: removing it rejects that mail at once.
+  // Such contacts stay until an administrator allows their removal (alias_contacts_approved_at,
+  // journaled); they are reported (heldAliasContacts) and raise tenant_alias_contacts_held. On an
+  // Internal Relay domain they go like any contact nobody needs.
+  const authoritative = out.state === 'authoritative' || out.acceptedType === 'Authoritative' || row.accepted_domain_type === 'Authoritative';
+  const aliases = new Set(plan.nodeAliases);
+  const heldAliasContacts = authoritative && !row.alias_contacts_approved_at ? plan.remove.filter((a) => aliases.has(a)) : [];
+  const removals = plan.remove.filter((a) => !heldAliasContacts.includes(a));
+  // Complete on a fresh read: nothing to make, move or remove (contacts held for an administrator
+  // aside), no active catch-all (D-6), a node answer to trust.
+  const complete = !plan.create.length && !plan.retarget.length && !removals.length && !plan.catchAll && !plan.suspicious;
   const external = (address) => externalOf(address, settings.dbebExternalDomain ?? null);
   const created = [];
   const retargeted = [];
@@ -477,7 +494,7 @@ async function syncMirror({ session, settings }, row, out) {
         present.add(address);
       }
     }
-    for (const address of plan.remove) {
+    for (const address of removals) {
       if (budget <= 0) break;
       if (await write('remove_mail_contact', address, { address }, ['exo_not_found'])) removed.push(address);
     }
@@ -502,15 +519,17 @@ async function syncMirror({ session, settings }, row, out) {
     // (or throttling) kept for later; a write that failed is not retried at once.
     const left = plan.create.filter((a) => !attempted.has(`make:${a}`)).length
       + plan.retarget.filter((a) => !attempted.has(`make:${a}`)).length
-      + plan.remove.filter((a) => !attempted.has(`remove:${a}`)).length;
+      + removals.filter((a) => !attempted.has(`remove:${a}`)).length;
     out.sync.mirror = {
       at: out.at, ok: !failed.length, complete,
       desired: plan.desired.length, present: present.size,
       created: created.slice(0, LIST_MAX), retargeted: retargeted.slice(0, LIST_MAX), removed: removed.slice(0, LIST_MAX),
       failed: failed.slice(0, LIST_MAX),
       missing: plan.desired.filter((a) => !present.has(a) && !plan.conflicts.includes(a)).slice(0, LIST_MAX),
-      extra: plan.remove.filter((a) => !removed.includes(a)).slice(0, LIST_MAX),
+      extra: removals.filter((a) => !removed.includes(a)).slice(0, LIST_MAX),
+      heldAliasContacts: heldAliasContacts.slice(0, LIST_MAX),
       conflicts: plan.conflicts.slice(0, LIST_MAX), catchAll: plan.catchAll, suspicious: plan.suspicious,
+      nodeAliases: plan.nodeAliases.slice(0, LIST_MAX),
       nodeOnly: plan.nodeOnly.slice(0, LIST_MAX), panelOnly: plan.panelOnly.slice(0, LIST_MAX),
       variant: settings.dbebExternalDomain ? 'B' : 'A', left,
     };
@@ -702,7 +721,8 @@ async function lockDomain(domain, jobId) {
     UPDATE mail_node_domains SET sync_lock_job = $2, sync_locked_at = NOW()
      WHERE domain = $1
        AND (sync_lock_job IS NULL OR sync_lock_job = $2 OR sync_locked_at < NOW() - make_interval(mins => $3::int))
-    RETURNING domain, state, dkim_mode, tenant_sync, hold_internal_relay, internal_relay_approved_at, accepted_domain_type
+    RETURNING domain, state, dkim_mode, tenant_sync, hold_internal_relay, internal_relay_approved_at, accepted_domain_type,
+              alias_contacts_approved_at
   `, [domain, jobId, LOCK_STALE_MINUTES]);
   if (row) return row;
   const { rows: [known] } = await query('SELECT 1 FROM mail_node_domains WHERE domain = $1', [domain]);

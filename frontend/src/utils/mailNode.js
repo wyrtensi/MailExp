@@ -91,6 +91,7 @@ const ERROR_KEYS = {
   hold_invalid: 'admin.mailNode.errorHoldInvalid',
   domain_authoritative: 'admin.mailNode.errorDomainAuthoritative',
   internal_relay_not_needed: 'admin.mailNode.errorInternalRelayNotNeeded',
+  alias_contacts_not_held: 'admin.mailNode.errorAliasContactsNotHeld',
   domain_not_found: 'admin.mailNode.errorDomainNotFound',
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
@@ -962,6 +963,7 @@ const ALERT_TITLE_KEYS = {
   certificate: 'admin.nodeOps.alertCertificate',
   containers: 'admin.nodeOps.alertContainers',
   terrl_budget: 'admin.nodeOps.alertTerrlBudget',
+  spam_rule_outdated: 'admin.nodeOps.alertSpamRuleOutdated',
   outage_letters_waiting: 'admin.nodeOps.alertOutageLettersWaiting',
   connector_blocked_tenant: 'admin.nodeOps.alertConnectorBlockedTenant',
   tenant_certificate: 'admin.nodeOps.alertTenantCertificate',
@@ -969,6 +971,8 @@ const ALERT_TITLE_KEYS = {
   tenant_connector_drift: 'admin.nodeOps.alertTenantConnectorDrift',
   tenant_domain_authoritative: 'admin.nodeOps.alertTenantDomainAuthoritative',
   tenant_phish_held: 'admin.nodeOps.alertTenantPhishHeld',
+  tenant_alias_contacts_held: 'admin.nodeOps.alertTenantAliasContactsHeld',
+  tenant_antispam_not_enforced: 'admin.nodeOps.alertTenantAntispamNotEnforced',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -989,8 +993,10 @@ const ALERT_SOURCE_KEYS = {
   tenant_certificate: 'admin.nodeOps.sourceTenant',
   tenant_poll: 'admin.nodeOps.sourceTenant',
   tenant_connectors: 'admin.nodeOps.sourceTenant',
+  tenant_antispam: 'admin.nodeOps.sourceTenant',
   tenant_domains: 'admin.nodeOps.sourceTenant',
   tenant_quarantine: 'admin.nodeOps.sourceTenant',
+  spam_rule: 'admin.nodeOps.sourceSpamRule',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1053,6 +1059,27 @@ export function alertDetail(alert) {
     // Phishing the panel keeps in EOP's quarantine (R-42, stage 7c).
     case 'tenant_phish_held':
       return { key: 'admin.nodeOps.alertDetailTenantPhishHeld', values: { count: d.count ?? 0 }, at: d.soonestExpiresAt ?? null };
+    // The anti-spam actions the panel could not set to MoveToJmf (section 5.14).
+    // The worker image predates the operation (unknown_op), or the read after the writes failed and
+    // the writes may have gone through (unconfirmed).
+    case 'tenant_antispam_not_enforced': {
+      let key = 'admin.nodeOps.alertDetailTenantAntispamNotEnforced';
+      if (d.code === 'unknown_op') key = 'admin.nodeOps.alertDetailTenantAntispamWorkerOutdated';
+      else if (d.unconfirmed) key = 'admin.nodeOps.alertDetailTenantAntispamUnconfirmed';
+      return { key, values: { fields: (d.fields ?? []).join(', ') || '—', code: d.code ?? '—' }, at: d.checkedAt ?? null };
+    }
+    // The node's spam rule is older than the panel's, or missing (section 5.14).
+    case 'spam_rule_outdated':
+      return {
+        key: d.state === 'missing' ? 'admin.nodeOps.alertDetailSpamRuleMissing' : 'admin.nodeOps.alertDetailSpamRuleOutdated',
+        values: {}, at: d.checkedAt ?? null,
+      };
+    // Alias contacts kept on an Authoritative domain for an administrator (section 5.14).
+    case 'tenant_alias_contacts_held':
+      return {
+        key: 'admin.nodeOps.alertDetailTenantAliasContactsHeld',
+        values: { count: d.count ?? 0, addresses: (d.addresses ?? []).join(', ') || '—', domains: (d.domains ?? []).join(', ') || '—' },
+      };
     case 'tenant_domain_authoritative':
       return { key: 'admin.nodeOps.alertDetailTenantDomainAuthoritative', values: { count: d.count ?? 0, domains: (d.domains ?? []).join(', ') || '—' } };
     // A connector changed since its reference (R-25, stage 7b).
@@ -1183,6 +1210,8 @@ const TENANT_FAILURE_KEYS = {
   // Stage 7c: the phishing release (backend services/tenant/quarantineRelease.js).
   list_failed: 'admin.tenant.failExo',
   quarantine_not_allowed: 'admin.tenant.failQuarantineNotAllowed',
+  antispam_not_written: 'admin.tenant.failAntispamNotWritten',
+  unknown_op: 'admin.tenant.failWorkerOutdated',
   mail_node_not_configured: 'admin.mailNode.errorNotConfigured',
   mail_node_unreachable: 'admin.mailNode.errorUnreachable',
   mail_node_auth: 'admin.mailNode.errorAuth',
@@ -1200,6 +1229,7 @@ const POLICY_CONFLICT_KEYS = {
   redirected: 'admin.tenant.conflictRedirected',
   redirect_not_decided: 'admin.tenant.conflictRedirectNotDecided',
   subject_only: 'admin.tenant.conflictSubjectOnly',
+  header_only: 'admin.tenant.conflictHeaderOnly',
   no_action: 'admin.tenant.conflictNoAction',
   unexpected: 'admin.tenant.conflictUnexpected',
 };
@@ -1219,8 +1249,8 @@ export function policyFieldKey(field) {
   return POLICY_FIELD_KEYS[field] ?? 'admin.tenant.policyOther';
 }
 
-// R-42 (stage 7c): what became of a message the phishing release looked at (backend
-// services/tenant/quarantineRelease.js), and why a guard kept it in EOP's quarantine.
+// R-42 (stage 7c, widened in section 5.14): what became of a message the release looked at
+// (backend services/tenant/quarantineRelease.js), and why a guard kept it in EOP's quarantine.
 const PHISH_STATE_KEYS = {
   releasing: 'admin.tenant.phishStateReleasing',
   released: 'admin.tenant.phishStateReleased',
@@ -1234,6 +1264,8 @@ const PHISH_REASON_KEYS = {
   foreign_recipients: 'admin.tenant.phishReasonForeign',
   outbound: 'admin.tenant.phishReasonOutbound',
   no_recipients: 'admin.tenant.phishReasonNoRecipients',
+  type_not_allowed: 'admin.tenant.phishReasonType',
+  // Rows of stage 7c; migration 0090 deletes them, kept for a row read before it ran.
   not_high_conf_phish: 'admin.tenant.phishReasonType',
   release_denied: 'admin.tenant.phishReasonDenied',
   gone: 'admin.tenant.phishReasonGone',
@@ -1246,6 +1278,19 @@ export function phishReasonKey(reason) {
   if (!reason) return null;
   return Object.hasOwn(PHISH_REASON_KEYS, reason) ? PHISH_REASON_KEYS[reason] : 'admin.tenant.phishReasonOther';
 }
+// The type a message was quarantined as (backend quarantineRelease.js quarantineTypeOf): the
+// four the panel releases have words, another (Malware) is shown as EOP wrote it.
+const QUARANTINE_TYPE_KEYS = {
+  HighConfPhish: 'admin.tenant.qtypeHighConfPhish',
+  Phish: 'admin.tenant.qtypePhish',
+  Spam: 'admin.tenant.qtypeSpam',
+  HighConfSpam: 'admin.tenant.qtypeHighConfSpam',
+  Bulk: 'admin.tenant.qtypeBulk',
+};
+export function quarantineTypeKey(type) {
+  return Object.hasOwn(QUARANTINE_TYPE_KEYS, type ?? '') ? QUARANTINE_TYPE_KEYS[type] : null;
+}
+
 // A row that stays in the quarantine for an administrator (the alert tenant_phish_held counts them).
 export function phishHeld(row) {
   return (row?.state === 'skipped' && row.reason !== 'gone') || (row?.state === 'failed' && row.reason === 'attempts_exhausted');

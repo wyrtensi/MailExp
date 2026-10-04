@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ALERT_KEYS, POLICY_FIELDS, TENANT_STEPS, alertDetail, alertSourceKey, alertTitleKey, mailNodeErrorKey, normalizeEopSettings,
-  phishHeld, phishReasonKey, phishStateKey, policyConflictKey, policyFieldKey, tenantCertificateLevel, tenantFailureKey, tenantJobActive, tenantStepKey,
+  phishHeld, phishReasonKey, quarantineTypeKey, phishStateKey, policyConflictKey, policyFieldKey, tenantCertificateLevel, tenantFailureKey, tenantJobActive, tenantStepKey,
 } from './mailNode.js';
 
 const NOW = Date.parse('2026-10-03T12:00:00Z');
@@ -80,6 +80,11 @@ describe('the phishing release (R-42, stage 7c)', () => {
     assert.equal(phishReasonKey('read_failed'), 'admin.tenant.phishReasonReadFailed');
     assert.equal(phishReasonKey('not_found'), 'admin.tenant.phishReasonNotFound');
     assert.equal(phishReasonKey('worker_refused'), 'admin.tenant.phishReasonWorkerRefused');
+    // Section 5.14: a type the panel does not release, and the type of a row in words.
+    assert.equal(phishReasonKey('type_not_allowed'), 'admin.tenant.phishReasonType');
+    assert.equal(quarantineTypeKey('HighConfSpam'), 'admin.tenant.qtypeHighConfSpam');
+    assert.equal(quarantineTypeKey('Malware'), null);
+    assert.equal(quarantineTypeKey(null), null);
     assert.equal(tenantFailureKey('quarantine_not_allowed'), 'admin.tenant.failQuarantineNotAllowed');
     assert.equal(phishReasonKey(null), null);
     assert.equal(phishHeld({ state: 'skipped', reason: 'outbound' }), true);

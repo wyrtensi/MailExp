@@ -1,4 +1,6 @@
-import { alertTitleKey, applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, queueActionKey, rateFrameKey } from './mailNode.js';
+import {
+  alertTitleKey, applyItemKey, dnsCheckKey, dnsStatusKey, domainStateKey, quarantineTypeKey, queueActionKey, rateFrameKey,
+} from './mailNode.js';
 import { formatDateTime, formatDay } from './formatDate.js';
 
 // Helpers for the admin audit log screen. Actions and details mirror
@@ -56,6 +58,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'tenant.quarantine_released': 'admin.audit.actionTenantQuarantineReleased',
   'tenant.phish_release_changed': 'admin.audit.actionTenantPhishReleaseChanged',
   'tenant.message_traced': 'admin.audit.actionTenantMessageTraced',
+  'tenant.antispam_enforced': 'admin.audit.actionTenantAntispamEnforced',
+  'tenant.alias_contacts_removal_approved': 'admin.audit.actionTenantAliasContactsApproved',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -326,10 +330,24 @@ export function auditDetail(entry) {
       };
     case 'tenant.domain_hold_changed':
       return { key: details.hold ? 'admin.audit.detailTenantHoldOn' : 'admin.audit.detailTenantHoldOff', values: { domain: details.domain ?? '' } };
-    case 'tenant.quarantine_released':
+    // The type in words (section 5.14); an entry of stage 7c carries none and reads as before.
+    case 'tenant.quarantine_released': {
+      const values = { sender: details.sender ?? '', recipients: (details.recipients ?? []).join(', '), messageId: details.messageId ?? '' };
+      if (!details.type) return { key: 'admin.audit.detailTenantQuarantineReleasedNoType', values };
+      const typeKey = quarantineTypeKey(details.type);
+      return typeKey
+        ? { key: 'admin.audit.detailTenantQuarantineReleased', values, valueKeys: { type: typeKey } }
+        : { key: 'admin.audit.detailTenantQuarantineReleased', values: { ...values, type: details.type } };
+    }
+    case 'tenant.alias_contacts_removal_approved':
       return {
-        key: 'admin.audit.detailTenantQuarantineReleased',
-        values: { sender: details.sender ?? '', recipients: (details.recipients ?? []).join(', '), messageId: details.messageId ?? '' },
+        key: 'admin.audit.detailTenantAliasContactsApproved',
+        values: { domain: details.domain ?? '', addresses: (details.addresses ?? []).join(', ') || '—' },
+      };
+    case 'tenant.antispam_enforced':
+      return {
+        key: 'admin.audit.detailTenantAntispamEnforced',
+        values: { fields: (details.changed ?? []).map((c) => `${c.field}: ${c.from} → ${c.to}`).join(', ') || '—' },
       };
     case 'tenant.phish_release_changed':
       return { key: details.enabled ? 'admin.audit.detailTenantPhishReleaseOn' : 'admin.audit.detailTenantPhishReleaseOff', values: {} };

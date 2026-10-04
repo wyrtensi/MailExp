@@ -266,10 +266,48 @@ export function createFakeTenantModel(options = {}) {
   };
   const isNotReleased = (row) => String(row.ReleaseStatus).toLowerCase() === 'notreleased';
 
+  // The worker's release guard (runner.lib.ps1 Test-ReleasableInbound): inbound; QuarantineTypes
+  // (or Type when it is empty) all releasable; no forbidden word in any of them.
+  const RELEASABLE = ['highconfphish', 'phish', 'spam', 'highconfspam', 'bulk'];
+  const FORBIDDEN = ['malware', 'transportrule', 'filetype', 'datalossprevention'];
+  const token = (value) => {
+    const t = String(value).toLowerCase().replace(/[^a-z]/g, '');
+    return {
+      highconfidencephish: 'highconfphish', highconfidencephishing: 'highconfphish', phishing: 'phish', highconfidencespam: 'highconfspam',
+    }[t] ?? t;
+  };
+  const present = (value) => [value].flat().filter((v) => v != null && String(v).trim() !== '');
+  const releasable = (row) => {
+    const kinds = present(row.QuarantineTypes);
+    const typeText = present(row.Type);
+    if ([...kinds, ...typeText].map(token).some((t) => FORBIDDEN.some((w) => t.includes(w)))) return false;
+    const deciding = (kinds.length ? kinds : typeText.slice(0, 1)).map(token);
+    return row.Direction === 'Inbound' && deciding.length > 0 && deciding.every((t) => RELEASABLE.includes(t));
+  };
+  const LISTED = ['HighConfPhish', 'Phish', 'Spam', 'Bulk'];
+
+  // The Default anti-spam policy (R-28), as fixtures.json has it; the set operations of section 5.14
+  // change one action each. writesIgnored: a write the tenant accepts without applying it (the
+  // panel must notice by reading again).
+  model.policy = clone(TENANT_FIXTURES.exo.get_content_filter_policy[0]);
+  model.policyWrites = [];
+  model.options.policyWritesIgnored = model.options.policyWritesIgnored ?? false;
+  const setAction = (field) => () => {
+    model.policyWrites.push(field);
+    if (!model.options.policyWritesIgnored) model.policy[field] = 'MoveToJmf';
+    return [];
+  };
+
   model.exo = {
-    // The summary: inbound high confidence phishing not released, 100 per page; no recipients.
+    get_content_filter_policy: () => [clone(model.policy)],
+    set_spam_action_junk: setAction('SpamAction'),
+    set_high_confidence_spam_action_junk: setAction('HighConfidenceSpamAction'),
+    set_phish_spam_action_junk: setAction('PhishSpamAction'),
+    set_bulk_spam_action_junk: setAction('BulkSpamAction'),
+    // The summary: inbound high confidence phishing, phishing and spam not released, 100 per page;
+    // no recipients.
     get_quarantine_messages: ({ page }) => {
-      const rows = [...model.quarantine.values()].filter((row) => row.QuarantineTypes === 'HighConfPhish'
+      const rows = [...model.quarantine.values()].filter((row) => [row.QuarantineTypes].flat().some((t) => LISTED.includes(t))
         && row.Direction === 'Inbound' && isNotReleased(row));
       const start = (Number(page) - 1) * 100;
       const SUMMARY = ['Identity', 'ReceivedTime', 'SenderAddress', 'Subject', 'Type', 'QuarantineTypes', 'ReleaseStatus', 'Direction', 'MessageId', 'Expires'];
@@ -279,12 +317,12 @@ export function createFakeTenantModel(options = {}) {
     },
     // As the worker answers it: only the message with exactly this Identity, none for an unknown one.
     get_quarantine_message: ({ identity }) => (model.quarantine.has(identity) ? [clone(model.quarantine.get(identity))] : []),
-    // -ReleaseToAll, after the worker's guard (inbound HighConfPhish only, quarantine_not_allowed).
+    // -ReleaseToAll, after the worker's guard (inbound spam and phishing only, quarantine_not_allowed).
     // A second release of a released message: its wording is Inferred.
     release_quarantine_message: ({ identity }) => {
       const found = model.quarantine.get(identity);
-      if (!found || found.QuarantineTypes !== 'HighConfPhish' || found.Direction !== 'Inbound') {
-        throw exoError('quarantine_not_allowed', 'Only inbound high confidence phishing is released');
+      if (!found || !releasable(found)) {
+        throw exoError('quarantine_not_allowed', 'Only inbound spam and phishing are released');
       }
       const row = quarantined(identity);
       if (!isNotReleased(row)) throw exoError('exo_failed', 'The message has already been released.');

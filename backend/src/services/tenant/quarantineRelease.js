@@ -3,6 +3,7 @@ import { JobError, enqueueJob, registerJobKind } from '../jobQueue.js';
 import { insertAuditEntries, recordAudit } from '../auditLog.js';
 import { getEopSettings } from '../mailNode/eopSettings.js';
 import { SYSTEM_ACTOR } from '../mailNode/domains.js';
+import { checkSpamRule } from '../mailNode/nodeApply.js';
 import { getTenantDriver, tenantOf } from './driver.js';
 import { TenantError, asRows, parseQuarantineId } from './exoRunner.js';
 import { saveTenantState, tenantContext } from './tenantJobs.js';
@@ -12,17 +13,28 @@ import { saveTenantState, tenantContext } from './tenantJobs.js';
 // the R-11 Sieve rule files it into Junk (PHSH/HPHSH, also with SFV:SKQ, which a released message
 // carries) and the panel shows it in the safe view (R-41). R-31 (an administrator releasing by hand,
 // the Tenant Allow/Block List) applies only if phishing stayed in quarantine, which D-2 decided
-// against: it is not built, and the worker releases no other quarantine type (it reads the message
-// again and refuses with quarantine_not_allowed), never -AllowSender or the TABL.
+// against: it is not built, and the worker releases no quarantine type outside RELEASABLE_TYPES (it
+// reads the message again and refuses with quarantine_not_allowed), never -AllowSender or the TABL.
 //
-// The release is OFF by default (mail_node_phish_release) until experiment 17 confirms the shapes
-// of Get-QuarantineMessage on a live tenant; an administrator turns it on (journaled).
+// The owner's decisions after stage 7 (section 5.14 of eop-panel-requirements.md): ordinary
+// phishing, spam, high confidence spam and bulk land in the employees' Spam too. The panel sets the
+// Default anti-spam policy to MoveToJmf for them (services/tenant/antispam.js); what EOP
+// quarantined anyway (before that, or under another policy) goes through this same job with the
+// same guards. Malware and every other type stay in the quarantine. The node's R-11 rule files
+// all of them into Junk, also after a release (SFV:SKQ with CAT SPM, HSPM, PHSH, SPOOF, BULK) —
+// but only this version of the rule: until an administrator writes it on the node, every type but
+// high confidence phishing waits (spam_rule_not_applied, checked on the node every run, not final),
+// so a released spam letter never lands in the Inbox. The list is walked with a cursor (page 1
+// every run, then the next pages), so final rows piling up never hide later mail.
+//
+// The release is ON by default (mail_node_phish_release; the 7c default "off until experiment 17"
+// is reversed by the owner); an administrator turns it off and on (journaled).
 //
 // The job tenant_quarantine_release runs every poll slot (10 minutes) and on "Release now". One run
 // at a time: a run holds RUN_LOCK_PROVIDER (a run that died frees it after RUN_LOCK_STALE_MINUTES);
 // a second one (a slot and a button at once, a lease that expired) ends at once.
 // 1. candidates: the messages Get-QuarantineMessage lists (pinned by the worker to inbound
-//    HighConfPhish not yet released, up to MAX_PAGES pages of 100) that the table does not hold as
+//    HighConfPhish, Phish and Spam not yet released, up to MAX_PAGES pages of 100) that the table does not hold as
 //    final, alternating with the rows left behind (oldest first): 'releasing' (the process stopped
 //    after the claim), 'failed' with attempts left, and, every RECHECK_EXHAUSTED_MS, the rows whose
 //    attempts ran out (a read settles them if the release did happen after all);
@@ -33,8 +45,9 @@ import { saveTenantState, tenantContext } from './tenantJobs.js';
 //    transition to 'released'. The switch is read again before each claim (cached RELEASE_CHECK_MS).
 //    A follow-up job comes 30 s later only when the run left candidates and changed something.
 //
-// Guards: the type is high confidence phishing; the direction is inbound (outbound phishing from a
-// node mailbox is never released to the internet); every recipient is on a domain of the node
+// Guards: every type the message carries is in RELEASABLE_TYPES (type_not_allowed otherwise); the
+// direction is inbound (outbound spam or phishing from a node mailbox is never released to the
+// internet); every recipient is on a domain of the node
 // that receives mail through EOP (states connector_ready, ready, authoritative); the message is not
 // released, being released or denied already. A message kept by a guard stays 'skipped' with its
 // reason; while it is still in the quarantine (until it expires) the alert tenant_phish_held says
@@ -83,11 +96,11 @@ const isoOrNull = (value) => {
 };
 const listOf = (value) => (Array.isArray(value) ? value : value == null || value === '' ? [] : [value]);
 
-// Off unless an administrator turned it on.
+// On unless an administrator turned it off (section 5.14).
 export async function getReleaseSettings() {
   const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [RELEASE_SETTINGS_PROVIDER]);
   const config = rows[0]?.config ?? {};
-  return { enabled: config.enabled === true, changedAt: config.changedAt ?? null, changedBy: config.changedBy ?? null };
+  return { enabled: config.enabled !== false, changedAt: config.changedAt ?? null, changedBy: config.changedBy ?? null };
 }
 
 // The switch, journaled when it changes.
@@ -104,18 +117,71 @@ export async function setReleaseEnabled(enabled, { userId = null, now = Date.now
   return config;
 }
 
+// The quarantine types the panel releases (section 5.14): high confidence phishing (D-2), and,
+// by the owner's decisions after stage 7, phishing, spam, high confidence spam and bulk. Malware,
+// mail flow rules, file types and DLP are never released; the worker holds the same set
+// (runner.lib.ps1 $ReleasableTypes, a test keeps them equal).
+export const RELEASABLE_TYPES = Object.freeze(['HighConfPhish', 'Phish', 'Spam', 'HighConfSpam', 'Bulk']);
+// The types released only while the node's spam rule is this version's (nodeApply.js
+// checkSpamRule): earlier rules filed a released spoof, spam or bulk letter (SFV:SKQ) into the
+// Inbox. High confidence phishing went to Junk under every version.
+export const RULE_GATED_TYPES = Object.freeze(['Phish', 'Spam', 'HighConfSpam', 'Bulk']);
+// A word in Type that is never released, whatever QuarantineTypes says (a veto): malware (also
+// SPOMalware), a mail flow rule, a file type block, DLP.
+const FORBIDDEN_TYPE_WORDS = Object.freeze(['malware', 'transportrule', 'filetype', 'datalossprevention']);
+// A type as a token (lower case, letters only) -> its name; the spellings Get-QuarantineMessage
+// uses ('HighConfPhish' in QuarantineTypes, 'High Confidence Phish' in Type) give one name.
+const TYPE_NAMES = Object.freeze({
+  highconfphish: 'HighConfPhish', highconfidencephish: 'HighConfPhish', highconfidencephishing: 'HighConfPhish',
+  phish: 'Phish', phishing: 'Phish', spam: 'Spam', highconfspam: 'HighConfSpam', highconfidencespam: 'HighConfSpam',
+  bulk: 'Bulk',
+});
+const TYPE_MAX = 64;
+const token = (value) => String(value ?? '').toLowerCase().replace(/[^a-z]/g, '');
+const typeName = (value) => {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  return TYPE_NAMES[token(text)] ?? text.slice(0, TYPE_MAX);
+};
+const present = (values) => values.map((v) => String(v ?? '').trim()).filter(Boolean);
+
+// What the types allow: { act: 'ok', types } | { act: 'skip', reason: 'type_not_allowed' } |
+// { act: 'wait', reason: 'type_unknown' }. QuarantineTypes (an enum) decides; Type (free text whose
+// spellings Learn does not list) only vetoes with a forbidden word, or stands in when QuarantineTypes
+// is empty. An unknown spelling waits (not final): the next pass reads it again.
+export function typeVerdict(row) {
+  const kinds = present(listOf(row?.QuarantineTypes));
+  const typeText = present(listOf(row?.Type));
+  const all = [...kinds, ...typeText].map(token);
+  if (all.some((t) => FORBIDDEN_TYPE_WORDS.some((word) => t.includes(word)))) return { act: 'skip', reason: 'type_not_allowed' };
+  const names = (kinds.length ? kinds : typeText.slice(0, 1)).map(typeName);
+  if (!names.length || names.some((name) => !RELEASABLE_TYPES.includes(name))) return { act: 'wait', reason: 'type_unknown' };
+  return { act: 'ok', types: names };
+}
+
+// The type to show: Type when the panel knows its spelling (it tells high confidence spam from
+// spam), else the first of QuarantineTypes, else Type as written; null for a message without one.
+export function quarantineTypeOf(row) {
+  const typeText = present(listOf(row?.Type));
+  const precise = typeName(typeText[0]);
+  if (RELEASABLE_TYPES.includes(precise)) return precise;
+  return typeName(present(listOf(row?.QuarantineTypes))[0]) ?? precise ?? null;
+}
+
 // What a run does with a message read by its Identity: { act: 'release' } | { act: 'released' } |
 // { act: 'skip', reason } | { act: 'wait', reason }. domains: the node's domains, lower case.
-export function decide(row, domains) {
-  const types = listOf(row?.QuarantineTypes).map(lower);
-  const phish = types.includes('highconfphish') || /high\s*conf(idence)?\s*phish/i.test(String(row?.Type ?? ''));
-  if (!phish) return { act: 'skip', reason: 'not_high_conf_phish' };
+// ruleOk: the node's spam rule is this version's (types in RULE_GATED_TYPES wait otherwise).
+export function decide(row, domains, { ruleOk = true } = {}) {
+  const types = typeVerdict(row);
+  if (types.act === 'skip') return types;
   if (lower(row?.Direction) !== 'inbound') return { act: 'skip', reason: 'outbound' };
   const status = lower(row?.ReleaseStatus).replace(/[\s_]/g, '');
   if (status === 'released' || status === 'approved') return { act: 'released' };
   if (status === 'denied') return { act: 'skip', reason: 'release_denied' };
   if (status === 'preparingtorelease' || status === 'requested') return { act: 'wait', reason: status };
   if (status && status !== 'notreleased' && status !== 'error') return { act: 'wait', reason: 'status_unknown' };
+  if (types.act === 'wait') return types;
+  if (!ruleOk && types.types.some((type) => RULE_GATED_TYPES.includes(type))) return { act: 'wait', reason: 'spam_rule_not_applied' };
   const recipients = recipientsOf(row);
   if (!recipients.length) return { act: 'skip', reason: 'no_recipients' };
   const known = new Set(domains);
@@ -137,10 +203,12 @@ function facts(row) {
     recipients: recipientsOf(row),
     receivedAt: isoOrNull(row?.ReceivedTime),
     expiresAt: isoOrNull(row?.Expires),
+    type: quarantineTypeOf(row),
   };
 }
 const storedFacts = (stored) => facts(stored ? {
   MessageId: stored.message_id, SenderAddress: stored.sender, Subject: stored.subject, RecipientAddress: stored.recipients,
+  Type: stored.quarantine_type,
 } : {});
 
 // Writes what a run learned about a message (not the claim): a final state or a failure. Answers
@@ -148,9 +216,11 @@ const storedFacts = (stored) => facts(stored ? {
 async function record(identity, state, f, { reason = null, error = null, byPanel = null, releasedAt = null, attemptsDelta = 0 } = {}, db = { query }) {
   const { rows } = await db.query(`
     INSERT INTO tenant_quarantine_releases
-      (identity, message_id, sender, subject, recipients, received_at, expires_at, state, reason, error, attempts, by_panel, released_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, GREATEST($11, 0), COALESCE($12, false), $13)
+      (identity, message_id, sender, subject, recipients, received_at, expires_at, state, reason, error, attempts, by_panel, released_at,
+       quarantine_type)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, GREATEST($11, 0), COALESCE($12, false), $13, $14)
     ON CONFLICT (identity) DO UPDATE SET
+      quarantine_type = COALESCE(EXCLUDED.quarantine_type, tenant_quarantine_releases.quarantine_type),
       message_id = COALESCE(EXCLUDED.message_id, tenant_quarantine_releases.message_id),
       sender = COALESCE(EXCLUDED.sender, tenant_quarantine_releases.sender),
       subject = COALESCE(EXCLUDED.subject, tenant_quarantine_releases.subject),
@@ -163,7 +233,7 @@ async function record(identity, state, f, { reason = null, error = null, byPanel
       released_at = COALESCE(EXCLUDED.released_at, tenant_quarantine_releases.released_at),
       updated_at = NOW()
     RETURNING attempts
-  `, [identity, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, state, reason, error, attemptsDelta, byPanel, releasedAt]);
+  `, [identity, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, state, reason, error, attemptsDelta, byPanel, releasedAt, f.type]);
   return rows[0]?.attempts ?? 0;
 }
 
@@ -185,16 +255,17 @@ const touch = (identity, error = null) => query(
 async function claim(identity, f) {
   const { rows } = await query(`
     INSERT INTO tenant_quarantine_releases
-      (identity, message_id, sender, subject, recipients, received_at, expires_at, state, attempts)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, 'releasing', 1)
+      (identity, message_id, sender, subject, recipients, received_at, expires_at, state, attempts, quarantine_type)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, 'releasing', 1, $10)
     ON CONFLICT (identity) DO UPDATE SET
       state = 'releasing', attempts = tenant_quarantine_releases.attempts + 1, error = NULL, reason = NULL,
-      recipients = EXCLUDED.recipients, updated_at = NOW()
+      recipients = EXCLUDED.recipients,
+      quarantine_type = COALESCE(EXCLUDED.quarantine_type, tenant_quarantine_releases.quarantine_type), updated_at = NOW()
       WHERE (tenant_quarantine_releases.state = 'failed' AND tenant_quarantine_releases.attempts < $9)
          OR (tenant_quarantine_releases.state = 'releasing'
              AND tenant_quarantine_releases.updated_at < NOW() - make_interval(mins => $8::int))
     RETURNING attempts
-  `, [identity, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, CLAIM_STALE_MINUTES, MAX_RELEASE_ATTEMPTS]);
+  `, [identity, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, CLAIM_STALE_MINUTES, MAX_RELEASE_ATTEMPTS, f.type]);
   return rows.length ? rows[0].attempts : null;
 }
 
@@ -207,25 +278,28 @@ export async function markReleased(identity, f, { byPanel, now }) {
       UPDATE tenant_quarantine_releases SET state = 'released', reason = NULL, error = NULL, by_panel = $2, released_at = $3,
              message_id = COALESCE($4, message_id), sender = COALESCE($5, sender), subject = COALESCE($6, subject),
              recipients = CASE WHEN cardinality($7::text[]) > 0 THEN $7::text[] ELSE recipients END,
-             received_at = COALESCE($8, received_at), expires_at = COALESCE($9, expires_at), updated_at = NOW()
+             received_at = COALESCE($8, received_at), expires_at = COALESCE($9, expires_at),
+             quarantine_type = COALESCE($10, quarantine_type), updated_at = NOW()
        WHERE identity = $1 AND state <> 'released'
       RETURNING identity`,
-    [identity, !!byPanel, at, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt]);
+    [identity, !!byPanel, at, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, f.type]);
     if (!rows.length) {
       ({ rows } = await tx.query(`
         INSERT INTO tenant_quarantine_releases
-          (identity, message_id, sender, subject, recipients, received_at, expires_at, state, by_panel, released_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'released', $8, $9)
+          (identity, message_id, sender, subject, recipients, received_at, expires_at, state, by_panel, released_at, quarantine_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'released', $8, $9, $10)
         ON CONFLICT (identity) DO NOTHING
         RETURNING identity`,
-      [identity, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, !!byPanel, at]));
+      [identity, f.messageId, f.sender, f.subject, f.recipients, f.receivedAt, f.expiresAt, !!byPanel, at, f.type]));
     }
     const moved = rows.length > 0;
     if (moved && byPanel) {
       await insertAuditEntries(tx, [{
         actorEmail: SYSTEM_ACTOR,
         action: 'tenant.quarantine_released',
-        details: { identity, messageId: f.messageId, sender: f.sender, recipients: f.recipients, receivedAt: f.receivedAt },
+        details: {
+          identity, type: f.type, messageId: f.messageId, sender: f.sender, recipients: f.recipients, receivedAt: f.receivedAt,
+        },
       }]);
     }
     return moved;
@@ -252,9 +326,9 @@ async function readMessage(session, identity) {
 }
 
 // One message, from its read by Identity to its outcome: 'released' | 'skipped' | 'waiting' |
-// 'failed' | 'busy' | 'gone' | 'checked'. stored: its row, or null. stillOn(): the switch, read
-// again before a claim.
-async function handleMessage(session, identity, stored, domains, now, stillOn) {
+// 'failed' | 'busy' | 'gone' | 'checked' | 'ruleWaiting'. stored: its row, or null. stillOn(): the
+// switch, read again before a claim. ruleOk: the node's spam rule is this version's.
+async function handleMessage(session, identity, stored, domains, now, stillOn, ruleOk = true) {
   // A row whose attempts ran out is only read again: settled if the release happened after all,
   // gone if the quarantine dropped it, else left held (no new attempt).
   const exhausted = stored?.state === 'failed' && stored.reason === 'attempts_exhausted';
@@ -281,7 +355,7 @@ async function handleMessage(session, identity, stored, domains, now, stillOn) {
     return 'failed';
   }
   const f = facts(row);
-  const verdict = decide(row, domains);
+  const verdict = decide(row, domains, { ruleOk });
   // A message the panel claimed or tried and that EOP now shows released was released by the panel.
   const sentByPanel = stored?.state === 'releasing' || (stored?.state === 'failed' && stored.reason !== 'read_failed' && stored.reason !== 'not_found');
   if (verdict.act === 'released') {
@@ -296,7 +370,7 @@ async function handleMessage(session, identity, stored, domains, now, stillOn) {
     await record(identity, 'skipped', f, { reason: verdict.reason });
     return 'skipped';
   }
-  if (verdict.act === 'wait') return 'waiting';
+  if (verdict.act === 'wait') return verdict.reason === 'spam_rule_not_applied' ? 'ruleWaiting' : 'waiting';
   if (stored && stored.attempts >= MAX_RELEASE_ATTEMPTS) {
     await record(identity, 'failed', f, { reason: 'attempts_exhausted', error: stored.error });
     return 'failed';
@@ -318,7 +392,7 @@ async function handleMessage(session, identity, stored, domains, now, stillOn) {
       return 'failed';
     }
     if (isCode(err, 'quarantine_not_allowed')) {
-      // The worker's own read found no inbound high confidence phishing: never released.
+      // The worker's own read found no inbound message of a releasable type: never released.
       await record(identity, 'skipped', f, { reason: 'worker_refused', error: failureText(err) });
       return 'skipped';
     }
@@ -331,6 +405,26 @@ async function handleMessage(session, identity, stored, domains, now, stillOn) {
   }
   await markReleased(identity, f, { byPanel: true, now });
   return 'released';
+}
+
+// The window's cursor over the list's pages (I2: final rows must not hide later mail).
+export const CURSOR_PROVIDER = 'mail_node_phish_release_cursor';
+const MAX_PAGE = 1000;
+async function readCursor() {
+  const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [CURSOR_PROVIDER]);
+  const page = Number(rows[0]?.config?.page);
+  return Number.isInteger(page) && page >= 2 && page <= MAX_PAGE ? page : 2;
+}
+const saveCursor = (page) => query(`
+  INSERT INTO integration_config (provider, config) VALUES ($1, $2)
+  ON CONFLICT (provider) DO UPDATE SET config = EXCLUDED.config, updated_at = NOW()
+`, [CURSOR_PROVIDER, { page }]);
+
+// A listed message (the summary row) that waits for the node's spam rule: its types are releasable
+// and one of them is gated. Read again once the rule is in place.
+function gatedSummary(row) {
+  const types = typeVerdict(row);
+  return types.act === 'ok' && types.types.some((type) => RULE_GATED_TYPES.includes(type));
 }
 
 // Alternates two lists: a, b, a, b, ... then the rest of the longer one.
@@ -360,7 +454,7 @@ function switchReader(checkMs = RELEASE_CHECK_MS) {
 export async function runRelease(context, { now = Date.now(), releaseCheckMs = RELEASE_CHECK_MS } = {}) {
   const at = new Date(now).toISOString();
   const counts = {
-    released: 0, skipped: 0, failed: 0, waiting: 0, gone: 0, busy: 0, checked: 0,
+    released: 0, skipped: 0, failed: 0, waiting: 0, gone: 0, busy: 0, checked: 0, ruleWaiting: 0,
   };
   const stillOn = switchReader(releaseCheckMs);
   if (!(await stillOn())) return { at, ok: true, paused: true, counts, left: false };
@@ -368,6 +462,9 @@ export async function runRelease(context, { now = Date.now(), releaseCheckMs = R
   const { rows: domainRows } = await query('SELECT domain FROM mail_node_domains WHERE state = ANY($1::text[]) ORDER BY domain', [RELEASE_DOMAIN_STATES]);
   const domains = domainRows.map((r) => lower(r.domain));
   if (!domains.length) return { at, ok: true, noDomains: true, counts, left: false };
+  // Section 5.14: spam, phishing and bulk only while the node files a released letter into Junk.
+  const rule = await checkSpamRule({ now });
+  const ruleOk = rule.state === 'ok';
 
   const { rows: storedRows } = await query('SELECT * FROM tenant_quarantine_releases ORDER BY updated_at, identity');
   const stored = new Map(storedRows.map((r) => [r.identity, r]));
@@ -379,7 +476,18 @@ export async function runRelease(context, { now = Date.now(), releaseCheckMs = R
   const queued = new Set(leftovers);
   const fresh = [];
   let listed = true;
-  for (let page = 1; page <= MAX_PAGES && fresh.length < MAX_MESSAGES_PER_RUN + 1; page += 1) {
+  // The window: page 1 every run (new mail), then MAX_PAGES - 1 pages from the cursor, which moves
+  // on every run and starts over after the last page. Final rows (kept, gone) and messages waiting
+  // for the spam rule stay in the list and take no slot, so later pages are reached in later runs.
+  const cursor = await readCursor();
+  const pages = [1];
+  for (let page = Math.max(2, cursor); pages.length < MAX_PAGES && page <= MAX_PAGE; page += 1) pages.push(page);
+  let nextCursor = 2;
+  for (const page of pages) {
+    if (fresh.length >= MAX_MESSAGES_PER_RUN + 1) {
+      nextCursor = page;
+      break;
+    }
     let rows;
     try {
       rows = asRows(await context.session.exo.run('get_quarantine_messages', { page: String(page) }));
@@ -387,17 +495,29 @@ export async function runRelease(context, { now = Date.now(), releaseCheckMs = R
       if (isThrottled(err)) throw new Throttled(err);
       if (!leftovers.length && !fresh.length) throw err;
       listed = false;
+      nextCursor = page;
       break;
     }
     for (const row of rows) {
       const identity = parseQuarantineId(row.Identity);
       if (!identity || queued.has(identity)) continue;
       if (stored.has(identity)) continue; // final, or a leftover already queued
+      // Waits for the node's spam rule: not read until it is in place.
+      if (!ruleOk && gatedSummary(row)) {
+        counts.ruleWaiting += 1;
+        continue;
+      }
       fresh.push(identity);
       queued.add(identity);
     }
-    if (rows.length < PAGE_SIZE) break;
+    // The end of the list: the next run walks from the second page again.
+    if (rows.length < PAGE_SIZE) {
+      nextCursor = 2;
+      break;
+    }
+    nextCursor = page === 1 ? Math.max(2, cursor) : page + 1;
   }
+  await saveCursor(nextCursor > MAX_PAGE ? 2 : nextCursor);
 
   const queue = interleave(fresh, leftovers);
   let done = 0;
@@ -406,7 +526,7 @@ export async function runRelease(context, { now = Date.now(), releaseCheckMs = R
     if (done >= MAX_MESSAGES_PER_RUN) break;
     done += 1;
     try {
-      const outcome = await handleMessage(context.session, identity, stored.get(identity) ?? null, domains, now, stillOn);
+      const outcome = await handleMessage(context.session, identity, stored.get(identity) ?? null, domains, now, stillOn, ruleOk);
       counts[outcome] += 1;
     } catch (err) {
       if (!(err instanceof Paused)) throw err;
@@ -418,6 +538,7 @@ export async function runRelease(context, { now = Date.now(), releaseCheckMs = R
   const progressed = counts.released + counts.skipped + counts.gone + counts.failed > 0;
   return {
     at, ok: listed, counts, left: !paused && queue.length > done && progressed,
+    rule: { state: rule.state, ...(rule.code ? { code: rule.code } : {}) },
     ...(paused ? { paused: true } : {}), ...(listed ? {} : { error: { code: 'list_failed' } }),
   };
 }
@@ -490,6 +611,7 @@ export async function listReleases({ limit = 100 } = {}) {
     const code = error && /^[a-z][a-z0-9_]{1,63}:/.test(error) ? error.slice(0, error.indexOf(':')) : null;
     return {
       identity: row.identity,
+      type: row.quarantine_type ?? null,
       messageId: row.message_id,
       sender: row.sender,
       subject: row.subject,

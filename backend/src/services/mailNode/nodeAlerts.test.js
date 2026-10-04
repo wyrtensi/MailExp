@@ -4,6 +4,7 @@ const db = vi.hoisted(() => ({ configs: {} }));
 vi.mock('../db.js', () => ({
   query: vi.fn(async (sql, params) => {
     if (sql.startsWith('SELECT config')) return { rows: db.configs[params[0]] ? [{ config: db.configs[params[0]] }] : [] };
+    if (sql.includes('heldAliasContacts')) return { rows: db.heldAliases ?? [] };
     if (sql.includes('FROM mail_node_domains')) return { rows: db.waitingDomains ?? [] };
     if (sql.includes('FROM tenant_quarantine_releases')) {
       if (db.held instanceof Error) throw db.held;
@@ -38,6 +39,8 @@ vi.mock('./mailcow.js', async (importActual) => {
     listQueue: vi.fn(async () => fail(node.queue)),
     getContainers: vi.fn(async () => fail(node.containers)),
     listAliasDomains: vi.fn(async () => []),
+    // The current spam rule unless a test sets another (section 5.14).
+    getPrefilter: vi.fn(async () => (node.prefilter === undefined ? (await import('./nodeApply.js')).buildPrefilter('') : fail(node.prefilter))),
   };
 });
 vi.mock('./eopSettings.js', () => ({ getEopSettings: vi.fn(async () => node.eop) }));
@@ -104,6 +107,7 @@ beforeEach(() => {
   node.nodeDns = null;
   node.budget = { warn: false, used: 0, limit: null };
   node.eop = { eopHost: 'eop.test.local' };
+  node.prefilter = undefined;
   recordAudit.mockClear();
   safeFetch.mockClear();
   outage.record = null;
@@ -326,6 +330,31 @@ describe('runAlertCheck', () => {
     expect(safeFetch).not.toHaveBeenCalled();
   });
 
+  it('warns while the node holds an older spam rule or none, and keeps the alert when the rule cannot be read (section 5.14)', async () => {
+    db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
+    const { buildPrefilter } = await import('./nodeApply.js');
+    node.prefilter = buildPrefilter('').replace('|SPM|HSPM|SPOOF|BULK)', ')');
+    let state = await runAlertCheck({ now: NOW });
+    expect(state.alerts.find((a) => a.key === 'spam_rule_outdated')).toMatchObject({ severity: 'warning', details: { state: 'outdated' } });
+    expect(db.configs.mail_node_spam_rule).toMatchObject({ state: 'outdated' });
+    // The node does not answer: the alert stays as it was.
+    const { MailNodeError } = await import('./mailcow.js');
+    node.prefilter = new MailNodeError('mail_node_unreachable', 'down');
+    state = await runAlertCheck({ now: NOW + 60000 });
+    expect(keys(state.alerts)).toContain('spam_rule_outdated');
+    node.prefilter = '';
+    state = await runAlertCheck({ now: NOW + 120000 });
+    expect(state.alerts.find((a) => a.key === 'spam_rule_outdated').details.state).toBe('missing');
+    node.prefilter = undefined;
+    state = await runAlertCheck({ now: NOW + 180000 });
+    expect(keys(state.alerts)).not.toContain('spam_rule_outdated');
+    // Without <EOP_HOST> the rule is not checked.
+    node.eop = { eopHost: null };
+    node.prefilter = '';
+    state = await runAlertCheck({ now: NOW + 240000 });
+    expect(keys(state.alerts)).not.toContain('spam_rule_outdated');
+  });
+
   it('pings success with warnings only, naming them in the body', async () => {
     db.configs[ALERTS_PROVIDER] = { pingUrl: PING };
     node.budget = { warn: true, exceeded: false, used: 900, limit: 1000, percent: 90, rampPercent: 100 };
@@ -480,7 +509,7 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
   const BLOCKED = [{ connectorId: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', connectorName: 'From mail node', reason: 'Suspicious', createdTime: null }];
 
   it('tenantSignals: a blocked connector, and the certificate at 30 and 14 days', () => {
-    expect(tenantSignals(pollState(), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: true });
+    expect(tenantSignals(pollState(), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: true, antispamStale: false });
     const blocked = tenantSignals(pollState({ items: BLOCKED }), NOW);
     expect(blocked.alerts).toEqual([{
       key: 'connector_blocked_tenant', severity: 'error', details: { count: 1, connectors: BLOCKED, checkedAt: at(NOW - 60000) },
@@ -494,11 +523,11 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
   });
 
   it('tenantSignals: a failed or old poll is stale and raises no connector alert of its own', () => {
-    expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true });
+    expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true, antispamStale: false });
     const old = tenantSignals(pollState({ readAt: NOW - TENANT_STALE_MS - 1000 }), NOW);
     expect(old.stale).toBe(true);
     expect(old.alerts.map((a) => a.key)).toEqual(['tenant_poll_failing']);
-    expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true });
+    expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true, antispamStale: false });
   });
 
   it('tenantSignals: a connector changed since its reference warns (R-25, stage 7b)', () => {
@@ -507,7 +536,7 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
     const read = (tls, { ok = true, readAt = NOW - 60000 } = {}) => ({
       ...pollState(), connectorReference: reference, connectors: { at: at(readAt), ok, inbound: [], outbound: [connector(tls)] },
     });
-    expect(tenantSignals(read('domainvalidation'), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: false });
+    expect(tenantSignals(read('domainvalidation'), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: false, antispamStale: false });
     expect(tenantSignals(read('encryptiononly'), NOW).alerts).toEqual([{
       key: 'tenant_connector_drift', severity: 'warning',
       details: { count: 1, connectors: [{ direction: 'outbound', name: 'To mail node', kind: 'changed' }], checkedAt: at(NOW - 60000) },
@@ -515,6 +544,25 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
     // A failed or old read of the connectors keeps the alert as it was (the source is not read).
     expect(tenantSignals(read('encryptiononly', { ok: false }), NOW)).toMatchObject({ alerts: [], connectorsStale: true });
     expect(tenantSignals(read('encryptiononly', { readAt: NOW - TENANT_STALE_MS - 1000 }), NOW).connectorsStale).toBe(true);
+  });
+
+  it('tenantSignals: the anti-spam actions the panel could not set warn (section 5.14)', () => {
+    const withAntispam = (antispam) => ({ ...pollState(), antispam });
+    expect(tenantSignals(withAntispam({ at: at(NOW), ok: true, enforcement: { at: at(NOW), ok: true, changed: [], failed: [] } }), NOW))
+      .toMatchObject({ alerts: [], antispamStale: false });
+    expect(tenantSignals(withAntispam({
+      at: at(NOW), ok: true, enforcement: { at: at(NOW), ok: false, changed: [], failed: ['PhishSpamAction'], error: { code: 'antispam_not_written' } },
+    }), NOW).alerts).toEqual([{
+      key: 'tenant_antispam_not_enforced', severity: 'warning',
+      details: { fields: ['PhishSpamAction'], code: 'antispam_not_written', unconfirmed: false, checkedAt: at(NOW) },
+    }]);
+    // The read after the writes failed: the state is unknown, the alert says so.
+    expect(tenantSignals(withAntispam({
+      at: at(NOW), ok: true,
+      enforcement: { at: at(NOW), ok: false, unconfirmed: true, changed: [], failed: ['SpamAction'], error: { code: 'worker_timeout' } },
+    }), NOW).alerts[0].details).toMatchObject({ unconfirmed: true, code: 'worker_timeout' });
+    // A read that failed before any write keeps the alert as it was.
+    expect(tenantSignals(withAntispam({ at: at(NOW), ok: false, code: 'worker_unreachable' }), NOW)).toMatchObject({ alerts: [], antispamStale: true });
   });
 
   describe('in the run', () => {
@@ -590,6 +638,22 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
         expect(keys(state.alerts)).not.toContain('tenant_phish_held');
       } finally {
         db.held = undefined;
+      }
+    });
+
+    it('warns while alias contacts wait for an administrator on an Authoritative domain (section 5.14)', async () => {
+      db.configs.mail_node_tenant_state = pollState();
+      db.heldAliases = [{ domain: 'example.com', addresses: ['sales@example.com', 'info@example.com'] }];
+      try {
+        let state = await runAlertCheck({ now: NOW });
+        expect(state.alerts.find((a) => a.key === 'tenant_alias_contacts_held')).toMatchObject({
+          severity: 'warning', details: { count: 2, domains: ['example.com'], addresses: ['sales@example.com', 'info@example.com'] },
+        });
+        db.heldAliases = [];
+        state = await runAlertCheck({ now: NOW + 60000 });
+        expect(keys(state.alerts)).not.toContain('tenant_alias_contacts_held');
+      } finally {
+        db.heldAliases = undefined;
       }
     });
 

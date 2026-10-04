@@ -10,6 +10,7 @@ import {
   phishStateKey,
   policyConflictKey,
   policyFieldKey,
+  quarantineTypeKey,
   tenantCertificateLevel,
   tenantFailureKey,
   tenantJobActive,
@@ -219,6 +220,22 @@ export default function MailNodeTenant({ revision = 0 }) {
               {t(policyFieldKey(field))}: <span style={monoStyle}>{antispam.policy?.[field] ?? '—'}</span>
             </div>
           ))}
+          {antispam.enforcement?.changed?.length > 0 && (
+            <div role="status" data-policy-enforced style={{ marginTop: 6 }}>
+              {t('admin.tenant.policyEnforced', {
+                at: when(antispam.enforcement.at),
+                fields: antispam.enforcement.changed.map((c) => `${t(policyFieldKey(c.field))} (${c.from} → ${c.to})`).join(', '),
+              })}
+            </div>
+          )}
+          {antispam.enforcement && !antispam.enforcement.ok && (
+            <div role="alert" data-policy-not-enforced style={boxStyle('warning')}>
+              {t(antispam.enforcement.unconfirmed ? 'admin.tenant.policyUnconfirmed' : 'admin.tenant.policyNotEnforced', {
+                fields: (antispam.enforcement.failed ?? []).map((f) => t(policyFieldKey(f))).join(', ') || '—',
+              })}
+              {antispam.enforcement.error && <div><Failure failure={antispam.enforcement.error} /></div>}
+            </div>
+          )}
           {(antispam.conflicts ?? []).length === 0
             ? <div style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>
             : (antispam.conflicts.map((c) => (
@@ -298,11 +315,13 @@ export default function MailNodeTenant({ revision = 0 }) {
 
 const cellStyle = { padding: '4px 6px', borderTop: '1px solid var(--border)', verticalAlign: 'top', wordBreak: 'break-word' };
 
-// Stage 7c, R-42 (decision D-2): high confidence phishing EOP quarantined, released by MailExpert to
-// the node's mailboxes, where it lands in Junk and opens in the safe view. The pause switch, "Release
-// now", the last run, the messages kept in the quarantine (a guard: a recipient outside the node, an
-// outbound message, a release denied; or a release that kept failing) and the latest rows. R-31 (a
-// release by hand, the Tenant Allow/Block List) is not offered: by D-2 phishing does not stay there.
+// Stage 7c, R-42 (decision D-2), widened in section 5.14: high confidence phishing, phishing, spam and
+// high confidence spam EOP quarantined, released by MailExpert to the node's mailboxes, where they
+// land in Junk and open in the safe view; malware and other types are never released. The switch (on
+// by default since section 5.14), "Release now", the last run, the messages kept in the quarantine
+// (a guard: a type not released, a recipient outside the node, an outbound message, a release
+// denied; or a release that kept failing) and the latest rows. R-31 (a release by hand, the Tenant
+// Allow/Block List) is not offered.
 function PhishRelease({ canRun, revision }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
@@ -371,6 +390,12 @@ function PhishRelease({ canRun, revision }) {
                 at: when(run.at), released: run.counts.released ?? 0, skipped: run.counts.skipped ?? 0, failed: run.counts.failed ?? 0,
               })}
               {run.left && <div>{t('admin.tenant.phishRunLeft')}</div>}
+              {/* Section 5.14: spam, phishing and bulk wait for this version of the spam rule on the node. */}
+              {run.rule && run.rule.state !== 'ok' && !run.paused && !run.noDomains && (
+                <div role="status" data-phish-rule-waiting={run.rule.state} style={boxStyle('warning')}>
+                  {t('admin.tenant.phishRuleWaiting', { count: run.counts?.ruleWaiting ?? 0 })}
+                </div>
+              )}
               {run.throttled && <div><Failure failure={{ code: run.throttled.code }} /></div>}
               {run.error && <div><Failure failure={run.error} /></div>}
             </div>
@@ -385,6 +410,7 @@ function PhishRelease({ canRun, revision }) {
               <thead>
                 <tr style={{ textAlign: 'left' }}>
                   <th scope="col" style={cellStyle}>{t('admin.tenant.phishColState')}</th>
+                  <th scope="col" style={cellStyle}>{t('admin.tenant.phishColType')}</th>
                   <th scope="col" style={cellStyle}>{t('admin.tenant.phishColReceived')}</th>
                   <th scope="col" style={cellStyle}>{t('admin.tenant.phishColSender')}</th>
                   <th scope="col" style={cellStyle}>{t('admin.tenant.phishColRecipients')}</th>
@@ -394,6 +420,7 @@ function PhishRelease({ canRun, revision }) {
               <tbody>
                 {rows.map((row) => {
                   const reason = phishReasonKey(row.reason);
+                  const typeKey = quarantineTypeKey(row.type);
                   return (
                     <tr key={row.identity} data-phish-row={row.state} data-phish-held-row={phishHeld(row) ? 'true' : undefined}>
                       <td style={cellStyle}>
@@ -406,6 +433,7 @@ function PhishRelease({ canRun, revision }) {
                           </div>
                         )}
                       </td>
+                      <td style={cellStyle} data-phish-type={row.type ?? ''}>{typeKey ? t(typeKey) : (row.type ?? '—')}</td>
                       <td style={cellStyle}>{when(row.receivedAt)}</td>
                       <td style={{ ...cellStyle, ...monoStyle, fontSize: 11 }}>{row.sender ?? '—'}</td>
                       <td style={{ ...cellStyle, ...monoStyle, fontSize: 11 }}>{(row.recipients ?? []).join(', ') || '—'}</td>

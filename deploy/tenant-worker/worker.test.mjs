@@ -58,12 +58,14 @@ test('the whitelist: every op loads only its own cmdlets', () => {
     'get_content_filter_policy', 'get_dkim_signing_config', 'get_inbound_connectors', 'get_outbound_connectors',
     'get_quarantine_message', 'get_quarantine_messages', 'get_recipients',
     'hide_mail_contact', 'new_dkim_signing_config', 'new_mail_contact', 'release_quarantine_message', 'remove_mail_contact',
-    'set_accepted_domain_authoritative', 'set_accepted_domain_internal_relay', 'set_mail_contact_external', 'whoami',
+    'set_accepted_domain_authoritative', 'set_accepted_domain_internal_relay', 'set_bulk_spam_action_junk', 'set_high_confidence_spam_action_junk',
+    'set_mail_contact_external', 'set_phish_spam_action_junk', 'set_spam_action_junk', 'whoami',
   ]);
   assert.deepEqual(COMMAND_NAMES, [
     'Get-AcceptedDomain', 'Get-BlockedConnector', 'Get-DkimSigningConfig', 'Get-HostedContentFilterPolicy', 'Get-InboundConnector',
     'Get-OrganizationConfig', 'Get-OutboundConnector', 'Get-QuarantineMessage', 'Get-Recipient', 'New-DkimSigningConfig', 'New-MailContact',
-    'Release-QuarantineMessage', 'Remove-MailContact', 'Set-AcceptedDomain', 'Set-DkimSigningConfig', 'Set-MailContact', 'Set-OutboundConnector',
+    'Release-QuarantineMessage', 'Remove-MailContact', 'Set-AcceptedDomain', 'Set-DkimSigningConfig', 'Set-HostedContentFilterPolicy',
+    'Set-MailContact', 'Set-OutboundConnector',
   ]);
   const runner = fs.readFileSync(path.join(HERE, 'runner.lib.ps1'), 'utf8');
   for (const [op, spec] of Object.entries(OPS)) {
@@ -389,13 +391,25 @@ test('dry mode with pwsh: R-35 start, printed commands, R-36', { skip: !hasPwsh 
       [{ cmdlet: 'Set-MailContact', parameters: { HiddenFromAddressListsEnabled: true, Identity: 'info@example.com' } }]);
     assert.deepEqual(await printed('remove_mail_contact', { address: 'info@example.com' }),
       [{ cmdlet: 'Remove-MailContact', parameters: { Confirm: false, Identity: 'info@example.com' } }]);
-    // Stage 7c (R-42): the quarantine list is pinned to inbound HighConfPhish not yet released.
+    // Section 5.14: one action of the Default policy to MoveToJmf, fixed by the op; no arguments taken.
+    assert.deepEqual(await printed('set_spam_action_junk', {}),
+      [{ cmdlet: 'Set-HostedContentFilterPolicy', parameters: { Identity: 'Default', SpamAction: 'MoveToJmf' } }]);
+    assert.deepEqual(await printed('set_high_confidence_spam_action_junk', {}),
+      [{ cmdlet: 'Set-HostedContentFilterPolicy', parameters: { Identity: 'Default', HighConfidenceSpamAction: 'MoveToJmf' } }]);
+    assert.deepEqual(await printed('set_phish_spam_action_junk', {}),
+      [{ cmdlet: 'Set-HostedContentFilterPolicy', parameters: { Identity: 'Default', PhishSpamAction: 'MoveToJmf' } }]);
+    assert.deepEqual(await printed('set_bulk_spam_action_junk', {}),
+      [{ cmdlet: 'Set-HostedContentFilterPolicy', parameters: { Identity: 'Default', BulkSpamAction: 'MoveToJmf' } }]);
+    res = await post(base, '/ops/set_phish_spam_action_junk', { tenant, args: { field: 'HighConfidencePhishAction' } });
+    assert.equal(res.status, 400);
+    // Stage 7c (R-42) and section 5.14: the quarantine list is pinned to inbound high confidence
+    // phishing, phishing and spam not yet released.
     assert.deepEqual(await printed('get_quarantine_messages', { page: '2' }), [{
       cmdlet: 'Get-QuarantineMessage',
-      parameters: { QuarantineTypes: 'HighConfPhish', Direction: 'Inbound', ReleaseStatus: 'NotReleased', PageSize: 100, Page: '2' },
+      parameters: { QuarantineTypes: ['HighConfPhish', 'Phish', 'Spam', 'Bulk'], Direction: 'Inbound', ReleaseStatus: 'NotReleased', PageSize: 100, Page: '2' },
     }]);
     assert.deepEqual(await printed('get_quarantine_message', { identity: QID }), [{ cmdlet: 'Get-QuarantineMessage', parameters: { Identity: QID } }]);
-    // The release reads the message first (the guard: inbound HighConfPhish only).
+    // The release reads the message first (the guard: inbound spam and phishing only).
     assert.deepEqual(await printed('release_quarantine_message', { identity: QID }), [
       { cmdlet: 'Get-QuarantineMessage', parameters: { Identity: QID } },
       { cmdlet: 'Release-QuarantineMessage', parameters: { ReleaseToAll: true, Confirm: false, Identity: QID } },
@@ -509,7 +523,18 @@ Write-Answer @{ id = 'seen'; ok = $true; result = @{ add = $global:Seen.Add; typ
 $global:Q = @(
   [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\${QID_PARTS[1]}'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Inbound' },
   [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\aaaaaaaa-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Phish'; Type = 'Phish'; Direction = 'Inbound' },
-  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Outbound' }
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phish'; Direction = 'Outbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\dddddddd-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Spam'; Type = 'High Confidence Spam'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\eeeeeeee-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Malware'; Type = 'Malware'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\ffffffff-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Bulk'; Type = 'Bulk'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\11111111-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = @('Phish', 'Malware'); Type = 'Phish'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\22222222-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'TransportRule'; Type = 'Transport Rule'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\33333333-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = $null; Type = $null; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\44444444-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Spam'; Type = 'Phish, Malware'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\55555555-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'HighConfPhish'; Type = 'High Confidence Phishing'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\66666666-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = $null; Type = 'Phishing'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\77777777-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'SPOMalware'; Type = 'Phish'; Direction = 'Inbound' },
+  [pscustomobject]@{ Identity = '${QID_PARTS[0]}\\88888888-94ea-db3a-7eb8-3b63657d4db7'; QuarantineTypes = 'Something New'; Type = 'Phish'; Direction = 'Inbound' }
 )
 function Get-QuarantineMessage { param($Identity) $m = @($global:Q | Where-Object { $_.Identity -eq $Identity }); if ($m.Count) { $m } else { $global:Q } }
 $global:Released = [System.Collections.Generic.List[string]]::new()
@@ -520,6 +545,11 @@ AskArgs 'qok' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID
 AskArgs 'qphish' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\aaaaaaaa-94ea-db3a-7eb8-3b63657d4db7' })
 AskArgs 'qout' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\bbbbbbbb-94ea-db3a-7eb8-3b63657d4db7' })
 AskArgs 'qnone' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\cccccccc-94ea-db3a-7eb8-3b63657d4db7' })
+AskArgs 'qhcs' 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\dddddddd-94ea-db3a-7eb8-3b63657d4db7' })
+# Not $q: PowerShell names are case-insensitive, and $q is $global:Q, the quarantine above.
+foreach ($part in @('eeeeeeee', 'ffffffff', '11111111', '22222222', '33333333', '44444444', '55555555', '66666666', '77777777', '88888888')) {
+  AskArgs "q$part" 'release_quarantine_message' ([pscustomobject]@{ identity = '${QID_PARTS[0]}\\' + $part + '-94ea-db3a-7eb8-3b63657d4db7' })
+}
 Write-Answer @{ id = 'released'; ok = $true; result = @($global:Released) }
 `;
   fs.writeFileSync(file('lib.test.ps1'), script);
@@ -542,13 +572,20 @@ Write-Answer @{ id = 'released'; ok = $true; result = @($global:Released) }
   assert.equal(answers.gone.error.code, 'exo_not_found');
   assert.deepEqual(answers.add.result, []);
   assert.deepEqual(answers.seen.result, { add: 'example.com', type: 'Hashtable' });
-  // Stage 7c: a read by Identity answers that message only, an unknown one nothing; the release is
-  // refused unless the message is inbound high confidence phishing.
+  // Stage 7c and section 5.14: a read by Identity answers that message only, an unknown one nothing.
+  // QuarantineTypes decides (Type only when it is empty): high confidence phishing, phishing, spam,
+  // high confidence spam and bulk are released whatever Type spells; a forbidden word anywhere
+  // (malware, a mail flow rule), an unknown QuarantineTypes value, no type at all and an outbound
+  // message are refused.
   assert.deepEqual(answers.qread.result.map((r) => r.Identity), [QID]);
   assert.deepEqual(answers.qmissing.result, []);
-  assert.equal(answers.qok.ok, true);
-  for (const id of ['qphish', 'qout', 'qnone']) assert.equal(answers[id].error.code, 'quarantine_not_allowed', id);
-  assert.deepEqual(answers.released.result, [QID]);
+  const released = ['qok', 'qphish', 'qhcs', 'qffffffff', 'q55555555', 'q66666666'];
+  for (const id of released) assert.equal(answers[id].ok, true, `${id} ${JSON.stringify(answers[id])}`);
+  for (const id of ['qout', 'qnone', 'qeeeeeeee', 'q11111111', 'q22222222', 'q33333333', 'q44444444', 'q77777777', 'q88888888']) {
+    assert.equal(answers[id].error.code, 'quarantine_not_allowed', id);
+  }
+  const at = (part) => `${QID_PARTS[0]}\\${part}-94ea-db3a-7eb8-3b63657d4db7`;
+  assert.deepEqual(answers.released.result, [QID, at('aaaaaaaa'), at('dddddddd'), at('ffffffff'), at('55555555'), at('66666666')]);
 });
 
 test('the runner gets no token, and a pinned tenant is the only one served', async () => {

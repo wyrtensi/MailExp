@@ -323,16 +323,54 @@ describe('the recipient mirror (R-29)', () => {
     driver.fake.exo.calls.length = 0;
   });
 
-  it('removes a contact nobody needs, mirrors aliases and holds Authoritative back for a catch-all (D-6)', async () => {
-    model.recipients.set('old@example.com', { ...TENANT_FIXTURES.exo.get_recipients[0], Identity: 'old@example.com', PrimarySmtpAddress: 'old@example.com', ExternalEmailAddress: 'SMTP:old@example.com' });
+  it('keeps an alias contact on an Authoritative domain until an administrator allows its removal (section 5.14)', async () => {
+    setMailboxes('a@example.com');
+    await db.query("UPDATE mail_node_domains SET state = 'ready', hold_internal_relay = false WHERE domain = $1", [D]);
+    await sync();
+    await sync();
+    expect((await row()).state).toBe('authoritative');
+    // A contact the 7b mirror made for an alias still on the node: it lets mail to the alias in.
+    model.recipients.set('sales@example.com', {
+      ...TENANT_FIXTURES.exo.get_recipients[0], Identity: 'sales@example.com', PrimarySmtpAddress: 'sales@example.com',
+      ExternalEmailAddress: 'SMTP:sales@example.com', HiddenFromAddressListsEnabled: true,
+    });
+    node.aliases = [{ address: 'sales@example.com', targets: ['a@example.com'], active: true }];
+    driver.fake.exo.calls.length = 0;
+    await sync();
+    let r = await row();
+    expect(model.recipients.has('sales@example.com')).toBe(true);
+    expect(writes().map((c) => c.op)).not.toContain('remove_mail_contact');
+    expect(r.tenant_sync.mirror).toMatchObject({ heldAliasContacts: ['sales@example.com'], nodeAliases: ['sales@example.com'], complete: true });
+    expect(r.state).toBe('authoritative');
+
+    // Not held anywhere: refused. Held: allowed, journaled, removed by the next run.
+    expect((await post('/tenant/domains/other.example.org/alias-contacts/remove')).status).toBe(404);
+    let res = await post(`/tenant/domains/${D}/alias-contacts/remove`);
+    expect(res.status).toBe(202);
+    await runDue();
+    r = await row();
+    expect(r.alias_contacts_approved_at).not.toBeNull();
+    expect(model.recipients.has('sales@example.com')).toBe(false);
+    expect(r.tenant_sync.mirror.heldAliasContacts).toEqual([]);
+    expect((await audit()).map((e) => e.action)).toContain('tenant.alias_contacts_removal_approved');
+    res = await post(`/tenant/domains/${D}/alias-contacts/remove`);
+    expect(res.status).toBe(409);
+  });
+
+  it('removes a contact nobody needs and one made for a node alias, lists the aliases and holds Authoritative back for a catch-all (D-6)', async () => {
+    const stale = (address) => ({ ...TENANT_FIXTURES.exo.get_recipients[0], Identity: address, PrimarySmtpAddress: address, ExternalEmailAddress: `SMTP:${address}` });
+    model.recipients.set('old@example.com', stale('old@example.com'));
+    // Made by the 7b mirror for a hand-made alias: the mirror covers only what the panel owns now.
+    model.recipients.set('sales@example.com', stale('sales@example.com'));
     setMailboxes('a@example.com');
     node.aliases = [{ address: 'sales@example.com', targets: ['a@example.com'], active: true }, { address: '@example.com', targets: ['a@example.com'], active: true }];
     await db.query("UPDATE mail_node_domains SET state = 'ready', hold_internal_relay = false WHERE domain = $1", [D]);
     await sync();
+    expect((await row()).tenant_sync.mirror.removed.sort()).toEqual(['old@example.com', 'sales@example.com']);
     await sync();
     const r = await row();
-    expect([...model.recipients.keys()].sort()).toEqual(['a@example.com', 'sales@example.com']);
-    expect(r.tenant_sync.mirror).toMatchObject({ catchAll: '@example.com', complete: false, removed: [] });
+    expect([...model.recipients.keys()].sort()).toEqual(['a@example.com']);
+    expect(r.tenant_sync.mirror).toMatchObject({ catchAll: '@example.com', complete: false, removed: [], nodeAliases: ['sales@example.com'] });
     expect(r.state).toBe('ready');
     node.aliases = node.aliases.slice(0, 1);
     await sync();

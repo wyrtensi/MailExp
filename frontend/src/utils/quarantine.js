@@ -56,9 +56,9 @@ export function matchNoteKey(matchedBy) {
 // What releasing a letter does to its mailbox, by rspamd's action: a refused letter is delivered
 // (and the panel's rule files it in Spam again when EOP marked it, so the EOP note goes only with
 // a refused letter); a delivered one is dropped as a duplicate.
-export function releaseEopNoteShown(action, eop) {
+export function releaseEopNoteShown(action, eop, rule = null) {
   const value = String(action ?? '').toLowerCase();
-  return (value === 'reject' || value === 'soft reject') && eopSendsToSpam(eop);
+  return (value === 'reject' || value === 'soft reject') && eopSendsToSpam(eop, rule);
 }
 
 // An attachment's size for the screen: { key, value } in bytes, KB or MB.
@@ -70,16 +70,28 @@ export function sizeLabel(bytes) {
 }
 
 // Whether the panel's spam filing rule (R-11, backend services/mailNode/nodeApply.js) files a letter
-// with this EOP verdict in Spam: phishing and malware always, spam, bulk and spoofing unless EOP
-// released it from its own quarantine (SFV:SKQ). A released quarantine entry goes through the rule
-// like any letter, so such a letter lands in Spam again.
-const EOP_ALWAYS_SPAM = new Set(['PHSH', 'HPHSH', 'HPHISH', 'MALW']);
-export function eopSendsToSpam(eop) {
+// with this EOP verdict in Spam. rule: the rule's state on the node as the backend last saw it
+// (checkSpamRule: ok, outdated, missing, unknown, or null when never checked):
+// - this version (ok, and unknown or null, taken as the version the panel writes): every unwanted
+//   category always (the panel releases spam, phishing and bulk from EOP's quarantine itself,
+//   section 5.14), the spam verdicts unless EOP released the letter from its quarantine (SFV:SKQ);
+// - outdated (the rule before section 5.14): phishing and malware always, spam, bulk and spoofing
+//   unless released (SFV:SKQ);
+// - missing: nothing (no rule on the node).
+// A released quarantine entry goes through the rule like any letter, so such a letter lands in Spam
+// again.
+const EOP_ALWAYS_SPAM = new Set(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF', 'BULK']);
+const EOP_ALWAYS_SPAM_BEFORE = new Set(['PHSH', 'HPHSH', 'HPHISH', 'MALW']);
+const EOP_SPAM_BEFORE = new Set(['SPM', 'HSPM', 'BULK', 'SPOOF']);
+const SPAM_VERDICTS = new Set(['SPM', 'SKS', 'SKB']);
+export function eopSendsToSpam(eop, rule = null) {
   const verdict = String(eop?.verdict ?? '').toUpperCase();
   const category = String(eop?.category ?? '').toUpperCase();
-  if (EOP_ALWAYS_SPAM.has(category)) return true;
+  if (rule === 'missing') return false;
+  const outdated = rule === 'outdated';
+  if ((outdated ? EOP_ALWAYS_SPAM_BEFORE : EOP_ALWAYS_SPAM).has(category)) return true;
   if (verdict === 'SKQ') return false;
-  return ['SPM', 'SKS', 'SKB'].includes(verdict) || ['SPM', 'HSPM', 'BULK', 'SPOOF'].includes(category);
+  return SPAM_VERDICTS.has(verdict) || (outdated && EOP_SPAM_BEFORE.has(category));
 }
 
 // Why the letter is in Spam, as keys in the order they matter: rspamd marked it as spam (its score

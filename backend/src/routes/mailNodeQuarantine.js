@@ -29,6 +29,7 @@ import {
   withDeadline,
 } from '../services/mailNode/quarantine.js';
 import { mailNodeFailure, onOtherMailHost } from './mailNode.js';
+import { getSpamRuleState } from '../services/mailNode/nodeApply.js';
 
 // The mail node's quarantine and rspamd history (R-20; services/mailNode/quarantine.js), mounted
 // at /api/mail-node next to routes/mailNode.js:
@@ -210,6 +211,9 @@ router.get('/quarantine/:itemId', async (req, res) => {
     accountId: who.mailboxes.get(item.rcpt) ?? null,
     admin: who.admin,
     letter: parseQuarantineLetter(msg),
+    // Section 5.14: which version of the spam rule the node held when last checked (ok, outdated,
+    // missing, unknown; null before the first check), for what a release does with EOP's verdict.
+    spamRule: (await getSpamRuleState().catch(() => null))?.state ?? null,
   });
 });
 

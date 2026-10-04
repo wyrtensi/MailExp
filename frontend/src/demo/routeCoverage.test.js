@@ -565,7 +565,10 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   const tenant = await demoRequest('GET', '/mail-node/tenant');
   assert.equal(tenant.driver, 'fake');
   assert.equal(tenant.state.connection.ok, true);
-  assert.deepEqual(tenant.state.antispam.conflicts.map(c => c.field), ['PhishSpamAction']);
+  // Section 5.14: the demo's poll set phishing to MoveToJmf, as the backend does; nothing conflicts.
+  assert.deepEqual(tenant.state.antispam.conflicts, []);
+  assert.equal(tenant.state.antispam.policy.PhishSpamAction, 'MoveToJmf');
+  assert.equal(tenant.state.antispam.enforcement.ok, true);
   assert.equal((await demoRequest('GET', `/mail-node/tenant/jobs/${tested.job.id}`)).job.id, tested.job.id);
   // Stage 7b: one domain's tenant steps and the connector reference.
   const synced = await answer('/mail-node/tenant/domains/:param/sync', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/sync');
@@ -576,15 +579,18 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   const held = await answer('/mail-node/tenant/domains/:param/hold', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/hold', { hold: false });
   assert.equal(held.holdInternalRelay, true);
   await reject('/mail-node/tenant/domains/:param/internal-relay', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/internal-relay', {}, /does not wait/);
-  // Stage 7c: the phishing release (R-42) and a letter's trace (R-30).
-  // Off as on a new install (until experiment 17): "Release now" is refused until it is turned on.
-  assert.equal((await demoRequest('GET', '/mail-node/tenant/phish-release')).enabled, false);
-  await reject('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run', {}, /paused/);
-  const on = await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: true });
-  assert.equal(on.enabled, true);
+  await reject('/mail-node/tenant/domains/:param/alias-contacts/remove', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/alias-contacts/remove', {}, /no alias contacts/);
+  // Stage 7c: the spam and phishing release (R-42, section 5.14) and a letter's trace (R-30).
+  // On as on a new install; "Release now" is refused while it is off.
+  const release = await demoRequest('GET', '/mail-node/tenant/phish-release');
+  assert.equal(release.enabled, true);
+  assert.deepEqual([...new Set(release.releases.map(r => r.type))].sort(), ['HighConfPhish', 'Phish', 'Spam']);
   const ran = await answer('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run');
   assert.equal(ran.job.kind, 'tenant_quarantine_release');
-  await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: false });
+  const off = await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: false });
+  assert.equal(off.enabled, false);
+  await reject('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run', {}, /paused/);
+  await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: true });
   await reject('/mail/messages/:param/eop-trace', 'POST', '/mail/messages/demo-001/eop-trace', {}, /this mailbox sent/);
 });
 
