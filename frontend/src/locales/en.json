@@ -672,7 +672,11 @@
     "layout": "Layout",
     "changeLayout": "Change layout",
     "scrollTabsLeft": "Scroll tabs left",
-    "scrollTabsRight": "Scroll tabs right"
+    "scrollTabsRight": "Scroll tabs right",
+    "countFiltered": "Cached messages matching this filter",
+    "countUnknown": "The mailbox count is not available yet",
+    "countStale": "The last known mailbox count; waiting for the server to refresh it",
+    "countServer": "Messages reported by the mail server"
   },
   "lockScreen": {
     "subtitle": "Enter your PIN to unlock",
