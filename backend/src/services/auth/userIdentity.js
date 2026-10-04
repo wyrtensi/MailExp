@@ -105,12 +105,16 @@ export async function resolveVerifiedUser({ email, source, settings }) {
 }
 
 // Put a signed-in user into the session. Another user or sign-in method gets a fresh session
-// id first, so one session never carries two identities.
+// id first, so one session never carries two identities. The same user keeps the screen lock
+// (#235) across that: the identity gate runs before the lock gate, so a locked session that
+// arrives with a valid Access token for its own user must not come out unlocked.
 export async function bindSessionUser(req, user, authMethod) {
   if (req.session.userId !== user.id || req.session.authMethod !== authMethod) {
+    const keepLocked = req.session.userId === user.id && !!req.session.locked;
     await new Promise((resolve, reject) => {
       req.session.regenerate((err) => (err ? reject(err) : resolve()));
     });
+    if (keepLocked) req.session.locked = true;
   }
   req.session.userId = user.id;
   req.session.username = user.username;
