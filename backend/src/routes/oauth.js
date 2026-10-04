@@ -1,12 +1,15 @@
 import { randomBytes } from 'crypto';
 import { Router } from 'express';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { withTransaction } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 import { imapManager } from '../index.js';
 import { encrypt } from '../services/encryption.js';
 import { recordAudit } from '../services/auditLog.js';
-import { MICROSOFT_AUTH_URL, getMsConfig, refreshMicrosoftToken } from '../services/oauth/microsoftOAuth.js';
+import {
+  MICROSOFT_AUTH_URL, getMsConfig, microsoftSubject, refreshMicrosoftToken, verifiedMicrosoftAddress,
+} from '../services/oauth/microsoftOAuth.js';
 import { redactEmail } from '../utils/redact.js';
+import { isUuid } from '../utils/uuid.js';
 import googleOAuthRoutes from './oauthGoogle.js';
 
 // Cache JWKS fetchers per tenant — createRemoteJWKSet handles caching internally.
@@ -29,13 +32,61 @@ router.use('/google', googleOAuthRoutes);
 // Device codes expire in 15 minutes so no persistence is needed.
 const deviceFlows = new Map();
 
+const PROVIDER = 'microsoft';
+// Stable codes the callback redirects with (`/?oauth_error=<code>&oauth_provider=microsoft`) and
+// the device-code poll answers with; provider text never reaches the browser.
+const CALLBACK_ERROR_CODES = new Set([
+  'access_denied', 'invalid_state', 'not_configured', 'email_not_verified',
+  'authentication_failed', 'already_connected', 'account_mismatch', 'redirect_not_configured',
+]);
+
+class MicrosoftOAuthError extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
+const errorRedirect = (code) => `/?oauth_error=${code}&oauth_provider=${PROVIDER}`;
+const stableCode = (err) => (err instanceof MicrosoftOAuthError && CALLBACK_ERROR_CODES.has(err.code)
+  ? err.code
+  : 'authentication_failed');
+
+// The two flows, as in routes/oauthGoogle.js: `add` creates a mailbox and refuses an address
+// that already has one; `reconnect` (`?account=<id>`) renews the tokens of that one Microsoft
+// mailbox. Neither ever touches a mailbox of another provider, one added with a password or one
+// on the mail node.
+async function resolveFlow(accountParam) {
+  if (accountParam === undefined || accountParam === '') return { mode: 'add', accountId: null, email: null };
+  if (!isUuid(accountParam)) throw new MicrosoftOAuthError('invalid_state');
+  const { rows } = await query(
+    'SELECT id, email_address, oauth_provider, mail_node FROM email_accounts WHERE id = $1',
+    [accountParam],
+  );
+  const row = rows[0];
+  if (!row || row.oauth_provider !== PROVIDER || row.mail_node) throw new MicrosoftOAuthError('invalid_state');
+  return { mode: 'reconnect', accountId: row.id, email: row.email_address };
+}
+
 // Step 1: redirect user to Microsoft login
 router.get('/microsoft', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
 
   const { clientId, tenantId, redirectUri } = getMsConfig();
-  if (!clientId || !tenantId || !redirectUri) {
-    return res.status(500).json({ error: 'Microsoft OAuth not configured. Set MS_CLIENT_ID, MS_CLIENT_SECRET, MS_TENANT_ID, MS_REDIRECT_URI in .env' });
+  if (!clientId || !tenantId) return res.redirect(errorRedirect('not_configured'));
+
+  let flow;
+  try {
+    flow = await resolveFlow(req.query.account);
+  } catch (err) {
+    return res.redirect(errorRedirect(stableCode(err)));
+  }
+
+  // Only the device-code flow is set up (no redirect URI): say so, with the mailbox to reconnect,
+  // so the panel runs the device-code flow for it instead (POST /microsoft/device { account }).
+  if (!redirectUri) {
+    const account = flow.accountId ? `&oauth_account=${encodeURIComponent(flow.accountId)}` : '';
+    return res.redirect(`${errorRedirect('redirect_not_configured')}${account}`);
   }
 
   // Generate a random CSRF nonce for the state parameter and store it alongside
@@ -43,6 +94,8 @@ router.get('/microsoft', async (req, res) => {
   const oauthNonce = randomBytes(16).toString('hex');
   req.session.oauthNonce  = oauthNonce;
   req.session.oauthUserId = req.session.userId;
+  req.session.oauthMode = flow.mode;
+  req.session.oauthAccountId = flow.accountId;
 
   const params = new URLSearchParams({
     client_id: clientId,
@@ -53,6 +106,7 @@ router.get('/microsoft', async (req, res) => {
     state: oauthNonce,
     prompt: 'select_account',
   });
+  if (flow.email) params.set('login_hint', flow.email);
 
   // Save session before redirecting so the nonce is committed to the store
   // before the external provider redirects back with the authorization code.
@@ -62,21 +116,27 @@ router.get('/microsoft', async (req, res) => {
 
 // Step 2: Microsoft redirects back here with auth code
 router.get('/microsoft/callback', async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+  const { code, state, error } = req.query;
 
   if (error) {
-    console.error('Microsoft OAuth error:', error, error_description);
-    return res.redirect(`/?oauth_error=${encodeURIComponent(error_description || error)}`);
+    // Microsoft's error_description is provider text: logged by code only, never echoed.
+    console.error(`Microsoft OAuth error: ${typeof error === 'string' ? error.slice(0, 64) : 'unknown'}`);
+    return res.redirect(errorRedirect(error === 'access_denied' ? 'access_denied' : 'authentication_failed'));
   }
 
   // Validate CSRF nonce BEFORE making any external requests
   if (!state || state !== req.session.oauthNonce) {
-    return res.redirect(`/?oauth_error=${encodeURIComponent('Invalid OAuth state — please try again')}`);
+    return res.redirect(errorRedirect('invalid_state'));
   }
   const userId = req.session.oauthUserId;
-  if (!userId) return res.redirect(`/?oauth_error=${encodeURIComponent('OAuth session expired — please try again')}`);
+  const flow = { mode: req.session.oauthMode, accountId: req.session.oauthAccountId ?? null };
   delete req.session.oauthNonce;
   delete req.session.oauthUserId;
+  delete req.session.oauthMode;
+  delete req.session.oauthAccountId;
+  if (!userId) return res.redirect(errorRedirect('invalid_state'));
+  // A state issued before the two flows existed says neither: refused, as the Google flow does.
+  if (flow.mode !== 'add' && flow.mode !== 'reconnect') return res.redirect(errorRedirect('invalid_state'));
 
   const { clientId, clientSecret, tenantId, redirectUri } = getMsConfig();
 
@@ -96,96 +156,115 @@ router.get('/microsoft/callback', async (req, res) => {
     });
 
     const tokens = await tokenRes.json();
-    if (!tokenRes.ok) {
-      throw new Error(tokens.error_description || tokens.error || 'Token exchange failed');
-    }
+    if (!tokenRes.ok) throw new MicrosoftOAuthError('authentication_failed');
 
     // Authorization-code flow uses the client secret → confidential client.
-    await processMicrosoftTokens(userId, tokens, { tenantId, clientId, publicClient: false });
+    await processMicrosoftTokens(userId, tokens, { tenantId, clientId, publicClient: false, ...flow });
 
     // Redirect back to app with success
     res.redirect('/?oauth_success=microsoft');
   } catch (err) {
-    console.error('Microsoft OAuth callback error:', err);
-    res.redirect('/?oauth_error=Authentication+failed');
+    const stable = stableCode(err);
+    console.error(`Microsoft OAuth callback failed: ${stable} (${err?.name || 'Error'})`);
+    res.redirect(errorRedirect(stable));
   }
 });
 
-// Shared: validate tokens, upsert account, connect IMAP.
-async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publicClient = false }) {
+// Validates the ID token and returns { email, subject, displayName } of the person who signed in.
+async function microsoftIdentity(idToken, { tenantId, clientId }) {
+  if (!idToken) throw new MicrosoftOAuthError('authentication_failed');
+  const verifyOpts = { audience: clientId };
+  // For multi-tenant ('common'/'organizations'/'consumers'), issuers vary per tenant,
+  // so we skip issuer validation and rely on audience + signature instead.
+  const fixedTenants = new Set(['common', 'organizations', 'consumers']);
+  if (!fixedTenants.has(tenantId)) {
+    verifyOpts.issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
+  }
+  let payload;
+  try {
+    ({ payload } = await jwtVerify(idToken, getMsJwks(tenantId), verifyOpts));
+  } catch (jwtErr) {
+    console.error(`Microsoft id_token validation failed: ${jwtErr?.code || jwtErr?.name || 'Error'}`);
+    throw new MicrosoftOAuthError('authentication_failed');
+  }
+  // With a multi-tenant authority the keys are Microsoft's common set, so a token from ANY tenant
+  // verifies, an attacker's own tenant included. This check only makes sure the token is
+  // consistent with itself (its issuer names its own tenant); it does not limit which tenant may
+  // sign in and does not prove who the user is. That is done by the verified address and the
+  // tid+oid subject below (services/oauth/microsoftOAuth.js).
+  if (fixedTenants.has(tenantId) && payload.tid && payload.iss) {
+    const expectedIss = `https://login.microsoftonline.com/${payload.tid}/v2.0`;
+    if (payload.iss !== expectedIss) {
+      console.error('Microsoft id_token issuer does not match its tenant');
+      throw new MicrosoftOAuthError('authentication_failed');
+    }
+  }
+  const subject = microsoftSubject(payload);
+  if (!subject) throw new MicrosoftOAuthError('authentication_failed');
+  const email = verifiedMicrosoftAddress(payload, { singleTenant: !fixedTenants.has(tenantId) });
+  if (!email) throw new MicrosoftOAuthError('email_not_verified');
+  return { email, subject, displayName: typeof payload.name === 'string' ? payload.name : null };
+}
+
+// Shared: validate tokens, create or renew the mailbox, connect IMAP.
+async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publicClient = false, mode, accountId = null }) {
   const { access_token, refresh_token, expires_in, id_token } = tokens;
   const expiresInSecs = Number.isFinite(expires_in) && expires_in > 0 ? expires_in : 3600;
   const expiry = new Date(Date.now() + expiresInSecs * 1000);
 
-  // Validate the id_token via Microsoft's JWKS, then extract user info.
   // The access_token is scoped to outlook.office.com (IMAP/SMTP) and cannot be used
-  // with graph.microsoft.com, so id_token is the right source for email/name.
-  let email = null;
-  let displayName = null;
-  if (id_token) {
-    const jwks = getMsJwks(tenantId);
-    const verifyOpts = { audience: clientId };
-    // For multi-tenant ('common'/'organizations'/'consumers'), issuers vary per tenant,
-    // so we skip issuer validation and rely on audience + signature instead.
-    const fixedTenants = new Set(['common', 'organizations', 'consumers']);
-    if (!fixedTenants.has(tenantId)) {
-      verifyOpts.issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
-    }
-    try {
-      const { payload } = await jwtVerify(id_token, jwks, verifyOpts);
-      // For multi-tenant configs the issuer check is skipped above, so validate that
-      // the iss claim matches the token's own tid.  This prevents cross-tenant identity
-      // injection where an attacker creates a Microsoft tenant with the victim's email,
-      // obtains a JWT signed by Microsoft, and submits it to a MailExpert instance
-      // configured for 'common'.
-      if (fixedTenants.has(tenantId) && payload.tid && payload.iss) {
-        const expectedIss = `https://login.microsoftonline.com/${payload.tid}/v2.0`;
-        if (payload.iss !== expectedIss) {
-          throw new Error(`id_token issuer mismatch: expected ${expectedIss}, got ${payload.iss}`);
-        }
-      }
-      email = payload.email || payload.preferred_username || null;
-      displayName = payload.name || null;
-    } catch (jwtErr) {
-      console.error('Microsoft id_token validation failed:', jwtErr.message);
-      throw new Error('Could not validate Microsoft identity token — please try again', { cause: jwtErr });
-    }
-  }
-
-  if (!email) throw new Error('Could not retrieve email address from Microsoft profile — ensure the openid, email, and profile scopes are granted');
+  // with graph.microsoft.com, so id_token is the right source for who signed in.
+  const { email, subject, displayName } = await microsoftIdentity(id_token, { tenantId, clientId });
 
   // Serialize the check-then-insert per mailbox address with a transaction-scoped advisory
   // lock. Two OAuth callbacks racing for the same mailbox would otherwise both miss the SELECT
-  // and each INSERT, producing duplicate account rows. The second waiter blocks until the first
-  // commits, then sees the row and updates it. Mailboxes are shared, so the address alone names one.
+  // and each INSERT, producing duplicate account rows. Mailboxes are shared, so the address alone
+  // names one.
   const { account, created } = await withTransaction(async (client) => {
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',
-      [`oauth-account:${email.toLowerCase()}`]);
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${email}`]);
 
-    const existing = await client.query(
-      'SELECT id FROM email_accounts WHERE lower(email_address) = lower($1) ORDER BY created_at LIMIT 1',
-      [email]
-    );
+    // A reconnect reads the mailbox it names, by id, and compares its address; an add looks for
+    // any mailbox with the address.
+    const existing = mode === 'reconnect'
+      ? await client.query(
+        'SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts WHERE id = $1',
+        [accountId],
+      )
+      : await client.query(
+        `SELECT id, email_address, oauth_provider, oauth_subject, mail_node FROM email_accounts
+          WHERE lower(email_address) = lower($1) ORDER BY created_at LIMIT 1`,
+        [email],
+      );
+    const row = existing.rows[0] || null;
 
-    let accountId;
-    let created = false;
-    if (existing.rows.length) {
-      accountId = existing.rows[0].id;
+    let id;
+    if (mode === 'reconnect') {
+      if (!row || row.oauth_provider !== PROVIDER || row.mail_node) throw new MicrosoftOAuthError('invalid_state');
+      // The person picked another account on Microsoft's page than the mailbox being reconnected.
+      if (String(row.email_address).toLowerCase() !== email) throw new MicrosoftOAuthError('account_mismatch');
+      // Same address, other Microsoft user (another tenant claiming the domain, or a recreated
+      // account): never hand it this mailbox. A mailbox connected before the subject was stored
+      // takes the subject of its first verified reconnect.
+      if (row.oauth_subject && row.oauth_subject !== subject) throw new MicrosoftOAuthError('account_mismatch');
+      id = row.id;
       // A fresh consent clears a reconnect flag set by the token manager on invalid_grant;
       // otherwise the flag would refuse every later refresh of the new refresh token.
-      // The mailbox may have been added with a password: switch it to Microsoft OAuth and its
-      // servers, as the Google callback does, or it keeps signing in with the old password.
-      await client.query(`
+      // The WHERE repeats the checks above, so a row changed meanwhile is left alone.
+      const updated = await client.query(`
         UPDATE email_accounts SET
-          oauth_access_token = $1, oauth_refresh_token = $2, oauth_token_expiry = $3,
-          name = $4, oauth_public_client = $5,
-          oauth_provider = 'microsoft', auth_user = email_address,
+          oauth_access_token = $1, oauth_refresh_token = COALESCE($2, oauth_refresh_token), oauth_token_expiry = $3,
+          oauth_public_client = $4, oauth_subject = $5,
+          auth_user = email_address,
           imap_host = 'outlook.office365.com', imap_port = 993, imap_tls = true,
           smtp_host = 'smtp.office365.com', smtp_port = 587, smtp_tls = 'STARTTLS',
           oauth_reconnect_required = false, sync_error = NULL
-        WHERE id = $6
-      `, [encrypt(access_token), encrypt(refresh_token), expiry, displayName || email, publicClient, accountId]);
+        WHERE id = $6 AND oauth_provider = 'microsoft' AND mail_node IS NOT TRUE
+          AND (oauth_subject IS NULL OR oauth_subject = $5)
+      `, [encrypt(access_token), refresh_token ? encrypt(refresh_token) : null, expiry, publicClient, subject, id]);
+      if (!updated.rowCount) throw new MicrosoftOAuthError('invalid_state');
     } else {
+      // Adding never takes over an existing mailbox, whatever it is.
+      if (row) throw new MicrosoftOAuthError('already_connected');
       const colors = ['#0078d4', '#106ebe', '#005a9e', '#004578'];
       const color = colors[Math.floor(Math.random() * colors.length)];
       const result = await client.query(`
@@ -195,34 +274,36 @@ async function processMicrosoftTokens(userId, tokens, { tenantId, clientId, publ
           smtp_host, smtp_port, smtp_tls,
           auth_user,
           oauth_provider, oauth_access_token, oauth_refresh_token, oauth_token_expiry,
-          oauth_public_client
+          oauth_public_client, oauth_subject
         ) VALUES ($1,$2,$3,$4,'imap',
           'outlook.office365.com', 993, true,
           'smtp.office365.com', 587, 'STARTTLS',
           $3,
           'microsoft', $5, $6, $7,
-          $8)
+          $8, $9)
         RETURNING *
-      `, [userId, displayName, email, color, encrypt(access_token), encrypt(refresh_token), expiry, publicClient]);
-      accountId = result.rows[0].id;
-      created = true;
+      `, [userId, displayName || email, email, color, encrypt(access_token), encrypt(refresh_token), expiry, publicClient, subject]);
+      id = result.rows[0].id;
     }
 
-    const accountResult = await client.query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-    return { account: accountResult.rows[0], created };
+    const accountResult = await client.query('SELECT * FROM email_accounts WHERE id = $1', [id]);
+    return { account: accountResult.rows[0], created: mode !== 'reconnect' };
   });
 
   recordAudit({
     actorUserId: userId,
     accountId: account.id,
     action: created ? 'mailbox.added' : 'mailbox.reconnected',
-    details: created ? { protocol: 'imap', oauthProvider: 'microsoft' } : { oauthProvider: 'microsoft' },
+    details: created ? { protocol: 'imap', oauthProvider: PROVIDER } : { oauthProvider: PROVIDER },
   });
 
   // Fresh tokens from a (re)consent: lift any auth cooldown left by the old, rejected grant.
   imapManager.clearConnectCooldown(account.id);
-  imapManager.connectAccount(account).catch(err =>
-    console.error(`OAuth connect failed for ${redactEmail(email)}:`, err.message)
+  const connect = () => imapManager.connectAccount(account);
+  // A renewed mailbox may still hold a connection built from the old token: restart it.
+  const run = created ? connect() : Promise.resolve(imapManager.disconnectAccount(account.id)).catch(() => {}).then(connect);
+  Promise.resolve(run).catch(err =>
+    console.error(`OAuth connect failed for ${redactEmail(email)}:`, err?.message)
   );
   return email;
 }
@@ -240,11 +321,19 @@ function deviceErrorDetail(err) {
 }
 
 // Step 1: initiate device code flow — returns user_code + verification_uri to the frontend.
+// `account` (body or query) names the Microsoft mailbox to reconnect; without it, a mailbox is added.
 router.post('/microsoft/device', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
   const { clientId, tenantId } = getMsConfig();
   if (!clientId || !tenantId) {
     return res.status(400).json({ error: 'Microsoft integration not configured. Set Client ID and Tenant ID in the Integrations tab.' });
+  }
+
+  let flow;
+  try {
+    flow = await resolveFlow(req.body?.account ?? req.query.account);
+  } catch (err) {
+    return res.status(400).json({ error: 'Invalid mailbox', code: stableCode(err) });
   }
 
   try {
@@ -267,6 +356,8 @@ router.post('/microsoft/device', async (req, res) => {
       deviceCode: dc.device_code,
       tenantId,
       clientId,
+      mode: flow.mode,
+      accountId: flow.accountId,
       expiresAt: Date.now() + dc.expires_in * 1000,
     });
 
@@ -323,11 +414,18 @@ router.get('/microsoft/device/poll', async (req, res) => {
     deviceFlows.delete(req.session.userId);
     // Device-code flow never uses a client secret → public client. Its refresh must
     // omit the secret too, or Microsoft rejects it with AADSTS90023 (#216).
-    await processMicrosoftTokens(req.session.userId, tokens, { tenantId: flow.tenantId, clientId: flow.clientId, publicClient: true });
+    await processMicrosoftTokens(req.session.userId, tokens, {
+      tenantId: flow.tenantId, clientId: flow.clientId, publicClient: true, mode: flow.mode, accountId: flow.accountId,
+    });
     res.json({ status: 'success' });
   } catch (err) {
-    console.error('Device code poll error:', deviceErrorDetail(err));
     deviceFlows.delete(req.session.userId);
+    if (err instanceof MicrosoftOAuthError) {
+      const code = stableCode(err);
+      console.error(`Device code sign-in refused: ${code}`);
+      return res.json({ status: 'error', error: 'Microsoft sign-in refused', code });
+    }
+    console.error('Device code poll error:', deviceErrorDetail(err));
     res.json(DEVICE_TOKEN_FAILED);
   }
 });

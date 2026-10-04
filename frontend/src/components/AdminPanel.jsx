@@ -46,6 +46,7 @@ import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
 import AddAccountTabs from './AddAccountTabs.jsx';
 import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
+import { accountUpdateFromForm } from '../utils/accountUpdate.js';
 import {
   canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, mailNodeErrorKey, nodeMailboxDeleteDialog,
   pendingDeletion,
@@ -54,8 +55,9 @@ import MailboxDeletionNotice, { TenantPendingLine } from './MailboxDeletionNotic
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
+import { microsoftOAuthErrorKey } from '../utils/microsoftOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
-import { isValidForwardAddress } from '../utils/ruleActions.js';
+import { isValidForwardAddress, ruleForwardTarget } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
 import { buildAccountSearchIndex, searchAccounts } from '../utils/accountSearch.js';
@@ -100,6 +102,11 @@ const PRESETS = {
 };
 
 // ─── Account Form (Add or Edit) ───────────────────────────────────────────────
+// A Google or Microsoft OAuth mailbox (not on the mail node): it is bound to one provider account.
+function isOAuthBound(account) {
+  return (account?.oauth_provider === 'google' || account?.oauth_provider === 'microsoft') && !account?.mail_node;
+}
+
 function isMicrosoftImapHost(host) {
   const h = (host || '').toLowerCase();
   return h.includes('.outlook.com') || h.includes('office365.com') || h.includes('.hotmail.com') || h.includes('.live.com');
@@ -107,9 +114,12 @@ function isMicrosoftImapHost(host) {
 
 function AccountForm({ initial, onSave, onCancel }) {
   const { t } = useTranslation();
-  const { categorizationEnabled } = useStore();
+  const { categorizationEnabled, user } = useStore();
 
   const isEdit = !!initial?.id;
+  // The server settings of an existing mailbox are an administrator's to change (the backend
+  // refuses them from anyone else): other users see a note in their place.
+  const serverLocked = isEdit && !user?.isAdmin;
   const [form, setForm] = useState(initial || {
     name: '', email_address: '', color: '#6366f1', protocol: 'imap',
     imap_host: '', imap_port: 993, imap_skip_tls_verify: false,
@@ -143,7 +153,7 @@ function AccountForm({ initial, onSave, onCancel }) {
   };
 
   const handleSubmit = async () => {
-    if (!form.email_address || !form.auth_user || !form.imap_host) {
+    if (!form.email_address || (!serverLocked && (!form.auth_user || !form.imap_host))) {
       setError(t('admin.accounts.errorRequired'));
       return;
     }
@@ -225,6 +235,10 @@ function AccountForm({ initial, onSave, onCancel }) {
       {initial?.mail_node ? (
         <div style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '16px 0 0', lineHeight: 1.5 }}>
           {t('admin.accounts.mailNodeServerNote')}
+        </div>
+      ) : serverLocked ? (
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', margin: '16px 0 0', lineHeight: 1.5 }}>
+          {t('admin.accounts.serverAdminOnlyNote')}
         </div>
       ) : (
         <>
@@ -565,18 +579,7 @@ export function AccountsTab() {
   };
 
   const handleEdit = async (form) => {
-    const updates = { name: form.name, sender_name: form.sender_name || null, color: form.color, imap_host: form.imap_host, imap_port: form.imap_port, imap_skip_tls_verify: !!form.imap_skip_tls_verify, smtp_host: form.smtp_host, smtp_port: form.smtp_port, smtp_tls: form.smtp_tls, signature: form.signature || null, categorization_enabled: !!form.categorization_enabled };
-    if (form.auth_pass) updates.auth_pass = form.auth_pass;
-    if (form.auth_user) updates.auth_user = form.auth_user;
-    // Separate SMTP credentials (optional). A username sends both (a blank password on
-    // edit keeps the stored one); a blank username clears both back to the IMAP login.
-    if (form.smtp_auth_user) {
-      updates.smtp_auth_user = form.smtp_auth_user;
-      if (form.smtp_auth_pass) updates.smtp_auth_pass = form.smtp_auth_pass;
-    } else {
-      updates.smtp_auth_user = null;
-      updates.smtp_auth_pass = null;
-    }
+    const updates = accountUpdateFromForm(form, { isAdmin });
     const updated = await api.updateAccount(editTarget.id, updates);
     updateAccount(editTarget.id, updated);
     api.getUnreadCounts().then(setUnreadCounts).catch(console.error);
@@ -720,6 +723,18 @@ export function AccountsTab() {
       ? t('admin.accounts.threading.switchToGmail')
       : t('admin.accounts.threading.switchToRfc'));
   };
+
+  // Admin: forget which Google/Microsoft account the mailbox is bound to; its next reconnect binds
+  // whoever signs in with the mailbox's verified address (backend POST /accounts/:id/oauth-subject/reset).
+  const handleResetOAuthSubject = (account) => setConfirmDialog({
+    title: t('admin.accounts.oauthSubjectResetTitle'),
+    message: t('admin.accounts.oauthSubjectResetConfirm', { email: account.email_address }),
+    confirmLabel: t('admin.accounts.oauthSubjectReset'),
+    onConfirm: async () => {
+      await api.resetOAuthSubject(account.id);
+      addNotification({ type: 'info', title: t('admin.accounts.oauthSubjectResetTitle'), body: t('admin.accounts.oauthSubjectResetDone') });
+    },
+  });
 
   const handleRecomputeThreading = (account) =>
     confirmThreadingMode(account, threadModeOf(account), t('admin.accounts.threading.recompute'));
@@ -1401,6 +1416,13 @@ export function AccountsTab() {
                 </>
               )}
             </div>
+            {isAdmin && isOAuthBound(account) && (
+              <div style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button onClick={() => handleResetOAuthSubject(account)} style={threadingBtnStyle}>
+                  {t('admin.accounts.oauthSubjectReset')}
+                </button>
+              </div>
+            )}
             {threadRecomputeText(account.thread_recompute, t) && (
               <div style={{
                 fontSize: 11,
@@ -2535,7 +2557,7 @@ export function LayoutsTab() {
 // ─── Integrations Tab ────────────────────────────────────────────────────────
 function IntegrationsTab() {
   const { t } = useTranslation();
-  const { setAccounts, setTodoistConnected, user } = useStore();
+  const { setAccounts, setTodoistConnected, user, accounts, msDeviceReconnectRequested, clearMsDeviceReconnect } = useStore();
   const isAdmin = !!user?.isAdmin;
   const [subTab, setSubTab] = useState('emailProviders');
   const [configs, setConfigs] = useState({});
@@ -2550,6 +2572,10 @@ function IntegrationsTab() {
   const [connectingMs, setConnectingMs] = useState(false);
   const [deviceFlow, setDeviceFlow] = useState(null); // { userCode, verificationUri, interval }
   const [deviceStatus, setDeviceStatus] = useState(null); // 'pending'|'success'|'declined'|'expired'|'error'
+  // Why the device-code sign-in was refused (a stable code's message), when the server said.
+  const [deviceErrorKey, setDeviceErrorKey] = useState(null);
+  // The mailbox the running device-code flow reconnects (null: it adds one).
+  const [deviceReconnectId, setDeviceReconnectId] = useState(null);
   const devicePollRef = useRef(null);
   // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
   const [mailNodeRevision, setMailNodeRevision] = useState(0);
@@ -2621,7 +2647,8 @@ function IntegrationsTab() {
         api.getAccounts().then(setAccounts).catch(console.error);
       } else if (e.data?.type === 'oauth_error' && (!e.data?.provider || e.data.provider === 'microsoft')) {
         // Google errors carry provider 'google' and are announced by MailApp.
-        setSaveMsg('Error: ' + e.data.error);
+        // A stable code from the callback (routes/oauth.js), never shown as is.
+        setSaveMsg('Error: ' + t(microsoftOAuthErrorKey(e.data.error)));
         setConnectingMs(false);
       }
     };
@@ -2659,13 +2686,17 @@ function IntegrationsTab() {
     if (devicePollRef.current) { clearInterval(devicePollRef.current); devicePollRef.current = null; }
     setDeviceFlow(null);
     setDeviceStatus(null);
+    setDeviceErrorKey(null);
+    setDeviceReconnectId(null);
   };
 
-  const handleStartDeviceFlow = async () => {
+  // accountId: the Microsoft mailbox to reconnect; without it the flow adds a mailbox.
+  const handleStartDeviceFlow = async (accountId = null) => {
     stopDeviceFlow();
     setDeviceStatus('pending');
+    setDeviceReconnectId(accountId);
     try {
-      const data = await api.startMsDeviceFlow();
+      const data = await api.startMsDeviceFlow(accountId);
       setDeviceFlow(data);
       const intervalMs = (data.interval || 5) * 1000;
       devicePollRef.current = setInterval(async () => {
@@ -2675,6 +2706,7 @@ function IntegrationsTab() {
           clearInterval(devicePollRef.current);
           devicePollRef.current = null;
           setDeviceStatus(result.status);
+          setDeviceErrorKey(result.status === 'error' && result.code ? microsoftOAuthErrorKey(result.code) : null);
           if (result.status === 'success') {
             setSaveMsg(t('admin.integrations.microsoft.connectedNote'));
             api.getAccounts().then(setAccounts).catch(console.error);
@@ -2691,6 +2723,17 @@ function IntegrationsTab() {
       setSaveMsg('Error: ' + err.message);
     }
   };
+
+  // A reconnect asked for elsewhere (sidebar, Accounts) while only the device-code flow is set up
+  // (MailApp, store.requestMsDeviceReconnect): run it here for that mailbox.
+  useEffect(() => {
+    if (!msDeviceReconnectRequested) return;
+    const accountId = msDeviceReconnectRequested;
+    clearMsDeviceReconnect();
+    setSubTab('emailProviders');
+    setMsExpanded(true);
+    handleStartDeviceFlow(accountId);
+  }, [msDeviceReconnectRequested]); // eslint-disable-line react-hooks/exhaustive-deps -- handleStartDeviceFlow is a plain function recreated each render
 
   const handleConnectMs = () => {
     setConnectingMs(true);
@@ -2852,6 +2895,7 @@ function IntegrationsTab() {
                     <li>{t('admin.integrations.microsoft.step4')}</li>
                     <li>{t('admin.integrations.microsoft.step5')}</li>
                     <li>{t('admin.integrations.microsoft.step6')}</li>
+                    <li>{t('admin.integrations.microsoft.step7')}</li>
                   </ol>
                 </div>
 
@@ -2986,10 +3030,20 @@ function IntegrationsTab() {
                   <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10, lineHeight: 1.5 }}>
                     {t('admin.integrations.microsoft.deviceCodeNote')}
                   </div>
+                  <div style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 10, lineHeight: 1.5 }}>
+                    {t('admin.integrations.microsoft.deviceCodePhishingNote')}
+                  </div>
+                  {deviceFlow && deviceReconnectId && (
+                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10, overflowWrap: 'anywhere' }}>
+                      {t('admin.integrations.microsoft.deviceCodeReconnecting', {
+                        email: accounts.find(a => a.id === deviceReconnectId)?.email_address ?? '',
+                      })}
+                    </div>
+                  )}
 
                   {!deviceFlow && (
                     <button
-                      onClick={handleStartDeviceFlow}
+                      onClick={() => handleStartDeviceFlow()}
                       disabled={!msConfigured}
                       title={!msConfigured ? t('admin.integrations.microsoft.save') : ''}
                       style={{
@@ -3018,7 +3072,11 @@ function IntegrationsTab() {
                       ) : deviceStatus === 'expired' ? (
                         <div style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>{t('admin.integrations.microsoft.deviceCodeExpired')}</div>
                       ) : deviceStatus === 'error' ? (
-                        <div style={{ color: 'var(--red)', fontSize: 13 }}>{t('admin.integrations.microsoft.deviceCodeError')}</div>
+                        <div style={{ color: 'var(--red)', fontSize: 13 }}>
+                          {deviceErrorKey && deviceErrorKey !== 'admin.integrations.microsoft.errorAuthenticationFailed'
+                            ? t(deviceErrorKey)
+                            : t('admin.integrations.microsoft.deviceCodeError')}
+                        </div>
                       ) : (
                         <>
                           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
@@ -6153,9 +6211,10 @@ function RulesTab() {
     const acts = Array.isArray(rule.actions) ? rule.actions : [];
     if (!acts.length) return '—';
     const labels = { mark_read: t('admin.rules.actionMarkRead'), star: t('admin.rules.actionStar'), forward: t('admin.rules.actionForward'), archive: t('admin.rules.actionArchive'), delete: t('admin.rules.actionDelete'), move: t('admin.rules.actionMove') };
-    // Show the move destination so same-named rules are tellable apart at a glance.
-    return acts.map(a => a.type === 'move' && a.value
-      ? `${labels.move} → ${a.value}`
+    // Show the move destination so same-named rules are tellable apart at a glance, and the
+    // forward target so nobody's forwarding goes unnoticed.
+    return acts.map(a => (a.type === 'move' || a.type === 'forward') && a.value
+      ? `${labels[a.type]} → ${a.value}`
       : (labels[a.type] || a.type)).join(', ');
   }
 
@@ -6545,6 +6604,15 @@ function RulesTab() {
                   <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{rule.name || '(unnamed)'}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {accountLabel(accounts, rule.account_id)} · {conditionSummary(rule)} → {actionSummary(rule)}
+                  </div>
+                  {/* Rules are shared: everyone sees who made one and, in full, where it forwards mail. */}
+                  {ruleForwardTarget(rule) && (
+                    <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 2, overflowWrap: 'anywhere' }}>
+                      {t('admin.rules.forwardsTo', { address: ruleForwardTarget(rule) })}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2, overflowWrap: 'anywhere' }}>
+                    {rule.created_by_name ? t('admin.rules.createdBy', { author: rule.created_by_name }) : t('admin.rules.createdByUnknown')}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

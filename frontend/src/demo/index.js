@@ -2130,6 +2130,7 @@ export async function demoRequest(method, path, body = {}) {
     if (account) account.health = 'healthy';
     return { ok: true };
   }
+  if (verb === 'POST' && /^\/accounts\/[^/]+\/oauth-subject\/reset$/.test(pathname)) return { ok: true };
   const reindexMatch = pathname.match(/^\/accounts\/([^/]+)\/reindex$/);
   if (verb === 'POST' && reindexMatch) return { ok: true, alreadyRunning: false };
   const threadingPreviewMatch = pathname.match(/^\/accounts\/([^/]+)\/threading\/preview$/);
@@ -2807,6 +2808,7 @@ export async function demoRequest(method, path, body = {}) {
     const rule = {
       id: `demo-rule-${nextRuleSequence++}`,
       created_by: 'demo-user',
+      created_by_name: 'demo@mailexpert.local',
       account_id: body?.accountId ?? null,
       name: String(body?.name ?? '').trim() || 'Untitled rule',
       enabled: body?.enabled !== false,

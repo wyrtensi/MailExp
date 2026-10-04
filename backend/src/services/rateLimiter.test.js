@@ -7,11 +7,12 @@ vi.mock('./redis.js', () => ({
     async incr(k)        { if (rs.fail) throw new Error('down'); const e = rs.store.get(k) || { v: 0, exp: 0 }; e.v++; rs.store.set(k, e); return e.v; },
     async pExpire(k, ms) { if (rs.fail) throw new Error('down'); const e = rs.store.get(k); if (e) e.exp = Date.now() + ms; return true; },
     async pTTL(k)        { if (rs.fail) throw new Error('down'); const e = rs.store.get(k); return e ? (e.exp - Date.now()) : -2; },
+    async get(k)         { if (rs.fail) throw new Error('down'); const e = rs.store.get(k); return e ? String(e.v) : null; },
     async del(k)         { if (rs.fail) throw new Error('down'); rs.store.delete(k); return 1; },
   },
 }));
 
-const { consume, reset } = await import('./rateLimiter.js');
+const { consume, peek, reset } = await import('./rateLimiter.js');
 
 describe('rateLimiter — Redis path', () => {
   beforeEach(() => { rs.fail = false; rs.store.clear(); });
@@ -53,5 +54,29 @@ describe('rateLimiter — in-memory fallback when Redis is down', () => {
     expect((await consume(key, 1, 60000)).limited).toBe(true);
     await reset(key);
     expect((await consume(key, 1, 60000)).limited).toBe(false);
+  });
+});
+
+describe('rateLimiter peek', () => {
+  beforeEach(() => { rs.fail = false; rs.store.clear(); });
+
+  it('reports a full counter without counting the request', async () => {
+    expect(await peek('p1', 2, 60000)).toEqual({ limited: false, resetMs: 0 });
+    await consume('p1', 2, 60000);
+    expect((await peek('p1', 2, 60000)).limited).toBe(false);
+    await consume('p1', 2, 60000);
+    const full = await peek('p1', 2, 60000);
+    expect(full.limited).toBe(true);
+    expect(full.resetMs).toBeGreaterThan(0);
+    expect(rs.store.get('rl:p1').v).toBe(2);
+  });
+
+  it('reads the in-memory counter when Redis is down', async () => {
+    rs.fail = true;
+    const key = `p2-${Math.random()}`;
+    await consume(key, 1, 60000);
+    expect((await peek(key, 1, 60000)).limited).toBe(true);
+    await reset(key);
+    expect((await peek(key, 1, 60000)).limited).toBe(false);
   });
 });

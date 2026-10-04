@@ -341,6 +341,7 @@ test('manual IMAP mailbox add, edit, aliases and delete round-trip through ACCOU
   assert.equal(edited.name, 'Renamed Mailbox');
   await answer('/accounts/:param/reconnect', 'POST', `/accounts/${id}/reconnect`);
   await answer('/accounts/:param/reindex', 'POST', `/accounts/${id}/reindex`);
+  await answer('/accounts/:param/oauth-subject/reset', 'POST', `/accounts/${id}/oauth-subject/reset`);
   await answer('/accounts/:param/threading/preview', 'POST', `/accounts/${id}/threading/preview`, { mode: 'rfc' });
   await answer('/accounts/:param/threading/mode', 'POST', `/accounts/${id}/threading/mode`, { mode: 'rfc' });
   const alias = await answer('/accounts/:param/aliases', 'POST', `/accounts/${id}/aliases`, { name: 'Alt Name', email: 'alt@demo.mailexpert.local' });

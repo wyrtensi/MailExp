@@ -16,3 +16,9 @@ services:
     # The certs volume is kept because nginx still serves HTTPS internally
     # (Caddy connects with tls_insecure_skip_verify via the Docker network).
     ports: !reset []
+
+  backend:
+    environment:
+      # Caddy and nginx both append to X-Forwarded-For: two hops to the client's address
+      # (backend/src/utils/trustProxy.js).
+      TRUST_PROXY: ${TRUST_PROXY:-2}
