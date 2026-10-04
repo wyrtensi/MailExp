@@ -12,14 +12,35 @@ import { authorizeSocketUser, closeUserSockets, setupWebSocket } from './websock
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 
+// The session store behind the upgrade: `store.session` is what a reload reads (null once the
+// session is destroyed), as express-session's req.session.reload() does.
 function setup(sessionMiddleware, options) {
-  const wss = new EventEmitter();
+  const wss = Object.assign(new EventEmitter(), { clients: new Set() });
   const ws = Object.assign(new EventEmitter(), {
     readyState: 1, close: vi.fn(), terminate: vi.fn(), send: vi.fn(),
   });
+  wss.clients.add(ws);
+  const store = { session: { userId: 'u1' } };
+  const req = { headers: {}, sessionID: 'sess-1' };
+  const sessionFromStore = () => ({
+    ...store.session,
+    reload(cb) {
+      if (!store.session) return cb(new Error('failed to load session'));
+      req.session = sessionFromStore();
+      cb();
+    },
+  });
+  req.session = sessionFromStore();
   setupWebSocket(wss, sessionMiddleware, options);
-  wss.emit('connection', ws, { headers: {}, session: { userId: 'u1' }, sessionID: 'sess-1' });
-  return { ws };
+  wss.emit('connection', ws, req);
+  return { ws, wss, store };
+}
+
+// An authorization that waits until the test lets it finish, like google mode's token check.
+function delayedAuthorize() {
+  let finish;
+  const authorize = () => new Promise((resolve) => { finish = resolve; });
+  return { authorize, finish: (userId = 'u1') => finish(userId) };
 }
 afterEach(() => vi.restoreAllMocks());
 
@@ -167,6 +188,44 @@ describe('closeUserSockets', () => {
     Object.assign(sockets.authenticating, { userId: 'u1', sessionId: 's1' });
     await flush();
     expect(sockets.authenticating.close).toHaveBeenCalledWith(1008, 'Session ended');
+  });
+});
+
+describe('a session that ends or locks while its socket is being authorized', () => {
+  it('is not attached when its sockets are closed meanwhile', async () => {
+    const { authorize, finish } = delayedAuthorize();
+    const { ws, wss } = setup((_req, _res, next) => next(), { authorize });
+    expect(ws).toMatchObject({ sessionId: 'sess-1', pendingUserId: 'u1' });
+    closeUserSockets(wss, 'u1', { sessionId: 'sess-1', reason: 'Locked' });
+    await flush();
+    expect(ws.close).toHaveBeenCalledWith(1008, 'Locked');
+    // ws.close is a stub here, so the socket still reads as open: the revoked mark must hold.
+    finish();
+    await flush();
+    expect(ws.userId).toBeUndefined();
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it('is refused as locked when the stored session locked meanwhile', async () => {
+    const { authorize, finish } = delayedAuthorize();
+    const { ws, store } = setup((_req, _res, next) => next(), { authorize });
+    store.session = { userId: 'u1', locked: true };
+    finish();
+    await flush();
+    expect(ws.close).toHaveBeenCalledWith(1008, 'Locked');
+    expect(ws.userId).toBeUndefined();
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it('is refused when the stored session was destroyed meanwhile', async () => {
+    const { authorize, finish } = delayedAuthorize();
+    const { ws, store } = setup((_req, _res, next) => next(), { authorize });
+    store.session = null;
+    finish();
+    await flush();
+    expect(ws.close).toHaveBeenCalledWith(1008, 'Unauthorized');
+    expect(ws.userId).toBeUndefined();
+    expect(ws.send).not.toHaveBeenCalled();
   });
 });
 

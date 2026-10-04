@@ -45,7 +45,10 @@ export async function authorizeSocketUser(req, {
 // Close the live sockets of a user whose access just ended: every one of them, or with
 // `sessionId` only those that session opened (logout, lock). A socket is authenticated once,
 // at upgrade, so nothing else stops broadcasts reaching it after its session ends or locks.
-// No userId closes nothing: a socket still in its session lookup has no userId either.
+// A socket still being authorized (google mode awaits a token check and a DB read) is matched
+// by the user its session named (ws.pendingUserId) and marked revoked, so the authorization
+// cannot attach a user to it afterwards. A socket still in its session lookup names no user
+// and is not matched; it reads the session after the change. No userId closes nothing.
 // The close waits a turn: an upgrade whose session lookup was answered in the same Redis read
 // as the write that ended the session authenticates a microtask after that write's callback,
 // and closing at once would miss it.
@@ -53,10 +56,20 @@ export function closeUserSockets(wss, userId, { sessionId = null, reason = 'Sess
   if (!wss || !userId) return;
   setImmediate(() => {
     for (const ws of wss.clients) {
-      if (ws.userId !== userId || ws.readyState !== 1) continue;
+      if ((ws.userId ?? ws.pendingUserId) !== userId || ws.readyState !== 1) continue;
       if (sessionId && ws.sessionId !== sessionId) continue;
+      ws.revoked = true;
       ws.close(1008, reason);
     }
+  });
+}
+
+// Read the session again from the store, after an authorization that may have awaited for a
+// while: it may have been destroyed or locked meanwhile. Resolves to the fresh session or null.
+function reloadSession(req) {
+  return new Promise((resolve) => {
+    if (typeof req.session?.reload !== 'function') return resolve(null);
+    req.session.reload((err) => resolve(err ? null : req.session));
   });
 }
 
@@ -95,22 +108,33 @@ export function setupWebSocket(wss, sessionMiddleware, { authorize = authorizeSo
         ws.close(1011, 'Session unavailable');
         return;
       }
+      // Known before the authorization awaits anything, so closeUserSockets can reach a socket
+      // whose session ends or locks while it is being authorized.
+      ws.sessionId = req.sessionID;
+      ws.pendingUserId = req.session?.userId;
       authorize(req)
-        .then((userId) => {
-          if (ws.readyState !== 1) return;
+        .then(async (userId) => {
+          if (ws.readyState !== 1 || ws.revoked) return;
           if (!userId) {
             ws.close(1008, 'Unauthorized');
             return;
           }
-          if (req.session.locked) {
+          // The session read at upgrade is a snapshot: logout, lock or a disable may have
+          // happened while the authorization awaited. Read it again before attaching the user.
+          const session = await reloadSession(req);
+          if (ws.readyState !== 1 || ws.revoked) return;
+          if (!session || session.userId !== userId) {
+            ws.close(1008, 'Unauthorized');
+            return;
+          }
+          if (session.locked) {
             // Screen lock (#235) is server-enforced: don't stream live mail to a locked
             // session. POST /auth/lock closes the sockets already open; this blocks a new one.
             ws.close(1008, 'Locked');
             return;
           }
           ws.userId = userId;
-          // The session that opened the socket, so logout and lock can close just its sockets.
-          ws.sessionId = req.sessionID;
+          delete ws.pendingUserId;
           recordWsConnect();
           ws._diagCounted = true;
           console.log(`WebSocket connected for user ${userId}`);
