@@ -3,6 +3,7 @@ import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { applyInboxRules, isDangerousRegex } from '../services/inboxRules.js';
 import { requireMailbox } from '../utils/requireMailbox.js';
+import { recordAudit } from '../services/auditLog.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -74,9 +75,38 @@ export function normalizeActions(actions) {
     ));
 }
 
+// Rules are shared: everyone who can open a mailbox sees all of its rules, with who made each one
+// (created_by_name: the author's email, else username) and every action, a forward target too.
+const AUTHOR_NAME = "COALESCE(NULLIF(u.email, ''), u.username) AS created_by_name";
+
+// The rule row as the list shows it, author included, from a statement that returns one rule.
+const withAuthor = (statement) => `WITH r AS (${statement})
+  SELECT r.*, ${AUTHOR_NAME} FROM r LEFT JOIN users u ON u.id = r.created_by`;
+
+// The address a rule forwards to, or null.
+function forwardTarget(actions) {
+  const list = Array.isArray(actions) ? actions : [];
+  const forward = list.find((action) => action?.type === 'forward' && typeof action.value === 'string');
+  return forward ? forward.value : null;
+}
+
+// What the audit log keeps of a rule: its name, its action types and where it forwards to.
+function ruleAuditDetails(rule) {
+  const actions = Array.isArray(rule.actions) ? rule.actions : [];
+  return {
+    ruleId: rule.id,
+    name: rule.name || '',
+    actions: actions.map((action) => action?.type).filter((type) => typeof type === 'string'),
+    forwardTo: forwardTarget(actions),
+  };
+}
+
 router.get('/', async (req, res) => {
   try {
-    const result = await query('SELECT * FROM inbox_rules ORDER BY priority ASC, created_at ASC');
+    const result = await query(
+      `SELECT r.*, ${AUTHOR_NAME} FROM inbox_rules r LEFT JOIN users u ON u.id = r.created_by
+       ORDER BY r.priority ASC, r.created_at ASC`
+    );
     res.json(result.rows);
   } catch (err) {
     console.error('GET /rules error:', err.message);
@@ -239,10 +269,10 @@ router.post('/', async (req, res) => {
     const countResult = await query('SELECT COUNT(*) AS cnt FROM inbox_rules');
     const priority = parseInt(countResult.rows[0].cnt);
     const result = await query(
-      `INSERT INTO inbox_rules
+      withAuthor(`INSERT INTO inbox_rules
          (created_by, account_id, name, enabled, stop_processing, priority, condition_logic, conditions, actions)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING *`,
+       RETURNING *`),
       [
         req.session.userId,
         mailboxId,
@@ -255,7 +285,12 @@ router.post('/', async (req, res) => {
         JSON.stringify(normalizedActions),
       ]
     );
-    res.status(201).json(result.rows[0]);
+    const rule = result.rows[0];
+    recordAudit({
+      actorUserId: req.session.userId, accountId: mailboxId, action: 'rule.created',
+      details: ruleAuditDetails({ ...rule, name: name || '', actions: normalizedActions }),
+    });
+    res.status(201).json(rule);
   } catch (err) {
     console.error('POST /rules error:', err.message);
     res.status(500).json({ error: 'Failed to create rule' });
@@ -287,12 +322,15 @@ router.put('/:id', async (req, res) => {
         return res.status(400).json({ error: 'Move destination folder not found for this account' });
       }
     }
+    // The rule as it was, for the audit log: what it forwarded to before this change.
+    const before = await query('SELECT id, account_id, name, actions FROM inbox_rules WHERE id = $1', [req.params.id]);
+    if (!before.rows.length) return res.status(404).json({ error: 'Rule not found' });
     const result = await query(
-      `UPDATE inbox_rules
+      withAuthor(`UPDATE inbox_rules
        SET name = $1, account_id = $2, enabled = $3, stop_processing = $4,
            condition_logic = $5, conditions = $6, actions = $7, updated_at = NOW()
        WHERE id = $8
-       RETURNING *`,
+       RETURNING *`),
       [
         name || '',
         mailboxId,
@@ -305,7 +343,18 @@ router.put('/:id', async (req, res) => {
       ]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Rule not found' });
-    res.json(result.rows[0]);
+    const rule = result.rows[0];
+    const previous = before.rows[0];
+    recordAudit({
+      actorUserId: req.session.userId, accountId: mailboxId, action: 'rule.updated',
+      details: {
+        ...ruleAuditDetails({ ...rule, name: name || '', actions: normalizedActions }),
+        enabled: enabled !== false,
+        previousForwardTo: forwardTarget(previous.actions),
+        ...(previous.account_id !== mailboxId ? { previousAccountId: previous.account_id } : {}),
+      },
+    });
+    res.json(rule);
   } catch (err) {
     console.error('PUT /rules/:id error:', err.message);
     res.status(500).json({ error: 'Failed to update rule' });
@@ -315,10 +364,15 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const result = await query(
-      'DELETE FROM inbox_rules WHERE id = $1 RETURNING id',
+      'DELETE FROM inbox_rules WHERE id = $1 RETURNING id, account_id, name, actions',
       [req.params.id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Rule not found' });
+    const rule = result.rows[0];
+    recordAudit({
+      actorUserId: req.session.userId, accountId: rule.account_id, action: 'rule.deleted',
+      details: ruleAuditDetails(rule),
+    });
     res.json({ ok: true });
   } catch (err) {
     console.error('DELETE /rules/:id error:', err.message);

@@ -56,7 +56,7 @@ import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
 import { getEffectiveShortcuts, getGroupedActions, ACTION_DEFS, SPECIAL_KEY_LABELS, parseModKey, modLabel } from '../utils/defaultShortcuts.js';
-import { isValidForwardAddress } from '../utils/ruleActions.js';
+import { isValidForwardAddress, ruleForwardTarget } from '../utils/ruleActions.js';
 import { folderParentLabel } from '../utils/folderDisplay.js';
 import { accountLabel } from '../utils/accountLabel.js';
 import { buildAccountSearchIndex, searchAccounts } from '../utils/accountSearch.js';
@@ -6150,9 +6150,10 @@ function RulesTab() {
     const acts = Array.isArray(rule.actions) ? rule.actions : [];
     if (!acts.length) return '—';
     const labels = { mark_read: t('admin.rules.actionMarkRead'), star: t('admin.rules.actionStar'), forward: t('admin.rules.actionForward'), archive: t('admin.rules.actionArchive'), delete: t('admin.rules.actionDelete'), move: t('admin.rules.actionMove') };
-    // Show the move destination so same-named rules are tellable apart at a glance.
-    return acts.map(a => a.type === 'move' && a.value
-      ? `${labels.move} → ${a.value}`
+    // Show the move destination so same-named rules are tellable apart at a glance, and the
+    // forward target so nobody's forwarding goes unnoticed.
+    return acts.map(a => (a.type === 'move' || a.type === 'forward') && a.value
+      ? `${labels[a.type]} → ${a.value}`
       : (labels[a.type] || a.type)).join(', ');
   }
 
@@ -6542,6 +6543,15 @@ function RulesTab() {
                   <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>{rule.name || '(unnamed)'}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {accountLabel(accounts, rule.account_id)} · {conditionSummary(rule)} → {actionSummary(rule)}
+                  </div>
+                  {/* Rules are shared: everyone sees who made one and, in full, where it forwards mail. */}
+                  {ruleForwardTarget(rule) && (
+                    <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 2, overflowWrap: 'anywhere' }}>
+                      {t('admin.rules.forwardsTo', { address: ruleForwardTarget(rule) })}
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2, overflowWrap: 'anywhere' }}>
+                    {rule.created_by_name ? t('admin.rules.createdBy', { author: rule.created_by_name }) : t('admin.rules.createdByUnknown')}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

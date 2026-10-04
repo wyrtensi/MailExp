@@ -60,6 +60,9 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'tenant.message_traced': 'admin.audit.actionTenantMessageTraced',
   'tenant.antispam_enforced': 'admin.audit.actionTenantAntispamEnforced',
   'tenant.alias_contacts_removal_approved': 'admin.audit.actionTenantAliasContactsApproved',
+  'rule.created': 'admin.audit.actionRuleCreated',
+  'rule.updated': 'admin.audit.actionRuleUpdated',
+  'rule.deleted': 'admin.audit.actionRuleDeleted',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -266,6 +269,23 @@ export function auditQuery({ account, user, action, fromDate, toDate, before } =
 export function auditDetail(entry) {
   const details = entry?.details ?? {};
   switch (entry?.action) {
+    // An inbox rule created, changed or deleted (backend routes/rules.js): its name, and where it
+    // forwards to, before and after when a change moved the forward target.
+    case 'rule.created':
+    case 'rule.updated':
+    case 'rule.deleted': {
+      const name = details.name ?? '';
+      const to = details.forwardTo ?? null;
+      const from = entry.action === 'rule.updated' ? (details.previousForwardTo ?? null) : to;
+      if (from && from !== to) {
+        return to
+          ? { key: 'admin.audit.detailRuleForwardChanged', values: { name, from, to } }
+          : { key: 'admin.audit.detailRuleForwardRemoved', values: { name, from } };
+      }
+      return to
+        ? { key: 'admin.audit.detailRuleForward', values: { name, address: to } }
+        : { key: 'admin.audit.detailRule', values: { name } };
+    }
     case 'mailbox.added':
     case 'mailbox.reconnected':
       return details.oauthProvider
