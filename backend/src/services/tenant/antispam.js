@@ -8,12 +8,14 @@
 //
 // The owner's decision after stage 7 (section 5.14 of eop-panel-requirements.md): ordinary
 // phishing and spam land in the employees' Spam automatically. The panel no longer only warns: it
-// sets SpamAction, HighConfidenceSpamAction and PhishSpamAction of the Default policy to MoveToJmf
+// sets SpamAction, HighConfidenceSpamAction, PhishSpamAction and (D-11) BulkSpamAction of the
+// Default policy to MoveToJmf
 // (ENFORCED: one fixed worker operation per field; services/tenant/tenantJobs.js syncAntispam
 // reads, writes only the fields that differ, reads again and journals). Learn
 // (Set-HostedContentFilterPolicy) allows MoveToJmf for those three verdicts; HighConfidencePhishAction
 // takes only Quarantine and Redirect, and secure by default turns a MoveToJmf there into Quarantine,
-// so high confidence phishing keeps the release path (R-42). BulkSpamAction is still only checked.
+// so high confidence phishing keeps the release path (R-42). Only Default is changed: custom
+// policies and the Standard/Strict presets are left alone, their mail goes through the release.
 
 export const POLICY_ACTION_FIELDS = Object.freeze([
   'SpamAction', 'HighConfidenceSpamAction', 'BulkSpamAction', 'PhishSpamAction', 'HighConfidencePhishAction',
@@ -25,6 +27,8 @@ export const ENFORCED = Object.freeze({
   SpamAction: 'set_spam_action_junk',
   HighConfidenceSpamAction: 'set_high_confidence_spam_action_junk',
   PhishSpamAction: 'set_phish_spam_action_junk',
+  // D-11 (bulk to Spam), the owner's default after stage 7.
+  BulkSpamAction: 'set_bulk_spam_action_junk',
 });
 
 // field -> the actions that fit the layout. An enforced field fits only with MoveToJmf: anything
@@ -32,7 +36,7 @@ export const ENFORCED = Object.freeze({
 const EXPECTED = Object.freeze({
   SpamAction: [ENFORCED_ACTION],
   HighConfidenceSpamAction: [ENFORCED_ACTION],
-  BulkSpamAction: ['MoveToJmf', 'AddXHeader'],
+  BulkSpamAction: [ENFORCED_ACTION],
   PhishSpamAction: [ENFORCED_ACTION],
   HighConfidencePhishAction: ['Quarantine'],
 });

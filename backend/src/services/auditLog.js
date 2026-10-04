@@ -29,6 +29,8 @@ export const AUDIT_ACTIONS = Object.freeze([
   'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
   'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
   'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',
+  // Section 5.14 (the owner's decisions after stage 7).
+  'tenant.antispam_enforced', 'tenant.alias_contacts_removal_approved',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 

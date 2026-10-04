@@ -161,7 +161,35 @@ export async function readAntispam(session, now = Date.now()) {
 // (error: the first refused write, or antispam_not_written when the tenant answered "done" but the
 // second read still shows another action). What changed is journaled (tenant.antispam_enforced);
 // a failure is kept for the alert tenant_antispam_not_enforced. A failed first read writes nothing.
-export async function syncAntispam(session, { now = Date.now(), actor = null } = {}) {
+export async function syncAntispam(session, { now = Date.now(), actor = null, lockId = null } = {}) {
+  // One run at a time (the poll and "Check and fix" at once): two would both write and journal the
+  // same change. A run that finds another going answers null and changes nothing.
+  const holder = lockId ?? `antispam-${now}-${Math.random().toString(36).slice(2)}`;
+  if (!(await lockAntispam(holder))) return null;
+  try {
+    return await enforceAntispam(session, { now, actor });
+  } finally {
+    await query(
+      `UPDATE integration_config SET config = '{}'::jsonb, updated_at = NOW() WHERE provider = $1 AND config->>'run' = $2`,
+      [ANTISPAM_LOCK_PROVIDER, holder],
+    ).catch((err) => console.error(`Anti-spam lock not freed: ${err?.code || err?.message}`));
+  }
+}
+
+export const ANTISPAM_LOCK_PROVIDER = 'mail_node_antispam_run';
+const ANTISPAM_LOCK_STALE_MINUTES = 10;
+async function lockAntispam(holder) {
+  const { rows } = await query(`
+    INSERT INTO integration_config (provider, config) VALUES ($1, $2)
+    ON CONFLICT (provider) DO UPDATE SET config = EXCLUDED.config, updated_at = NOW()
+      WHERE integration_config.config->>'run' IS NULL
+         OR integration_config.updated_at < NOW() - make_interval(mins => $3::int)
+    RETURNING provider
+  `, [ANTISPAM_LOCK_PROVIDER, { run: holder }, ANTISPAM_LOCK_STALE_MINUTES]);
+  return rows.length > 0;
+}
+
+async function enforceAntispam(session, { now, actor }) {
   const first = await readAntispam(session, now);
   if (!first.ok) return first;
   const at = first.at;
@@ -179,8 +207,14 @@ export async function syncAntispam(session, { now = Date.now(), actor = null } =
   }
   const after = await readAntispam(session, now);
   if (!after.ok) {
-    // What the writes did is unknown until the next read; the first read stays shown.
-    return { ...first, enforcement: { at, ok: false, changed: [], failed: plan.map((s) => s.field), error: { code: after.code, message: after.message } } };
+    // What the writes did is unknown until the next read (they may have gone through): the first
+    // read stays shown, the state is marked unconfirmed for the screen and the alert.
+    return {
+      ...first,
+      enforcement: {
+        at, ok: false, unconfirmed: true, changed: [], failed: plan.map((s) => s.field), error: { code: after.code, message: after.message },
+      },
+    };
   }
   const changed = plan.filter((s) => after.policy[s.field] === ENFORCED_ACTION).map((s) => ({ field: s.field, from: s.from, to: ENFORCED_ACTION }));
   const failed = plan.filter((s) => after.policy[s.field] !== ENFORCED_ACTION).map((s) => s.field);
@@ -227,7 +261,10 @@ export async function poll(context, { previous = {}, now = Date.now() } = {}) {
   const antispamAt = Date.parse(previous.antispam?.at ?? '');
   const due = !Number.isFinite(antispamAt) || now - antispamAt >= ANTISPAM_MAX_AGE_MS;
   const pending = previous.antispam?.ok === true && !previous.antispam.enforcement && enforcementPlan(previous.antispam.policy).length > 0;
-  if (due || pending) patch.antispam = await syncAntispam(context.session, { now });
+  if (due || pending) {
+    const antispam = await syncAntispam(context.session, { now });
+    if (antispam) patch.antispam = antispam;
+  }
   return patch;
 }
 
@@ -265,7 +302,9 @@ export function registerTenantJobKinds() {
     maxAttempts: 1,
     handler: async (job, ctx) => {
       const context = await tenantContext();
-      const antispam = await syncAntispam(context.session, { actor: job.created_by ?? null });
+      const antispam = await syncAntispam(context.session, { actor: job.created_by ?? null, lockId: `job-${job.id}` });
+      // Another run is setting the policy: it keeps its own result.
+      if (!antispam) return;
       await ctx.complete((tx) => saveTenantState({ antispam }, tx));
     },
   });

@@ -5,12 +5,12 @@ import { TENANT_FIXTURES } from './fakes.js';
 // R-28: the default policy against the filing layout of R-11, and what the panel sets (section 5.14).
 
 const fitting = {
-  SpamAction: 'MoveToJmf', HighConfidenceSpamAction: 'MoveToJmf', BulkSpamAction: 'AddXHeader',
+  SpamAction: 'MoveToJmf', HighConfidenceSpamAction: 'MoveToJmf', BulkSpamAction: 'MoveToJmf',
   PhishSpamAction: 'MoveToJmf', HighConfidencePhishAction: 'Quarantine',
 };
 
 describe('policyConflicts', () => {
-  it('a policy that delivers spam and phishing to the node\'s Junk fits', () => {
+  it('a policy that delivers spam, bulk and phishing to the node\'s Junk fits', () => {
     expect(policyConflicts(summarizePolicy(fitting))).toEqual([]);
   });
 
@@ -51,11 +51,12 @@ describe('policyConflicts', () => {
 });
 
 describe('enforcementPlan (section 5.14)', () => {
-  it('sets spam, high confidence spam and phishing to MoveToJmf, nothing else', () => {
+  it('sets spam, high confidence spam, phishing and bulk to MoveToJmf, never high confidence phishing', () => {
     expect(ENFORCED).toEqual({
       SpamAction: 'set_spam_action_junk',
       HighConfidenceSpamAction: 'set_high_confidence_spam_action_junk',
       PhishSpamAction: 'set_phish_spam_action_junk',
+      BulkSpamAction: 'set_bulk_spam_action_junk',
     });
     expect(enforcementPlan(summarizePolicy(fitting))).toEqual([]);
     expect(enforcementPlan(summarizePolicy({
@@ -65,6 +66,7 @@ describe('enforcementPlan (section 5.14)', () => {
       { field: 'SpamAction', from: 'Quarantine', op: 'set_spam_action_junk' },
       { field: 'HighConfidenceSpamAction', from: 'AddXHeader', op: 'set_high_confidence_spam_action_junk' },
       { field: 'PhishSpamAction', from: 'Delete', op: 'set_phish_spam_action_junk' },
+      { field: 'BulkSpamAction', from: 'Quarantine', op: 'set_bulk_spam_action_junk' },
     ]);
   });
 

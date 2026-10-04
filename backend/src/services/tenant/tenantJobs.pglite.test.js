@@ -277,19 +277,50 @@ describe('the anti-spam policy (R-28, section 5.14)', () => {
     expect(enforcedAudits()).toHaveLength(1);
   });
 
-  it('every enforced field at once; high confidence phishing and bulk are never written', async () => {
+  it('every enforced field at once, bulk included (D-11); high confidence phishing is never written', async () => {
     Object.assign(model().policy, {
       SpamAction: 'Quarantine', HighConfidenceSpamAction: 'Redirect', PhishSpamAction: 'Quarantine', BulkSpamAction: 'Quarantine',
     });
     await post('/tenant/antispam');
     await runDue();
-    expect(model().policyWrites).toEqual(['SpamAction', 'HighConfidenceSpamAction', 'PhishSpamAction']);
+    expect(model().policyWrites).toEqual(['SpamAction', 'HighConfidenceSpamAction', 'PhishSpamAction', 'BulkSpamAction']);
     const { antispam } = await getTenantState();
     expect(antispam.policy).toMatchObject({
       SpamAction: 'MoveToJmf', HighConfidenceSpamAction: 'MoveToJmf', PhishSpamAction: 'MoveToJmf',
-      BulkSpamAction: 'Quarantine', HighConfidencePhishAction: 'Quarantine',
+      BulkSpamAction: 'MoveToJmf', HighConfidencePhishAction: 'Quarantine',
     });
-    expect(antispam.conflicts.map((c) => c.field)).toEqual(['BulkSpamAction']);
+    expect(antispam.conflicts).toEqual([]);
+  });
+
+  it('two runs at once write and journal one change once (M3)', async () => {
+    const { syncAntispam } = await import('./tenantJobs.js');
+    const session = driver.forTenant({ tenantId: SETTINGS.tenantId, appId: SETTINGS.appId, organization: SETTINGS.tenantDomain, thumbprint: SETTINGS.certThumbprint });
+    const [a, b] = await Promise.all([syncAntispam(session), syncAntispam(session)]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+    expect(model().policyWrites).toEqual(['PhishSpamAction']);
+    expect(enforcedAudits()).toHaveLength(1);
+    // Freed afterwards: the next run reads and finds nothing to change.
+    expect((await syncAntispam(session)).enforcement).toMatchObject({ ok: true, changed: [] });
+  });
+
+  it('a re-read that fails after the writes leaves the state unconfirmed (M7)', async () => {
+    let reads = 0;
+    driver.fake.exo.answers.get_content_filter_policy = () => {
+      reads += 1;
+      return reads === 1 ? [model().policy] : new TenantError('worker_timeout', 'The tenant worker did not answer in time');
+    };
+    await post('/tenant/antispam');
+    await runDue();
+    expect((await getTenantState()).antispam.enforcement).toMatchObject({
+      ok: false, unconfirmed: true, failed: ['PhishSpamAction'], error: { code: 'worker_timeout' },
+    });
+  });
+
+  it('a worker image without the operation says so (unknown_op)', async () => {
+    driver.fake.exo.answers.set_phish_spam_action_junk = new TenantError('unknown_op', 'Unknown operation', { status: 404 });
+    await post('/tenant/antispam');
+    await runDue();
+    expect((await getTenantState()).antispam.enforcement).toMatchObject({ ok: false, error: { code: 'unknown_op' } });
   });
 
   it('a write the tenant did not apply is reported, not journaled as done', async () => {

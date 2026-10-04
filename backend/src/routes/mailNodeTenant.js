@@ -49,6 +49,7 @@ const ERRORS = {
   hold_invalid: [400, 'hold must be true or false'],
   domain_authoritative: [409, 'The domain is Authoritative already: it is not held on Internal Relay'],
   internal_relay_not_needed: [409, 'The domain does not wait for this decision'],
+  alias_contacts_not_held: [409, 'The domain holds no alias contacts for a decision'],
   enabled_invalid: [400, 'enabled must be true or false'],
   phish_release_paused: [409, 'The release of quarantined phishing is paused'],
 };
@@ -142,6 +143,23 @@ router.post('/tenant/domains/:domain/internal-relay', async (req, res) => {
   if (row.tenant_sync?.acceptedDomain?.code !== 'authoritative_in_tenant') return refuse(res, 'internal_relay_not_needed');
   await query('UPDATE mail_node_domains SET internal_relay_approved_at = NOW(), updated_at = NOW() WHERE domain = $1', [domain]);
   recordAudit({ actorUserId: req.session.userId, action: 'tenant.internal_relay_approved', details: { domain } });
+  const { job } = await enqueueDomainSync(domain, { userId: req.session.userId });
+  return res.status(202).json({ job: jobAnswer(job) });
+});
+
+// Section 5.14: an administrator allows the mirror to remove, on an Authoritative domain, the
+// contacts stage 7b made for mailcow aliases made by hand. Mail to those aliases is rejected from the
+// next run on. Journaled with the addresses the last run held.
+router.post('/tenant/domains/:domain/alias-contacts/remove', async (req, res) => {
+  const domain = parseHostName(req.params.domain);
+  if (!domain) return refuse(res, 'domain_invalid');
+  if (await tenantRefusal(res)) return undefined;
+  const { rows: [row] } = await query('SELECT tenant_sync FROM mail_node_domains WHERE domain = $1', [domain]);
+  if (!row) return refuse(res, 'domain_not_found');
+  const held = row.tenant_sync?.mirror?.heldAliasContacts ?? [];
+  if (!held.length) return refuse(res, 'alias_contacts_not_held');
+  await query('UPDATE mail_node_domains SET alias_contacts_approved_at = NOW(), updated_at = NOW() WHERE domain = $1', [domain]);
+  recordAudit({ actorUserId: req.session.userId, action: 'tenant.alias_contacts_removal_approved', details: { domain, addresses: held } });
   const { job } = await enqueueDomainSync(domain, { userId: req.session.userId });
   return res.status(202).json({ job: jobAnswer(job) });
 });

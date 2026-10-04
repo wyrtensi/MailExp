@@ -10,6 +10,7 @@ vi.mock('../services/db.js', () => ({
     if (sql.includes('is_admin')) return { rows: [{ is_admin: session.isAdmin }] };
     if (sql.includes('FROM messages m JOIN email_accounts')) return { rows: db.message ? [db.message] : [] };
     if (sql.includes('FROM account_aliases')) return { rows: db.aliases };
+    if (sql.includes('FROM integration_config')) return { rows: db.spamRule ? [{ config: db.spamRule }] : [] };
     return { rows: [] };
   }),
 }));
@@ -123,7 +124,15 @@ describe('/api/mail-node quarantine', () => {
     node.item = { ...entry(1, 'info@example.com'), ip: '198.51.100.7', symbols: [], user: null, msg: 'Subject: Hi\r\nContent-Type: text/html\r\n\r\n<img src="https://t.test/x"><p>Hi</p>' };
     const body = await (await call('GET', '/quarantine/1')).json();
     expect(body).toMatchObject({ id: 1, accountId: ACCOUNT, admin: true, ip: '198.51.100.7', letter: { subject: 'Hi', html: '<img src="https://t.test/x"><p>Hi</p>' } });
+    // Section 5.14: the spam rule's state on the node, null before the first check.
+    expect(body.spamRule).toBeNull();
     expect(body.msg).toBeUndefined();
+    db.spamRule = { at: '2026-10-04T10:00:00.000Z', state: 'outdated' };
+    try {
+      expect((await (await call('GET', '/quarantine/1')).json()).spamRule).toBe('outdated');
+    } finally {
+      db.spamRule = null;
+    }
   });
 
   it('hides from a user an entry of a mailbox the panel does not have', async () => {
