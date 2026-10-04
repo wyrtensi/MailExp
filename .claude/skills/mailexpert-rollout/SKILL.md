@@ -65,6 +65,18 @@ Target preflight (it may `git fetch` the commit into `<PREFIX>/app`; nothing els
 ssh root@<PANEL_HOST> "$D/status.sh --prefix <PREFIX> --target sha-<12> --json"
 ```
 
+If the installed version predates `status.sh` (`No such file`, or `update.sh --check` answers
+"unknown argument"), run it from a fresh shallow clone; it works against an older install. The
+clone is the one write of this phase (a scratch directory outside `<PREFIX>`): say so to the human,
+and reuse it (`git -C /root/mailexpert-next pull`) when it already exists:
+
+```bash
+ssh root@<PANEL_HOST> "git clone --depth 1 https://github.com/wyrtensi/MailExpert.git /root/mailexpert-next && /root/mailexpert-next/scripts/deploy/status.sh --prefix <PREFIX> --target sha-<12> --json"
+```
+
+The update itself still runs from `<PREFIX>/app` (`update.sh` hands over to the target's
+installer). Afterwards `status.sh` is in `<PREFIX>/app`.
+
 What changed between the running and the target commit (for the plan):
 
 ```bash

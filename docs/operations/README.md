@@ -147,6 +147,17 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
    sudo $D/update.sh --check sha-<12>      # = status.sh --target sha-<12>
    ```
 
+   **Первое обновление с версии без `status.sh`** (`update.sh` отвечает «unknown argument:
+   --check»): запустить предпроверку из свежей копии репозитория — скрипт работает с уже
+   установленной панелью любой версии, — а само обновление как обычно:
+
+   ```bash
+   git clone --depth 1 https://github.com/wyrtensi/MailExpert.git /root/mailexpert-next
+   sudo /root/mailexpert-next/scripts/deploy/status.sh --prefix <PREFIX> --target sha-<12>
+   ```
+
+   После обновления `status.sh` есть в `<PREFIX>/app`, копию можно удалить.
+
    Код 0 — можно обновлять. `problem:` — устранить до обновления (не та версия в checkout, нет
    образа в реестре, мало места, база новее целевой версии, идёт другое обновление). `note:` — шаги
    после `update.sh`. Строка `pending_migrations` — есть ли новые миграции: от неё зависит откат.
