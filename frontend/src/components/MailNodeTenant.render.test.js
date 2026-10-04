@@ -145,22 +145,35 @@ describe('MailNodeTenant — the anti-spam actions MailExpert sets (section 5.14
 
 describe('MailNodeTenant — the policy and the spam rule of the node (section 5.14)', () => {
   const FITTING = { ...STATE, antispam: { ...STATE.antispam, conflicts: [] } };
-  const fits = async (props) => {
-    answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: false, state: FITTING, jobs: {} };
-    const root = await mount(React.createElement(MailNodeTenant, props));
+  const fits = async (extra) => {
+    answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: false, state: FITTING, jobs: {}, ...extra };
+    const root = await mount(React.createElement(MailNodeTenant));
     const line = root.querySelector('[data-policy-fits]');
     return { state: line.getAttribute('data-policy-fits'), text: line.textContent };
   };
 
   test('says the actions fit only when the node holds the rule', async () => {
-    assert.deepEqual(await fits({ spamRule: 'ok' }), { state: 'ok', text: 'admin.tenant.policyFits' });
+    assert.deepEqual(await fits({ spamRule: { at: '2026-10-05T08:00:00.000Z', state: 'ok' } }), { state: 'ok', text: 'admin.tenant.policyFits' });
     assert.deepEqual(await fits({}), { state: 'policy', text: 'admin.tenant.policyFits' });
   });
 
-  test('says the rule is missing, outdated or not checked instead of that they fit', async () => {
-    assert.deepEqual(await fits({ spamRule: 'missing' }), { state: 'missing', text: 'admin.tenant.policyFitsRuleMissing' });
-    assert.deepEqual(await fits({ spamRule: 'outdated' }), { state: 'outdated', text: 'admin.tenant.policyFitsRuleOutdated' });
-    assert.deepEqual(await fits({ spamRule: null }), { state: 'unknown', text: 'admin.tenant.policyFitsRuleUnknown' });
+  test('says the rule is missing, outdated, unread or never read instead of that they fit', async () => {
+    assert.deepEqual(await fits({ spamRule: { state: 'missing' } }), { state: 'missing', text: 'admin.tenant.policyFitsRuleMissing' });
+    assert.deepEqual(await fits({ spamRule: { state: 'outdated' } }), { state: 'outdated', text: 'admin.tenant.policyFitsRuleOutdated' });
+    assert.deepEqual(await fits({ spamRule: { state: 'unknown', code: 'mail_node_unreachable' } }), { state: 'unknown', text: 'admin.tenant.policyFitsRuleUnreadable' });
+    assert.deepEqual(await fits({ spamRule: null }), { state: 'never', text: 'admin.tenant.policyFitsRuleUnknown' });
+  });
+
+  test('the policy and the release read the same rule: both wait while it is missing', async () => {
+    answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: true, state: FITTING, jobs: {}, spamRule: { state: 'missing' } };
+    answers['GET /api/mail-node/tenant/phish-release'] = {
+      enabled: true, releases: [], held: { count: 0 },
+      // The last run still saw the rule in place; the server's newer read says it is gone.
+      run: { at: '2026-10-05T08:00:00.000Z', ok: true, counts: { released: 0, skipped: 0, failed: 0, ruleWaiting: 2 }, left: false, rule: { state: 'ok' } },
+    };
+    const root = await mount(React.createElement(MailNodeTenant));
+    assert.equal(root.querySelector('[data-policy-fits]').getAttribute('data-policy-fits'), 'missing');
+    assert.equal(root.querySelector('[data-phish-rule-waiting]').getAttribute('data-phish-rule-waiting'), 'missing');
   });
 });
 

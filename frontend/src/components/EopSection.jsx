@@ -14,7 +14,6 @@ import {
   mailNodeErrorKey,
   prefilterDoneKey,
   prefilterPending,
-  spamRuleState,
 } from '../utils/mailNode.js';
 
 const fieldStyle = {
@@ -98,8 +97,10 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
   const [confirmPrefilter, setConfirmPrefilter] = useState(false);
   // The TERRL budget now (R-21); null while it loads or when it could not be read.
   const [budget, setBudget] = useState(null);
-  // Bumped by every save, so the tenant part reads what the new settings allow.
+  // Bumped by every save, so the tenant part reads what the new settings allow, and by every apply,
+  // which reads the node's spam rule again (the tenant part shows it next to the policy).
   const [saves, setSaves] = useState(0);
+  const [applies, setApplies] = useState(0);
 
   const loadBudget = useCallback(async () => {
     try {
@@ -188,6 +189,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
     setNotice(null);
     try {
       const answer = await action();
+      setApplies((n) => n + 1);
       await loadApplied();
       setNotice(typeof noticeKey === 'function' ? noticeKey(answer) : noticeKey);
       domainChanged();
@@ -340,7 +342,7 @@ export default function EopSection({ revision = 0, onDomainsChanged }) {
       {stored && (
         <div data-eop-tenant>
           <div style={subTitleStyle}>{t('admin.tenant.title')}</div>
-          <MailNodeTenant revision={saves} spamRule={spamRuleState(applied)} />
+          <MailNodeTenant revision={saves + applies} />
         </div>
       )}
 

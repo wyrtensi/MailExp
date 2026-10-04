@@ -206,6 +206,8 @@ export function demoTenantRequest(verb, pathname, settings, error, body = null, 
     return clone({
       driver: 'fake', profileWithoutDriver: false, configured: configured(settings), state, connectorDrift: [],
       jobs: { test: latest(KINDS.test), antispam: latest(KINDS.antispam), poll: latest(KINDS.poll) },
+      // The node's spam rule as last read (backend getSpamRuleState): the demo reads it on every load.
+      spamRule: { at: iso(Date.now()), state: spamRule },
     });
   }
   const button = /^\/mail-node\/tenant\/(test|poll|antispam)$/.exec(pathname);

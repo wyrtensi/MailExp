@@ -3,6 +3,7 @@ import { getJob, listJobs } from '../jobQueue.js';
 import { recordAudit } from '../auditLog.js';
 import { auditOf, jobBy } from '../actor.js';
 import { getEopSettings } from '../mailNode/eopSettings.js';
+import { getSpamRuleState } from '../mailNode/nodeApply.js';
 import { getDomainRow } from '../mailNode/domains.js';
 import { parseHostName } from '../mailNode/mailcow.js';
 import { getTenantDriver, tenantOf, tenantProfileWithoutDriver } from './driver.js';
@@ -51,7 +52,7 @@ async function latestJob(kind) {
 
 // GET /tenant: { driver, profileWithoutDriver, configured, state, connectorDrift, jobs }.
 export async function tenantStatus() {
-  const [settings, state] = await Promise.all([getEopSettings(), getTenantState()]);
+  const [settings, state, spamRule] = await Promise.all([getEopSettings(), getTenantState(), getSpamRuleState()]);
   const driver = getTenantDriver();
   // The latest job of each button's kind: the screen shows a test still running after a reload.
   const [test, antispam, poll] = await Promise.all([
@@ -66,6 +67,9 @@ export async function tenantStatus() {
     // R-25: what changed in the connectors since the reference.
     connectorDrift: connectorDrift(state.connectorReference, state.connectors),
     jobs: { test, antispam, poll },
+    // Section 5.14: the node's spam filing rule as last read ({ at, state, code? } or null), the
+    // one the quarantine release waits for; the policy fits the node only with it.
+    spamRule,
   };
 }
 

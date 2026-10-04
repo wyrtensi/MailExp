@@ -36,20 +36,25 @@ const POLL_MS = 1500;
 const POLL_LIMIT = 200;
 
 // In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
-const when = (iso) => formatDateTime(iso) || '—';
+// With seconds: a job's start and end, and the runs, are seconds apart.
+const when = (iso) => formatDateTime(iso, { seconds: true }) || '—';
 
 // The policy without conflicts, said with the node's spam rule: the actions deliver spam, phishing
-// and bulk to the node, which files them into Spam only with the rule (section 5.14). undefined: the
-// screen does not know the rule, the policy alone is judged.
-function PolicyFits({ spamRule }) {
+// and bulk to the node, which files them into Spam only with the rule (section 5.14). `rule` is the
+// server's last read of it (GET /tenant spamRule, the one the quarantine release waits for):
+// { state, code? }, null when nothing has read it yet, undefined from a server that does not say.
+function PolicyFits({ rule }) {
   const { t } = useTranslation();
-  if (spamRule === undefined || spamRule === 'ok') {
-    return <div data-policy-fits={spamRule ?? 'policy'} style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>;
+  if (rule === undefined || rule?.state === 'ok') {
+    return <div data-policy-fits={rule ? 'ok' : 'policy'} style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>;
   }
-  const key = spamRule === 'outdated'
-    ? 'admin.tenant.policyFitsRuleOutdated'
-    : (spamRule === 'missing' ? 'admin.tenant.policyFitsRuleMissing' : 'admin.tenant.policyFitsRuleUnknown');
-  return <div role="status" data-policy-fits={spamRule ?? 'unknown'} style={boxStyle('warning')}>{t(key)}</div>;
+  const state = rule?.state ?? 'never';
+  let text;
+  if (state === 'missing') text = t('admin.tenant.policyFitsRuleMissing');
+  else if (state === 'outdated') text = t('admin.tenant.policyFitsRuleOutdated');
+  else if (state === 'never') text = t('admin.tenant.policyFitsRuleUnknown');
+  else text = t('admin.tenant.policyFitsRuleUnreadable', { reason: t(mailNodeErrorKey(rule.code)) });
+  return <div role="status" data-policy-fits={state} style={boxStyle('warning')}>{text}</div>;
 }
 
 // One failure line: the translated reason, with the server's short message when it has one.
@@ -73,9 +78,7 @@ function Failure({ failure }) {
 // compared with their reference, with "Take as the reference" after a deliberate change. Every
 // job button queues a job and the section follows it until it ends. `revision` changes when the
 // EOP settings were saved.
-// `spamRule`: the node's spam filing rule from its last apply (utils/mailNode.js spamRuleState),
-// when the screen knows it; the policy fits the node only once the rule is there.
-export default function MailNodeTenant({ revision = 0, spamRule }) {
+export default function MailNodeTenant({ revision = 0 }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -255,7 +258,7 @@ export default function MailNodeTenant({ revision = 0, spamRule }) {
             </div>
           )}
           {(antispam.conflicts ?? []).length === 0
-            ? <PolicyFits spamRule={spamRule} />
+            ? <PolicyFits rule={data?.spamRule} />
             : (antispam.conflicts.map((c) => (
               <div key={c.field} data-policy-conflict={c.field} style={boxStyle(c.severity === 'error' ? 'error' : 'warning')}>
                 <span style={{ fontWeight: 600, color: SEVERITY_COLORS[c.severity] ?? 'var(--red)' }}>{t(policyFieldKey(c.field))}: {c.action}</span>
@@ -326,7 +329,7 @@ export default function MailNodeTenant({ revision = 0, spamRule }) {
 
       {error && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(error)}</div>}
 
-      {data?.driver && data?.configured && <PhishRelease canRun revision={revision} />}
+      {data?.driver && data?.configured && <PhishRelease canRun revision={revision} spamRule={data.spamRule} />}
     </div>
   );
 }
@@ -340,7 +343,7 @@ const cellStyle = { padding: '4px 6px', borderTop: '1px solid var(--border)', ve
 // (a guard: a type not released, a recipient outside the node, an outbound message, a release
 // denied; or a release that kept failing) and the latest rows. R-31 (a release by hand, the Tenant
 // Allow/Block List) is not offered.
-function PhishRelease({ canRun, revision }) {
+function PhishRelease({ canRun, revision, spamRule }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -385,6 +388,9 @@ function PhishRelease({ canRun, revision }) {
   };
 
   const run = data?.run;
+  // The rule as the server last read it, shared with the policy above so the two never disagree;
+  // the last run's own read when the server does not say.
+  const ruleState = spamRule !== undefined ? spamRule?.state : run?.rule?.state;
   const held = data?.held?.count ?? 0;
   const rows = data?.releases ?? [];
   return (
@@ -414,8 +420,8 @@ function PhishRelease({ canRun, revision }) {
               })}
               {run.left && <div>{t('admin.tenant.phishRunLeft')}</div>}
               {/* Section 5.14: spam, phishing and bulk wait for this version of the spam rule on the node. */}
-              {run.rule && run.rule.state !== 'ok' && !run.paused && !run.noDomains && (
-                <div role="status" data-phish-rule-waiting={run.rule.state} style={boxStyle('warning')}>
+              {ruleState && ruleState !== 'ok' && !run.paused && !run.noDomains && (
+                <div role="status" data-phish-rule-waiting={ruleState} style={boxStyle('warning')}>
                   {t('admin.tenant.phishRuleWaiting', { n: run.counts?.ruleWaiting ?? 0 })}
                 </div>
               )}

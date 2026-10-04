@@ -65,7 +65,7 @@ beforeEach(async () => {
   vi.mocked(recordAudit).mockClear();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   auth.admin = true;
-  await db.exec("DELETE FROM jobs; DELETE FROM integration_config WHERE provider IN ('mail_node_eop', 'mail_node_tenant_state');");
+  await db.exec("DELETE FROM jobs; DELETE FROM integration_config WHERE provider IN ('mail_node_eop', 'mail_node_tenant_state', 'mail_node_spam_rule');");
   await saveEopSettings(SETTINGS);
   driver = createFakeTenantDriver();
   setTenantDriver(driver);
@@ -85,8 +85,10 @@ describe('Test connection', () => {
     await runDue();
 
     expect((await get(`/tenant/jobs/${job.id}`)).job.status).toBe('done');
-    const { state, jobs, driver: kind, configured } = await get('/tenant');
+    const { state, jobs, driver: kind, configured, spamRule } = await get('/tenant');
     expect(kind).toBe('fake');
+    // No run has read the node's spam rule yet (section 5.14).
+    expect(spamRule).toBeNull();
     expect(configured).toBe(true);
     expect(jobs.test).toMatchObject({ id: job.id, status: 'done' });
     expect(state.connection.ok).toBe(true);
@@ -105,6 +107,11 @@ describe('Test connection', () => {
     expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
       actorUserId: ADMIN, action: 'tenant.connection_tested', details: { ok: true, failed: [] },
     }));
+  });
+
+  it('answers the spam rule of the node as last read, for the policy and the release alike', async () => {
+    await db.query("INSERT INTO integration_config (provider, config) VALUES ('mail_node_spam_rule', $1)", [{ at: '2026-10-05T08:00:00.000Z', state: 'missing' }]);
+    expect((await get('/tenant')).spamRule).toEqual({ at: '2026-10-05T08:00:00.000Z', state: 'missing' });
   });
 
   it('a thumbprint that is not the worker\'s stops at the first step', async () => {
