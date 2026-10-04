@@ -40,17 +40,37 @@ describe('planMirror (R-29)', () => {
     expect(plan.remove).toEqual(['a@example.com']);
   });
 
-  it('mirrors node aliases, reports a catch-all and the node/panel differences', () => {
+  it('mirrors no node alias (section 5.14), lists them, reports a catch-all and the node/panel differences', () => {
     const plan = planMirror({
       ...base,
       mailboxes: [mailbox('a@example.com'), mailbox('manual@example.com')],
       aliases: [{ address: 'sales@example.com', active: true }, { address: 'old@example.com', active: false }, { address: '@example.com', active: true }],
       panel: [{ email: 'a@example.com', deleting: false }, { email: 'gone@example.com', deleting: false }],
     });
-    expect(plan.desired).toEqual(['a@example.com', 'manual@example.com', 'sales@example.com']);
+    expect(plan.desired).toEqual(['a@example.com', 'manual@example.com']);
+    expect(plan.create).toEqual(['a@example.com', 'manual@example.com']);
+    // Active aliases made by hand on the node: shown, never mirrored (they get no mail once the
+    // domain is Authoritative).
+    expect(plan.nodeAliases).toEqual(['sales@example.com']);
     expect(plan.catchAll).toBe('@example.com');
     expect(plan.nodeOnly).toEqual(['manual@example.com']);
     expect(plan.panelOnly).toEqual(['gone@example.com']);
+  });
+
+  it('removes the contact the mirror made for a node alias before section 5.14, like any stale contact', () => {
+    const plan = planMirror({
+      ...base,
+      mailboxes: [mailbox('a@example.com')],
+      aliases: [{ address: 'sales@example.com', active: true }],
+      panel: [{ email: 'a@example.com', deleting: false }],
+      recipients: [contact('a@example.com'), contact('sales@example.com')],
+    });
+    expect(plan.desired).toEqual(['a@example.com']);
+    expect(plan.remove).toEqual(['sales@example.com']);
+    expect(plan.nodeAliases).toEqual(['sales@example.com']);
+    // An empty node answer still removes nothing.
+    expect(planMirror({ ...base, mailboxes: [], aliases: [{ address: 'sales@example.com', active: true }], recipients: [contact('sales@example.com')] }))
+      .toMatchObject({ suspicious: true, remove: [] });
   });
 
   it('makes no contact for an address another recipient holds, and reports it', () => {

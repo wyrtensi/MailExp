@@ -76,18 +76,20 @@ const TIMEOUTS_UNTIL_DOWN = 2;
 // EOP files nothing into Junk for a recipient outside the cloud: it stamps its verdict into
 // X-Forefront-Antispam-Report ("NAME:value;" fields, folded over lines at times) and the node files
 // the message. SFV is the verdict: SPM spam, SKS marked spam by a mail flow rule, SKB a blocked
-// sender; CAT the category. By the owner's decisions D-2 and D-11 (R-42):
-// - phishing and malware (CAT PHSH, HPHSH, HPHISH, MALW) always go to Junk, also when EOP released
-//   them from quarantine (SFV:SKQ): the panel releases high confidence phish itself and shows it in
-//   Junk in safe mode;
-// - spam, bulk and spoofing (SFV SPM/SKS/SKB, CAT SPM, HSPM, BULK, SPOOF) go to Junk unless released
-//   from quarantine (SFV:SKQ: someone decided it is not spam).
+// sender; CAT the category. By the owner's decisions D-2 and D-11 (R-42) and those after stage 7
+// (section 5.14 of eop-panel-requirements.md):
+// - phishing, malware, spam and spoofing (CAT PHSH, HPHSH, HPHISH, MALW, SPM, HSPM, SPOOF) always go
+//   to Junk, also when EOP released them from quarantine (SFV:SKQ): the panel releases high
+//   confidence phishing, phishing, spam and high confidence spam itself (a spoof quarantined as
+//   phishing among them) and shows them in Junk in safe mode;
+// - the spam verdicts and bulk (SFV SPM/SKS/SKB, CAT BULK) go to Junk unless released from
+//   quarantine (SFV:SKQ: someone decided it is not spam; the panel never releases bulk).
 // That a released message keeps its CAT is an assumption for tenant experiment 17.
 // Each value must be a whole field: after the start of the header or a ";" (with any blank the
 // unfolding left) and before ";" or the end, so "SFV:SPMX" or "XSFV:SPM" match nothing.
 export const PREFILTER_SFV = Object.freeze(['SPM', 'SKS', 'SKB']);
-export const PREFILTER_ALWAYS_CAT = Object.freeze(['PHSH', 'HPHSH', 'HPHISH', 'MALW']);
-export const PREFILTER_CAT = Object.freeze(['SPM', 'HSPM', 'BULK', 'SPOOF']);
+export const PREFILTER_ALWAYS_CAT = Object.freeze(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF']);
+export const PREFILTER_CAT = Object.freeze(['BULK']);
 const HEADER = 'X-Forefront-Antispam-Report';
 const field = (name, values) => {
   const value = values.length === 1 ? values[0] : `(${values.join('|')})`;

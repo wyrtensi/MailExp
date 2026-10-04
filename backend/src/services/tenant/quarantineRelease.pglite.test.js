@@ -92,8 +92,7 @@ beforeEach(async () => {
   driver = createFakeTenantDriver();
   model = driver.fake.model;
   setTenantDriver(driver);
-  // Off by default until experiment 17; these tests turn it on.
-  await setReleaseEnabled(true, { userId: ADMIN });
+  // On by default (section 5.14): no switch row at the start of a test.
   journal.entries = [];
 });
 
@@ -117,6 +116,34 @@ describe('the release job (R-42)', () => {
     await runNow();
     expect(model.released).toEqual([qid(1)]);
     expect(releases()).toHaveLength(1);
+  });
+
+  it('releases phishing, spam and high confidence spam the same way, and keeps malware (section 5.14)', async () => {
+    quarantine(70, { QuarantineTypes: 'Phish', Type: 'Phish' });
+    quarantine(71, { QuarantineTypes: 'Spam', Type: 'Spam' });
+    quarantine(72, { QuarantineTypes: 'Spam', Type: 'High Confidence Spam' });
+    quarantine(73, { QuarantineTypes: 'Malware', Type: 'Malware' });
+    await runNow();
+    expect(model.released.sort()).toEqual([qid(70), qid(71), qid(72)].sort());
+    expect(await rowOf(qid(70))).toMatchObject({ state: 'released', by_panel: true, quarantine_type: 'Phish' });
+    expect(await rowOf(qid(71))).toMatchObject({ state: 'released', quarantine_type: 'Spam' });
+    expect(await rowOf(qid(72))).toMatchObject({ state: 'released', quarantine_type: 'HighConfSpam' });
+    // The worker never lists malware; it is not even read.
+    expect(await rowOf(qid(73))).toBeUndefined();
+    expect(releases().map((e) => e.details.type).sort()).toEqual(['HighConfSpam', 'Phish', 'Spam']);
+    const shown = await (await fetch(`${base}/tenant/phish-release`)).json();
+    expect(shown.releases.find((r) => r.identity === qid(72))).toMatchObject({ type: 'HighConfSpam', state: 'released' });
+  });
+
+  it('keeps malware or a mixed type that reaches it all the same, with the reason', async () => {
+    quarantine(74, { QuarantineTypes: 'Malware', Type: 'Malware' });
+    quarantine(75, { QuarantineTypes: ['Phish', 'Malware'], Type: 'Phish' });
+    model.exo.get_quarantine_messages = () => [{ Identity: qid(74) }, { Identity: qid(75) }];
+    await runNow();
+    expect(model.released).toEqual([]);
+    expect(releaseCalls()).toEqual([]);
+    expect(await rowOf(qid(74))).toMatchObject({ state: 'skipped', reason: 'type_not_allowed', quarantine_type: 'Malware' });
+    expect(await rowOf(qid(75))).toMatchObject({ state: 'skipped', reason: 'type_not_allowed' });
   });
 
   it('keeps a message with a recipient outside the node, says why, and raises it as held', async () => {
@@ -247,15 +274,21 @@ describe('the release job (R-42)', () => {
 describe('the review round (R-42)', () => {
   const runDirect = async (options = {}) => runRelease(await tenantContext(), options);
 
-  it('is off by default, and turning it on is journaled', async () => {
-    await db.query("DELETE FROM integration_config WHERE provider = 'mail_node_phish_release'");
+  it('is on by default (section 5.14); turning it off and on again is journaled and kept', async () => {
+    expect((await getReleaseSettings()).enabled).toBe(true);
+    expect(await enqueueReleaseSlot(Date.now())).not.toBeNull();
+    await db.exec('DELETE FROM jobs');
+    await setReleaseEnabled(false, { userId: ADMIN });
     expect((await getReleaseSettings()).enabled).toBe(false);
+    expect(await enqueueReleaseSlot(Date.now())).toBeNull();
     quarantine(30);
     await runNow();
     expect(model.released).toEqual([]);
     expect((await getTenantState()).phishRelease).toMatchObject({ paused: true });
     await setReleaseEnabled(true, { userId: ADMIN });
-    expect(journal.entries).toContainEqual(expect.objectContaining({ action: 'tenant.phish_release_changed', details: { enabled: true } }));
+    expect(journal.entries.filter((e) => e.action === 'tenant.phish_release_changed').map((e) => e.details)).toEqual([
+      { enabled: false }, { enabled: true },
+    ]);
   });
 
   it('failed reads cost attempts: the queue moves on, later messages are reached, and the follow-ups stop', async () => {

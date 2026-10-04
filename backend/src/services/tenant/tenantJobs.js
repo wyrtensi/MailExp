@@ -5,7 +5,7 @@ import { getEopSettings } from '../mailNode/eopSettings.js';
 import { SYSTEM_ACTOR } from '../mailNode/domains.js';
 import { getTenantDriver, tenantOf } from './driver.js';
 import { TenantError, asRows } from './exoRunner.js';
-import { policyConflicts, summarizePolicy } from './antispam.js';
+import { ENFORCED_ACTION, enforcementPlan, policyConflicts, summarizePolicy } from './antispam.js';
 import { readConnectors } from './connectors.js';
 import { enqueueDueDomainSyncs } from './tenantDomains.js';
 import { enqueueReleaseSlot, registerQuarantineReleaseKind } from './quarantineRelease.js';
@@ -14,18 +14,23 @@ import { pruneMessageTraces, registerMessageTraceKind } from './messageTrace.js'
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
 // docs/architecture/job-queue.md) instead of a table of their own (R-22 planned `tenant_jobs`):
 // the queue already has the claim, the lease, retries and a restart-safe worker. Every kind is
-// read only and idempotent (at least once is fine).
+// idempotent (at least once is fine); the only writes are the anti-spam actions of section 5.14,
+// made only where the policy differs.
 //
 //   tenant_test_connection  "Test connection": the worker's certificate against the thumbprint in
-//                           the settings, a Graph token and GET /domains, EXO whoami
+//                           the settings, a Graph token and GET /domains, EXO whoami; the anti-spam
+//                           policy is read, not changed
 //   tenant_poll             every POLL_INTERVAL_MS while the tenant is configured: the certificate
 //                           (its expiry, for the alerts), Get-BlockedConnector (R-27) and the
 //                           connectors against their reference (R-25, stage 7b); the anti-spam
-//                           policy too when the last read is older than ANTISPAM_MAX_AGE_MS
+//                           policy too (syncAntispam) when the last read is older than
+//                           ANTISPAM_MAX_AGE_MS or only looked and found something to set
 //
 // The domains' tenant steps and the recipient mirror (stage 7b) are jobs of their own, one per
 // domain (services/tenant/tenantDomains.js); the poll's timer queues them in the same slot.
-//   tenant_antispam_read    Get-HostedContentFilterPolicy -Identity Default (R-28), on demand
+//   tenant_antispam_read    the Default anti-spam policy (R-28) read and, since section 5.14, its
+//                           spam, high confidence spam and phishing actions set to MoveToJmf
+//                           (syncAntispam), on demand
 //
 // Stage 7c adds tenant_quarantine_release (R-42, services/tenant/quarantineRelease.js), queued in
 // the same slot, and tenant_message_trace (R-30, services/tenant/messageTrace.js), on request.
@@ -148,6 +153,44 @@ export async function readAntispam(session, now = Date.now()) {
   }
 }
 
+// Section 5.14 (the owner's decision after stage 7): the Default policy's spam, high confidence
+// spam and phishing actions are set to MoveToJmf. Read, write only the fields that differ (one
+// fixed worker operation each), read again; a field counts as changed only when the second read
+// shows MoveToJmf. The result is the read as readAntispam keeps it, with
+//   enforcement: { at, ok, changed: [{ field, from, to }], failed: [field], error? }
+// (error: the first refused write, or antispam_not_written when the tenant answered "done" but the
+// second read still shows another action). What changed is journaled (tenant.antispam_enforced);
+// a failure is kept for the alert tenant_antispam_not_enforced. A failed first read writes nothing.
+export async function syncAntispam(session, { now = Date.now(), actor = null } = {}) {
+  const first = await readAntispam(session, now);
+  if (!first.ok) return first;
+  const at = first.at;
+  const plan = enforcementPlan(first.policy);
+  if (!plan.length) return { ...first, enforcement: { at, ok: true, changed: [], failed: [] } };
+  let error = null;
+  for (const step of plan) {
+    try {
+      await session.exo.run(step.op);
+    } catch (err) {
+      // A refused write stops the rest (throttling, a missing role would refuse them too).
+      error = failureOf(err);
+      break;
+    }
+  }
+  const after = await readAntispam(session, now);
+  if (!after.ok) {
+    // What the writes did is unknown until the next read; the first read stays shown.
+    return { ...first, enforcement: { at, ok: false, changed: [], failed: plan.map((s) => s.field), error: { code: after.code, message: after.message } } };
+  }
+  const changed = plan.filter((s) => after.policy[s.field] === ENFORCED_ACTION).map((s) => ({ field: s.field, from: s.from, to: ENFORCED_ACTION }));
+  const failed = plan.filter((s) => after.policy[s.field] !== ENFORCED_ACTION).map((s) => s.field);
+  if (failed.length && !error) error = { code: 'antispam_not_written', message: 'The tenant answered the change but the policy still shows another action' };
+  if (changed.length) {
+    recordAudit({ ...(actor ? { actorUserId: actor } : { actorEmail: SYSTEM_ACTOR }), action: 'tenant.antispam_enforced', details: { changed } });
+  }
+  return { ...after, enforcement: { at, ok: !failed.length, changed, failed, ...(failed.length ? { error } : {}) } };
+}
+
 // One poll: the certificate and the blocked connectors, each on its own (one failing keeps the
 // other's answer); a failed read keeps the last good list with the error beside it, so the alert
 // stays as it was.
@@ -179,8 +222,12 @@ export async function poll(context, { previous = {}, now = Date.now() } = {}) {
   } catch (err) {
     patch.connectors = { ...(previous.connectors ?? {}), ok: false, error: failureOf(err), errorAt: at };
   }
+  // The policy every ANTISPAM_MAX_AGE_MS, and at once after a read that only looked (the connection
+  // test) and found something to set; a failed enforcement waits for the next ANTISPAM_MAX_AGE_MS.
   const antispamAt = Date.parse(previous.antispam?.at ?? '');
-  if (!Number.isFinite(antispamAt) || now - antispamAt >= ANTISPAM_MAX_AGE_MS) patch.antispam = await readAntispam(context.session, now);
+  const due = !Number.isFinite(antispamAt) || now - antispamAt >= ANTISPAM_MAX_AGE_MS;
+  const pending = previous.antispam?.ok === true && !previous.antispam.enforcement && enforcementPlan(previous.antispam.policy).length > 0;
+  if (due || pending) patch.antispam = await syncAntispam(context.session, { now });
   return patch;
 }
 
@@ -218,7 +265,7 @@ export function registerTenantJobKinds() {
     maxAttempts: 1,
     handler: async (job, ctx) => {
       const context = await tenantContext();
-      const antispam = await readAntispam(context.session);
+      const antispam = await syncAntispam(context.session, { actor: job.created_by ?? null });
       await ctx.complete((tx) => saveTenantState({ antispam }, tx));
     },
   });

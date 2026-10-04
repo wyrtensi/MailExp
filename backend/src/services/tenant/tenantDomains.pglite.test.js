@@ -323,16 +323,20 @@ describe('the recipient mirror (R-29)', () => {
     driver.fake.exo.calls.length = 0;
   });
 
-  it('removes a contact nobody needs, mirrors aliases and holds Authoritative back for a catch-all (D-6)', async () => {
-    model.recipients.set('old@example.com', { ...TENANT_FIXTURES.exo.get_recipients[0], Identity: 'old@example.com', PrimarySmtpAddress: 'old@example.com', ExternalEmailAddress: 'SMTP:old@example.com' });
+  it('removes a contact nobody needs and one made for a node alias, lists the aliases and holds Authoritative back for a catch-all (D-6)', async () => {
+    const stale = (address) => ({ ...TENANT_FIXTURES.exo.get_recipients[0], Identity: address, PrimarySmtpAddress: address, ExternalEmailAddress: `SMTP:${address}` });
+    model.recipients.set('old@example.com', stale('old@example.com'));
+    // Made by the 7b mirror for a hand-made alias: the mirror covers only what the panel owns now.
+    model.recipients.set('sales@example.com', stale('sales@example.com'));
     setMailboxes('a@example.com');
     node.aliases = [{ address: 'sales@example.com', targets: ['a@example.com'], active: true }, { address: '@example.com', targets: ['a@example.com'], active: true }];
     await db.query("UPDATE mail_node_domains SET state = 'ready', hold_internal_relay = false WHERE domain = $1", [D]);
     await sync();
+    expect((await row()).tenant_sync.mirror.removed.sort()).toEqual(['old@example.com', 'sales@example.com']);
     await sync();
     const r = await row();
-    expect([...model.recipients.keys()].sort()).toEqual(['a@example.com', 'sales@example.com']);
-    expect(r.tenant_sync.mirror).toMatchObject({ catchAll: '@example.com', complete: false, removed: [] });
+    expect([...model.recipients.keys()].sort()).toEqual(['a@example.com']);
+    expect(r.tenant_sync.mirror).toMatchObject({ catchAll: '@example.com', complete: false, removed: [], nodeAliases: ['sales@example.com'] });
     expect(r.state).toBe('ready');
     node.aliases = node.aliases.slice(0, 1);
     await sync();

@@ -249,17 +249,85 @@ describe('answers that are not arrays (one item unrolled, nothing)', () => {
   });
 });
 
-describe('the anti-spam policy (R-28)', () => {
-  it('is read on demand with its conflicts', async () => {
-    driver.fake.exo.answers.get_content_filter_policy = [{ ...TENANT_FIXTURES.exo.get_content_filter_policy[0], SpamAction: 'Quarantine', PhishSpamAction: 'MoveToJmf' }];
+describe('the anti-spam policy (R-28, section 5.14)', () => {
+  const model = () => driver.fake.model;
+  const ops = () => driver.fake.exo.calls.map((c) => c.op);
+  const enforcedAudits = () => vi.mocked(recordAudit).mock.calls.map(([entry]) => entry).filter((e) => e.action === 'tenant.antispam_enforced');
+
+  it('sets what differs to MoveToJmf, reads again, journals it, and does nothing the second time', async () => {
+    Object.assign(model().policy, { SpamAction: 'Quarantine', PhishSpamAction: 'MoveToJmf' });
     expect((await post('/tenant/antispam')).status).toBe(202);
     await runDue();
     const { state, jobs } = await get('/tenant');
     expect(jobs.antispam.status).toBe('done');
-    expect(state.antispam.policy).toMatchObject({ identity: 'Default', SpamAction: 'Quarantine' });
-    expect(state.antispam.conflicts).toEqual([
-      { field: 'SpamAction', action: 'Quarantine', expected: ['MoveToJmf', 'AddXHeader'], code: 'quarantined', severity: 'warning' },
-    ]);
+    expect(ops()).toEqual(['get_content_filter_policy', 'set_spam_action_junk', 'get_content_filter_policy']);
+    expect(model().policyWrites).toEqual(['SpamAction']);
+    expect(state.antispam.policy).toMatchObject({ identity: 'Default', SpamAction: 'MoveToJmf', HighConfidencePhishAction: 'Quarantine' });
+    expect(state.antispam.conflicts).toEqual([]);
+    expect(state.antispam.enforcement).toMatchObject({ ok: true, changed: [{ field: 'SpamAction', from: 'Quarantine', to: 'MoveToJmf' }], failed: [] });
+    expect(enforcedAudits()).toEqual([expect.objectContaining({
+      actorUserId: ADMIN, details: { changed: [{ field: 'SpamAction', from: 'Quarantine', to: 'MoveToJmf' }] },
+    })]);
+
+    driver.fake.exo.calls.length = 0;
+    await post('/tenant/antispam');
+    await runDue();
+    expect(ops()).toEqual(['get_content_filter_policy']);
+    expect((await getTenantState()).antispam.enforcement).toMatchObject({ ok: true, changed: [] });
+    expect(enforcedAudits()).toHaveLength(1);
+  });
+
+  it('every enforced field at once; high confidence phishing and bulk are never written', async () => {
+    Object.assign(model().policy, {
+      SpamAction: 'Quarantine', HighConfidenceSpamAction: 'Redirect', PhishSpamAction: 'Quarantine', BulkSpamAction: 'Quarantine',
+    });
+    await post('/tenant/antispam');
+    await runDue();
+    expect(model().policyWrites).toEqual(['SpamAction', 'HighConfidenceSpamAction', 'PhishSpamAction']);
+    const { antispam } = await getTenantState();
+    expect(antispam.policy).toMatchObject({
+      SpamAction: 'MoveToJmf', HighConfidenceSpamAction: 'MoveToJmf', PhishSpamAction: 'MoveToJmf',
+      BulkSpamAction: 'Quarantine', HighConfidencePhishAction: 'Quarantine',
+    });
+    expect(antispam.conflicts.map((c) => c.field)).toEqual(['BulkSpamAction']);
+  });
+
+  it('a write the tenant did not apply is reported, not journaled as done', async () => {
+    model().options.policyWritesIgnored = true;
+    await post('/tenant/antispam');
+    await runDue();
+    const { antispam } = await getTenantState();
+    expect(model().policyWrites).toEqual(['PhishSpamAction']);
+    expect(antispam.enforcement).toMatchObject({
+      ok: false, changed: [], failed: ['PhishSpamAction'], error: { code: 'antispam_not_written' },
+    });
+    expect(antispam.conflicts.map((c) => c.field)).toEqual(['PhishSpamAction']);
+    expect(enforcedAudits()).toEqual([]);
+  });
+
+  it('a refused write keeps the code; what went through before it is kept and journaled', async () => {
+    Object.assign(model().policy, { SpamAction: 'Quarantine', PhishSpamAction: 'Quarantine' });
+    driver.fake.exo.answers.set_phish_spam_action_junk = new TenantError('exo_failed', 'Access denied');
+    await post('/tenant/antispam');
+    await runDue();
+    const { antispam } = await getTenantState();
+    expect(antispam.enforcement).toMatchObject({
+      ok: false, changed: [{ field: 'SpamAction', from: 'Quarantine', to: 'MoveToJmf' }], failed: ['PhishSpamAction'], error: { code: 'exo_failed' },
+    });
+    expect(enforcedAudits()).toHaveLength(1);
+  });
+
+  it('the connection test only reads; the next poll enforces what it found', async () => {
+    await post('/tenant/test');
+    await runDue();
+    expect(ops()).toEqual(['whoami', 'get_content_filter_policy']);
+    expect((await getTenantState()).antispam.enforcement).toBeUndefined();
+    driver.fake.exo.calls.length = 0;
+    await post('/tenant/poll');
+    await runDue();
+    expect(ops()).toEqual(expect.arrayContaining(['get_content_filter_policy', 'set_phish_spam_action_junk']));
+    expect((await getTenantState()).antispam).toMatchObject({ enforcement: { ok: true }, conflicts: [] });
+    expect(enforcedAudits()).toEqual([expect.objectContaining({ actorEmail: expect.any(String) })]);
   });
 });
 

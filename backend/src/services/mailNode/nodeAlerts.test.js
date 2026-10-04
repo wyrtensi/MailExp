@@ -480,7 +480,7 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
   const BLOCKED = [{ connectorId: '9f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a', connectorName: 'From mail node', reason: 'Suspicious', createdTime: null }];
 
   it('tenantSignals: a blocked connector, and the certificate at 30 and 14 days', () => {
-    expect(tenantSignals(pollState(), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: true });
+    expect(tenantSignals(pollState(), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: true, antispamStale: false });
     const blocked = tenantSignals(pollState({ items: BLOCKED }), NOW);
     expect(blocked.alerts).toEqual([{
       key: 'connector_blocked_tenant', severity: 'error', details: { count: 1, connectors: BLOCKED, checkedAt: at(NOW - 60000) },
@@ -494,11 +494,11 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
   });
 
   it('tenantSignals: a failed or old poll is stale and raises no connector alert of its own', () => {
-    expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true });
+    expect(tenantSignals(pollState({ items: BLOCKED, ok: false }), NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true, antispamStale: false });
     const old = tenantSignals(pollState({ readAt: NOW - TENANT_STALE_MS - 1000 }), NOW);
     expect(old.stale).toBe(true);
     expect(old.alerts.map((a) => a.key)).toEqual(['tenant_poll_failing']);
-    expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true });
+    expect(tenantSignals({}, NOW)).toEqual({ alerts: [], stale: true, connectorsStale: true, antispamStale: false });
   });
 
   it('tenantSignals: a connector changed since its reference warns (R-25, stage 7b)', () => {
@@ -507,7 +507,7 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
     const read = (tls, { ok = true, readAt = NOW - 60000 } = {}) => ({
       ...pollState(), connectorReference: reference, connectors: { at: at(readAt), ok, inbound: [], outbound: [connector(tls)] },
     });
-    expect(tenantSignals(read('domainvalidation'), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: false });
+    expect(tenantSignals(read('domainvalidation'), NOW)).toEqual({ alerts: [], stale: false, connectorsStale: false, antispamStale: false });
     expect(tenantSignals(read('encryptiononly'), NOW).alerts).toEqual([{
       key: 'tenant_connector_drift', severity: 'warning',
       details: { count: 1, connectors: [{ direction: 'outbound', name: 'To mail node', kind: 'changed' }], checkedAt: at(NOW - 60000) },
@@ -515,6 +515,20 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
     // A failed or old read of the connectors keeps the alert as it was (the source is not read).
     expect(tenantSignals(read('encryptiononly', { ok: false }), NOW)).toMatchObject({ alerts: [], connectorsStale: true });
     expect(tenantSignals(read('encryptiononly', { readAt: NOW - TENANT_STALE_MS - 1000 }), NOW).connectorsStale).toBe(true);
+  });
+
+  it('tenantSignals: the anti-spam actions the panel could not set warn (section 5.14)', () => {
+    const withAntispam = (antispam) => ({ ...pollState(), antispam });
+    expect(tenantSignals(withAntispam({ at: at(NOW), ok: true, enforcement: { at: at(NOW), ok: true, changed: [], failed: [] } }), NOW))
+      .toMatchObject({ alerts: [], antispamStale: false });
+    expect(tenantSignals(withAntispam({
+      at: at(NOW), ok: true, enforcement: { at: at(NOW), ok: false, changed: [], failed: ['PhishSpamAction'], error: { code: 'antispam_not_written' } },
+    }), NOW).alerts).toEqual([{
+      key: 'tenant_antispam_not_enforced', severity: 'warning',
+      details: { fields: ['PhishSpamAction'], code: 'antispam_not_written', checkedAt: at(NOW) },
+    }]);
+    // A read that failed before any write keeps the alert as it was.
+    expect(tenantSignals(withAntispam({ at: at(NOW), ok: false, code: 'worker_unreachable' }), NOW)).toMatchObject({ alerts: [], antispamStale: true });
   });
 
   describe('in the run', () => {

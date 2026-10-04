@@ -330,18 +330,25 @@ export function externalOf(address, externalDomain) {
 //   mailboxes: the node's mailboxes of the domain ({ email, state }); aliases: its aliases
 //   ({ address, active }); panel: the panel's mailboxes there ({ email, deleting }); recipients:
 //   the tenant's (Get-Recipient rows). Returns { desired, create, retarget, remove, hide, present,
-//   conflicts, catchAll, nodeOnly, panelOnly, suspicious }. retarget: contacts of the other D-7
-//   variant, changed in place (Set-MailContact -ExternalEmailAddress), never removed and made again:
-//   on an Authoritative domain that would reject the address in between.
+//   conflicts, catchAll, nodeAliases, nodeOnly, panelOnly, suspicious }. retarget: contacts of the
+//   other D-7 variant, changed in place (Set-MailContact -ExternalEmailAddress), never removed and
+//   made again: on an Authoritative domain that would reject the address in between.
+//
+// Aliases (the owner's decision after stage 7, section 5.14, which undoes the stage 7b
+// clarification of D-16): everything goes through the panel, and the mirror covers only addresses
+// the panel owns. An alias made by hand in mailcow gets no contact; nodeAliases lists the active
+// ones for the administrators (once the domain is Authoritative, EOP rejects mail to them), and a
+// contact the 7b mirror made for one is removed like any contact nobody needs.
 export function planMirror({ domain, mailboxes, aliases, panel, recipients, externalDomain = null }) {
   const deleting = new Set(panel.filter((p) => p.deleting).map((p) => p.email));
   const desired = new Set();
-  // Every mailbox that takes mail (active, or receiving without login) and every active alias but a
-  // catch-all, except a mailbox being deleted: its contact goes first (BEFORE_NODE_DELETE).
+  // Every mailbox that takes mail (active, or receiving without login), except a mailbox being
+  // deleted: its contact goes first (BEFORE_NODE_DELETE).
   for (const m of mailboxes) if (m.state !== 0 && domainOf(m.email) === domain && !deleting.has(m.email)) desired.add(m.email);
   // An active catch-all only: a disabled one takes no mail (D-6).
   const catchAll = aliases.find((a) => a.active && a.address.startsWith('@'))?.address ?? null;
-  for (const a of aliases) if (a.active && !a.address.startsWith('@') && !deleting.has(a.address)) desired.add(a.address);
+  const nodeAliases = [...new Set(aliases.filter((a) => a.active && !a.address.startsWith('@') && domainOf(a.address) === domain)
+    .map((a) => a.address))].sort();
   const contacts = new Map();
   const taken = new Set();
   for (const r of recipients) {
@@ -388,6 +395,7 @@ export function planMirror({ domain, mailboxes, aliases, panel, recipients, exte
     present,
     conflicts: [...desired].filter((a) => taken.has(a)).sort(),
     catchAll,
+    nodeAliases,
     nodeOnly: [...onNode].filter((e) => !inPanel.has(e)).sort(),
     panelOnly: [...inPanel].filter((e) => !onNode.has(e)).sort(),
     suspicious,
@@ -511,6 +519,7 @@ async function syncMirror({ session, settings }, row, out) {
       missing: plan.desired.filter((a) => !present.has(a) && !plan.conflicts.includes(a)).slice(0, LIST_MAX),
       extra: plan.remove.filter((a) => !removed.includes(a)).slice(0, LIST_MAX),
       conflicts: plan.conflicts.slice(0, LIST_MAX), catchAll: plan.catchAll, suspicious: plan.suspicious,
+      nodeAliases: plan.nodeAliases.slice(0, LIST_MAX),
       nodeOnly: plan.nodeOnly.slice(0, LIST_MAX), panelOnly: plan.panelOnly.slice(0, LIST_MAX),
       variant: settings.dbebExternalDomain ? 'B' : 'A', left,
     };

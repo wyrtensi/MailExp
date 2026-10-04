@@ -294,12 +294,12 @@ describe('the spam filing rule', () => {
   const RULE = [
     '# BEGIN MailExpert: EOP verdicts to Junk (managed by MailExpert, do not edit)',
     'if anyof (',
-    '  header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(PHSH|HPHSH|HPHISH|MALW)[[:space:]]*(;|$)",',
+    '  header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(PHSH|HPHSH|HPHISH|MALW|SPM|HSPM|SPOOF)[[:space:]]*(;|$)",',
     '  allof (',
     '    not header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:SKQ[[:space:]]*(;|$)",',
     '    anyof (',
     '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*SFV:(SPM|SKS|SKB)[[:space:]]*(;|$)",',
-    '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:(SPM|HSPM|BULK|SPOOF)[[:space:]]*(;|$)"',
+    '      header :regex "X-Forefront-Antispam-Report" "(^|;)[[:space:]]*CAT:BULK[[:space:]]*(;|$)"',
     '    )',
     '  )',
     ') {',
@@ -309,10 +309,10 @@ describe('the spam filing rule', () => {
     '# END MailExpert: EOP verdicts',
   ].join('\n');
 
-  it('files phishing and malware always, and spam, bulk and spoofing unless released from quarantine (D-2, D-11)', () => {
-    expect(PREFILTER_ALWAYS_CAT).toEqual(['PHSH', 'HPHSH', 'HPHISH', 'MALW']);
+  it('files phishing, malware, spam and spoofing always, and bulk unless released from quarantine (D-2, D-11, section 5.14)', () => {
+    expect(PREFILTER_ALWAYS_CAT).toEqual(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF']);
     expect(PREFILTER_SFV).toEqual(['SPM', 'SKS', 'SKB']);
-    expect(PREFILTER_CAT).toEqual(['SPM', 'HSPM', 'BULK', 'SPOOF']);
+    expect(PREFILTER_CAT).toEqual(['BULK']);
     const script = buildPrefilter('');
     expect(script).toContain('require ["fileinto", "regex"];');
     expect(script.endsWith(`${RULE}\n`)).toBe(true);
@@ -341,13 +341,19 @@ describe('the spam filing rule', () => {
       ['SFV:NSPM;CAT:SPOOF;', true],
       ['SFV:NSPM;CAT:MALW;', true],
       ['SFV:NSPM;CAT:HPHSH', true],
-      // Released from quarantine: phishing and malware still go to Junk, spam does not.
+      // Released from quarantine (the panel releases spam and phishing, section 5.14): phishing,
+      // malware, spam and spoofing still go to Junk; only bulk does not.
       ['SFV:SKQ;CAT:PHSH;', true],
       ['SFV:SKQ;CAT:HPHISH;', true],
       ['SFV:SKQ;CAT:MALW;', true],
-      ['SFV:SKQ;CAT:SPM;', false],
+      ['SFV:SKQ;CAT:SPM;', true],
+      ['SFV:SKQ;CAT:HSPM;', true],
+      ['SFV:SKQ;CAT:SPOOF;', true],
       ['SFV:SKQ;CAT:BULK;', false],
-      ['SFV:SKQ;CAT:SPOOF;', false],
+      ['SFV:SKQ;CAT:NONE;', false],
+      // What MoveToJmf delivers for each verdict the panel sets (section 5.14).
+      ['SFV:SPM;CAT:HSPM;SCL:9;', true],
+      ['SFV:SPM;CAT:PHSH;SCL:9;', true],
       ['CIP:198.51.100.1;SFV:SPMX;CAT:SPMTEST;XSFV:SPM;XCAT:PHSH;CAT:PHSHX', false],
       // Unfolded, a folded header keeps a blank after the ";" where it was broken.
       ['CIP:198.51.100.1;CTRY:;LANG:en; SFV:SKS;H:x;', true],
