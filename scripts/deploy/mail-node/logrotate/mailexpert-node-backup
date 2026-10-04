@@ -1,0 +1,10 @@
+# MailExpert mail node backup (scripts/deploy/mail-node/setup.sh, hosts without systemd): the
+# output of the nightly cron run. It holds no secrets, but stays readable by root only.
+@LOG@ {
+  weekly
+  rotate 8
+  compress
+  missingok
+  notifempty
+  create 0600 root root
+}

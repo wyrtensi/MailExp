@@ -1,0 +1,12 @@
+# The questions of mailcow 2026-09's helper-scripts/backup_and_restore.sh, verbatim (its read lines
+# and the line that offers "all"), from
+# https://github.com/mailcow/mailcow-dockerized/blob/2026-09/helper-scripts/backup_and_restore.sh
+# (fetched 2026-10-04). mailcow_restore_prompts_ok must accept them; a mailcow release that asks
+# something else needs node-restore.sh's answers checked again.
+read -ep "Backup location (absolute path, starting with /): " BACKUP_LOCATION
+read -p "Create it now? [y|N] " CREATE_BACKUP_LOCATION
+read -p "Force a resync now? [y|N] " FORCE_RESYNC
+read -p "mailcow will be stopped and the currently active mailcow.conf will be modified to use the DB parameters found in ${RESTORE_LOCATION}/mailcow.conf - do you want to proceed? [Y|n] " MYSQL_STOP_MAILCOW
+read -p "Select a restore point: " input_sel
+echo "[ 0 ] - all"
+read -p "Select a dataset to restore: " input_sel

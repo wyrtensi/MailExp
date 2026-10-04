@@ -15,8 +15,12 @@
 # hosts (R-12); a new version puts `eop_ranges_version_changed <old>-><new>` into the ping, the
 # signal to bump the panel's copy.
 #
-# Every run then checks the node and pings EOP_RANGES_PING_URL (node.env; not on the old node of a
-# move, standby after node-backup.sh --tag move: the new node pings it): success, or /fail with
+# On the old node of a move (standby after node-backup.sh --tag move) a run asks Microsoft nothing:
+# it closes mailcow's mail ports (25, 587, 993 and the rest) to everyone and pings EOP_RANGES_PING_URL
+# only to fail, when postfix-mailcow, dovecot-mailcow or the watchdog run again: mail could reach the
+# old node and never the new one, which pings the same check otherwise.
+#
+# Every run then checks the node and pings EOP_RANGES_PING_URL (node.env): success, or /fail with
 # every problem, and exit 1:
 # - the firewall rules are in place (rebuilt when they differ from what the last build left);
 # - IPv4 always, IPv6 when mailcow runs with it or Docker has an IPv6 DOCKER-USER chain;
@@ -69,6 +73,8 @@ http_problem() {
 }
 
 PING_URL=''
+STANDBY_PING=''
+FIREWALL_CLOSED=0
 DRY_RUN=0
 TMP_DIR=''
 RESTORE=0
@@ -177,6 +183,22 @@ finish() {
   [ -z "$message" ] || send_ping "$PING_URL" success "eop-ranges: $message"
 }
 
+# standby_run: the hourly run of a standby node: the closed firewall and the node checks; /fail
+# (the only ping) when a mail service runs again.
+standby_run() {
+  local problems running dir
+  [ "$DRY_RUN" = 0 ] || { log "dry run: a standby node only closes its mail ports"; return 0; }
+  problems=$(node_problems)
+  dir=$(env_get "$NODE_CONF" MAILCOW_DIR 2>/dev/null) || dir=/opt/mailcow-dockerized
+  running=$(mailcow_running "$dir" "${STANDBY_SERVICES[@]}" | paste -sd' ' -)
+  if [ -n "$running" ]; then
+    send_ping "$STANDBY_PING" fail "eop-ranges: standby node (moved away) runs $running: stop them (docker compose stop $running in $dir); mail must reach the new node only"
+    die "standby node runs $running: stop them; mail must reach the new node only"
+  fi
+  if [ -n "$problems" ]; then die "$(paste -sd';' - <<<"$problems" | sed 's/;/; /g')"; fi
+  log "standby node: mail ports closed, postfix and dovecot stopped"
+}
+
 restore() {
   saved_list "$TMP_DIR/saved.txt" || fail "no valid saved list in $(ranges_file): run eop-ranges.sh without --restore"
   apply_sets "$TMP_DIR/saved.txt"
@@ -201,8 +223,8 @@ main() {
   [ -f "$NODE_CONF" ] || die "$NODE_CONF is missing: run setup.sh first" 2
   PING_URL=$(env_get "$NODE_CONF" EOP_RANGES_PING_URL 2>/dev/null) || PING_URL=''
   if [ -f "$(node_standby_file)" ]; then
-    log "standby node (moved away): the firewall stays, the check is not pinged (the new node pings it)"
-    PING_URL=''
+    log "standby node (moved away): mail ports closed to everyone, the check is pinged only if postfix or dovecot run"
+    STANDBY_PING=$PING_URL PING_URL='' FIREWALL_CLOSED=1
   fi
   CLIENT_ID=$(env_get "$NODE_CONF" EOP_CLIENT_REQUEST_ID 2>/dev/null) || CLIENT_ID=''
   mkdir -p "$NODE_STATE"
@@ -214,6 +236,10 @@ main() {
   fi
   if [ "$mode" = restore ]; then
     restore
+    return 0
+  fi
+  if [ "$FIREWALL_CLOSED" = 1 ]; then
+    standby_run
     return 0
   fi
   is_guid "$CLIENT_ID" || fail_keep "EOP_CLIENT_REQUEST_ID in $NODE_CONF is not a GUID"

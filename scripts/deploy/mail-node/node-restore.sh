@@ -26,18 +26,29 @@
 # addresses and the EOP host), the A record of <MAIL_HOST> and the PTR, then the checks of
 # section 8.
 #
+# Then it checks the result itself, whatever mailcow's script printed: the mail_crypt keys are in
+# the crypt volume, and the database answers with the number of mailboxes the backup recorded.
+#
 # A move with a lot of mail restores twice, so that the mail is mostly in place before the old
 # node stops: --rehearsal first, from a nightly snapshot while the old node still works (Postfix's
-# data set, the mail queue, is left out: the queued mail would go out a second time), then
-# --update from the move snapshot, which only downloads what changed since. --update runs only on a
-# server node-restore.sh restored before; without it such a server is refused like any other with
-# mailcow data.
+# data set, the mail queue, is left out: the queued mail would go out a second time; at the end
+# postfix-mailcow, ofelia-mailcow (it runs the sync jobs) and the watchdog are stopped with the
+# restart policy "no"), then --update from the move snapshot, which only downloads what changed
+# since. What the script did on a server is kept in /var/lib/mailexpert-node/restored (STATE):
+#   in-progress  a restore that stopped half way: run it again (the same or a newer snapshot of the
+#                same node, or a move snapshot);
+#   rehearsal    only --update, from a newer snapshot of the same node or a move snapshot;
+#   live         a restore that is not a rehearsal, or setup.sh on the server: never again.
+# A server without the file must be fresh (no vmail or mysql volume, mailcow not running).
+#
+# latest without --host is refused when the repository holds snapshots of several nodes (they are
+# listed): a move leaves the old node's next to the new one's.
 #
 #   node-restore.sh latest|<snapshot id> [--host <restic host>] [--mailcow-dir DIR]
 #                   [--rehearsal | --update] [--resync]
 #
-# latest is the newest snapshot of any node in the repository; --host limits the choice to one
-# node's snapshots (restic snapshots lists them). The node and time restored are printed.
+# latest is the newest snapshot of the node (--host, as restic snapshots lists them). The node and
+# time restored are printed.
 #
 # Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (nothing changed).
 # shellcheck source-path=SCRIPTDIR
@@ -59,8 +70,14 @@ exit_on_unexpected_failure
 
 # How long mailcow's restore of the small data sets may take.
 RESTORE_TIMEOUT=${MAILEXPERT_NODE_RESTORE_TIMEOUT:-3600}
+# How often, 5 s apart, the restored database is asked for its mailboxes while it starts.
+DB_TRIES=${MAILEXPERT_NODE_RESTORE_DB_TRIES:-36}
+# What a rehearsal stops: the mail queue's delivery, the sync jobs and other scheduled jobs, and the
+# watchdog, which would start them again.
+REHEARSAL_SERVICES=(postfix-mailcow ofelia-mailcow watchdog-mailcow)
 WORK=''
 REHEARSAL=0
+RESTORE_LOG=''
 
 usage() {
   sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
@@ -146,35 +163,61 @@ restore_vmail() {
   log "vmail restored in $((SECONDS - started))s"
 }
 
+# keep_restore_log <log>: mailcow's output where the owner finds it after a failure.
+keep_restore_log() {
+  cp "$1" "$NODE_BACKUP_DIR/mailcow-restore.log"
+  chmod 600 "$NODE_BACKUP_DIR/mailcow-restore.log"
+}
+
 # restore_mailcow <dir with the restored backup>: mailcow's own restore of everything else, its
 # questions answered: restore point 1 (the only one in the location), data set 0 (all), and yes to
 # the SQL restore, which stops and starts mailcow. (Its `docker run -i` steps may read what is left
 # of the answers; the SQL question then reads nothing, and an empty answer is its default, yes.)
+# Its exit status says little (it goes on after a step that failed): check_restored decides.
 restore_mailcow() {
-  local location=$WORK/location log=$WORK/mailcow-restore.log code=0 problems
+  local location=$WORK/location log=$WORK/mailcow-restore.log code=0
   mkdir -m 755 "$location"
   # A rehearsal leaves the mail queue out: the old node still delivers it.
   if [ "$REHEARSAL" = 1 ]; then rm -f "$1/backup_postfix.tar.zst"; fi
   mv "$1" "$location/mailcow-restore"
   printf '1\n0\ny\n' | MAILCOW_BACKUP_LOCATION=$location timeout "$RESTORE_TIMEOUT" \
     "$MAILCOW_DIR/helper-scripts/backup_and_restore.sh" restore >"$log" 2>&1 || code=$?
-  problems=$(restore_log_problems "$log")
-  if [ "$code" != 0 ] || [ -n "$problems" ]; then
-    cp "$log" "$NODE_BACKUP_DIR/mailcow-restore.log"
-    chmod 600 "$NODE_BACKUP_DIR/mailcow-restore.log"
-    die "mailcow's restore failed (exit $code${problems:+: $(paste -sd';' - <<<"$problems")}); its output: $NODE_BACKUP_DIR/mailcow-restore.log"
+  if [ "$code" != 0 ]; then
+    keep_restore_log "$log"
+    die "mailcow's restore failed (exit $code); its output: $NODE_BACKUP_DIR/mailcow-restore.log"
   fi
-  if [ "$REHEARSAL" = 1 ]; then
-    log "mailcow's restore done: crypt, mysql, redis, rspamd (postfix left out: rehearsal)"
-  else
-    log "mailcow's restore done: crypt, mysql, postfix, redis, rspamd"
-  fi
+  RESTORE_LOG=$log
 }
 
-restored_marker() { printf '%s/restored\n' "$NODE_STATE"; }
+# check_restored <project> <mailboxes the backup recorded, or ''>: what mailcow's restore must have
+# done, checked on the server: the mail_crypt key pair in the crypt volume, and the database
+# answering with the backup's number of mailboxes (it may take a while to start).
+check_restored() {
+  local crypt problems='' count='' try key
+  crypt=$(volume_path "$(mailcow_volume "$1" crypt)") || crypt=''
+  for key in ecprivkey.pem ecpubkey.pem; do
+    if [ -z "$crypt" ] || [ ! -s "$crypt/$key" ]; then problems+="the crypt volume has no $key; "; fi
+  done
+  for ((try = 1; try <= DB_TRIES; try++)); do
+    if count=$(mailcow_mailboxes "$MAILCOW_DIR"); then break; fi
+    count=''
+    [ "$try" = "$DB_TRIES" ] || sleep 5
+  done
+  if [ -z "$count" ]; then
+    problems+="mailcow's database does not answer; "
+  elif [ -n "$2" ] && [ "$count" != "$2" ]; then
+    problems+="the database has $count mailboxes, the backup $2; "
+  fi
+  if [ -n "$problems" ]; then
+    keep_restore_log "$RESTORE_LOG"
+    die "mailcow's restore is incomplete: ${problems%; }; its output: $NODE_BACKUP_DIR/mailcow-restore.log; run node-restore.sh again (section 8)"
+  fi
+  log "restored: the mail_crypt keys in place, ${count} mailboxes in the database${2:+ (as in the backup)}"
+}
 
 main() {
-  local snapshot='' host='' resync=0 update=0 picked id from at project commit here problem
+  local snapshot='' host='' resync=0 update=0 picked id from at epoch tags project commit here problem
+  local state='' mhost='' mepoch=0 hosts mailboxes
   MAILCOW_DIR=''
   while [ $# -gt 0 ]; do
     case $1 in
@@ -217,10 +260,17 @@ main() {
   fi
   mkdir -p "$NODE_STATE"
   ensure_image "$RESTIC_IMAGE"
-  picked=$(pick_snapshot "$snapshot" "$host" "$NODE_BACKUP_TAG") ||
+  if [ "$snapshot" = latest ] && [ -z "$host" ]; then
+    hosts=$(restic_run -- snapshots --json --tag "$NODE_BACKUP_TAG" | node_hosts "$NODE_BACKUP_TAG") ||
+      die "restic could not list the snapshots: the repository is unreachable, or a wrong key"
+    if [ "$(grep -c . <<<"$hosts")" -gt 1 ]; then
+      die "the repository holds snapshots of several nodes: $(paste -sd' ' - <<<"$hosts"); name one with --host" 2
+    fi
+  fi
+  picked=$(pick_snapshot "$snapshot" "$host" "$NODE_BACKUP_TAG" "$NODE_HOST_RE") ||
     die "restic could not list $snapshot: no such snapshot, or the repository is unreachable"
   [ -n "$picked" ] || die "no node snapshot ($snapshot${host:+ of $host}) in the repository" 2
-  read -r id from at <<<"$picked"
+  read -r id from at epoch tags <<<"$picked"
   log "restoring snapshot ${id:0:8} of node $from, made $at"
 
   install -d -m 700 "$NODE_BACKUP_DIR"
@@ -238,38 +288,47 @@ main() {
     die "mailcow in $MAILCOW_DIR is at ${here:0:12}, the backup was made on $(jq -r '.mailcow_version' "$WORK/backup/mailexpert/meta.json") (${commit:0:12}): git -C $MAILCOW_DIR checkout $commit, then run again; update mailcow after the restore" 2
   fi
   project=$(compose_project "$WORK/backup/mailcow.conf") || die "the backup's mailcow.conf has no COMPOSE_PROJECT_NAME" 2
-  if [ "$update" = 1 ]; then
-    [ -f "$(restored_marker)" ] ||
-      die "--update: node-restore.sh has not restored this server before; a server it did not restore is never overwritten" 2
-    log "updating the restore of $(cut -d' ' -f1 "$(restored_marker)" | cut -c1-8) to snapshot ${id:0:8}"
-  else
-    if [ -f "$(restored_marker)" ]; then
-      problem="node-restore.sh restored this server before; bring it to a newer snapshot with --update"
-    else
-      problem=$(fresh_server_problem "$project")
-    fi
-    [ -z "$problem" ] || die "$problem" 2
+  if [ -f "$(restore_marker_file)" ]; then
+    state=$(env_get "$(restore_marker_file)" STATE 2>/dev/null) || state=unknown
+    mhost=$(env_get "$(restore_marker_file)" HOST 2>/dev/null) || mhost=''
+    mepoch=$(env_get "$(restore_marker_file)" EPOCH 2>/dev/null) || mepoch=0
+    [[ $mepoch =~ ^[0-9]+$ ]] || mepoch=0
   fi
+  problem=$(restore_problem "$update" "$state" "$mhost" "$mepoch" "$from" "$epoch" "$tags")
+  if [ -z "$problem" ] && [ -z "$state" ]; then problem=$(fresh_server_problem "$project"); fi
+  [ -z "$problem" ] || die "$problem" 2
+  if [ -n "$state" ]; then log "this server holds a restore ($state) of node $mhost; continuing it with snapshot ${id:0:8}"; fi
+  mailboxes=$(jq -r '.mailboxes // empty' "$WORK/backup/mailexpert/meta.json")
 
+  # From here on the server changes: a run that stops can be run again (section 8).
+  write_restore_marker in-progress "$id" "$from" "$epoch"
   place_files "$WORK/backup"
   log "mailcow: pulling images and starting (creates the volumes)"
   mailcow_compose pull -q >/dev/null || die "docker compose pull failed in $MAILCOW_DIR"
   mailcow_compose up -d >/dev/null || die "docker compose up -d failed in $MAILCOW_DIR"
   restore_vmail "$id" "$(mailcow_volume "$project" vmail)"
   restore_mailcow "$WORK/backup"
+  # A rehearsal's restart policies (no) back to mailcow's own, then everything up.
+  if [ "$REHEARSAL" = 0 ]; then mailcow_restart_policy "$MAILCOW_DIR" always "${REHEARSAL_SERVICES[@]}" || true; fi
   mailcow_compose up -d >/dev/null || die "docker compose up -d failed in $MAILCOW_DIR after the restore"
+  check_restored "$project" "$mailboxes"
   if [ "$resync" = 1 ]; then
     mailcow_compose exec -T dovecot-mailcow doveadm force-resync -A '*' || warn "doveadm force-resync reported a problem; run it again once Dovecot is up"
   fi
-  printf '%s %s %s\n' "$id" "$REHEARSAL" "$(date +%s)" >"$(restored_marker)"
   log "restored snapshot ${id:0:8} of node $from ($at)"
   if [ "$REHEARSAL" = 1 ]; then
     # Nothing leaves a rehearsal: no firewall yet, the old node's certificate and relayhost.
-    mailcow_compose stop postfix-mailcow >/dev/null || warn "could not stop postfix-mailcow; stop it by hand"
-    log "rehearsal: postfix-mailcow stopped; do not run setup.sh yet; for the move, node-restore.sh <move snapshot> --update (it starts postfix again)"
+    mailcow_restart_policy "$MAILCOW_DIR" no "${REHEARSAL_SERVICES[@]}" || warn "docker update --restart=no failed"
+    mailcow_compose stop "${REHEARSAL_SERVICES[@]}" >/dev/null || warn "could not stop ${REHEARSAL_SERVICES[*]}; stop them by hand"
+    write_restore_marker rehearsal "$id" "$from" "$epoch"
+    log "rehearsal: ${REHEARSAL_SERVICES[*]} stopped (restart policy no); do not run setup.sh yet; for the move: node-restore.sh <move snapshot> --host $from --update"
     return 0
   fi
+  write_restore_marker live "$id" "$from" "$epoch"
   log "next: $SCRIPT_DIR/setup.sh (firewall, EOP ranges, timers), then the A record of the mail host and the PTR (section 8)"
+  if [[ ,$tags, == *,move,* ]]; then
+    log "after the move is checked: /opt/mailexpert-node/node-backup.sh --forget-host $from (the old node's snapshots but the move one go)"
+  fi
 }
 
 main "$@"; exit $?

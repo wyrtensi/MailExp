@@ -6,8 +6,14 @@ After=docker.service network-online.target
 [Service]
 Type=oneshot
 ExecStart=@DIR@/node-backup.sh
+# Removes the restic and mailcow backup containers a run killed by the timeout below left running
+# (dockerd runs them, not this unit's cgroup).
+ExecStopPost=@DIR@/node-backup.sh --cleanup
+# Nice and IOSchedulingClass apply to the script and the docker client only: the containers that do
+# the work (mailcow's dump, restic) run under dockerd and keep their default priority.
 Nice=10
 IOSchedulingClass=idle
-# An outer bound only: node-backup.sh stops mailcow's dump after NODE_BACKUP_DUMP_TIMEOUT and the
-# upload after NODE_BACKUP_PUSH_TIMEOUT (node.env) with a clear message and a /fail ping.
-TimeoutStartSec=16h
+# The sum of the run's own bounds (NODE_BACKUP_DUMP_TIMEOUT, _PUSH_, _VERIFY_, retention and the
+# small calls, node.env) and an hour: setup.sh writes it. Each phase stops itself first, with its
+# own message and a /fail ping.
+TimeoutStartSec=@TIMEOUT@

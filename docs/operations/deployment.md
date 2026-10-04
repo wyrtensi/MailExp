@@ -293,6 +293,8 @@ sudo /opt/mailexpert/app/scripts/deploy/update.sh sha-<12 символов ко�
 2. **Репетиция:**
 
    ```bash
+   # latest — самый новый снимок панели (хосты restic mailexpert-<hex>; снимки почтового узла,
+   # mailexpert-node-<hex>, restore.sh не выбирает, даже если их положили в тот же репозиторий)
    sudo /opt/mailexpert/app/scripts/deploy/restore.sh latest --no-start
    curl --resolve <DIRECT_HOST>:443:<IP сервера B> https://<DIRECT_HOST>/api/health
    docker compose -p mailexpert down -v   # убрать репетиционные данные с B

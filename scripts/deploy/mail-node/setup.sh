@@ -30,12 +30,19 @@
 #   mailexpert-node-backup timer (cron without systemd). --backup-keys reads the keys as KEY=VALUE
 #   lines on stdin, never as arguments: RESTIC_REPOSITORY, RESTIC_PASSWORD (kept once stored),
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION, NODE_BACKUP_PING_URL and the
-#   optional NODE_BACKUP_READ_SUBSET, NODE_BACKUP_DUMP_TIMEOUT, NODE_BACKUP_PUSH_TIMEOUT. A run
-#   also ends the standby of a node that made its move backup (the move was called off).
+#   optional NODE_BACKUP_READ_SUBSET, NODE_BACKUP_DUMP_TIMEOUT, NODE_BACKUP_PUSH_TIMEOUT,
+#   NODE_BACKUP_VERIFY_TIMEOUT, NODE_BACKUP_RESERVE_PERCENT, NODE_BACKUP_RESERVE_GB,
+#   NODE_BACKUP_PARTIAL_LIMIT. The unit's TimeoutStartSec (the cron line's timeout) is the sum of the
+#   run's bounds; under cron the output goes to /var/log/mailexpert-node-backup.log (0600, rotated
+#   weekly by logrotate).
+# - A server node-restore.sh restored is marked live: node-restore.sh never restores over it again.
+# - The old node of a move stays standby (mail ports closed, backup skipped) until --end-standby:
+#   the move was called off; the restart policies of postfix, dovecot and the watchdog go back to
+#   always and mailcow is started (docker compose up -d) before the firewall opens again.
 #
 # Usage: setup.sh --panel-ip <PANEL_IP> [--panel-ip ...] [--eop-host <EOP_HOST>]
 #                 [--mailcow-dir /opt/mailcow-dockerized] [--ping-url <Healthchecks URL>]
-#                 [--client-request-id <GUID>] [--backup-keys < file] [--dry-run]
+#                 [--client-request-id <GUID>] [--backup-keys < file] [--end-standby] [--dry-run]
 #
 # Options given once are kept in node.env: a later run without them uses the same values. Run it
 # again after every mailcow update. --dry-run prints the changes (diffs; for mailcow.conf only the
@@ -61,6 +68,8 @@ exit_on_unexpected_failure
 SYSTEMD_DIR=${MAILEXPERT_SYSTEMD_DIR:-/etc/systemd/system}
 CRON_FILE=${MAILEXPERT_CRON_FILE:-/etc/cron.d/mailexpert-node}
 BACKUP_CRON_FILE=${MAILEXPERT_BACKUP_CRON_FILE:-/etc/cron.d/mailexpert-node-backup}
+BACKUP_LOG=${MAILEXPERT_NODE_BACKUP_LOG:-/var/log/mailexpert-node-backup.log}
+LOGROTATE_FILE=${MAILEXPERT_LOGROTATE_FILE:-/etc/logrotate.d/mailexpert-node-backup}
 UNITS=(mailexpert-eop-ranges.service mailexpert-eop-ranges.timer mailexpert-node-firewall.service)
 BACKUP_UNITS=(mailexpert-node-backup.service mailexpert-node-backup.timer)
 # Set by setup_node_backups: 1 once the restic keys are in node.env and the repository opens; the
@@ -154,14 +163,10 @@ install_scripts() {
 # once. A repository that neither opens nor can be created fails the first setup of backups (the
 # owner is there to fix the keys: BACKUP_PROBLEM, reported once the firewall's schedule is in place,
 # the backup timer is not installed) and is a warning afterwards: the nightly run and its ping
-# report it. Without the keys the node runs without backups. A standby marker (the move backup) goes.
+# report it. Without the keys the node runs without backups.
 setup_node_backups() {
   local problem set_up=0 since
   node_backup_env
-  if [ -f "$(node_standby_file)" ]; then
-    rm -f "$(node_standby_file)"
-    log "backups: this node is no longer standby (it had made its move backup); its nightly backup runs again"
-  fi
   if ! backup_configured "$NODE_CONF"; then
     log "backups: off; give setup.sh --backup-keys the restic keys on stdin (docs/operations/mail-node.md, section 7)"
     return 0
@@ -183,6 +188,25 @@ setup_node_backups() {
   BACKUPS_ON=1
 }
 
+# end_standby: the move was called off: the mail services may restart and run again; the firewall
+# opens with the eop-ranges.sh run that follows.
+end_standby() {
+  rm -f "$(node_standby_file)"
+  mailcow_restart_policy "$MAILCOW_DIR" always "${STANDBY_SERVICES[@]}" || die "docker update --restart=always failed for ${STANDBY_SERVICES[*]}"
+  (cd "$MAILCOW_DIR" && docker compose up -d >/dev/null) || die "docker compose up -d failed in $MAILCOW_DIR"
+  log "standby ended: ${STANDBY_SERVICES[*]} restart again, mailcow is up, the mail ports open with the firewall below"
+}
+
+# render_backup_template <template>: a backup unit or cron file with @DIR@, @TIMEOUT@ (the bound
+# of a whole run, from node.env's bounds) and @LOG@ replaced.
+render_backup_template() {
+  local total
+  total=$(node_backup_total_timeout "$(node_setting NODE_BACKUP_DUMP_TIMEOUT "$NODE_BACKUP_DUMP_TIMEOUT_DEFAULT")" \
+    "$(node_setting NODE_BACKUP_PUSH_TIMEOUT "$NODE_BACKUP_PUSH_TIMEOUT_DEFAULT")" \
+    "$(node_setting NODE_BACKUP_VERIFY_TIMEOUT "$NODE_BACKUP_VERIFY_TIMEOUT_DEFAULT")")
+  render_template "$1" "$NODE_DIR" | sed -e "s|@TIMEOUT@|$total|g" -e "s|@LOG@|$BACKUP_LOG|g"
+}
+
 # systemctl_do <args...>: systemctl with its own error message shown; a failure stops the run.
 systemctl_do() {
   systemctl "$@" >/dev/null || die "systemctl $* failed"
@@ -198,7 +222,10 @@ install_schedule() {
     tmp=$(mktemp)
     for unit in "${units[@]}"; do
       target=$SYSTEMD_DIR/$unit
-      render_template "$SCRIPT_DIR/systemd/$unit" "$NODE_DIR" >"$tmp"
+      case $unit in
+        mailexpert-node-backup.*) render_backup_template "$SCRIPT_DIR/systemd/$unit" >"$tmp" ;;
+        *) render_template "$SCRIPT_DIR/systemd/$unit" "$NODE_DIR" >"$tmp" ;;
+      esac
       if changed "$target" "$tmp"; then
         install -m 644 "$tmp" "$target"
         log "systemd: $unit written"
@@ -226,10 +253,16 @@ install_schedule() {
       log "cron: $CRON_FILE written (no systemd on this host)"
     fi
     if [ "$BACKUPS_ON" = 1 ]; then
-      render_template "$SCRIPT_DIR/cron/mailexpert-node-backup" "$NODE_DIR" >"$tmp"
+      render_backup_template "$SCRIPT_DIR/cron/mailexpert-node-backup" >"$tmp"
       if changed "$BACKUP_CRON_FILE" "$tmp"; then
         install -m 644 "$tmp" "$BACKUP_CRON_FILE"
         log "cron: $BACKUP_CRON_FILE written (nightly backup, no systemd on this host)"
+      fi
+      if [ ! -e "$BACKUP_LOG" ]; then install -m 600 /dev/null "$BACKUP_LOG"; fi
+      sed "s|@LOG@|$BACKUP_LOG|g" "$SCRIPT_DIR/logrotate/mailexpert-node-backup" >"$tmp"
+      if changed "$LOGROTATE_FILE" "$tmp"; then
+        install -D -m 644 "$tmp" "$LOGROTATE_FILE"
+        log "logrotate: $LOGROTATE_FILE written ($BACKUP_LOG weekly)"
       fi
     fi
     rm -f "$tmp"
@@ -253,7 +286,7 @@ main() {
   local eop_host='' ping_url='' client_id='' net mailcow_conf extra_cf dovecot_conf tmp
   local conflicts rc=0 restart_note='' family rules service listeners
   local -a panel_ips=() given_ips=() parts=() settings=() keys=()
-  local stored_conf=0 backup_keys=0 line
+  local stored_conf=0 backup_keys=0 end_standby=0 line
   DRY_RUN=0
   MAILCOW_DIR=''
   while [ $# -gt 0 ]; do
@@ -271,6 +304,7 @@ main() {
         ;;
       --dry-run) DRY_RUN=1 && shift ;;
       --backup-keys) backup_keys=1 && shift ;;
+      --end-standby) end_standby=1 && shift ;;
       -h | --help) usage && return 0 ;;
       *) die "unknown option: $1 (see --help)" 2 ;;
     esac
@@ -422,6 +456,19 @@ $conflicts" 2
 
   # The EOP ranges first, the firewall with them: eop-ranges.sh fills the sets, then puts the
   # chain in place and checks the node; it never installs the port 25 rules while a set is empty.
+  if [ -f "$(node_standby_file)" ]; then
+    if [ "$end_standby" = 1 ]; then
+      end_standby
+    else
+      warn "this node is standby (it made its move backup): its mail ports stay closed and its backup skipped; --end-standby if the move is called off"
+    fi
+  fi
+  # A server node-restore.sh restored serves mail from now on: never restored over again.
+  node_backup_env
+  if [ -f "$(restore_marker_file)" ] && [ "$(env_get "$(restore_marker_file)" STATE 2>/dev/null || true)" != live ]; then
+    mark_restore_live
+    log "this server's restore is marked live: node-restore.sh does not restore over it any more"
+  fi
   "$NODE_DIR/eop-ranges.sh" || rc=$?
   if [ "$rc" != 0 ]; then
     if active_chain 4 >/dev/null; then
@@ -430,7 +477,11 @@ $conflicts" 2
       die "eop-ranges.sh failed and no firewall rules are in place: fix the cause above and run setup.sh again" 1
     fi
   fi
-  log "firewall: port 25 from EOP only, ${PANEL_PORTS} from ${panel_ips[*]} only, ${CLOSED_PORTS} closed"
+  if [ -f "$(node_standby_file)" ]; then
+    log "firewall: standby, every mail port closed"
+  else
+    log "firewall: port 25 from EOP only, ${PANEL_PORTS} from ${panel_ips[*]} only, ${CLOSED_PORTS} closed"
+  fi
   warn_foreign_rules
   setup_node_backups
   install_schedule

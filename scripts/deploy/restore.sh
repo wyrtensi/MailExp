@@ -15,7 +15,8 @@
 #
 #   restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--host <restic host>] [--no-start]
 #
-# latest is the newest snapshot of any server (each server backs up under its own restic host);
+# latest is the newest snapshot of any panel server (each server backs up under its own restic host,
+# mailexpert-<hex>; a mail node's mailexpert-node-<hex> snapshots are never picked);
 # --host limits the choice to one server's snapshots. The host and time restored are printed.
 #
 # Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no data changed).
@@ -46,7 +47,7 @@ Usage: restore.sh latest|<snapshot id> [--prefix /opt/mailexpert] [--host <resti
 
 On a fresh server: install.sh --version <the snapshot's version> --no-start, configure.sh with
 RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, then this.
-latest       the newest snapshot of any server in the repository
+latest       the newest snapshot of any panel server in the repository (never a mail node's)
 --host       only snapshots of this restic host (restic snapshots lists them)
 --no-start   restore without starting the panel (rehearsal of a move); the server stays standby
 Exit codes: 0 restored, 1 failure, 2 invalid input or not a fresh server (no data changed).
@@ -163,9 +164,9 @@ main() {
   load_restic_env
   ensure_image "$RESTIC_IMAGE"
   started=$SECONDS
-  picked=$(pick_snapshot "$snapshot" "$host") || die "restic could not list $snapshot: no such snapshot, or the repository is unreachable"
+  picked=$(pick_snapshot "$snapshot" "$host" '' "$PANEL_HOST_RE") || die "restic could not list $snapshot: no such snapshot, or the repository is unreachable"
   [ -n "$picked" ] || die "no snapshot $snapshot${host:+ of host $host} in the repository" 2
-  read -r id from at <<<"$picked"
+  read -r id from at _ <<<"$picked"
   log "restoring snapshot ${id:0:8} of host $from, made at $at"
   restic_run -v "$WORK:/restore" -- restore "$id" --target /restore >/dev/null
   files=$WORK/backup

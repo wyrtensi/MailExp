@@ -103,6 +103,14 @@ node_backup_setup() {
     mkdir -p "$MOCK_DIR/volumes/mailcowdockerized_$set-vol-1"
     printf 'data\n' >"$MOCK_DIR/volumes/mailcowdockerized_$set-vol-1/file"
   done
+  # mail_crypt's key pair, and the database's two mailboxes (the docker mock's mysql reads it).
+  printf 'key\n' >"$MOCK_DIR/volumes/mailcowdockerized_crypt-vol-1/ecprivkey.pem"
+  printf 'key\n' >"$MOCK_DIR/volumes/mailcowdockerized_crypt-vol-1/ecpubkey.pem"
+  printf '2\n' >"$MOCK_DIR/volumes/mailcowdockerized_mysql-vol-1/mailboxes"
+  printf 'DBUSER=mailcow\nDBNAME=mailcow\n' >>"$MC/mailcow.conf"
+  export MAILEXPERT_NODE_RESTORE_DB_TRIES=1
+  export MAILEXPERT_NODE_BACKUP_LOG=$BATS_TEST_TMPDIR/node-backup.log
+  export MAILEXPERT_LOGROTATE_FILE=$BATS_TEST_TMPDIR/logrotate.d/mailexpert-node-backup
   mkdir -p "$vmail/example.com/alice/Maildir/cur" "$vmail/example.com/bob/Maildir/cur" "$vmail/_garbage"
   printf 'Subject: one\n' >"$vmail/example.com/alice/Maildir/cur/1700000000.M1.mail:2,S"
   printf 'Subject: two\n' >"$vmail/example.com/bob/Maildir/cur/1700000001.M2.mail:2,S"
@@ -122,6 +130,16 @@ EOF
 }
 
 restic_calls() { cat "$MOCK_DIR/restic" 2>/dev/null; }
+
+# repo_snapshot <id prefix of 8 hex> <host> <tag...>: a snapshot made elsewhere (another node, the
+# panel) in the restic mock's repository.
+repo_snapshot() {
+  local id=$1$(printf 'c%.0s' $(seq 56)) host=$2
+  shift 2
+  mkdir -p "$MOCK_DIR/repo/$id/backup"
+  printf '%s\n' "$host" >"$MOCK_DIR/repo/$id.host"
+  printf '%s\n' "$@" >"$MOCK_DIR/repo/$id.tags"
+}
 
 # The recorded endpoints answer with the Exchange entry of TCP 25 changed by a jq filter.
 endpoints_with() {

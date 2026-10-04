@@ -35,11 +35,12 @@ shift
 case $cmd in
   cat) exit "${MOCK_RESTIC_CAT:-0}" ;;
   init) exit "${MOCK_RESTIC_INIT:-0}" ;;
-  forget) exit 0 ;;
+  forget | unlock) exit 0 ;;
   check) exit "${MOCK_RESTIC_CHECK:-0}" ;;
   backup)
     status=${MOCK_RESTIC_BACKUP:-0}
     if [ "$status" != 0 ] && [ "$status" != 3 ]; then echo "Fatal: unable to save snapshot" >&2 && exit "$status"; fi
+    if [ "$status" = 3 ]; then echo "error: lstat /vmail/example.com/x: no such file or directory" >&2; fi
     host='' tags=() sources=()
     while [ $# -gt 0 ]; do
       case $1 in
@@ -84,19 +85,24 @@ case $cmd in
       [ -z "$tag" ] || grep -qx "$tag" "$REPO/$id.tags" || continue
       [ "$first" = 1 ] || printf ','
       first=0
-      printf '{"id":"%s","hostname":"%s","time":"2026-10-04T02:30:%02dZ"}' "$id" "$(cat "$REPO/$id.host")" "$((16#${id:0:8}))"
+      printf '{"id":"%s","hostname":"%s","time":"2026-10-04T02:30:%02dZ","tags":%s}' "$id" "$(cat "$REPO/$id.host")" \
+        "$((16#${id:0:8}))" "$(jq -R . "$REPO/$id.tags" | jq -sc .)"
     done
     printf ']\n'
     ;;
   ls)
-    [ "$1" = --json ] && shift
+    recursive=0
+    while [ "${1:-}" = --json ] || [ "${1:-}" = --recursive ]; do
+      [ "$1" != --recursive ] || recursive=1
+      shift
+    done
     dir=$(snapshot_dir "$1") || exit 1
     echo '{"message_type":"snapshot","struct_type":"snapshot"}'
     [ -d "$dir$2" ] || exit 0
-    for entry in "$dir$2"/*; do
-      [ -e "$entry" ] || continue
-      if [ -d "$entry" ]; then type=dir; else type=file; fi
-      printf '{"message_type":"node","struct_type":"node","type":"%s","path":"%s/%s"}\n' "$type" "$2" "$(basename "$entry")"
+    if [ "$recursive" = 1 ]; then depth=(-mindepth 1); else depth=(-mindepth 1 -maxdepth 1); fi
+    find "$dir$2" "${depth[@]}" | sort | while IFS= read -r entry; do
+      if [ -d "$entry" ]; then type=dir size=0; else type=file size=$(wc -c <"$entry"); fi
+      printf '{"message_type":"node","struct_type":"node","type":"%s","path":"%s","size":%s}\n' "$type" "${entry#"$dir"}" "$((size))"
     done
     ;;
   restore)

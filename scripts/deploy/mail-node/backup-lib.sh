@@ -29,15 +29,44 @@ NODE_BACKUP_TAG=mailcow
 NODE_RESTIC_HOST_PREFIX=mailexpert-node
 # What setup.sh --backup-keys stores in node.env (secrets on stdin, never as arguments).
 NODE_BACKUP_KEYS=(RESTIC_REPOSITORY RESTIC_PASSWORD AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION
-  NODE_BACKUP_PING_URL NODE_BACKUP_READ_SUBSET NODE_BACKUP_DUMP_TIMEOUT NODE_BACKUP_PUSH_TIMEOUT)
+  NODE_BACKUP_PING_URL NODE_BACKUP_READ_SUBSET NODE_BACKUP_DUMP_TIMEOUT NODE_BACKUP_PUSH_TIMEOUT
+  NODE_BACKUP_VERIFY_TIMEOUT NODE_BACKUP_RESERVE_PERCENT NODE_BACKUP_RESERVE_GB NODE_BACKUP_PARTIAL_LIMIT)
 # Defaults of the bounds: mailcow's dump (the database and the small volumes), the upload (the
-# first one carries all the mail), and the share of the repository the weekly check reads back.
+# first one carries all the mail), the weekly verification (each restic call of it), and the share
+# of the repository it reads back.
 NODE_BACKUP_DUMP_TIMEOUT_DEFAULT=3600
 NODE_BACKUP_PUSH_TIMEOUT_DEFAULT=43200
+NODE_BACKUP_VERIFY_TIMEOUT_DEFAULT=7200
 NODE_BACKUP_READ_SUBSET_DEFAULT=5%
+# retention (forget, and prune on Sundays) and the small restic calls (unlock, listings).
+NODE_BACKUP_FORGET_TIMEOUT=3600
+NODE_BACKUP_SHORT_TIMEOUT=600
+# What must stay free on the disk besides the dump: the larger of a share of the file system and a
+# fixed amount, so a dump never fills the disk mailcow writes mail to.
+NODE_BACKUP_RESERVE_PERCENT_DEFAULT=10
+NODE_BACKUP_RESERVE_GB_DEFAULT=2
+# Runs in a row whose snapshot lacks files restic could not read (mail moved while it read) before
+# the run fails its ping.
+NODE_BACKUP_PARTIAL_LIMIT_DEFAULT=3
+# The label of the node's restic containers, and the name mailcow's script gives its own.
+NODE_BACKUP_LABEL=mailexpert.node-backup=1
+MAILCOW_BACKUP_CONTAINER=mailcow-backup
+# The node's restic hosts: snapshots of other hosts (the panel's) are not the node's to back up into
+# or restore from.
+NODE_HOST_RE='^mailexpert-node-'
 
 node_backup_last_file() { printf '%s/backup-last.json\n' "$NODE_STATE"; }
 node_backup_since_file() { printf '%s/backup-since\n' "$NODE_STATE"; }
+node_backup_partial_file() { printf '%s/backup-partial-count\n' "$NODE_STATE"; }
+# What node-restore.sh did on this server: KEY=VALUE lines STATE (in-progress, rehearsal, live),
+# SNAPSHOT, HOST (the node it came from), EPOCH (the snapshot's time), AT.
+restore_marker_file() { printf '%s/restored\n' "$NODE_STATE"; }
+
+# node_backup_total_timeout <dump> <push> <verify>: the bound of a whole run, which the systemd unit
+# (TimeoutStartSec) and the cron line (timeout) get: every phase's own bound and an hour of slack.
+node_backup_total_timeout() {
+  echo $(($1 + $2 + $3 + NODE_BACKUP_FORGET_TIMEOUT + 3 * NODE_BACKUP_SHORT_TIMEOUT + 3600))
+}
 
 # compose_project <mailcow.conf>: COMPOSE_PROJECT_NAME as mailcow's script cleans it (the prefix of
 # its volume names); status 1 when there is none.
@@ -60,9 +89,12 @@ node_backup_key_problem() {
     RESTIC_PASSWORD) [ "${#2}" -ge 16 ] || echo "must be at least 16 characters" ;;
     NODE_BACKUP_PING_URL) [[ $2 == https://* && $2 != *[[:space:]\"\'\$\#\\]* ]] || echo "must be an https URL" ;;
     NODE_BACKUP_READ_SUBSET) read_subset_ok "$2" || echo "must be a percentage (5%) or n/t (1/12)" ;;
-    NODE_BACKUP_DUMP_TIMEOUT | NODE_BACKUP_PUSH_TIMEOUT)
+    NODE_BACKUP_DUMP_TIMEOUT | NODE_BACKUP_PUSH_TIMEOUT | NODE_BACKUP_VERIFY_TIMEOUT)
       [[ $2 =~ ^[1-9][0-9]{1,5}$ ]] || echo "must be a number of seconds (10 to 999999)"
       ;;
+    NODE_BACKUP_RESERVE_PERCENT) [[ $2 =~ ^[0-9]{1,2}$ ]] || echo "must be a percentage of the disk, 0 to 99" ;;
+    NODE_BACKUP_RESERVE_GB) [[ $2 =~ ^[0-9]{1,4}$ ]] || echo "must be a number of GB, 0 to 9999" ;;
+    NODE_BACKUP_PARTIAL_LIMIT) [[ $2 =~ ^[1-9][0-9]?$ ]] || echo "must be a number of runs, 1 to 99" ;;
     AWS_ACCESS_KEY_ID | AWS_SECRET_ACCESS_KEY | AWS_DEFAULT_REGION) [ -n "$2" ] || echo "must not be empty" ;;
     *) echo "is not a node backup key (${NODE_BACKUP_KEYS[*]})" ;;
   esac
@@ -156,13 +188,101 @@ dump_need_kb() {
   echo $(((2 * $1 + $2) * 11 / 10))
 }
 
-# space_problem <need kB> <free kB> <dir>: the problem when <dir> has too little room; else nothing.
+# space_reserve_kb <file system size kB> <percent> <GB>: what must stay free: the larger of the share
+# and the fixed amount.
+space_reserve_kb() {
+  local share=$(($1 * $2 / 100)) fixed=$(($3 * 1024 * 1024))
+  if [ "$share" -gt "$fixed" ]; then echo "$share"; else echo "$fixed"; fi
+}
+
+# space_problem <need kB> <free kB> <reserve kB> <dir> [what]: the problem when <dir> cannot take
+# <what> (mailcow's dump) and still keep the reserve free; else nothing.
 space_problem() {
-  if [ "$2" -lt "$1" ]; then
-    echo "not enough free space for mailcow's dump in $3: about $(($1 / 1024)) MB needed, $(($2 / 1024)) MB free"
+  local what=${5:-the dump of mailcow}
+  if [ "$2" -lt $(($1 + $3)) ]; then
+    echo "not enough free space for $what in $4: about $(($1 / 1024)) MB needed and $(($3 / 1024)) MB to stay free (NODE_BACKUP_RESERVE_PERCENT, NODE_BACKUP_RESERVE_GB), $(($2 / 1024)) MB free"
   fi
   return 0
 }
+
+# archive_problems <crypt listing> <mariadb listing>: what the listings (tar -t) of mailcow's crypt
+# and database archives lack, one line each: the mail_crypt key pair (without it vmail is
+# unreadable), and at least one file of the database (mariabackup that failed leaves an empty
+# directory, and tar archives it without a word).
+archive_problems() {
+  local crypt=$1 mariadb=$2 key
+  for key in ecprivkey.pem ecpubkey.pem; do
+    grep -qE "(^|/)$key\$" <<<"$crypt" || echo "backup_crypt.tar.zst has no $key"
+  done
+  grep -qE '(^|/)backup_mariadb/.*[^/]$' <<<"$mariadb" || echo "backup_mariadb.tar.zst holds no database file"
+  return 0
+}
+
+# snapshot_size_kb: the size of the files of `restic ls --json` on stdin, in kB.
+snapshot_size_kb() {
+  jq -s '[.[] | select(((.message_type // .struct_type) == "node") and .type == "file") | (.size // 0)] | add // 0 | (. / 1024 | ceil)' 2>/dev/null || echo 0
+}
+
+# panel_hosts: the panel's restic hosts among the snapshots of `restic snapshots --json` on stdin,
+# one per line: a repository the panel backs up into is not the node's.
+panel_hosts() {
+  jq -r --arg re "$PANEL_HOST_RE" '.[] | .hostname | select(test($re))' 2>/dev/null | sort -u
+}
+
+# node_hosts <tag>: the node hosts with snapshots of the tag in `restic snapshots --json` on stdin.
+node_hosts() {
+  jq -r --arg re "$NODE_HOST_RE" --arg tag "$1" \
+    '.[] | select(((.tags // []) | index($tag)) != null) | .hostname | select(test($re))' 2>/dev/null | sort -u
+}
+
+# restore_problem <update 0|1> <marker state or ''> <marker host> <marker epoch> <target host>
+# <target epoch> <target tags>: why node-restore.sh must not restore this snapshot onto a server it
+# restored before; nothing when it may. Without a marker the fresh server check decides.
+#   in-progress: a restore that stopped half way; it may be run again, from the same or a newer
+#                snapshot of the same node (or a move snapshot).
+#   rehearsal:   only --update, from a newer snapshot of the same node or a move snapshot.
+#   live:        never: this node serves mail (a restore over it would roll it back).
+restore_problem() {
+  local update=$1 state=$2 host=$3 epoch=$4 thost=$5 tepoch=$6 ttags=$7
+  case $state in
+    '') [ "$update" = 0 ] || echo "--update: node-restore.sh has not restored this server before; a server it did not restore is never overwritten" ;;
+    live) echo "this server is a live node (restored and set up, or restored from a move snapshot): node-restore.sh never restores over it" ;;
+    rehearsal | in-progress)
+      if [ "$state" = rehearsal ] && [ "$update" = 0 ]; then
+        echo "node-restore.sh restored this server for a rehearsal; bring it to a newer snapshot with --update"
+      elif [ "$thost" != "$host" ] && [[ ,$ttags, != *,move,* ]]; then
+        echo "the snapshot is of node $thost, the server holds node $host: only a snapshot of the same node or a move snapshot"
+      elif [ "$state" = rehearsal ] && [ "$tepoch" -le "$epoch" ]; then
+        echo "the snapshot is not newer than the one the rehearsal restored: --update only moves forward"
+      elif [ "$tepoch" -lt "$epoch" ]; then
+        echo "the snapshot is older than the one the interrupted restore started with"
+      fi
+      ;;
+    *) echo "$(restore_marker_file) has an unknown state $state: look at it and remove it by hand" ;;
+  esac
+  return 0
+}
+
+# write_restore_marker <state> <snapshot> <host> <epoch>
+write_restore_marker() {
+  local file
+  file=$(restore_marker_file)
+  mkdir -p "$NODE_STATE"
+  printf 'STATE=%s\nSNAPSHOT=%s\nHOST=%s\nEPOCH=%s\nAT=%s\n' "$1" "$2" "$3" "$4" "$(date +%s)" >"$file.tmp"
+  chmod 600 "$file.tmp"
+  mv -f "$file.tmp" "$file"
+}
+
+# mark_restore_live: a server node-restore.sh restored serves mail now (setup.sh ran on it).
+mark_restore_live() {
+  local file
+  file=$(restore_marker_file)
+  [ -f "$file" ] || return 0
+  env_set "$file" STATE live
+}
+
+# partial_count <runs in a row so far> <partial 0|1>: the new count of partial runs in a row.
+partial_count() { if [ "$2" = 1 ]; then echo $(($1 + 1)); else echo 0; fi; }
 
 # mailbox_children <parent>: from `restic ls --json` on stdin, the names of the directories directly
 # under <parent> (whether or not restic listed recursively), skipping mailcow's own (_garbage,
@@ -187,7 +307,8 @@ pick_rotating() {
 # mailcow_restore_prompts_ok <backup_and_restore.sh>: status 0 when mailcow's script asks what
 # node-restore.sh answers: the restore point, the data set, and the confirmation that the SQL
 # restore stops mailcow. Another version that asks something else is restored by hand instead
-# (node-restore.sh would answer the wrong question).
+# (node-restore.sh would answer the wrong question). Checked against the questions of mailcow
+# 2026-09 (test/mail-node/mailcow-2026-09-prompts: its read lines, verbatim).
 mailcow_restore_prompts_ok() {
   local file=$1 count
   [ -f "$file" ] || return 1
@@ -197,15 +318,6 @@ mailcow_restore_prompts_ok() {
     grep -qF 'Select a dataset to restore' "$file" &&
     grep -qF 'do you want to proceed? [Y|n]' "$file" &&
     grep -qF '[ 0 ] - all' "$file"
-}
-
-# restore_log_problems <log of mailcow's restore>: the lines that say a data set was not restored
-# (mailcow's script goes on and exits 0 after them), without colour codes; nothing when there are
-# none. rspamd skipped for another CPU architecture is not one: its learned data starts afresh.
-restore_log_problems() {
-  local esc
-  esc=$(printf '\033')
-  sed "s/$esc\[[0-9;]*m//g" "$1" | grep -E '^(Error|Could not|Cannot find)' || true
 }
 
 # node_backup_age <now>: the backup age problem of the node (backup_age_problem of the panel's
@@ -220,9 +332,9 @@ node_backup_age() {
 }
 
 # write_node_backup_last <snapshot> <tag> <seconds> <dump seconds> <dump bytes> <push seconds>
-# <processed bytes> <added bytes> <mailcow ref> <restore seconds or ''>: state/backup-last.json, for
-# node-backup.sh --status, the hourly node check (eop-ranges.sh) and the owner (the size and time
-# a move takes).
+# <processed bytes> <added bytes> <mailcow ref> <restore seconds or ''> <partial 0|1>:
+# state/backup-last.json, for node-backup.sh --status and the owner (the size and time a move
+# takes). partial: restic could not read some files (mail moved while it read the volume).
 write_node_backup_last() {
   local file tmp now
   file=$(node_backup_last_file)
@@ -230,10 +342,12 @@ write_node_backup_last() {
   tmp=$(mktemp "$file.XXXXXX")
   jq -cn --arg snapshot "$1" --arg tag "$2" --argjson seconds "$3" --argjson dump_seconds "$4" \
     --argjson dump_bytes "$5" --argjson push_seconds "$6" --argjson processed "$7" --argjson added "$8" \
-    --arg mailcow "$9" --arg restore "${10}" --argjson now "$now" \
+    --arg mailcow "$9" --arg restore "${10}" --argjson partial "$([ "${11:-0}" = 1 ] && echo true || echo false)" \
+    --argjson now "$now" \
     '{finished_epoch: $now, finished_at: ($now | todate), snapshot: $snapshot, tag: $tag,
       seconds: $seconds, dump_seconds: $dump_seconds, dump_bytes: $dump_bytes,
       push_seconds: $push_seconds, processed_bytes: $processed, added_bytes: $added, mailcow: $mailcow,
+      partial: $partial,
       verified: ($restore != ""),
       restore_seconds: (if $restore == "" then null else ($restore | tonumber) end)}' >"$tmp"
   chmod 600 "$tmp"
@@ -246,6 +360,42 @@ write_node_backup_last() {
 node_backup_env() {
   # shellcheck disable=SC2034 # read by lib/backup.sh
   ENV_FILE=$NODE_CONF STATE_DIR=$NODE_STATE
+}
+
+# --- The functions below run Docker. ---
+
+# volume_path <volume>: where a Docker volume is on the host; status 1 when it does not exist.
+volume_path() { docker volume inspect -f '{{.Mountpoint}}' "$1" 2>/dev/null; }
+
+# mailcow_mailboxes <mailcow dir>: the number of mailboxes in mailcow's database (mysql-mailcow, with
+# the credentials of mailcow.conf; they go to mysql as an option file on stdin, never on a command
+# line); status 1 when the database does not answer.
+mailcow_mailboxes() {
+  local dir=$1 user pass db count
+  user=$(env_get "$dir/mailcow.conf" DBUSER 2>/dev/null) || return 1
+  pass=$(env_get "$dir/mailcow.conf" DBPASS 2>/dev/null) || return 1
+  db=$(env_get "$dir/mailcow.conf" DBNAME 2>/dev/null) || return 1
+  count=$(printf '[client]\nuser=%s\npassword=%s\n' "$user" "$pass" | (cd "$dir" && docker compose exec -T mysql-mailcow \
+    mysql --defaults-extra-file=/dev/stdin -D "$db" -N -s -e 'SELECT COUNT(*) FROM mailbox') 2>/dev/null) || return 1
+  [[ $count =~ ^[0-9]+$ ]] || return 1
+  echo "$count"
+}
+
+# remove_leftovers: restic containers of an earlier run that was killed (its systemd unit timed out,
+# say) and mailcow's backup container it left; the caller holds the backup lock, so none of them
+# belongs to a run still going.
+remove_leftovers() {
+  local ids
+  ids=$(docker ps -aq --filter "label=$NODE_BACKUP_LABEL" 2>/dev/null) || ids=''
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086 # one id per word
+    docker rm -f $ids >/dev/null 2>&1 || true
+    warn "removed restic containers an earlier run left behind (it was stopped from outside)"
+  fi
+  if docker container inspect "$MAILCOW_BACKUP_CONTAINER" >/dev/null 2>&1; then
+    docker rm -f "$MAILCOW_BACKUP_CONTAINER" >/dev/null 2>&1 || true
+    warn "removed the container $MAILCOW_BACKUP_CONTAINER an earlier mailcow dump left behind"
+  fi
 }
 
 # node_setting <key> <default>: a node.env value, or the default.
