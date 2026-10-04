@@ -135,19 +135,54 @@ git -C /opt/mailexpert-node-src checkout --detach <коммит панели>
 ## 9. Обновление
 
 Версия — коммит `main` с зелёным CI (джоба `images` опубликовала образы `sha-<12>`). Боевой канал —
-`latest`: сборка, которую владелец отметил как готовую к проду (механизм отметки появится вместе с
-обновлением из панели, [deployment-system.md, раздел 9](../architecture/deployment-system.md)). Пока
-его нет, версию называет владелец; последний зелёный `main`:
+`latest`: сборка, которую владелец отметил как готовую к проду
+([deployment-system.md, раздел 9](../architecture/deployment-system.md)). Сервер и тогда запускает
+её `sha-<12>`; `update.sh latest` и `status.sh --target latest` сначала превращают канал в `sha-<12>`.
+
+**Продвижение в `latest`** (владелец): GitHub → Actions → «Promote to latest» → Run workflow, поле
+`sha` — коммит `main` (пусто — голова `main`), `dry_run` — только проверить образы. Или:
+
+```bash
+gh workflow run promote.yml --repo wyrtensi/MailExpert -f sha=<sha или sha-12>   # пусто: голова main
+gh api repos/wyrtensi/MailExpert/git/ref/tags/latest --jq '.object.sha[0:12]'    # что сейчас latest
+```
+
+Workflow ничего не собирает: проверяет, что коммит на `main` и что его образы (backend, frontend,
+edge, tenant-worker) есть в GHCR, ставит им тег `latest` на тот же digest и переносит git-тег
+`latest`. Последний зелёный `main` (если владелец просит другую версию):
 
 ```bash
 gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status success --limit 1 \
   --json headSha --jq '.[0].headSha[0:12]'
 ```
 
+### Из панели (кнопка)
+
+Администратор: «Настройки → Администрирование → Обновление панели». Карточка показывает текущую
+версию, `latest`, число коммитов между ними со ссылкой на сравнение на GitHub, предпроверку
+(`status.sh --target` на хосте: проблемы, предупреждения, шаги вне панели, новые миграции и
+возможен ли автооткат) и кнопку «Обновить» с подтверждением. Дальше — ход обновления (строки лога
+`update.sh`), итог, путь к логу на хосте (`<PREFIX>/state/updater/<id>.log`,
+`journalctl -u mailexpert-updater.service`); панель на несколько минут перезапускается. В журнале
+— «Запрошено обновление панели», «началось», «обновлена» или «не удалось», с администратором,
+который нажал кнопку. Обычные пользователи карточку не видят.
+
+Кнопку исполняет хост: `mailexpert-updater.path` замечает запрос, `mailexpert-updater.service`
+(root) проверяет его, запускает `status.sh --target` и `update.sh` — те же шаги и проверки, что
+ниже. Только вперёд: версия старее текущей или не с `main` (кроме продвинутой `latest`) отклоняется,
+откат — только по SSH. Юниты ставит `install.sh` с systemd (без `--no-system`) на новых и
+существующих установках; без них карточка пишет «механизм обновления не установлен», и обновление
+идёт по шагам ниже. Если кнопка не отвечает: `systemctl status mailexpert-updater.path
+mailexpert-updater.service`; после множества запросов подряд юнит может упереться в лимит запусков —
+`systemctl reset-failed mailexpert-updater.service mailexpert-updater.path && systemctl start
+mailexpert-updater.path`.
+
+### По SSH
+
 1. **Предпроверка** (ничего не меняет, кроме `git fetch` нужного коммита):
 
    ```bash
-   sudo $D/update.sh --check sha-<12>      # = status.sh --target sha-<12>
+   sudo $D/update.sh --check sha-<12>      # = status.sh --target sha-<12>; вместо sha-<12> можно latest
    ```
 
    Код 0 — можно обновлять. `problem:` — устранить до обновления (не та версия в checkout, образа
@@ -195,9 +230,10 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
    | 3 | сбой до переключения (образ не скачался, бэкап перед обновлением, любая другая команда); ничего не изменено, работает прежняя версия |
 3. **Шаги по строкам `next:`**:
    - `mail node: ...` — на узле тот же коммит (раздел 4 выше), `setup.sh --dry-run`, затем `setup.sh`;
-   - `edge: the Caddy image changed ...` — в `<PREFIX>/edge/.env` оставить `EDGE_IMAGE=` пустым и
-     запустить `sudo $D/install.sh --prefix <PREFIX>`: он закрепит образ края текущей версии.
-     Прежний digest записать заранее (`status.sh`, строка `edge_image`) — он нужен для отката.
+   - образ Caddy (`info: edge: the Caddy image changed`) вручную не трогается: если между версиями
+     изменился `deploy/edge/Dockerfile`, `update.sh` скачивает новый образ до бэкапа, `install.sh`
+     закрепляет его по digest, а прежний `EDGE_IMAGE` остаётся в `<PREFIX>/state/edge-image.previous`
+     (его возвращают `rollback.sh` и автооткат).
 4. **Предупреждения панели**: правило раскладки спама на узле (`status.sh`: `spam_rule outdated`),
    «Применить настройки» узла, антиспам-политика тенанта.
 5. **Проверка** на сервере, а не через публичный адрес (он за Access или входом Google):
@@ -219,10 +255,25 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
   `update.sh` написал «no migration was recorded as applied»):
   `sudo $D/install.sh --prefix <PREFIX> --version sha-<старая>` (тоже через `systemd-run`). Данные
   не теряются.
-- **Миграции были или неизвестно**: [deployment.md, «Откат обновления»](deployment.md) —
-  восстановление `backups/pre-update-<старая>.dump` в отдельную базу, подмена переименованием,
-  `install.sh --version`. Теряется всё, записанное после обновления.
-- **Образ края**: вернуть прежний digest в `EDGE_IMAGE` и `install.sh --prefix <PREFIX>`.
+- **Миграции были или неизвестно**: `rollback.sh` (через `systemd-run`, как обновление):
+
+  ```bash
+  sudo $D/rollback.sh --prefix <PREFIX> --to sha-<старая>   # спросит версию ещё раз
+  # без терминала (systemd-run, агент после «да» владельца): --confirm sha-<старая>
+  ```
+
+  Он делает то же, что [deployment.md, «Откат обновления»](deployment.md): останавливает backend и
+  frontend, восстанавливает `backups/pre-update-<старая>.dump` в отдельную базу, подменяет текущую
+  переименованием (прежняя остаётся как `<db>_before_rollback_<время>`), возвращает образ Caddy,
+  если обновление его меняло, и запускает `install.sh --version`. Теряется всё, записанное после
+  обновления. Коды: 0 — откат сделан; 1 — сбой после остановки (вывод говорит, в каком состоянии
+  база); 2 и 3 — ничего не изменено.
+- **Автооткат кнопки**: если обновление из панели не поднялось, а предпроверка прочитала схему и
+  новых миграций не было (и число записанных не изменилось), исполнитель сам запускает
+  `install.sh --version <старая>` (итог «откат выполнен»). В остальных случаях карточка показывает
+  «не удалось» и ссылку сюда — решение за человеком.
+- **Образ края** без `rollback.sh`: прежний digest из `<PREFIX>/state/edge-image.previous` в
+  `EDGE_IMAGE` и `install.sh --prefix <PREFIX>`.
 - **Скрипты узла**: прежний коммит в `/opt/mailexpert-node-src`, `setup.sh`.
 
 ## 11. Переезд
