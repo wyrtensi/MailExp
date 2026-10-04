@@ -1873,9 +1873,12 @@ Confidence Spam`, `Bulk`, `HighConfPhish` с `Type` `High Confidence Phishing`, 
 restic `0.18.0` (документация и `cmd_ls.go`): `ls` с каталогом не рекурсивен без `--recursive`, у `restore`
 есть `--overwrite if-changed` и `--delete`, которое с `--include` удаляет только совпавшее.
 
-Тесты: `scripts/deploy/test/mail-node-backup.bats` (заглушки `docker` с restic внутри — `mock-restic`,
-`git`, и скрипт mailcow `fake-backup-and-restore` с его раскладкой и вопросами). С настоящими mailcow и
-restic бэкап узла не запускался: Docker на машине разработки не был запущен, стенд не трогался.
+Тесты: `scripts/deploy/test/mail-node-backup.bats`, 43 теста (заглушки `docker` с restic внутри —
+`mock-restic`, `git`, и скрипт mailcow `fake-backup-and-restore` с его раскладкой и вопросами). CI на
+коммите `d7efaa1d` (код этого раздела; позже менялся только этот абзац): весь `bats scripts/deploy/test` —
+232 из 232, shellcheck чисто, «Deploy e2e» (бэкап и восстановление панели через общий `lib/backup.sh`)
+проходит. С настоящими mailcow и restic бэкап узла не запускался: Docker на машине разработки не был
+запущен, стенд не трогался.
 
 ## 6. Что требует живого тенанта
 
