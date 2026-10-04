@@ -25,7 +25,8 @@ hand-rolled docker commands), verify, report what the commands printed.
   human says "update"; another `sha-<12>` only when the human names it, the latest green `main`
   (below) only when the human agrees to it. A channel is always resolved to its `sha-<12>` first
   (`update.sh latest` and `status.sh --target latest` do it): servers only ever run `sha-<12>`
-  images. Never run `promote.yml` yourself unless the owner explicitly asks for that promotion.
+  images. Never run `promote.yml` yourself unless the owner explicitly asks for that promotion (it
+  runs only from main and needs a tag ruleset on `latest`, see docs/operations/README.md, section 9).
 - For the mail node: `<MAIL_HOST>` SSH target. For a first install: sign-in mode, hosts, admin
   emails (see `docs/operations/deployment.md`, sections 1-3).
 - Which components are in scope (panel only, panel + node, tenant).
@@ -206,9 +207,14 @@ ssh root@<PANEL_HOST> "journalctl -u mailexpert-updater.service -o cat --no-page
 ssh root@<PANEL_HOST> "jq '{state, message, exitCode, next}' <PREFIX>/state/update-spool/result/<request id>.json"
 ```
 
-The updater rolls back by itself only after `update.sh` exit 1 when the preflight read the schema,
-nothing was pending and the migration count did not change (`state: rolled_back`); `failed` or
-`rollback_failed` means the Rollback section below, by a person's decision.
+The button installs only exactly the promoted `latest` (on main, newer than the running version,
+not a version that was rolled back); any other version is `update.sh sha-<12>` over SSH after the
+human's "yes". The updater rolls back by itself only after `update.sh` exit 1 when the preflight
+read the schema, nothing was pending and the migration count did not change
+(`state: rolled_back`); any other exit code means no rollback. `failed` or `rollback_failed` means
+the Rollback section below, by a person's decision. A version left by a rollback
+(`<PREFIX>/state/rolled-back-version`) is not offered again until a newer build is promoted; do not
+delete that file to get around it.
 
 First install of a panel: `docs/operations/deployment.md`, section 2. Run `install.sh` with the
 human's flags (detached); exit 3 lists the missing secrets: hand the list to the human, who feeds
@@ -255,8 +261,10 @@ and `version` are the target and `running` is usually empty (not ready).
   an update replaced, `install.sh --version sha-<old>`). Everything written since the update is
   lost. GATE: show the human the command and what is lost; after an explicit "yes" run it
   detached with `--confirm sha-<old>` (it refuses without a terminal or that flag). Exit codes:
-  0 done, 1 failed after the stop (read its output), 2/3 nothing changed. Never drop the kept
-  database yourself.
+  0 done, 1 failed after the stop (read its output), 2/3 nothing changed (2 also covers too little
+  free space: it needs the database size plus the dump). Interrupted after the swap: rerun the same
+  command, it only switches the code; if it says install.conf is at the target already, the next
+  step is `install.sh --prefix <PREFIX>` (GATE). Never drop the kept database yourself.
 - **Edge** without `rollback.sh`: put the old digest (`state/edge-image.previous`) back into
   `EDGE_IMAGE`, `install.sh` (GATE).
 - **Node scripts**: previous commit in `/opt/mailexpert-node-src`, `setup.sh` (GATE).
