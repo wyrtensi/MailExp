@@ -7650,7 +7650,16 @@ export class ImapManager {
   }
 
   async renameFolder(account, oldPath, newPath) {
+    // The guard below cannot deselect INBOX, and the UI never offers renaming it.
+    if (oldPath.toUpperCase() === 'INBOX') throw new Error('INBOX cannot be renamed');
     return withFreshClient(account, async (client) => {
+      // imapflow sends CLOSE before RENAME when this folder is selected, and CLOSE expunges
+      // every message flagged \Deleted, including mail another client only flagged. Selecting
+      // INBOX closes the folder without expunging, as in deleteFolder.
+      if ((client.mailbox?.path || '').toLowerCase() === oldPath.toLowerCase()) {
+        const lock = await client.getMailboxLock('INBOX');
+        lock.release();
+      }
       await client.mailboxRename(oldPath, newPath);
     });
   }
