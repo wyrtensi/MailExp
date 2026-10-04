@@ -1286,7 +1286,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      bcc_addresses, provider_thread_id, provider_message_id, threading_reason, eop_category
+      bcc_addresses, provider_thread_id, provider_message_id, threading_reason, eop_category, plugin_annotations
     )
     SELECT
       account_id, $4, $5, message_id, subject,
@@ -1297,7 +1297,7 @@ export async function insertCopiedSibling(accountId, uid, fromFolder, toFolder, 
       read_changed_at, star_changed_at, spam_score_sa, spam_score_ml,
       spam_verdict, spam_analyzed_at, spam_details, spam_user_override,
       category, list_unsubscribe, list_unsubscribe_post, unsubscribed_at, delivery_addresses, sender_name, sender_email,
-      bcc_addresses, provider_thread_id, provider_message_id, threading_reason, eop_category
+      bcc_addresses, provider_thread_id, provider_message_id, threading_reason, eop_category, plugin_annotations
     FROM messages
     WHERE account_id = $1 AND folder = $2 AND uid = $3
     ON CONFLICT (account_id, uid, folder) DO NOTHING
