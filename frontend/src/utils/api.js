@@ -160,9 +160,17 @@ export function createDirectApi({
       });
     },
 
-    async startMsDeviceFlow() {
-      if (demoMode) return demoRequestImpl('POST', '/oauth/microsoft/device');
-      const res = await fetchImpl('/oauth/microsoft/device', { method: 'POST', credentials: 'include' });
+    // Without an account the device-code flow adds a mailbox; with one it reconnects that
+    // Microsoft mailbox (backend routes/oauth.js).
+    async startMsDeviceFlow(accountId) {
+      const body = accountId ? { account: accountId } : {};
+      if (demoMode) return demoRequestImpl('POST', '/oauth/microsoft/device', body);
+      const res = await fetchImpl('/oauth/microsoft/device', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
+        body: JSON.stringify(body),
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to start device code flow');
       return data;
@@ -464,6 +472,8 @@ export const api = {
   requestMailboxDeletion: (id, { email, reason }) => request('POST', `/accounts/${id}/deletion`, { email, reason }),
   cancelMailboxDeletion: (id) => request('DELETE', `/accounts/${id}/deletion`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
+  // Admin: forget which Google/Microsoft account an OAuth mailbox is bound to.
+  resetOAuthSubject: (id) => request('POST', `/accounts/${id}/oauth-subject/reset`),
   reindexAccount: (id) => request('POST', `/accounts/${id}/reindex`),
   previewThreading: (id, mode) => request('POST', `/accounts/${id}/threading/preview`, { mode }),
   setThreadingMode: (id, mode) => request('POST', `/accounts/${id}/threading/mode`, { mode }),
@@ -550,7 +560,7 @@ export const api = {
   getIntegrationsStatus: () => request('GET', '/integrations/status'),
   saveIntegration: (provider, config) => request('POST', `/integrations/${provider}`, config),
   deleteIntegration: (provider) => request('DELETE', `/integrations/${provider}`),
-  startMsDeviceFlow: () => directApi.startMsDeviceFlow(),
+  startMsDeviceFlow: (accountId) => directApi.startMsDeviceFlow(accountId),
   pollMsDeviceFlow: () => directApi.pollMsDeviceFlow(),
   // Gmail by address: start answers a one-time /oauth/google/launch path (the address stays out
   // of MailExpert URLs); known-emails lists addresses connected before that have no mailbox now.

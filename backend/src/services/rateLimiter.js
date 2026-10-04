@@ -38,6 +38,24 @@ export async function consume(key, max, windowMs) {
   }
 }
 
+// Whether `key` already holds `max` hits, without counting this request: for limits that count
+// only failures (a sign-in is checked before, and counted after, the password is). Returns
+// { limited, resetMs }.
+export async function peek(key, max, windowMs) {
+  const rk = `rl:${key}`;
+  try {
+    const count = Number(await redisClient.get(rk)) || 0;
+    if (count < max) return { limited: false, resetMs: 0 };
+    const ttl = await redisClient.pTTL(rk);
+    return { limited: true, resetMs: ttl > 0 ? ttl : windowMs };
+  } catch {
+    const b = memory.get(key);
+    const now = Date.now();
+    if (!b || now > b.resetAt || b.count < max) return { limited: false, resetMs: 0 };
+    return { limited: true, resetMs: b.resetAt - now };
+  }
+}
+
 // Clear a key's counter (e.g. after a successful login).
 export async function reset(key) {
   try { await redisClient.del(`rl:${key}`); } catch { /* best effort */ }

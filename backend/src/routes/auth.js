@@ -9,7 +9,7 @@ import { pushConfigured } from '../services/pushNotifications.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
 import { createSmtpTransport } from '../services/smtpTransport.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
-import { authLimiterConfig } from '../services/authLimiter.js';
+import { authLimiterConfig, createAuthRateLimit, createLoginLimit, limitedIdentity } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
 import { sendSystemEmail } from '../services/mailer.js';
 import { buildEndSessionUrl } from './oidc.js';
@@ -20,7 +20,7 @@ import { MAX_PINNED_ACCOUNTS, sanitizePinnedAccounts } from '../utils/accountPre
 import { isUuid } from '../utils/uuid.js';
 import { redisClient } from '../services/redis.js';
 import { generateTotpSecret, totpKeyUri, verifyTotp } from '../services/totp.js';
-import { consume as rlConsume, reset as rlReset } from '../services/rateLimiter.js';
+import { consume as rlConsume, peek as rlPeek, reset as rlReset } from '../services/rateLimiter.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { CF_ACCESS_HEADER } from '../services/auth/cloudflareAccess.js';
 
@@ -97,20 +97,45 @@ async function createTrustedDevice(userId, req, res) {
   });
 }
 
-function rateLimit(config) {
-  return async (req, res, next) => {
-    const { maxRequests, windowMs } = config;
-    const key = `auth:${req.ip}`;
-    const { limited, resetMs } = await rlConsume(key, maxRequests, windowMs);
-    if (limited) {
-      res.setHeader('Retry-After', Math.ceil(resetMs / 1000));
-      return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
-    }
-    res.locals.resetRateLimit = () => rlReset(key);
-    next();
-  };
+// The raw trusted-device token of the request's mf_td cookie, or null.
+function trustedDeviceToken(req) {
+  const rawCookies = req.headers.cookie || '';
+  return rawCookies.split(';').map(c => c.trim()).find(c => c.startsWith('mf_td='))?.slice(6) || null;
 }
-const authLimiter = rateLimit(authLimiterConfig);
+
+// Whether the request carries a live trusted-device cookie of the account it signs in to: such a
+// request is not held by the per-account sign-in limit (services/authLimiter.js).
+async function hasTrustedDevice(req, username) {
+  const token = trustedDeviceToken(req);
+  if (!token || !username) return false;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const { rows } = await query(
+    `SELECT 1 FROM trusted_devices td JOIN users u ON u.id = td.user_id
+      WHERE u.username = $1 AND td.token_hash = $2 AND (td.expires_at IS NULL OR td.expires_at > NOW())
+      LIMIT 1`,
+    [username, tokenHash],
+  );
+  return rows.length > 0;
+}
+
+// Each route counts under its own purpose, so the steps never share a counter
+// (services/authLimiter.js).
+const rateLimitStore = { consume: rlConsume, reset: rlReset };
+const pendingSignIn = (req) => req.session?.pendingUserId || req.session?.userId || null;
+const registerLimiter = createAuthRateLimit(authLimiterConfig, { ...rateLimitStore, purpose: 'register' });
+const twoFactorLimiter = createAuthRateLimit(authLimiterConfig, { ...rateLimitStore, purpose: '2fa', identity: pendingSignIn });
+const resetLimiter = createAuthRateLimit(authLimiterConfig, { ...rateLimitStore, purpose: 'reset' });
+const forgotLimiter = createAuthRateLimit(authLimiterConfig, {
+  ...rateLimitStore, purpose: 'forgot', identity: (req) => limitedIdentity(req.body?.email),
+});
+// Password sign-in counts failures only (res.locals.recordAuthFailure).
+const loginLimiter = createLoginLimit(authLimiterConfig, {
+  ...rateLimitStore,
+  peek: rlPeek,
+  purpose: 'login',
+  identity: (req) => limitedIdentity(req.body?.username),
+  isTrustedDevice: (req, account) => hasTrustedDevice(req, account).catch(() => false),
+});
 
 // Public: which sign-in screen to show. Only switches, never the configured values.
 router.get('/config', (req, res) => {
@@ -118,7 +143,7 @@ router.get('/config', (req, res) => {
   res.json({ mode: settings.mode, cloudflare: !!settings.cloudflare, googleSignIn: !!settings.googleSignIn });
 });
 
-router.post('/register', authLimiter, async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
   const { username, password, inviteToken } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const trimmedUsername = username.toLowerCase().trim();
@@ -236,7 +261,7 @@ router.post('/register', authLimiter, async (req, res) => {
   }
 });
 
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
@@ -255,26 +280,31 @@ router.post('/login', authLimiter, async (req, res) => {
       // username exists (equalize with the real-user path below).
       await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
       logAuthEvent('login_fail', { username: username.toLowerCase().trim(), ip: req.ip, success: false });
+      await res.locals.recordAuthFailure?.();
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
     if (!user.password_hash) {
       await bcrypt.compare(password, DUMMY_PASSWORD_HASH); // equalize timing for SSO-only accounts
       logAuthEvent('login_fail', { username: user.username, userId: user.id, ip: req.ip, success: false });
+      await res.locals.recordAuthFailure?.();
       return res.status(401).json({ error: 'This account uses single sign-on. Please sign in with your SSO provider.' });
     }
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
       logAuthEvent('login_fail', { username: user.username, userId: user.id, ip: req.ip, success: false });
+      await res.locals.recordAuthFailure?.();
       return res.status(401).json({ error: 'Invalid credentials' });
     }
+
+    // The password is right: whatever step follows (2FA, enrollment), this was no guess.
+    res.locals.resetRateLimit?.();
 
     // Regenerate session ID before storing any auth state to prevent session fixation
     await new Promise((resolve, reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
 
     // Check trusted device cookie — bypass 2FA if valid
-    const rawCookies = req.headers.cookie || '';
-    const deviceToken = rawCookies.split(';').map(c => c.trim()).find(c => c.startsWith('mf_td='))?.slice(6);
+    const deviceToken = trustedDeviceToken(req);
     if (deviceToken) {
       const tokenHash = crypto.createHash('sha256').update(deviceToken).digest('hex');
       const deviceRes = await query(
@@ -342,7 +372,7 @@ router.post('/login', authLimiter, async (req, res) => {
 });
 
 // Second step of login when 2FA is enabled
-router.post('/2fa/challenge', authLimiter, async (req, res) => {
+router.post('/2fa/challenge', twoFactorLimiter, async (req, res) => {
   const { code, rememberDevice } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
 
@@ -356,7 +386,7 @@ router.post('/2fa/challenge', authLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Authentication timed out. Please log in again.' });
   }
 
-  // Per-user rate limit (5 attempts per 15 min) applied on top of the IP-based authLimiter.
+  // Per-user rate limit (5 attempts per 15 min) applied on top of the 2FA limiter (twoFactorLimiter).
   // Prevents brute-force via IP rotation during the pending TOTP window.
   const uid = req.session.pendingUserId;
   const totpLimit = await rlConsume(`totp:${uid}`, 5, 15 * 60 * 1000);
@@ -436,7 +466,7 @@ async function sendEmailOtpCode(userId, toEmail) {
 }
 
 // POST /api/auth/2fa/send-email-otp — (re)send email OTP during pending login
-router.post('/2fa/send-email-otp', authLimiter, async (req, res) => {
+router.post('/2fa/send-email-otp', twoFactorLimiter, async (req, res) => {
   if (!req.session.pendingUserId || req.session.pendingMFAEnrollment) {
     return res.status(400).json({ error: 'No pending authentication' });
   }
@@ -464,7 +494,7 @@ router.post('/2fa/send-email-otp', authLimiter, async (req, res) => {
 });
 
 // POST /api/auth/2fa/verify-email-otp — verify email OTP code
-router.post('/2fa/verify-email-otp', authLimiter, async (req, res) => {
+router.post('/2fa/verify-email-otp', twoFactorLimiter, async (req, res) => {
   const { code, rememberDevice } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   if (!req.session.pendingUserId || req.session.pendingMFAEnrollment) {
@@ -541,7 +571,7 @@ router.get('/2fa/enrollment/setup', async (req, res) => {
 });
 
 // POST /api/auth/2fa/enrollment/enable — verify TOTP and complete forced enrollment
-router.post('/2fa/enrollment/enable', authLimiter, async (req, res) => {
+router.post('/2fa/enrollment/enable', twoFactorLimiter, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   if (!req.session.pendingUserId || !req.session.pendingMFAEnrollment) {
@@ -1046,7 +1076,7 @@ router.patch('/profile/recovery-email', async (req, res) => {
 // POST /api/auth/forgot-password — public, rate-limited
 // Looks up a user by recovery_email and sends a reset link.
 // Always returns 200 to avoid leaking whether a recovery email exists.
-router.post('/forgot-password', authLimiter, async (req, res) => {
+router.post('/forgot-password', forgotLimiter, async (req, res) => {
   const authSetting = await query(
     "SELECT value FROM system_settings WHERE key = 'internal_auth_disabled'"
   );
@@ -1135,7 +1165,7 @@ router.post('/forgot-password', authLimiter, async (req, res) => {
 });
 
 // POST /api/auth/reset-password — public, rate-limited
-router.post('/reset-password', authLimiter, async (req, res) => {
+router.post('/reset-password', resetLimiter, async (req, res) => {
   const { token, password } = req.body;
   if (!token || typeof token !== 'string') return res.status(400).json({ error: 'Token required' });
   if (!password || typeof password !== 'string' || password.length < 8) {

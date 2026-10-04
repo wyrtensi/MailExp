@@ -7,7 +7,8 @@ describe('AUDIT_ACTIONS', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed',
-      'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'message.sent', 'message.deleted',
+      'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'mailbox.oauth_subject_reset',
+      'message.sent', 'message.deleted',
       'message.move_reverted', 'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted',
@@ -22,6 +23,7 @@ describe('AUDIT_ACTIONS', () => {
       'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
       'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced', 'tenant.antispam_enforced',
       'tenant.alias_contacts_removal_approved',
+      'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
     ]);
     // Section 5.14: the type in words, as EOP wrote it for one the panel does not name.
     assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { type: 'Spam', sender: 's@x.test', recipients: ['a@example.com'], messageId: '<m@x>' } }), {
@@ -463,5 +465,42 @@ describe('auditDetail of the node operations', () => {
       auditDetail({ action: 'mail_node.config_changed', details: { settings: 'eop', fields: ['licenses', 'tenantCreatedOn'] } }).valueKeys.fields,
       ['admin.audit.fieldLicenses', 'admin.audit.fieldTenantCreated'],
     );
+  });
+});
+
+describe('auditDetail for inbox rules', () => {
+  it('names the rule and where it forwards to', () => {
+    assert.deepEqual(auditDetail({ action: 'rule.created', details: { name: 'Copy', forwardTo: 'books@example.net' } }), {
+      key: 'admin.audit.detailRuleForward', values: { name: 'Copy', address: 'books@example.net' },
+    });
+    assert.deepEqual(auditDetail({ action: 'rule.deleted', details: { name: 'Star', forwardTo: null } }), {
+      key: 'admin.audit.detailRule', values: { name: 'Star' },
+    });
+  });
+
+  it('shows a forward target a change moved or removed', () => {
+    assert.deepEqual(auditDetail({ action: 'rule.updated', details: { name: 'Copy', forwardTo: 'new@example.net', previousForwardTo: 'old@example.net' } }), {
+      key: 'admin.audit.detailRuleForwardChanged', values: { name: 'Copy', from: 'old@example.net', to: 'new@example.net' },
+    });
+    assert.deepEqual(auditDetail({ action: 'rule.updated', details: { name: 'Copy', forwardTo: null, previousForwardTo: 'old@example.net' } }), {
+      key: 'admin.audit.detailRuleForwardRemoved', values: { name: 'Copy', from: 'old@example.net' },
+    });
+    assert.deepEqual(auditDetail({ action: 'rule.updated', details: { name: 'Copy', forwardTo: 'same@example.net', previousForwardTo: 'same@example.net' } }), {
+      key: 'admin.audit.detailRuleForward', values: { name: 'Copy', address: 'same@example.net' },
+    });
+  });
+});
+
+describe('auditDetail for a rules run and an OAuth binding reset', () => {
+  it('counts the rules a run ran', () => {
+    assert.deepEqual(auditDetail({ action: 'rule.run', details: { ruleIds: ['a', 'b'], allMailboxes: true } }), {
+      key: 'admin.audit.detailRuleRun', values: { count: 2 },
+    });
+  });
+
+  it('names the provider of a reset binding', () => {
+    assert.deepEqual(auditDetail({ action: 'mailbox.oauth_subject_reset', details: { oauthProvider: 'microsoft' } }), {
+      key: 'admin.audit.detailProvider', values: { provider: 'microsoft' },
+    });
   });
 });

@@ -7,7 +7,7 @@ vi.mock('../services/pushNotifications.js', () => ({ pushConfigured: false }));
 vi.mock('../services/hostValidation.js', () => ({ validateHost: vi.fn(), resolveForConnection: vi.fn() }));
 vi.mock('../services/smtpTransport.js', () => ({ createSmtpTransport: vi.fn(), createAccountSmtpTransport: vi.fn() }));
 vi.mock('../services/connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
-vi.mock('../services/authLimiter.js', () => ({ authLimiterConfig: { maxRequests: 10, windowMs: 900000 } }));
+vi.mock('../services/authLimiter.js', async (importOriginal) => ({ ...(await importOriginal()), authLimiterConfig: { maxRequests: 10, windowMs: 900000 } }));
 vi.mock('../services/authEvents.js', () => ({ logAuthEvent: vi.fn() }));
 vi.mock('../services/mailer.js', () => ({ sendSystemEmail: vi.fn() }));
 vi.mock('./oidc.js', () => ({ buildEndSessionUrl: vi.fn() }));
@@ -15,6 +15,7 @@ vi.mock('../services/categorizer.js', () => ({ getGlobalCategorizationEnabled: v
 vi.mock('../services/redis.js', () => ({ redisClient: { scan: vi.fn(), get: vi.fn(), del: vi.fn() } }));
 vi.mock('../services/rateLimiter.js', () => ({
   consume: vi.fn(async () => ({ limited: false, resetMs: 0 })),
+  peek: vi.fn(async () => ({ limited: false, resetMs: 0 })),
   reset: vi.fn(),
 }));
 

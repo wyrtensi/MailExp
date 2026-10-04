@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({
+  isAdminRequest: async () => true,
   requireAuth: (req, _res, next) => { req.session = { userId: 'u1' }; next(); },
   requireAdmin: (_req, _res, next) => next(),
 }));

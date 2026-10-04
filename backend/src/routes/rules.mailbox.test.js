@@ -5,6 +5,7 @@ vi.mock('../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: 'user-2' }; next(); },
 }));
 vi.mock('../services/inboxRules.js', () => ({ applyInboxRules: vi.fn(), isDangerousRegex: () => false }));
+vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 
 import express from 'express';
 import rulesRoutes from './rules.js';
@@ -35,6 +36,7 @@ describe('rules belong to one mailbox', () => {
       if (sql.includes('FROM folders')) return { rows: [{ total: '2', match: '1' }] };
       if (sql.includes('COUNT(*) AS cnt FROM inbox_rules')) return { rows: [{ cnt: '3' }] };
       if (sql.includes('INSERT INTO inbox_rules') || sql.includes('UPDATE inbox_rules')) return { rows: [{ id: 'rule-1' }] };
+      if (sql.startsWith('SELECT id, account_id, name, actions FROM inbox_rules')) return { rows: [{ id: 'rule-1', account_id: MAILBOX, name: 'x', actions: [] }] };
       return { rows: [] };
     });
   });
@@ -47,7 +49,9 @@ describe('rules belong to one mailbox', () => {
 
   it('lists the rules of every mailbox', async () => {
     expect((await send('GET', '/')).status).toBe(200);
-    expect(query).toHaveBeenCalledWith('SELECT * FROM inbox_rules ORDER BY priority ASC, created_at ASC');
+    const [sql] = query.mock.calls[0];
+    expect(sql).toMatch(/FROM inbox_rules r LEFT JOIN users u ON u\.id = r\.created_by\s+ORDER BY r\.priority ASC, r\.created_at ASC/);
+    expect(sql).not.toMatch(/WHERE/);
   });
 
   it('requires a mailbox to create or change a rule', async () => {
@@ -76,6 +80,6 @@ describe('rules belong to one mailbox', () => {
     expect(updateParams).toHaveLength(8);
     query.mockResolvedValueOnce({ rows: [{ id: 'rule-1' }] });
     expect((await send('DELETE', '/rule-1')).status).toBe(200);
-    expect(query).toHaveBeenLastCalledWith('DELETE FROM inbox_rules WHERE id = $1 RETURNING id', ['rule-1']);
+    expect(query).toHaveBeenLastCalledWith('DELETE FROM inbox_rules WHERE id = $1 RETURNING id, account_id, name, actions', ['rule-1']);
   });
 });

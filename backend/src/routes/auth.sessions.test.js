@@ -16,7 +16,8 @@ vi.mock('../services/hostValidation.js', () => ({
 vi.mock('../services/connectionPolicy.js', () => ({
   getConnectionPolicy: vi.fn(),
 }));
-vi.mock('../services/authLimiter.js', () => ({
+vi.mock('../services/authLimiter.js', async (importOriginal) => ({
+  ...(await importOriginal()),
   authLimiterConfig: { maxRequests: 10, windowMs: 900000 },
 }));
 vi.mock('../services/authEvents.js', () => ({ logAuthEvent: vi.fn() }));
@@ -28,6 +29,7 @@ vi.mock('../services/redis.js', () => ({
 }));
 vi.mock('../services/rateLimiter.js', () => ({
   consume: vi.fn(),
+  peek: vi.fn(),
   reset: vi.fn(),
 }));
 

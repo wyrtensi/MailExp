@@ -4,7 +4,8 @@
 // The backend redirects the OAuth callback ONLY to
 //   /?oauth_success=google&oauth_result=<created|updated>
 //   /?oauth_error=<code>&oauth_provider=google
-// Microsoft keeps its legacy format (/?oauth_success=microsoft, /?oauth_error=<code>).
+// Microsoft answers /?oauth_success=microsoft or /?oauth_error=<code>&oauth_provider=microsoft
+// (utils/microsoftOAuth.js maps its codes).
 // Query values are never rendered: everything is mapped to a fixed i18n key.
 
 export const GOOGLE_OAUTH_PATH = '/oauth/google';

@@ -17,7 +17,10 @@ const LOCAL_ONLY_PREFIXES = [
 ];
 const LOCAL_ONLY_PATTERNS = [/^\/api\/admin\/users\/[^/]+\/totp\/disable$/];
 
-export function isLocalOnlyPath(path) {
+// Express matches routes case-insensitively (/API/Auth/Login reaches the login route), so the
+// path is compared in lower case: every entry above is lower case.
+export function isLocalOnlyPath(rawPath) {
+  const path = String(rawPath).toLowerCase();
   return LOCAL_ONLY_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
     || LOCAL_ONLY_PATTERNS.some((pattern) => pattern.test(path));
 }
@@ -41,7 +44,7 @@ export function createIdentityGate({
     const settings = getSettings();
     if (settings.mode !== 'google') return next();
 
-    const path = req.originalUrl.split('?')[0];
+    const path = req.originalUrl.split('?')[0].toLowerCase();
     if (isLocalOnlyPath(path)) return res.status(404).json({ error: 'Not found' });
     if (PUBLIC_PATHS.has(path)) return next();
 

@@ -23,6 +23,15 @@ export async function requireAuth(req, res, next) {
   }
 }
 
+// Whether the signed-in user is an active administrator, read from the DB as requireAdmin does:
+// for routes open to everyone where only part of the request is an admin's to make.
+export async function isAdminRequest(req) {
+  if (!req.session?.userId) return false;
+  const result = await query('SELECT is_admin, disabled_at FROM users WHERE id = $1', [req.session.userId]);
+  const user = result.rows[0];
+  return !!user?.is_admin && !user.disabled_at;
+}
+
 // Always verifies against the DB so a revoked or disabled admin can't keep using
 // a stale session. The extra query is cheap and only hits admin routes.
 export async function requireAdmin(req, res, next) {

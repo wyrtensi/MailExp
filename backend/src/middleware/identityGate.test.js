@@ -77,6 +77,12 @@ describe('isLocalOnlyPath', () => {
     expect(isLocalOnlyPath(path)).toBe(true);
   });
 
+  it.each(['/API/Auth/Login', '/api/AUTH/2fa/challenge', '/Auth/OIDC/corp/start', '/api/admin/users/ABC/TOTP/disable'])(
+    'marks %s whatever its case', (path) => {
+      expect(isLocalOnlyPath(path)).toBe(true);
+    },
+  );
+
   it.each(['/api/auth/me', '/api/auth/logout', '/api/auth/lock', '/api/admin/users', '/api/auth/loginx'])('leaves %s', (path) => {
     expect(isLocalOnlyPath(path)).toBe(false);
   });
@@ -91,6 +97,13 @@ describe('identityGate', () => {
 
   it('hides local sign-in routes in google mode', async () => {
     for (const path of ['/api/auth/login', '/auth/oidc/corp/start']) {
+      expect((await call(path, { token: 'good-token' })).status).toBe(404);
+    }
+    expect(state.resolveUser).not.toHaveBeenCalled();
+  });
+
+  it('hides local sign-in routes in google mode whatever the case of the path', async () => {
+    for (const path of ['/api/auth/LOGIN', '/API/Auth/Register', '/auth/OIDC/corp/start']) {
       expect((await call(path, { token: 'good-token' })).status).toBe(404);
     }
     expect(state.resolveUser).not.toHaveBeenCalled();
