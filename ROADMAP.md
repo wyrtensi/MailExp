@@ -38,6 +38,12 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 - List work from upstream: Ctrl/Shift-click multi-select, Ctrl+Z undo, a choice of hover actions, download as .eml, a star in the bulk bar; search covers every folder except Trash and Spam by default.
 - A load scenario with ten employees working in shared mailboxes and a letter-by-letter check against the node (`scripts/deploy/test/e2e-mailcow.sh --scenario work`): 200 mailboxes and 60 000 letters, none lost or doubled.
 - Scripted production deployment for both sign-in hosts: `install.sh`/`configure.sh`, edge (Caddy or Cloudflare Tunnel), encrypted and verified restic backups, `update.sh`, a documented manual rollback and moving the panel to another server without losing data. Runbook: [docs/operations/deployment.md](docs/operations/deployment.md).
+- Mail node behind EOP, built and tested on the local stand with a fake EOP relay and a fake tenant ([requirements, stages and owner decisions](docs/architecture/mail-node-research/eop-panel-requirements.md), sections 5 and 7.1): node setup through the mailcow API (TLS policy, relayhost, DKIM, rate limits, the Junk filter, the fail2ban allow list), domain onboarding with DNS and certificate checks, node queue, alerts, mailcow quarantine with a safe view, TERRL budget, delivery status and bounces, outages with letters held in EOP, node host scripts (firewall, EOP ranges timer), node mailbox lifecycle with delayed deletion and two sender names.
+- Tenant driver (Graph plus an Exchange Online PowerShell worker) on the durable job queue: connection test, connector and anti-spam policy checks, domain steps and DBEB recipient mirroring, message trace, release of EOP quarantine into the node's Spam.
+- Durable job queue: undo send (5 seconds) and send later with a Scheduled list; a letter is never handed to the server twice ([job-queue.md](docs/architecture/job-queue.md)).
+- Security review fixes: mailbox connection settings admin-only, Microsoft OAuth bound to verified claims and the connecting account, per-purpose sign-in limits behind `TRUST_PROXY`, shared and journaled inbox rules.
+- Admin CLI `mailexpert` over the same services as the screens ([cli.md](docs/operations/cli.md)); nightly node backup and `node-restore.sh` for moving the node.
+- Rollout system: read-only `status.sh` preflight, the `latest` channel promoted by the owner, update from the admin screen through a host updater, `rollback.sh`, the `mailexpert-rollout` agent skill and a quick start ([docs/operations/quickstart.md](docs/operations/quickstart.md)).
 
 ## Now
 
@@ -49,15 +55,7 @@ the target architecture is [docs/architecture/team-mail-system-handoff.md](docs/
 
 - Gmail scale test in waves of 10 → 25 → 50 → 100 mailboxes: memory, CPU, IMAP connections, provider errors and UI latency on the target server.
 - 24-hour stability run, controlled restart and restore.
-- Mail node behind EOP, built and tested on the local stand without a tenant; requirements, stages and owner decisions: [docs/architecture/mail-node-research/eop-panel-requirements.md](docs/architecture/mail-node-research/eop-panel-requirements.md).
-  - Stand: a fake-EOP SMTP relay (client certificate check, EOP error codes, header injection), DNS fixtures, `extra.cf` relayhost, `ENABLE_IPV6=false`.
-  - Foundation: node settings saved without overwriting, a domain table with onboarding state, node mailboxes only on ready domains, audit entries for node actions.
-  - Node setup through the mailcow API: TLS policy map, relayhost, the DKIM decision, rate limits, the EOP-header Junk filter (prefilter), the fail2ban allow list for the panel.
-  - DNS and certificate checks for each domain and the node.
-  - Operations: node queue, delivery status and bounces with EOP codes, alerts (blocked connector, bypassed EOP, certificate), mailcow quarantine, TERRL budget.
-  - Node scripts and rspamd: install/config script (`mailcow.conf`, `extra.cf`, firewall), a timer that keeps EOP ranges current from the Microsoft web service, and the same ranges as mailcow forwarding hosts with `filter_spam` (only together with the Junk filter).
-  - Mailbox lifecycle: who may create and delete node mailboxes, create/delete order, disable semantics, aliases checked against the node's sender ACL.
-- Tenant automation behind a `TenantDriver` (Graph plus an EXO PowerShell worker), first on mocks, then against a live tenant: domain verification, accepted domain type, connector checks, EOP DKIM, blocked connector polling, message trace, and DBEB mirroring of node addresses and aliases (Internal Relay while syncing, Authoritative once synced).
+- The mail node and the tenant driver against a live Microsoft tenant: what the stand cannot show ([eop-panel-requirements.md, section 6](docs/architecture/mail-node-research/eop-panel-requirements.md)).
 - Optional: report spam/phishing from the panel to Microsoft through the Graph beta threat-submission API.
 
 ## Later
