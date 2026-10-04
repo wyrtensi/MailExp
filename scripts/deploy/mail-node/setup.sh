@@ -63,8 +63,10 @@ CRON_FILE=${MAILEXPERT_CRON_FILE:-/etc/cron.d/mailexpert-node}
 BACKUP_CRON_FILE=${MAILEXPERT_BACKUP_CRON_FILE:-/etc/cron.d/mailexpert-node-backup}
 UNITS=(mailexpert-eop-ranges.service mailexpert-eop-ranges.timer mailexpert-node-firewall.service)
 BACKUP_UNITS=(mailexpert-node-backup.service mailexpert-node-backup.timer)
-# Set by setup_node_backups: 1 once the restic keys are in node.env.
+# Set by setup_node_backups: 1 once the restic keys are in node.env and the repository opens; the
+# problem when a first setup of backups could not open or create it.
 BACKUPS_ON=0
+BACKUP_PROBLEM=''
 MAX_PANEL_IPS=10
 
 usage() {
@@ -149,9 +151,10 @@ install_scripts() {
 
 # setup_node_backups: with the restic keys in node.env the repository is opened (created when it
 # does not exist yet), the start of backups recorded for the age check and the recovery key shown
-# once. A repository that neither opens nor can be created stops the first setup of backups (the
-# owner is there to fix the keys) and is a warning afterwards: the nightly run and its ping report
-# it. Without the keys the node runs without backups. A standby marker (the move backup) goes.
+# once. A repository that neither opens nor can be created fails the first setup of backups (the
+# owner is there to fix the keys: BACKUP_PROBLEM, reported once the firewall's schedule is in place,
+# the backup timer is not installed) and is a warning afterwards: the nightly run and its ping
+# report it. Without the keys the node runs without backups. A standby marker (the move backup) goes.
 setup_node_backups() {
   local problem set_up=0 since
   node_backup_env
@@ -168,7 +171,10 @@ setup_node_backups() {
   load_restic_env
   ensure_image "$RESTIC_IMAGE"
   if ! problem=$(ensure_backup_repo); then
-    [ "$(backup_setup_failure "$set_up" 0)" = warning ] || die "backups: $problem"
+    if [ "$(backup_setup_failure "$set_up" 0)" != warning ]; then
+      BACKUP_PROBLEM=$problem
+      return 0
+    fi
     warn "backups: $problem"
   fi
   if [ ! -f "$since" ]; then date +%s >"$since"; fi
@@ -428,6 +434,9 @@ $conflicts" 2
   warn_foreign_rules
   setup_node_backups
   install_schedule
+  if [ -n "$BACKUP_PROBLEM" ]; then
+    die "backups: $BACKUP_PROBLEM; the keys are stored in $NODE_CONF: fix the storage or the keys (--backup-keys) and run setup.sh again"
+  fi
   if ! mailcow_ipv6_enabled "$tmp/mailcow.conf"; then
     listeners=$(ipv6_listeners "$tmp/mailcow.conf" | paste -sd, -)
     if [ -n "$listeners" ]; then

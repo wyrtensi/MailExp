@@ -275,6 +275,12 @@ EOF
   [ "$status" -eq 0 ]
   [[ $output == *"standby node"* ]]
   [ ! -s "$MOCK_DIR/restic" ]
+  # The hourly check keeps the firewall but leaves the pings to the new node, whatever it finds
+  # (here mailcow.conf still has IPv6 on: a /fail on a node that pinged).
+  : >"$MOCK_DIR/pings"
+  run bash "$NODE_SCRIPTS/eop-ranges.sh"
+  [[ $output == *"standby node (moved away)"* && $output == *"firewall (IPv4): rules put in place"* ]]
+  pings | lacks 'eop-check'
   run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10
   [ ! -e "$MAILEXPERT_NODE_STATE/standby" ]
 }
@@ -314,6 +320,25 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "setup.sh --backup-keys: storage that cannot be set up fails the run after the firewall's schedule" {
+  export MOCK_RESTIC_CAT=10 MOCK_RESTIC_INIT=1
+  run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10 --backup-keys < <(printf '%s\n' \
+    RESTIC_REPOSITORY=s3:https://s3.example.com/node-backups/node RESTIC_PASSWORD=correct-horse-battery-staple \
+    AWS_ACCESS_KEY_ID=AKIAEXAMPLEKEY AWS_SECRET_ACCESS_KEY=example-secret-access-key)
+  [ "$status" -eq 1 ]
+  [[ $output == *"backups: the restic repository could not be opened or created"* ]]
+  # The firewall's units are in place, the backup timer is not, the keys are kept for the rerun.
+  calls | grep -q '^systemctl enable mailexpert-node-firewall.service$'
+  [ -f "$MAILEXPERT_SYSTEMD_DIR/mailexpert-eop-ranges.timer" ]
+  [ ! -e "$MAILEXPERT_SYSTEMD_DIR/mailexpert-node-backup.timer" ]
+  [ "$(env_get "$MAILEXPERT_NODE_CONF" RESTIC_PASSWORD)" = correct-horse-battery-staple ]
+  [ ! -e "$MAILEXPERT_NODE_STATE/backup-since" ]
+  export MOCK_RESTIC_INIT=0
+  run bash "$SETUP" --mailcow-dir "$MC" --panel-ip 203.0.113.10
+  [ "$status" -eq 0 ]
+  [ -f "$MAILEXPERT_SYSTEMD_DIR/mailexpert-node-backup.timer" ]
+}
+
 @test "setup.sh --backup-keys refuses bad keys and writes nothing" {
   write_node_env
   cp "$MAILEXPERT_NODE_CONF" "$BATS_TEST_TMPDIR/before"
@@ -343,9 +368,12 @@ EOF
 # --- node-restore.sh ----------------------------------------------------------------------------
 
 # fresh_node: what a new server has before the restore: mailcow cloned (compose file and its
-# script), no mailcow.conf, no volumes, no node.env.
+# script) and generate_config.sh run (its own mailcow.conf and files), no volumes, no node.env.
 fresh_node() {
-  rm -rf "$MOCK_DIR/volumes" "$MAILEXPERT_NODE_CONF" "$MC/mailcow.conf" "$MC/data" "$MAILEXPERT_NODE_STATE"
+  rm -rf "$MOCK_DIR/volumes" "$MAILEXPERT_NODE_CONF" "$MC/data" "$MAILEXPERT_NODE_STATE"
+  printf 'MAILCOW_HOSTNAME=mail.example.com\nDBPASS=generated-here\nCOMPOSE_PROJECT_NAME=mailcowdockerized\n' >"$MC/mailcow.conf"
+  mkdir -p "$MC/data/web/inc"
+  printf '<?php\n' >"$MC/data/web/inc/app_info.inc.php"
   : >"$MOCK_DIR/calls"
 }
 
@@ -363,6 +391,8 @@ keys() {
   [ "$status" -eq 0 ]
   [[ $output == *"restoring snapshot 00000001 of node mailexpert-node-"* ]]
   [ "$(env_get "$MC/mailcow.conf" MAILCOW_HOSTNAME)" = mail.example.com ]
+  # The backup's mailcow.conf replaced the one generate_config.sh wrote.
+  [ "$(env_get "$MC/mailcow.conf" DBPASS)" = not-a-real-password ]
   [ "$(readlink "$MC/.env")" = mailcow.conf ]
   [ -f "$MC/data/conf/postfix/extra.cf" ] && [ -f "$MC/data/assets/ssl/cert.pem" ]
   [ "$(env_get "$MAILEXPERT_NODE_CONF" PANEL_IPS)" = 203.0.113.10 ]
@@ -388,7 +418,8 @@ keys() {
   [ "$status" -eq 0 ]
   [ ! -e "$MOCK_DIR/mailcow-restored/backup_postfix.tar.zst" ]
   [ -f "$MOCK_DIR/mailcow-restored/backup_mariadb.tar.zst" ]
-  [[ $output == *"rehearsal: do not run setup.sh yet"* ]]
+  [[ $output == *"rehearsal: postfix-mailcow stopped"* ]]
+  calls | tail -n 1 | grep -q 'compose stop postfix-mailcow'
   # A plain restore on it is refused; an update is what it takes.
   run bash "$RESTORE" latest --mailcow-dir "$MC"
   [ "$status" -eq 2 ]
@@ -441,7 +472,7 @@ keys() {
   run bash "$RESTORE" latest --mailcow-dir "$MC" < <(keys)
   [ "$status" -eq 2 ]
   [[ $output == *"the backup was made on 2026-09 (0123456789ab): git -C $MC checkout 0123456789abcdef0123456789abcdef01234567"* ]]
-  [ ! -e "$MC/mailcow.conf" ]
+  [ "$(env_get "$MC/mailcow.conf" DBPASS)" = generated-here ]
 }
 
 @test "node-restore.sh stops when mailcow's restore reports a data set it did not restore" {
@@ -467,4 +498,10 @@ keys() {
   run bash "$RESTORE" latest --mailcow-dir "$BATS_TEST_TMPDIR/nowhere" < <(keys)
   [ "$status" -eq 2 ]
   [[ $output == *"has no docker-compose.yml"* ]]
+  cp "$MOCK_FIXTURES/fake-backup-and-restore" "$MC/helper-scripts/backup_and_restore.sh"
+  rm "$MC/data/web/inc/app_info.inc.php"
+  run bash "$RESTORE" latest --mailcow-dir "$MC" < <(keys)
+  [ "$status" -eq 2 ]
+  [[ $output == *"run ln -s mailcow.conf .env && ./generate_config.sh in $MC first"* ]]
+  [ ! -s "$MOCK_DIR/restic" ]
 }

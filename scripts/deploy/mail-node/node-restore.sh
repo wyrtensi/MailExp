@@ -4,7 +4,8 @@
 #
 # Before it: Docker on the new server, this repository checked out, and mailcow cloned into
 # --mailcow-dir at the version the backup was made on (the script names it and refuses another
-# one); generate_config.sh is not needed and nothing of mailcow may have started yet. The restic
+# one), `ln -s mailcow.conf .env && ./generate_config.sh` run there (it writes files mailcow needs
+# besides mailcow.conf, which the backup's then replaces), and nothing of mailcow started yet. The restic
 # keys come from node.env when this server has one, otherwise as KEY=VALUE lines on stdin
 # (RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and, when the
 # storage needs it, AWS_DEFAULT_REGION): never as arguments.
@@ -205,6 +206,8 @@ main() {
   [ -f "$MAILCOW_DIR/docker-compose.yml" ] || die "$MAILCOW_DIR has no docker-compose.yml: clone mailcow there first (section 8)" 2
   mailcow_restore_prompts_ok "$MAILCOW_DIR/helper-scripts/backup_and_restore.sh" ||
     die "$MAILCOW_DIR/helper-scripts/backup_and_restore.sh does not ask the questions node-restore.sh answers (another mailcow version?): restore by hand, section 8" 2
+  [ -f "$MAILCOW_DIR/data/web/inc/app_info.inc.php" ] ||
+    die "run ln -s mailcow.conf .env && ./generate_config.sh in $MAILCOW_DIR first (with the node's host name; the backup's mailcow.conf replaces the one it writes)" 2
 
   node_backup_env
   if [ -f "$NODE_CONF" ] && backup_configured "$NODE_CONF"; then
@@ -261,7 +264,9 @@ main() {
   printf '%s %s %s\n' "$id" "$REHEARSAL" "$(date +%s)" >"$(restored_marker)"
   log "restored snapshot ${id:0:8} of node $from ($at)"
   if [ "$REHEARSAL" = 1 ]; then
-    log "rehearsal: do not run setup.sh yet; for the move, node-restore.sh <move snapshot> --update"
+    # Nothing leaves a rehearsal: no firewall yet, the old node's certificate and relayhost.
+    mailcow_compose stop postfix-mailcow >/dev/null || warn "could not stop postfix-mailcow; stop it by hand"
+    log "rehearsal: postfix-mailcow stopped; do not run setup.sh yet; for the move, node-restore.sh <move snapshot> --update (it starts postfix again)"
     return 0
   fi
   log "next: $SCRIPT_DIR/setup.sh (firewall, EOP ranges, timers), then the A record of the mail host and the PTR (section 8)"

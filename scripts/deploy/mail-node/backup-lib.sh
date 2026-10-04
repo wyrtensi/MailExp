@@ -38,7 +38,6 @@ NODE_BACKUP_READ_SUBSET_DEFAULT=5%
 
 node_backup_last_file() { printf '%s/backup-last.json\n' "$NODE_STATE"; }
 node_backup_since_file() { printf '%s/backup-since\n' "$NODE_STATE"; }
-node_standby_file() { printf '%s/standby\n' "$NODE_STATE"; }
 
 # compose_project <mailcow.conf>: COMPOSE_PROJECT_NAME as mailcow's script cleans it (the prefix of
 # its volume names); status 1 when there is none.

@@ -15,7 +15,8 @@
 # hosts (R-12); a new version puts `eop_ranges_version_changed <old>-><new>` into the ping, the
 # signal to bump the panel's copy.
 #
-# Every run then checks the node and pings EOP_RANGES_PING_URL (node.env): success, or /fail with
+# Every run then checks the node and pings EOP_RANGES_PING_URL (node.env; not on the old node of a
+# move, standby after node-backup.sh --tag move: the new node pings it): success, or /fail with
 # every problem, and exit 1:
 # - the firewall rules are in place (rebuilt when they differ from what the last build left);
 # - IPv4 always, IPv6 when mailcow runs with it or Docker has an IPv6 DOCKER-USER chain;
@@ -199,6 +200,10 @@ main() {
   for tool in curl jq ipset iptables flock ss; do command -v "$tool" >/dev/null || die "$tool is required (setup.sh installs it)" 2; done
   [ -f "$NODE_CONF" ] || die "$NODE_CONF is missing: run setup.sh first" 2
   PING_URL=$(env_get "$NODE_CONF" EOP_RANGES_PING_URL 2>/dev/null) || PING_URL=''
+  if [ -f "$(node_standby_file)" ]; then
+    log "standby node (moved away): the firewall stays, the check is not pinged (the new node pings it)"
+    PING_URL=''
+  fi
   CLIENT_ID=$(env_get "$NODE_CONF" EOP_CLIENT_REQUEST_ID 2>/dev/null) || CLIENT_ID=''
   mkdir -p "$NODE_STATE"
   take_lock "$NODE_STATE/eop-ranges.lock" 120 "another eop-ranges.sh"

@@ -4,6 +4,7 @@
 # copies its sources there under a new snapshot id, ls lists one directory of a snapshot, restore
 # copies paths back through the mounts. Every call is recorded in $MOCK_DIR/restic.
 #   MOCK_RESTIC_CAT       exit status of `cat config` (default 0: the repository opens)
+#   MOCK_RESTIC_INIT      exit status of `init`
 #   MOCK_RESTIC_BACKUP    exit status of `backup` (3: saved, some files unreadable; else no snapshot)
 #   MOCK_RESTIC_CHECK     exit status of `check`
 #   MOCK_RESTIC_RESTORE   exit status of `restore`
@@ -33,7 +34,8 @@ cmd=$1
 shift
 case $cmd in
   cat) exit "${MOCK_RESTIC_CAT:-0}" ;;
-  init | forget) exit 0 ;;
+  init) exit "${MOCK_RESTIC_INIT:-0}" ;;
+  forget) exit 0 ;;
   check) exit "${MOCK_RESTIC_CHECK:-0}" ;;
   backup)
     status=${MOCK_RESTIC_BACKUP:-0}

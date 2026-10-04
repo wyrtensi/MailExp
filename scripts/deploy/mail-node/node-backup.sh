@@ -92,7 +92,7 @@ check_space() {
 # dump_mailcow <timeout>: mailcow's backup of everything but vmail into a fresh directory, which
 # DUMP_DIR names afterwards. Its output (tar lists every file) goes to a log next to the dump.
 dump_mailcow() {
-  local timeout=$1 location=$NODE_BACKUP_DIR/mailcow log=$NODE_BACKUP_DIR/mailcow-backup.log code=0
+  local timeout=$1 location=$NODE_BACKUP_DIR/mailcow log=$NODE_BACKUP_DIR/mailcow-backup.log code=0 started
   local -a dirs
   local script=$MAILCOW_DIR/helper-scripts/backup_and_restore.sh problems
   [ -x "$script" ] || die "$script not found or not executable: is $MAILCOW_DIR a mailcow checkout?"
@@ -100,13 +100,15 @@ dump_mailcow() {
   # mailcow's script refuses a location others cannot read; the parent (0700) keeps them out.
   mkdir -m 755 "$location"
   DUMP_ROOT=$location
+  started=$SECONDS
   MAILCOW_BACKUP_LOCATION=$location timeout "$timeout" "$script" backup "${MAILCOW_COMPONENTS[@]}" >"$log" 2>&1 </dev/null || code=$?
   chmod 600 "$log"
-  case $code in
-    0) ;;
-    124) die "mailcow's backup ran past NODE_BACKUP_DUMP_TIMEOUT (${timeout}s) and was stopped; see $log" ;;
-    *) die "mailcow's backup failed (exit $code; it pulls $MAILCOW_BACKUP_IMAGE, so ghcr.io must be reachable); see $log" ;;
-  esac
+  # By the time taken, not by timeout's own exit status (GNU 124, BusyBox the signal's).
+  if [ "$code" != 0 ] && { [ "$code" = 124 ] || [ $((SECONDS - started)) -ge "$timeout" ]; }; then
+    die "mailcow's backup ran past NODE_BACKUP_DUMP_TIMEOUT (${timeout}s) and was stopped; see $log"
+  fi
+  [ "$code" = 0 ] ||
+    die "mailcow's backup failed (exit $code; it pulls $MAILCOW_BACKUP_IMAGE, so ghcr.io must be reachable); see $log"
   mapfile -t dirs < <(find "$location" -mindepth 1 -maxdepth 1 -type d -name 'mailcow-*')
   [ "${#dirs[@]}" = 1 ] || die "mailcow's backup left ${#dirs[@]} directories in $location instead of one; see $log"
   problems=$(dump_problems "${dirs[0]}")

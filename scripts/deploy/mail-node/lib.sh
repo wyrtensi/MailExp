@@ -47,6 +47,9 @@ DOVECOT_BEGIN='# BEGIN MailExpert: dovecot-extra.conf (managed by scripts/deploy
 DOVECOT_END='# END MailExpert: dovecot-extra.conf'
 
 ranges_file() { printf '%s/eop-ranges.txt\n' "$NODE_STATE"; }
+# Left by node-backup.sh --tag move on the old node of a move: its backup stops, and eop-ranges.sh
+# keeps the firewall but no longer pings (the new node pings the same checks). setup.sh removes it.
+node_standby_file() { printf '%s/standby\n' "$NODE_STATE"; }
 version_file() { printf '%s/eop-version\n' "$NODE_STATE"; }
 firewall_state_file() { printf '%s/firewall-%s.rules\n' "$NODE_STATE" "$1"; }
 firewall_chain_file() { printf '%s/firewall-%s.chain\n' "$NODE_STATE" "$1"; }

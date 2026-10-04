@@ -91,7 +91,9 @@ node_backup_setup() {
   export MAILEXPERT_BACKUP_CRON_FILE=$BATS_TEST_TMPDIR/cron.d/mailexpert-node-backup
   export MOCK_PROJECT=mailcowdockerized
   printf 'COMPOSE_PROJECT_NAME=mailcowdockerized\n' >>"$MC/mailcow.conf"
-  mkdir -p "$MC/helper-scripts" "$MC/data/assets/ssl"
+  mkdir -p "$MC/helper-scripts" "$MC/data/assets/ssl" "$MC/data/web/inc"
+  # What generate_config.sh writes besides mailcow.conf.
+  printf '<?php\n' >"$MC/data/web/inc/app_info.inc.php"
   cp "$MOCK_FIXTURES/fake-backup-and-restore" "$MC/helper-scripts/backup_and_restore.sh"
   chmod +x "$MC/helper-scripts/backup_and_restore.sh"
   printf 'services: {}\n' >"$MC/docker-compose.yml"

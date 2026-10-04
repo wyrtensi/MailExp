@@ -134,7 +134,8 @@ temporary file) and the version to `eop-version`. `--restore` checks the saved l
 Then every run checks the node: the firewall is in place, `mailcow.conf` still has the `ENABLE_IPV6`
 that `setup.sh` set, and with IPv6 off nothing listens on the mail ports over IPv6 (`ss -ltn`). Any
 problem, or any failure above, pings `<EOP_RANGES_PING_URL>/fail` with the reasons and exits 1;
-otherwise the run pings success.
+otherwise the run pings success. On the old node of a move (standby after `node-backup.sh --tag
+move`) the run keeps the firewall but pings nothing: the new node pings the same check.
 
 The list file is the same list the panel applies as mailcow forwarding hosts (R-12); the panel has
 its own copy in `eopRanges.js` and shows its version in the apply result. When the version changes,
@@ -182,7 +183,7 @@ the time, sizes and durations; pings go to `NODE_BACKUP_PING_URL` (start, succes
 does not read any of this: it reaches the node only through the mailcow API, so a missed or failed
 backup is the Healthchecks check's to report.
 
-`node-restore.sh` on a fresh server (mailcow cloned at the backup's commit, nothing started):
+`node-restore.sh` on a fresh server (mailcow cloned at the backup's commit, `generate_config.sh` run, nothing started):
 `/backup` into a temporary directory, mailcow.conf and the files in place, `docker compose pull` and
 `up -d`, vmail from restic straight into the volume (Dovecot stopped; `--overwrite if-changed
 --delete`, so an update downloads only what changed), then mailcow's own `restore` with its questions
