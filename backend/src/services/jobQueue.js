@@ -356,18 +356,26 @@ export async function cleanupFinishedJobs({ retentionMs = JOB_RETENTION_MS, kept
 // before the row goes), so each ends through its kind's onSettled (the journal, the author told)
 // instead of losing its mailbox silently; the rows stay, with account_id NULL. A job running right
 // now finds the mailbox gone in its handler. Never throws: a deletion is never blocked by this.
-// Resolves the rows it failed.
+// Only a job that was still waiting is reported settled now: a kept one (failed, needs attention)
+// was reported when it ended, and is only relabelled. Resolves the rows it failed.
 export async function failJobsOfDeletedAccount(accountId) {
   try {
     const { rows } = await query(
-      `UPDATE jobs SET status = 'failed', error_code = 'account_missing', last_error = 'The mailbox was deleted.',
-                       claim_token = NULL, lease_until = NULL, updated_at = now()
-        WHERE account_id = $1 AND status IN ('queued', 'failed', 'needs_attention')
-       RETURNING *`,
+      `WITH before AS (
+         SELECT id, status FROM jobs
+          WHERE account_id = $1 AND status IN ('queued', 'failed', 'needs_attention')
+          FOR UPDATE
+       )
+       UPDATE jobs j SET status = 'failed', error_code = 'account_missing', last_error = 'The mailbox was deleted.',
+                         claim_token = NULL, lease_until = NULL, updated_at = now()
+         FROM before
+        WHERE j.id = before.id AND j.status IN ('queued', 'failed', 'needs_attention')
+       RETURNING j.*, before.status AS previous_status`,
       [accountId]
     );
-    for (const row of rows) notifySettled(row);
-    return rows;
+    const failed = rows.map(({ previous_status: previous, ...row }) => ({ row, previous }));
+    for (const { row, previous } of failed) if (previous === 'queued') notifySettled(row);
+    return failed.map(({ row }) => row);
   } catch (err) {
     console.error('[jobs] Failing the jobs of a deleted mailbox failed:', err?.code || err?.message);
     return [];

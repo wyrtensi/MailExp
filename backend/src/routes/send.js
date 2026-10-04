@@ -94,9 +94,12 @@ router.post('/send', async (req, res) => {
     return res.status(400).json({ error: 'At least one recipient is required' });
   }
 
+  // A time that has passed is refused only after the idempotency lookup below: a retried "send
+  // later" whose time came meanwhile is the letter it already enqueued, not a new request.
   const parsedSendAt = parseSendAt(req.body.sendAt);
-  if (parsedSendAt.error) return res.status(400).json({ error: parsedSendAt.error, code: parsedSendAt.code });
-  const { sendAt } = parsedSendAt;
+  if (parsedSendAt.error && parsedSendAt.code !== 'send_at_past') {
+    return res.status(400).json({ error: parsedSendAt.error, code: parsedSendAt.code });
+  }
 
   let composeContext = null;
   if (req.body.context !== undefined && req.body.context !== null) {
@@ -120,11 +123,13 @@ router.post('/send', async (req, res) => {
   if (dedupeKey) {
     const existing = await existingSendJob(dedupeKey);
     if (existing) {
-      const conflict = sendRetryConflict(existing, sendAt);
+      const conflict = sendRetryConflict(existing, parsedSendAt.sendAt ?? parsedSendAt.requestedAt ?? null);
       if (conflict) return res.status(conflict.status).json({ error: conflict.error, code: conflict.code });
       return res.json(sendJobResponse(existing));
     }
   }
+  if (parsedSendAt.error) return res.status(400).json({ error: parsedSendAt.error, code: parsedSendAt.code });
+  const { sendAt } = parsedSendAt;
 
   if (attachments !== undefined) {
     if (!Array.isArray(attachments)) return res.status(400).json({ error: 'attachments must be an array' });

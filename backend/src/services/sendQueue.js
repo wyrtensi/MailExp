@@ -25,6 +25,9 @@ export const SEND_MAX_ATTEMPTS = 5;
 export const LISTED_STATUSES = Object.freeze(['queued', 'running', 'failed', 'needs_attention']);
 // A cancel or edit may take a letter from these: waiting, or kept after a failure.
 export const CANCELLABLE_STATUSES = Object.freeze(['queued', 'failed', 'needs_attention']);
+// The error code of a letter the mail server accepted but whose job could not be recorded done: it
+// needs attention (its content is kept), and is never sent again.
+export const DELIVERED_UNRECORDED = 'delivered_unrecorded';
 
 let broadcast = () => {};
 
@@ -62,13 +65,14 @@ export function deserializeMail(buffer) {
 
 // sendAt from the client: absent for a send with the undo window, else an ISO time with an explicit
 // offset or Z (stored as UTC), in the future and no further than SEND_LATER_MAX_MS. Returns
-// { sendAt } or { error, code }.
+// { sendAt } or { error, code }; a time that has passed also carries it as requestedAt, so a
+// retried request can still be matched to the letter it enqueued while the time was ahead.
 const ISO_WITH_OFFSET_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/i;
 export function parseSendAt(value, now = Date.now()) {
   if (value === undefined || value === null || value === '') return { sendAt: null };
   const at = typeof value === 'string' && ISO_WITH_OFFSET_RE.test(value) ? Date.parse(value) : NaN;
   if (!Number.isFinite(at)) return { error: 'sendAt must be an ISO date and time with a time zone offset', code: 'send_at_invalid' };
-  if (at <= now) return { error: 'The scheduled time has already passed.', code: 'send_at_past' };
+  if (at <= now) return { error: 'The scheduled time has already passed.', code: 'send_at_past', requestedAt: new Date(at) };
   if (at - now > SEND_LATER_MAX_MS) return { error: 'A letter can be scheduled at most a year ahead.', code: 'send_at_too_far' };
   return { sendAt: new Date(at) };
 }
@@ -300,6 +304,9 @@ function restoredCompose({ compose, mail }) {
 // letter or one that needs attention, so it is never re-sent by accident).
 export async function rescheduleScheduled(id, { userId, isAdmin, sendAt, resend = false }) {
   const job = await managedJob(id, { userId, isAdmin });
+  if (job.error_code === DELIVERED_UNRECORDED && job.status !== 'queued') {
+    throw refusal(409, 'The mail server accepted this letter already: it is not sent again.', 'already_delivered');
+  }
   const from = resend ? CANCELLABLE_STATUSES : ['queued'];
   const moved = await rescheduleJob(job.id, { runAt: sendAt, from, payloadPatch: resend ? null : { scheduled: true } });
   if (!moved) {
@@ -368,6 +375,11 @@ async function handleSendJob(job, ctx, imapManager) {
 
   let settledRow = null;
   let completed = false;
+  let delivered = false;
+  // Sent: the job is done and the letter's content goes, in one transaction.
+  const complete = () => ctx.complete(async (tx) => {
+    await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [job.id]);
+  });
   const sent = await deliverOutgoingMessage({
     account,
     mail,
@@ -375,14 +387,26 @@ async function handleSendJob(job, ctx, imapManager) {
     imapManager,
     detachPostSend: true,
     markEffectStarted: () => ctx.markEffectStarted(),
-    // Sent: the job is done and the letter's content goes, in one transaction.
     onDelivered: async () => {
-      completed = await ctx.complete(async (tx) => {
-        await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [job.id]);
-      });
+      delivered = true;
+      completed = await complete();
       if (!completed) settledRow = await settleSweptDelivery(job.id);
     },
   });
+  // The server took the letter but recording it failed (deliverOutgoingMessage logged why): one
+  // more try, then the job is settled as delivered-unrecorded rather than an uncertain send, so
+  // nobody is offered to send a delivered letter again.
+  if (delivered && !completed && !settledRow) {
+    try {
+      completed = await complete();
+      if (!completed) settledRow = await settleSweptDelivery(job.id);
+    } catch (err) {
+      console.error(`[send] Recording delivered job ${job.id} failed again:`, err?.message);
+      throw new JobError('The mail server accepted the letter, but recording it as sent failed. Do not send it again.', {
+        outcome: 'needs_attention', code: DELIVERED_UNRECORDED,
+      });
+    }
+  }
   return { ...sent, completed, settledRow };
 }
 

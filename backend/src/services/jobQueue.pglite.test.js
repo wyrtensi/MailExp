@@ -321,6 +321,22 @@ describe('listing and cleanup', () => {
     expect(await getJob(done.id)).toMatchObject({ status: 'done', account_id: null });
   });
 
+  it('reports only the jobs a deletion ended: a kept failed or needs-attention job is not reported again', async () => {
+    const onSettled = vi.fn();
+    registerJobKind('test', { handler: vi.fn(), onSettled });
+    const { job: waiting } = await due({ delayMs: 60000 });
+    const { job: failed } = await due({ delayMs: 60000 });
+    const { job: attention } = await due({ delayMs: 60000 });
+    await db.query("UPDATE jobs SET status = 'failed', error_code = 'smtp_rejected' WHERE id = $1", [failed.id]);
+    await db.query("UPDATE jobs SET status = 'needs_attention', error_code = 'lease_expired' WHERE id = $1", [attention.id]);
+    const changed = await failJobsOfDeletedAccount(ACCOUNT);
+    expect(changed.map(j => j.id).sort()).toEqual([waiting.id, failed.id, attention.id].sort());
+    expect(changed.every(j => j.status === 'failed' && j.error_code === 'account_missing' && !('previous_status' in j))).toBe(true);
+    await vi.waitFor(() => expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({ id: waiting.id })));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(onSettled).toHaveBeenCalledOnce();
+  });
+
   it('moves a job with a payload change', async () => {
     registerJobKind('test', { handler: vi.fn() });
     const { job } = await due({ delayMs: 60000 });
