@@ -2999,7 +2999,7 @@
       "policyFits": "Действия подходят раскладке спама на узле.",
       "policyEnforced": "MailExpert изменил {{at}}: {{fields}}.",
       "policyNotEnforced": "MailExpert не смог поставить MoveToJmf: {{fields}}. Такие письма могут оставаться в карантине Microsoft; выпуск ниже достаёт их оттуда.",
-      "policyRefresh": "Прочитать снова",
+      "policyRefresh": "Проверить и исправить",
       "policySpam": "Спам",
       "policyHighSpam": "Спам с высокой уверенностью",
       "policyBulk": "Массовая рассылка",

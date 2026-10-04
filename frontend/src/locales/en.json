@@ -2947,7 +2947,7 @@
       "policyFits": "The actions fit the spam filing of the node.",
       "policyEnforced": "Set by MailExpert {{at}}: {{fields}}.",
       "policyNotEnforced": "MailExpert could not set these actions to MoveToJmf: {{fields}}. Such letters may stay in Microsoft's quarantine; the release below takes them out.",
-      "policyRefresh": "Read again",
+      "policyRefresh": "Check and fix",
       "policySpam": "Spam",
       "policyHighSpam": "High confidence spam",
       "policyBulk": "Bulk",
