@@ -2869,7 +2869,7 @@ export default function MessageList() {
           </h2>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginLeft: 6 }}>
             {!searchQuery && (
-              <span title={filteredCount ? 'Cached results matching this filter' : !headerCountKnown ? 'Mailbox count not yet available' : headerCountStale ? 'Last observed mailbox count; awaiting server refresh' : 'Messages reported by the mail server'} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+              <span title={filteredCount ? t('messageList.countFiltered') : !headerCountKnown ? t('messageList.countUnknown') : headerCountStale ? t('messageList.countStale') : t('messageList.countServer')} style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
                 {filteredCount ? messagesTotal : !headerCountKnown ? '—' : headerServerTotal}
               </span>
             )}
