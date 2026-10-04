@@ -38,3 +38,7 @@ output/
 
 # Local secrets for manual setup (e.g. a Google Cloud OAuth client file) - never committed
 /data/
+
+# Claude Code: agent worktrees and local settings (the shared skills in .claude/skills are tracked)
+.claude/worktrees/
+.claude/settings.local.json

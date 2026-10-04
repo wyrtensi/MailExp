@@ -467,8 +467,11 @@ cat mailexpert-YYYYMMDD.sql | \
 
 For a production VPS, use the scripted install instead: encrypted, deduplicated, verified
 backups (restic to any S3-compatible storage), automatic sign-in and edge (Caddy or Cloudflare
-Tunnel) setup, updates and a way to move the panel to another server without losing data. See
-[docs/operations/deployment.md](docs/operations/deployment.md).
+Tunnel) setup, updates and a way to move the panel to another server without losing data. Start
+at [docs/operations/README.md](docs/operations/README.md) (topology, install, mail node, backups,
+monitoring, updates, rollback, troubleshooting); the modules and what may run on separate servers
+are in [docs/architecture/deployment-system.md](docs/architecture/deployment-system.md). An AI
+agent can run the rollout with the `mailexpert-rollout` skill (see [AGENTS.md](AGENTS.md)).
 
 ---
 
