@@ -1854,9 +1854,11 @@ Confidence Spam`, `Bulk`, `HighConfPhish` с `Type` `High Confidence Phishing`, 
 | переезд: `--rehearsal` (без очереди Postfix) заранее, затем `--update` со снапшота `move` (`--overwrite if-changed --delete`) | простой — только разница с ночным снапшотом, а не вся почта; очередь старого узла не уходит второй раз |
 | `--tag move` только при остановленных `postfix-mailcow` и `dovecot-mailcow`, после него узел standby | письмо после бэкапа осталось бы только на старом узле; ночной бэкап старого узла не пишет замороженные данные |
 
-Тесты: `scripts/deploy/test/mail-node-backup.bats` (заглушки `docker` с restic внутри — `mock-restic`,
-`git`, и скрипт mailcow `fake-backup-and-restore` с его раскладкой и вопросами). С настоящими mailcow и
-restic не запускалось: Docker на машине разработки не был запущен, e2e со стендом не трогался.
+Тесты: `scripts/deploy/test/mail-node-backup.bats`, 31 тест (заглушки `docker` с restic внутри —
+`mock-restic`, `git`, и скрипт mailcow `fake-backup-and-restore` с его раскладкой и вопросами); в CI весь
+`bats scripts/deploy/test` — 208 тестов, shellcheck чисто, «Deploy e2e» (бэкап и восстановление панели с
+общим `lib/backup.sh`) проходит. С настоящими mailcow и restic бэкап узла не запускался: Docker на машине
+разработки не был запущен, стенд не трогался.
 
 ## 6. Что требует живого тенанта
 
