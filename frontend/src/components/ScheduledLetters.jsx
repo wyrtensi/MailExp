@@ -139,13 +139,15 @@ function ScheduledDialog() {
   });
 
   // A letter the server accepted (delivered_unrecorded) went out: only its entry is removed.
-  const discardBodyKey = (letter) => {
-    if (letter.status === 'queued') return 'scheduled.cancelBody';
-    return letter.errorCode === DELIVERED_UNRECORDED ? 'scheduled.discardDeliveredBody' : 'scheduled.discardBody';
+  const discardKeys = (letter) => {
+    if (letter.status === 'queued') return ['scheduled.cancelTitle', 'scheduled.cancelBody'];
+    return letter.errorCode === DELIVERED_UNRECORDED
+      ? ['scheduled.discardDeliveredTitle', 'scheduled.discardDeliveredBody']
+      : ['scheduled.discardTitle', 'scheduled.discardBody'];
   };
   const discard = (letter) => setConfirm({
-    title: t(letter.status === 'queued' ? 'scheduled.cancelTitle' : 'scheduled.discardTitle'),
-    message: t(discardBodyKey(letter)),
+    title: t(discardKeys(letter)[0]),
+    message: t(discardKeys(letter)[1]),
     confirmLabel: t(letter.status === 'queued' ? 'scheduled.actions.cancel' : 'scheduled.actions.discard'),
     onConfirm: async () => {
       await api.scheduled.cancel(letter.id, 'discard');

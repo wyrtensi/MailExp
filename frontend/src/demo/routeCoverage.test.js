@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { demoRequest } from './index.js';
+import { demoNodeTime } from './clock.js';
 
 // Guards against the crash class fixed alongside this test: an unhandled request in demo mode
 // used to fall through to a fake `{ ok: true, demo: true }` success, so a screen expecting
@@ -471,7 +472,7 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   assert.equal(ready.state, 'ready');
   const adopted = await answer('/mail-node/domains/:param/adopt', 'POST', '/mail-node/domains/legacy.demo.mailexpert.local/adopt');
   assert.equal(adopted.state, 'node_created');
-  const acknowledged = await answer('/mail-node/domains/:param/acknowledge', 'POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge', { created: '2026-09-29 16:40:00' });
+  const acknowledged = await answer('/mail-node/domains/:param/acknowledge', 'POST', '/mail-node/domains/branch.demo.mailexpert.local/acknowledge', { created: demoNodeTime('2026-09-29 16:40:00') });
   assert.equal(acknowledged.state, 'ready');
   const scheduled = await answer('/accounts/:param/deletion', 'POST', '/accounts/demo-fx-44/deletion', {
     email: 'compliance@example.org', reason: 'Coverage run',

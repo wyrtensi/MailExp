@@ -1,4 +1,4 @@
-import { demoTime } from './clock.js';
+import { demoNodeTime, demoTime } from './clock.js';
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoOutageRequest, demoOutageWaiting } from './outages.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
@@ -1000,10 +1000,10 @@ let mailNodeDomains = [
     steps: { node_configured: demoStep(demoTime('2026-09-18T10:30:00.000Z')), dns_ok: demoStep(demoTime('2026-09-18T11:20:00.000Z')) },
   }),
   demoDomain({ domain: 'legacy.demo.mailexpert.local', active: true, maxMailboxes: 20, mailboxes: 0 }),
-  demoDomain({ domain: 'branch.demo.mailexpert.local', active: true, maxMailboxes: 100, mailboxes: 0, created: '2026-09-29 16:40:00' }, {
+  demoDomain({ domain: 'branch.demo.mailexpert.local', active: true, maxMailboxes: 100, mailboxes: 0, created: demoNodeTime('2026-09-29 16:40:00') }, {
     state: 'ready', origin: 'created', addedAt: demoTime('2026-09-02T09:15:00.000Z'), addedBy: DEMO_ADMIN_EMAIL,
     stateChangedAt: demoTime('2026-09-03T12:00:00.000Z'), steps: { ready: { ...demoStep(demoTime('2026-09-03T12:00:00.000Z')), markedReady: true } },
-    recreated: true, nodeCreated: '2026-09-02 09:15:00',
+    recreated: true, nodeCreated: demoNodeTime('2026-09-02 09:15:00'),
   }),
 ].sort((a, b) => a.domain.localeCompare(b.domain));
 for (const d of mailNodeDomains) if (d.state !== 'unknown') demoNode.dkimKeys.add(d.domain);

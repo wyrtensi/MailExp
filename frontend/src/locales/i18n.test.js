@@ -25,10 +25,16 @@
  *   excluding the locale files themselves. A key counts as referenced if it
  *   appears literally in the source — even in a comment or property assignment.
  *
- *   The reverse check runs here too: every key written out in a t() call of
- *   the source (t('a.b'), t("a.b"), t(`a.b`), t(c ? 'a.b' : 'c.d'), even with
- *   a fallback string) must exist in every locale; a dynamic key t(`a.b.${x}`)
- *   must name a section (a.b.) that has keys. Fix: add the key, translated.
+ *   The reverse check runs here too, on the first argument of every t() /
+ *   i18n.t() call outside tests:
+ *   - a dotted key written out ('a.b', "a.b", `a.b`), also as a branch of a
+ *     ternary (c ? 'a.b' : 'c.d', with or without parentheses, nested), must
+ *     exist in every locale, as itself, a plural form or a section; a fallback
+ *     string (t('a.b', 'Text')) does not excuse it;
+ *   - a dynamic key (`a.b.${x}` or 'a.b.' + x) must name a section (a.b.)
+ *     with keys; which keys it reaches is left to DYNAMIC_KEYS;
+ *   - a variable or a call (t(item.labelKey)) is not checked.
+ *   Fix: add the key to every locale, translated.
  *
  * SUITE 2 — key coverage
  *   Every key present in any locale file must exist in all locale files.
@@ -428,16 +434,113 @@ function loadLiteralSourceTranslationKeys(prefix) {
   return [...keys].sort();
 }
 
-// Every t() call of the source (tests excluded) whose key is written out: a quoted literal or a
-// template literal. A template literal with ${...} is dynamic: only its static head (up to the
-// first ${) is known, kept as a prefix. Only dotted keys count (a namespaced key, as every key of
-// the locale files is). Returns [{ file, key, prefix }] where prefix is true for a dynamic head.
+// Every t() call of the source (tests excluded) whose key is written out. The first argument is
+// read as an expression: a quoted or template literal is a key; a ternary (a ? b : c, conditions
+// in parentheses or not) gives the keys of both branches; a template literal with ${...} or a
+// concatenation ('a.b.' + x) is dynamic, and only its static head up to the last dot is known (a
+// section that must have keys). Anything else (a variable, a call) is not checked here. Only
+// dotted keys count (every key of the locale files is namespaced). Returns
+// [{ file, key, prefix }] where prefix is true for a dynamic head.
 const DOTTED_KEY_RE = /^[\w-]+(\.[\w-]+)+$/;
+
+// The end of the string or template literal starting at i (the index after its closing quote).
+function skipLiteral(text, i) {
+  const quote = text[i];
+  let j = i + 1;
+  while (j < text.length && text[j] !== quote) {
+    if (text[j] === '\\') j += 2;
+    else if (quote === '`' && text[j] === '$' && text[j + 1] === '{') j = skipBalanced(text, j + 1);
+    else j += 1;
+  }
+  return j + 1;
+}
+
+// The index after the bracket that closes the one at i.
+function skipBalanced(text, i) {
+  let depth = 0;
+  for (let j = i; j < text.length; j += 1) {
+    const c = text[j];
+    if (c === '\'' || c === '"' || c === '`') { j = skipLiteral(text, j) - 1; continue; }
+    if (c === '(' || c === '[' || c === '{') depth += 1;
+    else if (c === ')' || c === ']' || c === '}') { depth -= 1; if (depth === 0) return j + 1; }
+  }
+  return text.length;
+}
+
+// The first argument of a call whose '(' is at open: the text up to the top-level ',' or ')'.
+function firstArgument(text, open) {
+  for (let j = open + 1; j < text.length; j += 1) {
+    const c = text[j];
+    if (c === '\'' || c === '"' || c === '`') { j = skipLiteral(text, j) - 1; continue; }
+    if (c === '(' || c === '[' || c === '{') { j = skipBalanced(text, j) - 1; continue; }
+    if (c === ',' || c === ')') return text.slice(open + 1, j);
+  }
+  return '';
+}
+
+// Splits expr at its top-level operators: [{ op, start }] for '?', ':' and '+'.
+function topLevelOperators(expr) {
+  const ops = [];
+  for (let j = 0; j < expr.length; j += 1) {
+    const c = expr[j];
+    if (c === '\'' || c === '"' || c === '`') { j = skipLiteral(expr, j) - 1; continue; }
+    if (c === '(' || c === '[' || c === '{') { j = skipBalanced(expr, j) - 1; continue; }
+    if (c === '?' && expr[j + 1] !== '.' && expr[j + 1] !== '?' && expr[j - 1] !== '?') ops.push({ op: '?', at: j });
+    else if (c === ':' || c === '+') ops.push({ op: c, at: j });
+  }
+  return ops;
+}
+
+function isWholeLiteral(expr) {
+  return /^['"`]/.test(expr) && skipLiteral(expr, 0) === expr.length;
+}
+
+function sectionOf(head) {
+  const section = head.slice(0, head.lastIndexOf('.') + 1);
+  return section && DOTTED_KEY_RE.test(section.slice(0, -1)) ? section : null;
+}
+
+// The keys an expression written as t()'s first argument names: [{ key, prefix }].
+function keysOfExpression(source) {
+  let expr = source.trim();
+  while (expr.startsWith('(') && skipBalanced(expr, 0) === expr.length) expr = expr.slice(1, -1).trim();
+  const ops = topLevelOperators(expr);
+  const question = ops.find(o => o.op === '?');
+  if (question) {
+    // cond ? a : b — the ':' that pairs with the first '?' (nested ternaries count their own).
+    let depth = 0;
+    for (const o of ops.filter(x => x.at > question.at)) {
+      if (o.op === '?') depth += 1;
+      else if (o.op === ':') {
+        if (depth === 0) {
+          return [...keysOfExpression(expr.slice(question.at + 1, o.at)), ...keysOfExpression(expr.slice(o.at + 1))];
+        }
+        depth -= 1;
+      }
+    }
+    return [];
+  }
+  const plus = ops.find(o => o.op === '+');
+  if (plus) {
+    // 'a.b.' + x: only the head is known.
+    const head = expr.slice(0, plus.at).trim();
+    if (!isWholeLiteral(head) || head.startsWith('`')) return [];
+    const section = sectionOf(head.slice(1, -1));
+    return section ? [{ key: section, prefix: true }] : [];
+  }
+  if (!isWholeLiteral(expr)) return [];
+  const body = expr.slice(1, -1);
+  if (expr.startsWith('`') && body.includes('${')) {
+    const section = sectionOf(body.slice(0, body.indexOf('${')));
+    return section ? [{ key: section, prefix: true }] : [];
+  }
+  return DOTTED_KEY_RE.test(body) ? [{ key: body, prefix: false }] : [];
+}
+
 function loadSourceTranslationCalls() {
   const srcRoot = resolve(dir, '..');
   const calls = [];
-  const call = /(?:(?<![\w$.])|\bi18n(?:ext)?\.)t\(\s*(?:'([^'\n]*)'|"([^"\n]*)"|`([^`]*)`)/g;
-  const ternaryCall = /(?:(?<![\w$.])|\bi18n(?:ext)?\.)t\(\s*[^'"`()\n]{1,80}?\?\s*(['"])([\w.-]+)\1\s*:\s*(['"])([\w.-]+)\3/g;
+  const call = /(?:(?<![\w$.])|\bi18n(?:ext)?\.)t\(/g;
   function walk(d) {
     for (const entry of readdirSync(d, { withFileTypes: true })) {
       const full = join(d, entry.name);
@@ -446,25 +549,10 @@ function loadSourceTranslationCalls() {
         walk(full);
       } else if ((entry.name.endsWith('.js') || entry.name.endsWith('.jsx')) && !entry.name.includes('.test.')) {
         const source = readFileSync(full, 'utf8');
+        const file = full.slice(srcRoot.length + 1).replace(/\\/g, '/');
         for (const match of source.matchAll(call)) {
-          const file = full.slice(srcRoot.length + 1).replace(/\\/g, '/');
-          const template = match[3];
-          if (template === undefined) {
-            const key = match[1] ?? match[2];
-            if (DOTTED_KEY_RE.test(key)) calls.push({ file, key, prefix: false });
-          } else if (!template.includes('${')) {
-            if (DOTTED_KEY_RE.test(template)) calls.push({ file, key: template, prefix: false });
-          } else {
-            // `a.b.${x}`: the head up to its last dot must name a section with keys in it.
-            const head = template.slice(0, template.indexOf('${'));
-            const section = head.slice(0, head.lastIndexOf('.') + 1);
-            if (section && DOTTED_KEY_RE.test(section.slice(0, -1))) calls.push({ file, key: section, prefix: true });
-          }
-        }
-        // t(cond ? 'a.b' : 'c.d'): both keys are written out.
-        for (const match of source.matchAll(ternaryCall)) {
-          const file = full.slice(srcRoot.length + 1).replace(/\\/g, '/');
-          for (const key of [match[2], match[4]]) if (DOTTED_KEY_RE.test(key)) calls.push({ file, key, prefix: false });
+          const open = match.index + match[0].length - 1;
+          for (const found of keysOfExpression(firstArgument(source, open))) calls.push({ file, ...found });
         }
       }
     }
@@ -532,6 +620,24 @@ describe('i18n locale files', () => {
       }
       assert.equal(missing.length, 0,
         `Literal source translation keys missing from locale files:\n${missing.join('\n')}`);
+    });
+
+    it('reads the keys of a t() argument: literals, ternaries, templates and concatenations', () => {
+      const keys = (expr) => keysOfExpression(expr).map(({ key, prefix }) => (prefix ? `${key}*` : key));
+      assert.deepEqual(keys("'a.b'"), ['a.b']);
+      assert.deepEqual(keys('`a.b`'), ['a.b']);
+      assert.deepEqual(keys("on ? 'a.b' : 'c.d'"), ['a.b', 'c.d']);
+      assert.deepEqual(keys("(x && y(z)) ? 'a.b' : (w ? `c.d.${v}` : 'e.f')"), ['a.b', 'c.d.*', 'e.f']);
+      assert.deepEqual(keys("x?.y ?? z ? 'a.b' : 'c.d'"), ['a.b', 'c.d']);
+      assert.deepEqual(keys("'a.b.' + kind"), ['a.b.*']);
+      // 'a.b.c' + x may continue the last segment: only the section before it is known.
+      assert.deepEqual(keys("'a.b.c' + kind"), ['a.b.*']);
+      assert.deepEqual(keys("'a.b' + kind"), []);
+      assert.deepEqual(keys('`a.b.${kind}.c`'), ['a.b.*']);
+      assert.deepEqual(keys('item.labelKey'), []);
+      assert.deepEqual(keys("'plain'"), []);
+      const source = "t(on ? 'a.b' : 'c.d', 'Fallback, with comma')";
+      assert.equal(firstArgument(source, 1), "on ? 'a.b' : 'c.d'");
     });
 
     it('every key written out in a t() call of the source exists in every locale', () => {

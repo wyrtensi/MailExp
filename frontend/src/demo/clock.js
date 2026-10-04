@@ -11,3 +11,8 @@ export const DEMO_SHIFT_MS = Math.floor((Date.now() - DEMO_WRITTEN_AT) / DAY_MS)
 export function demoTime(iso) {
   return new Date(Date.parse(iso) + DEMO_SHIFT_MS).toISOString();
 }
+
+// A fixture's time in the mail node's own format ('YYYY-MM-DD HH:MM:SS', UTC), moved to today.
+export function demoNodeTime(value) {
+  return demoTime(`${value.replace(' ', 'T')}Z`).replace('T', ' ').slice(0, 19);
+}

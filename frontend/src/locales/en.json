@@ -3247,7 +3247,7 @@
       "auth": "The mail server did not accept the mailbox's credentials.",
       "reconnect": "Access to this mailbox was revoked or has expired. Reconnect it to send mail.",
       "authorDisabled": "Its author can no longer send mail.",
-      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. It went out: do not send it again."
+      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. Do not send it again."
     },
     "undoFailedTitle": "Could not undo",
     "undoTooLate": "The letter is already being sent and can no longer be stopped.",
@@ -3294,6 +3294,7 @@
     "keptUntil": "Kept until {{date}}, then deleted.",
     "conflict": "This letter was already sent with another time, or cancelled. Reopen it and send it again.",
     "deliveredUnrecordedTitle": "A letter was sent",
-    "discardDeliveredBody": "The letter went out already: only this entry is removed from the list."
+    "discardDeliveredBody": "The letter went out already: only this entry is removed from the list.",
+    "discardDeliveredTitle": "Remove the entry from the list?"
   }
 }
