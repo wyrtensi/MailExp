@@ -15,7 +15,7 @@ const jobs = await import('./jobQueue.js');
 const {
   enqueueJob, cancelJob, rescheduleJob, getJob, listJobs, claimDueJobs, runJob, runDueJobs,
   sweepExpiredLeases, cleanupFinishedJobs, registerJobKind, unregisterJobKind, JobError,
-  failJobsOfDeletedAccount, stopJobWorker, _resumeJobWorkerForTests,
+  failJobsOfDeletedAccount, stopJobWorker, _resumeJobWorkerForTests, _setSettleRetryDelaysForTests,
 } = jobs;
 
 const ACCOUNT = '40000000-0000-4000-8000-000000000001';
@@ -321,20 +321,92 @@ describe('listing and cleanup', () => {
     expect(await getJob(done.id)).toMatchObject({ status: 'done', account_id: null });
   });
 
-  it('reports only the jobs a deletion ended: a kept failed or needs-attention job is not reported again', async () => {
+  it('a deletion fails only the waiting jobs: kept ones keep their status and code, and are not reported again', async () => {
     const onSettled = vi.fn();
     registerJobKind('test', { handler: vi.fn(), onSettled });
     const { job: waiting } = await due({ delayMs: 60000 });
     const { job: failed } = await due({ delayMs: 60000 });
     const { job: attention } = await due({ delayMs: 60000 });
+    const { job: delivered } = await due({ delayMs: 60000 });
     await db.query("UPDATE jobs SET status = 'failed', error_code = 'smtp_rejected' WHERE id = $1", [failed.id]);
     await db.query("UPDATE jobs SET status = 'needs_attention', error_code = 'lease_expired' WHERE id = $1", [attention.id]);
+    await db.query("UPDATE jobs SET status = 'needs_attention', error_code = 'delivered_unrecorded' WHERE id = $1", [delivered.id]);
     const changed = await failJobsOfDeletedAccount(ACCOUNT);
-    expect(changed.map(j => j.id).sort()).toEqual([waiting.id, failed.id, attention.id].sort());
-    expect(changed.every(j => j.status === 'failed' && j.error_code === 'account_missing' && !('previous_status' in j))).toBe(true);
+    expect(changed.map(j => j.id)).toEqual([waiting.id]);
+    expect(changed[0]).toMatchObject({ status: 'failed', error_code: 'account_missing' });
+    expect(await getJob(failed.id)).toMatchObject({ status: 'failed', error_code: 'smtp_rejected' });
+    expect(await getJob(attention.id)).toMatchObject({ status: 'needs_attention', error_code: 'lease_expired' });
+    expect(await getJob(delivered.id)).toMatchObject({ status: 'needs_attention', error_code: 'delivered_unrecorded' });
     await vi.waitFor(() => expect(onSettled).toHaveBeenCalledWith(expect.objectContaining({ id: waiting.id })));
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(onSettled).toHaveBeenCalledOnce();
+  });
+
+  it('the sweep labels a job whose effect was marked done with that code, not lease_expired', async () => {
+    const onSettled = vi.fn();
+    let release;
+    registerJobKind('test', {
+      onSettled,
+      handler: async (_job, ctx) => {
+        await ctx.markEffectStarted();
+        expect(await ctx.markEffectDone('delivered_unrecorded')).toBe(true);
+        await new Promise(resolve => { release = resolve; });
+      },
+    });
+    const { job } = await due();
+    const [claimed] = await claimDueJobs(10);
+    const running = runJob(claimed);
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    await expireLease(job.id);
+    const [swept] = await sweepExpiredLeases();
+    expect(swept).toMatchObject({ id: job.id, status: 'needs_attention', error_code: 'delivered_unrecorded' });
+    release();
+    await running;
+    // A job moved to run again forgets the mark.
+    const moved = await rescheduleJob(job.id, { runAt: new Date(), from: ['needs_attention'] });
+    expect(moved.payload.effectDoneCode).toBeUndefined();
+  });
+
+  it('never moves a job whose error code is excluded, in the same statement', async () => {
+    registerJobKind('test', { handler: vi.fn() });
+    const { job } = await due({ delayMs: 60000 });
+    await db.query("UPDATE jobs SET status = 'needs_attention', error_code = 'delivered_unrecorded' WHERE id = $1", [job.id]);
+    expect(await rescheduleJob(job.id, { runAt: new Date(), from: ['needs_attention'], exceptErrorCodes: ['delivered_unrecorded'] })).toBeNull();
+    expect(await getJob(job.id)).toMatchObject({ status: 'needs_attention', error_code: 'delivered_unrecorded' });
+  });
+
+  it('keeps trying to record the outcome of a job whose effect began while the database refuses it', async () => {
+    _setSettleRetryDelaysForTests([5, 5, 5, 5]);
+    try {
+      const onSettled = vi.fn();
+      registerJobKind('test', {
+        onSettled,
+        handler: async (_job, ctx) => {
+          await ctx.markEffectStarted();
+          throw new JobError('effect unrecorded', { outcome: 'needs_attention', code: 'delivered_unrecorded' });
+        },
+      });
+      const { job } = await due();
+      await db.exec(`
+        CREATE FUNCTION refuse_settle() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            -- A sequence is not rolled back with the refused statement: the first two tries fail.
+            IF nextval('settle_refusals') <= 2 THEN RAISE EXCEPTION 'database unavailable'; END IF;
+            RETURN NEW;
+          END $$;
+        CREATE SEQUENCE settle_refusals;
+        CREATE TRIGGER refuse_settle BEFORE UPDATE ON jobs FOR EACH ROW
+          WHEN (NEW.status = 'needs_attention') EXECUTE FUNCTION refuse_settle();`);
+      try {
+        await runDueJobs({ wait: true });
+      } finally {
+        await db.exec('DROP TRIGGER refuse_settle ON jobs; DROP FUNCTION refuse_settle(); DROP SEQUENCE settle_refusals;');
+      }
+      expect(await getJob(job.id)).toMatchObject({ status: 'needs_attention', error_code: 'delivered_unrecorded' });
+      await vi.waitFor(() => expect(onSettled).toHaveBeenCalledOnce());
+    } finally {
+      _setSettleRetryDelaysForTests();
+    }
   });
 
   it('moves a job with a payload change', async () => {

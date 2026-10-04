@@ -38,6 +38,13 @@ export const JOB_CLEANUP_MS = 60 * 60 * 1000;
 // change, so someone can act on them.
 export const JOB_KEPT_FAILED_MS = 30 * 24 * 60 * 60 * 1000;
 const ERROR_TEXT_MAX = 500;
+// The payload key ctx.markEffectDone(code) sets: the irreversible step happened, so the sweep labels
+// the job with that code instead of lease_expired (the outcome is known, only unrecorded).
+const EFFECT_DONE_KEY = 'effectDoneCode';
+// How long a worker keeps trying to record the outcome of a job whose effect began, while the
+// database does not answer: then the lease sweep settles it.
+const SETTLE_RETRY_DELAYS_MS = [1000, 2000, 5000, 10000, 30000, 60000, 120000, 300000];
+let settleRetryDelaysMs = SETTLE_RETRY_DELAYS_MS;
 
 export function jobRetryDelayMs(attempts) {
   return Math.min(JOB_RETRY_MAX_MS, JOB_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1));
@@ -158,17 +165,20 @@ export async function cancelJob(id, { from = ['queued'] } = {}, db = { query }) 
 // Passing failed or needs_attention in `from` runs it again: its attempts and error are cleared.
 // Resolves the row, or null.
 // payloadPatch: keys merged into the payload with the move (the send queue marks the letter scheduled).
-export async function rescheduleJob(id, { runAt, from = ['queued'], payloadPatch = null }, db = { query }) {
+// exceptErrorCodes: a job whose error_code is one of these is never moved (checked in the same
+// statement, so a job relabelled meanwhile is not run again).
+export async function rescheduleJob(id, { runAt, from = ['queued'], payloadPatch = null, exceptErrorCodes = [] }, db = { query }) {
   const { rows: [job] } = await db.query(
     `UPDATE jobs SET run_at = $2::timestamptz, status = 'queued', updated_at = now(),
-                     payload = payload || COALESCE($4::jsonb, '{}'::jsonb),
+                     payload = (payload - '${EFFECT_DONE_KEY}') || COALESCE($4::jsonb, '{}'::jsonb),
                      attempts = CASE WHEN status = 'queued' THEN attempts ELSE 0 END,
                      last_error = CASE WHEN status = 'queued' THEN last_error ELSE NULL END,
                      error_code = CASE WHEN status = 'queued' THEN error_code ELSE NULL END,
                      effect_started_at = NULL, claim_token = NULL, lease_until = NULL
       WHERE id = $1 AND status = ANY($3::text[])
+        AND (error_code IS NULL OR NOT (error_code = ANY($5::text[])))
      RETURNING *`,
-    [id, new Date(runAt).toISOString(), from, payloadPatch ? JSON.stringify(payloadPatch) : null]
+    [id, new Date(runAt).toISOString(), from, payloadPatch ? JSON.stringify(payloadPatch) : null, exceptErrorCodes]
   );
   if (job) wakeAt(job.run_at);
   return job || null;
@@ -248,6 +258,29 @@ async function settleFailure(job, err, effectStarted) {
   return row || null;
 }
 
+// settleFailure, tried again while the database does not answer when the job's effect began (its
+// outcome must be recorded by this worker if at all possible: the sweep only knows the effect
+// began). A job without an effect is left to the lease sweep at once, which runs it again.
+async function settleWithRetry(job, err, effectStarted) {
+  const delays = effectStarted ? settleRetryDelaysMs : [];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await settleFailure(job, err, effectStarted);
+      return;
+    } catch (settleErr) {
+      console.error(`[jobs] Settling ${job.kind} job ${job.id} failed:`, settleErr?.message);
+      // Out of tries (or stopping): the lease runs out and the sweep settles the job.
+      if (attempt >= delays.length || stopping) return;
+      await new Promise(resolve => { setTimeout(resolve, delays[attempt]).unref?.(); });
+    }
+  }
+}
+
+// The delays between tries of recording a job's outcome after its effect began (tests shorten them).
+export function _setSettleRetryDelaysForTests(delays = SETTLE_RETRY_DELAYS_MS) {
+  settleRetryDelaysMs = delays;
+}
+
 // Runs one claimed job to its end. Never throws.
 export async function runJob(job) {
   const kind = kinds.get(job.kind);
@@ -267,6 +300,22 @@ export async function runJob(job) {
       // The claim is gone (swept after a stall): the effect must not begin.
       if (!rowCount) throw new JobError('The job is no longer claimed by this worker', { outcome: 'fail', code: 'claim_lost' });
       effectStarted = true;
+    },
+    // The irreversible step happened (the letter was accepted): written at once, without the claim
+    // check (a sweep may have taken the job meanwhile), so whoever settles the job later labels it
+    // with code rather than as an unknown outcome. Best effort: resolves whether it was written.
+    async markEffectDone(code) {
+      try {
+        const { rowCount } = await query(
+          `UPDATE jobs SET payload = payload || jsonb_build_object('${EFFECT_DONE_KEY}', $2::text), updated_at = now()
+            WHERE id = $1 AND effect_started_at IS NOT NULL AND status IN ('running', 'needs_attention')`,
+          [job.id, String(code).slice(0, 64)]
+        );
+        return rowCount > 0;
+      } catch (err) {
+        console.error(`[jobs] Marking the effect of ${job.kind} job ${job.id} done failed:`, err?.message);
+        return false;
+      }
     },
     async complete(fn = null) {
       completedRow = await withTransaction(async (tx) => {
@@ -296,12 +345,7 @@ export async function runJob(job) {
     } else if (err?.code === 'claim_lost') {
       console.warn(`[jobs] ${job.kind} job ${job.id} lost its claim before its effect began`);
     } else {
-      try {
-        await settleFailure(job, err, effectStarted);
-      } catch (settleErr) {
-        // The lease runs out and the sweep settles the job.
-        console.error(`[jobs] Settling ${job.kind} job ${job.id} failed:`, settleErr?.message);
-      }
+      await settleWithRetry(job, err, effectStarted);
     }
   } finally {
     clearInterval(heartbeat);
@@ -311,7 +355,8 @@ export async function runJob(job) {
 // Running jobs whose lease ran out (their worker died or stalled): queued again, or failed once
 // max_attempts is reached; needs_attention when the handler had begun its irreversible step. The
 // lease is renewed every JOB_HEARTBEAT_MS while a handler runs, so only a dead or stalled worker
-// lets it run out. Resolves the rows it changed.
+// lets it run out. A job whose effect was marked done (ctx.markEffectDone) gets that code instead of
+// lease_expired: its effect happened, only the record of it is missing. Resolves the rows it changed.
 export async function sweepExpiredLeases() {
   const { rows } = await query(
     `UPDATE jobs
@@ -319,8 +364,12 @@ export async function sweepExpiredLeases() {
                           WHEN attempts >= max_attempts THEN 'failed'
                           ELSE 'queued' END,
             run_at = CASE WHEN effect_started_at IS NULL THEN now() ELSE run_at END,
-            last_error = 'The worker running the job stopped before it finished',
-            error_code = 'lease_expired',
+            last_error = CASE WHEN effect_started_at IS NOT NULL AND payload ? '${EFFECT_DONE_KEY}'
+                              THEN 'The work was done, but the worker stopped before recording it'
+                              ELSE 'The worker running the job stopped before it finished' END,
+            error_code = CASE WHEN effect_started_at IS NOT NULL AND payload ? '${EFFECT_DONE_KEY}'
+                              THEN payload->>'${EFFECT_DONE_KEY}'
+                              ELSE 'lease_expired' END,
             claim_token = NULL, lease_until = NULL, updated_at = now()
       WHERE status = 'running' AND lease_until < now()
      RETURNING *`
@@ -352,30 +401,24 @@ export async function cleanupFinishedJobs({ retentionMs = JOB_RETENTION_MS, kept
   return rowCount;
 }
 
-// Fails the waiting and kept jobs of a mailbox about to be deleted (both deletion paths call it
-// before the row goes), so each ends through its kind's onSettled (the journal, the author told)
-// instead of losing its mailbox silently; the rows stay, with account_id NULL. A job running right
-// now finds the mailbox gone in its handler. Never throws: a deletion is never blocked by this.
-// Only a job that was still waiting is reported settled now: a kept one (failed, needs attention)
-// was reported when it ended, and is only relabelled. Resolves the rows it failed.
+// Fails the waiting jobs of a mailbox about to be deleted (both deletion paths call it before the
+// row goes), so each ends through its kind's onSettled (the journal, the author told) instead of
+// losing its mailbox silently; the rows stay, with account_id NULL. A job running right now finds
+// the mailbox gone in its handler. A kept job (failed, needs attention) is left as it is: it was
+// reported when it ended, and its error code says what may be done with it (a relabel could offer
+// to run again a job whose effect happened). Never throws: a deletion is never blocked by this.
+// Resolves the rows it failed.
 export async function failJobsOfDeletedAccount(accountId) {
   try {
     const { rows } = await query(
-      `WITH before AS (
-         SELECT id, status FROM jobs
-          WHERE account_id = $1 AND status IN ('queued', 'failed', 'needs_attention')
-          FOR UPDATE
-       )
-       UPDATE jobs j SET status = 'failed', error_code = 'account_missing', last_error = 'The mailbox was deleted.',
-                         claim_token = NULL, lease_until = NULL, updated_at = now()
-         FROM before
-        WHERE j.id = before.id AND j.status IN ('queued', 'failed', 'needs_attention')
-       RETURNING j.*, before.status AS previous_status`,
+      `UPDATE jobs SET status = 'failed', error_code = 'account_missing', last_error = 'The mailbox was deleted.',
+                       claim_token = NULL, lease_until = NULL, updated_at = now()
+        WHERE account_id = $1 AND status = 'queued'
+       RETURNING *`,
       [accountId]
     );
-    const failed = rows.map(({ previous_status: previous, ...row }) => ({ row, previous }));
-    for (const { row, previous } of failed) if (previous === 'queued') notifySettled(row);
-    return failed.map(({ row }) => row);
+    for (const row of rows) notifySettled(row);
+    return rows;
   } catch (err) {
     console.error('[jobs] Failing the jobs of a deleted mailbox failed:', err?.code || err?.message);
     return [];
