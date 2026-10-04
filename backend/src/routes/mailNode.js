@@ -5,8 +5,9 @@ import { uuidParam } from '../utils/uuid.js';
 import { recordAudit } from '../services/auditLog.js';
 import { MAIL_NODE_ERRORS } from '../services/mailNode/errors.js';
 import { adminDomainList, restartDomain } from '../services/mailNode/domainActions.js';
+import { defaultLimits, listNodeMailboxes, onOtherMailHost } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
-import { DISK_WARN_PERCENT, checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
+import { checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
 import {
   DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
@@ -18,11 +19,9 @@ import {
   MailNodeError,
   RATE_LIMIT_FRAMES,
   addDomain,
-  getDiskStatus,
   getMailbox,
   getMailNodeConfig,
   listDomains,
-  listMailboxes,
   parseHostName,
   parseNetworkList,
   parsePingUrl,
@@ -65,7 +64,6 @@ import {
   applyPrefilter,
   applyInBackground,
   applyQuietly,
-  defaultRateLimit,
   getNodeApplyResult,
 } from '../services/mailNode/nodeApply.js';
 import {
@@ -107,10 +105,9 @@ export function refuse(res, code) {
   return res.status(status).json({ error, code });
 }
 
-// Whether a node mailbox row is on another host than the node the settings name now.
-export function onOtherMailHost(row, cfg) {
-  return String(row.imap_host ?? '').trim().toLowerCase() !== cfg.mailHost;
-}
+// Whether a node mailbox row is on another host than the node the settings name now
+// (services/mailNode/mailboxActions.js; routes/accounts.js imports it from here).
+export { onOtherMailHost };
 
 // A mailcow failure: 502 (or the status the error carries), the node's own message and a code the
 // screens translate.
@@ -518,58 +515,21 @@ router.put('/eop', requireAdmin, async (req, res) => {
   if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'eop_settings' }));
 });
 
-// The send limit a mailbox gets when nobody set its own, for each domain of the given addresses.
-async function defaultLimits(emails) {
-  const domains = [...new Set(emails.map((email) => email.toLowerCase().split('@')[1]))];
-  const [eop, { rows }] = await Promise.all([
-    getEopSettings(),
-    query('SELECT domain, mailbox_send_limit FROM mail_node_domains WHERE domain = ANY($1::text[])', [domains]),
-  ]);
-  const own = new Map(rows.map((row) => [row.domain, row.mailbox_send_limit]));
-  return (email) => defaultRateLimit(eop, own.get(email.toLowerCase().split('@')[1]) ?? null);
-}
-
-const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
-
 // The node mailboxes MailExpert knows, with quota and usage as the node reports them, and the send
 // limit: the node's (rateLimit, null when the mailbox has none of its own), an administrator's
 // (rateLimitOverride) and the default the mailbox has without one (rateLimitDefault).
+// services/mailNode/mailboxActions.js, shared with the panel CLI.
 router.get('/mailboxes', requireAdmin, async (req, res) => {
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuse(res, 'mail_node_not_configured');
-  const { rows } = await query(
-    'SELECT id, email_address, node_rl_value, node_rl_frame FROM email_accounts WHERE mail_node = true ORDER BY email_address'
-  );
-  const defaultFor = await defaultLimits(rows.map((row) => row.email_address));
-  let onNode;
+  let result;
   try {
-    onNode = new Map((await listMailboxes(cfg)).map((m) => [m.email, m]));
+    result = await listNodeMailboxes();
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  // The disk is read fresh here; the scheduled check alone pings the ping URL.
-  const disk = await getDiskStatus(cfg).then(
-    (d) => ({ ...d, warn: d.usedPercent >= DISK_WARN_PERCENT }),
-    (err) => ({ error: err.message, code: err.code || 'mail_node_failed' }),
-  );
-  res.json({
-    disk,
-    mailboxes: rows.map((row) => {
-      const m = onNode.get(row.email_address.toLowerCase());
-      return {
-        accountId: row.id,
-        email: row.email_address,
-        onNode: !!m,
-        active: m?.active ?? false,
-        quotaMb: m?.quotaMb ?? null,
-        usedBytes: m?.usedBytes ?? null,
-        rateLimit: m?.rateLimit ?? null,
-        rateLimitOverride: overrideOf(row),
-        rateLimitDefault: defaultFor(row.email_address),
-      };
-    }),
-  });
+  return result.error ? refuse(res, result.error) : res.json(result);
 });
+
+const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
 
 router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {
   const quotaMb = parseWholeNumber(req.body?.quotaMb, 1, MAX_QUOTA_MB);

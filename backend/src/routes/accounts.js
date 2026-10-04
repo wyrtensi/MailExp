@@ -1,6 +1,6 @@
 import { publicFolderCounts } from '../services/folderStatus.js';
 import { Router } from 'express';
-import { query, withTransaction } from '../services/db.js';
+import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
@@ -15,18 +15,17 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
 import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
-import { addSecondSenderName, isForeignNodeAliasAddress, parseSenderNames } from '../utils/senderNames.js';
+import {
+  ALIAS_ERRORS, createAlias, deleteAlias, hasHeaderInjectionChars, listAliases, updateAlias,
+} from '../services/accountAliases.js';
 import { THREAD_MODE_GMAIL, THREAD_MODE_RFC } from '../services/threading/threadId.js';
 import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
+import { getMailNodeConfig, listAliasesTo } from '../services/mailNode/mailcow.js';
 import {
-  deleteMailbox, getMailNodeConfig, listAliasesTo, listDomains, parseHostName, parseLocalPart,
-  provisionMailbox,
-} from '../services/mailNode/mailcow.js';
-import { cancelDeletion, requestDeletion } from '../services/mailNode/mailboxDeletion.js';
-import { canCreateMailboxes, getDomainRow } from '../services/mailNode/domains.js';
-import { MIRRORED_STATES, kickDomainSync } from '../services/tenant/tenantDomains.js';
-import { newMailboxRateLimit } from '../services/mailNode/nodeApply.js';
+  MAILBOX_ERRORS, cancelMailboxDeletion, createNodeMailbox, requestMailboxDeletion,
+} from '../services/mailNode/mailboxActions.js';
+import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
 
@@ -37,9 +36,6 @@ const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
 // connectAccount's in-progress guard would drop the second and leave the GTD sync
 // tick armed inconsistently with the final DB value. Queued per account id.
 const reconnectQueue = createKeyedSerializer();
-// One domain mailbox creation per address at a time: two at once would both provision it, the
-// second taking it over with a new password and leaving the first row with a dead one.
-const domainCreateQueue = createKeyedSerializer();
 
 const ALLOWED_IMAP_PORTS = new Set([143, 993]);
 const ALLOWED_SMTP_PORTS = new Set([465, 587]);
@@ -56,11 +52,6 @@ function validatePort(port, allowed) {
     return `Port ${port} is not allowed. Allowed: ${[...allowed].join(', ')}`;
   }
   return null;
-}
-
-// Reject strings that contain characters that could inject extra email headers.
-function hasHeaderInjectionChars(str) {
-  return typeof str === 'string' && /[\r\n\0]/.test(str);
 }
 
 const router = Router();
@@ -172,95 +163,25 @@ function changedConnectionFields(stored, updates) {
 }
 
 // A mailbox on the mail node, open to everyone signed in: the server picks the host, the ports and
-// a password only MailExpert knows, so nothing from the body reaches the connection settings.
+// a password only MailExpert knows, so nothing from the body reaches the connection settings
+// (services/mailNode/mailboxActions.js, shared with the panel CLI).
 async function createDomainMailbox(req, res) {
-  const email = `${parseLocalPart(req.body?.localPart)}@${parseHostName(req.body?.domain)}`;
-  return domainCreateQueue(email, () => createDomainMailboxNow(req, res));
-}
-
-async function createDomainMailboxNow(req, res) {
-  const localPart = parseLocalPart(req.body?.localPart);
-  if (!localPart) return res.status(400).json({ error: 'The name before @ may hold letters, digits, dot, dash and underscore', code: 'local_part_invalid' });
-  const domain = parseHostName(req.body?.domain);
-  if (!domain) return refuseMailNode(res, 'domain_invalid');
-  const email = `${localPart}@${domain}`;
-  const name = typeof req.body?.name === 'string' && req.body.name.trim() ? req.body.name.trim().slice(0, 200) : email;
-  if (hasHeaderInjectionChars(name)) {
-    return res.status(400).json({ error: 'Name and email address cannot contain control characters' });
-  }
-  // The form asks for the sender name; a caller without one sends under the mailbox name.
-  const names = parseSenderNames(req.body);
-  if (names.error) return res.status(400).json({ error: names.error, code: 'sender_name_invalid' });
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
-
-  const taken = await query('SELECT delete_after FROM email_accounts WHERE lower(email_address) = $1 LIMIT 1', [email]);
-  if (taken.rows[0]?.delete_after) {
-    return res.status(409).json({ error: 'This mailbox is pending deletion: cancel the deletion to keep it', code: 'mailbox_pending_deletion' });
-  }
-  if (taken.rows.length) return res.status(409).json({ error: 'This mailbox is already in MailExpert', code: 'mailbox_exists' });
-  // Only a domain whose onboarding is done takes mailboxes; an unknown one (no row) never does. A
-  // node creation time other than the one the row is bound to is only a warning for administrators
-  // (services/mailNode/domains.js isRecreated) and does not stop it.
-  const panelDomain = await getDomainRow(domain);
-  if (!canCreateMailboxes(panelDomain?.state)) return refuseMailNode(res, 'domain_not_ready');
-
-  let created;
+  let result;
   try {
-    const onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
-    if (!onNode?.active) {
-      return res.status(400).json({ error: 'The mail node has no such active domain', code: 'domain_unknown' });
-    }
-    // The send limit a mailbox of the domain gets (R-10): the domain's, else the EOP settings'.
-    const rateLimit = await newMailboxRateLimit(domain);
-    created = await provisionMailbox(cfg, { localPart, domain, name, rateLimit });
+    result = await createNodeMailbox(req.body ?? {}, routeActor(req), {
+      onCreated: (account) => { imapManager.connectAccount(account).catch(console.error); },
+    });
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-
-  let account;
-  let secondName;
-  try {
-    ({ account, secondName } = await withTransaction(async (client) => {
-      const result = await client.query(`
-        INSERT INTO email_accounts (
-          added_by, name, email_address, protocol,
-          imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
-          auth_user, auth_pass, mail_node, sender_name
-        ) VALUES ($1,$2,$3,'imap',$4,993,true,false,$4,587,'STARTTLS',$3,$5,true,$6)
-        RETURNING *
-      `, [req.session.userId, name, email, cfg.mailHost, encrypt(created.password), names.senderName]);
-      const row = result.rows[0];
-      return { account: row, secondName: await addSecondSenderName(client, { accountId: row.id, email, senderNameAlt: names.senderNameAlt }) };
-    }));
-  } catch (err) {
-    console.error('Domain mailbox insert error:', err);
-    // Nobody else knows the new password. A mailbox made just now is deleted again, so the address
-    // can be created later. One taken over stays as it is, active with its letters: disabling it
-    // would make every retry refuse it as a disabled mailbox, and taking it over again on a retry
-    // sets a new password anyway.
-    if (!created.reused) {
-      await deleteMailbox(cfg, email).catch((e) => console.error(`Could not undo ${email} on the mail node: ${e.message}`));
-    }
-    return res.status(500).json({ error: 'Failed to add account' });
-  }
-
-  recordAudit({
-    actorUserId: req.session.userId,
-    accountId: account.id,
-    action: 'mailbox.added',
-    details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused },
-  });
-  imapManager.connectAccount(account).catch(console.error);
-  // R-32 with DBEB: the tenant gets the mailbox's recipient (services/tenant/tenantDomains.js). In an
-  // Authoritative domain EOP rejects the address until then, so the mailbox shows it.
-  const mirrored = MIRRORED_STATES.includes(panelDomain.state);
-  if (mirrored) kickDomainSync(domain, { userId: req.session.userId });
+  if (result.error) return refuseMailbox(res, result.error);
   // The store takes this row as is, so the second name is on it for compose's From list.
-  res.json({
-    ...safeAccount({ ...account, tenant_pending: panelDomain.state === 'authoritative' }),
-    aliases: secondName ? [secondName] : [],
-  });
+  return res.json({ ...safeAccount({ ...result.account, tenant_pending: result.tenantPending }), aliases: result.aliases });
+}
+
+function refuseMailbox(res, code) {
+  const [status, error] = MAILBOX_ERRORS[code];
+  return res.status(status).json({ error, code });
 }
 
 // Manual server setup is an admin task: an ordinary user adds Gmail through the Google flow or a
@@ -545,78 +466,27 @@ router.get('/:id/node-aliases', async (req, res) => {
   }
 });
 
-// The reason someone gives for deleting a node mailbox: required, kept in the journal for good.
-const MAX_DELETION_REASON = 500;
-
-// The reason as stored: line breaks made \n, invisible format characters (bidi controls,
-// zero-width marks) removed, other control characters turned into spaces, then trimmed.
-function parseDeletionReason(value) {
-  if (typeof value !== 'string') return { error: 'deletion_reason_required' };
-  const reason = value
-    .replace(/\r\n?/g, '\n')
-    .replace(/\p{Cf}/gu, '')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, ' ')
-    .trim();
-  if (!reason) return { error: 'deletion_reason_required' };
-  if (reason.length > MAX_DELETION_REASON) return { error: 'deletion_reason_too_long' };
-  return { reason };
-}
-
-const DELETION_REFUSALS = {
-  account_not_found: [404, 'Account not found'],
-  not_mail_node: [400, 'Only a mailbox on the mail node waits before it is deleted: remove this one directly'],
-  deletion_already_requested: [409, 'Deleting this mailbox was asked for already'],
-  deletion_not_requested: [409, 'No deletion of this mailbox is pending'],
-  deletion_in_progress: [409, 'The mailbox is being deleted right now'],
-  confirmation_mismatch: [400, 'Type the full address of the mailbox to confirm'],
-  deletion_reason_required: [400, 'Say why the mailbox is deleted'],
-  deletion_reason_too_long: [400, `The reason may be at most ${MAX_DELETION_REASON} characters`],
-};
-function refuseDeletion(res, code) {
-  const [status, error] = DELETION_REFUSALS[code];
-  return res.status(status).json({ error, code });
-}
-
 // Asks to delete a mail node mailbox (owner decision 2026-10-01): it keeps working until
 // delete_after (now plus the days an administrator set), then the deletion job deletes it on the
 // node with all its mail and removes it here (services/mailNode/mailboxDeletion.js). The body
 // repeats the mailbox's address, as typed in the confirmation, and says why ({ email, reason }).
-// Nothing is asked of the node now.
+// Nothing is asked of the node now. services/mailNode/mailboxActions.js, shared with the panel CLI.
 router.post('/:id/deletion', async (req, res) => {
-  const { rows } = await query('SELECT id, email_address, mail_node, imap_host FROM email_accounts WHERE id = $1', [req.params.id]);
-  if (!rows.length) return refuseDeletion(res, 'account_not_found');
-  if (!rows[0].mail_node) return refuseDeletion(res, 'not_mail_node');
-  if (!(await mayDeleteAccount(req, rows[0]))) return res.status(403).json({ error: 'Admin access required' });
-  // Refused up front what the deletion job could never do: without the node settings, or for a
-  // mailbox on another host than the node they name.
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuseMailNode(res, 'mail_node_not_configured');
-  if (refusedOtherHost(res, rows[0], cfg)) return undefined;
-  const typed = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  if (typed !== String(rows[0].email_address).trim().toLowerCase()) return refuseDeletion(res, 'confirmation_mismatch');
-  const { reason, error } = parseDeletionReason(req.body?.reason);
-  if (error) return refuseDeletion(res, error);
-  const result = await requestDeletion({ accountId: req.params.id, userId: req.session.userId, reason });
-  if (result.error) return refuseDeletion(res, result.error);
-  recordAudit({
-    actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.deletion_requested',
-    details: { mailNode: true, deleteAfter: result.deleteAfter, days: result.days, reason },
-  });
-  const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [req.params.id]);
-  return res.json(safeAccount(account));
+  const result = await requestMailboxDeletion(
+    { accountId: req.params.id, email: req.body?.email, reason: req.body?.reason },
+    routeActor(req),
+    { mayDelete: (row) => mayDeleteAccount(req, row) },
+  );
+  if (result.error === 'admin_required') return res.status(403).json({ error: 'Admin access required' });
+  if (result.error) return refuseMailbox(res, result.error);
+  return res.json(safeAccount(result.account));
 });
 
 // Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel.
 router.delete('/:id/deletion', async (req, res) => {
-  const result = await cancelDeletion({ accountId: req.params.id });
-  if (result.error) return refuseDeletion(res, result.error);
-  recordAudit({
-    actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.deletion_cancelled',
-    details: { mailNode: true, deleteAfter: result.deleteAfter, reason: result.reason },
-  });
-  const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [req.params.id]);
-  return res.json(safeAccount(account));
+  const result = await cancelMailboxDeletion({ accountId: req.params.id }, routeActor(req));
+  if (result.error) return refuseMailbox(res, result.error);
+  return res.json(safeAccount(result.account));
 });
 
 router.delete('/:id', async (req, res) => {
@@ -702,96 +572,45 @@ router.post('/:id/reconnect', async (req, res) => {
 
 // ── Alias CRUD ─────────────────────────────────────────────────────────────
 
-// A node mailbox's alias is another sender name for its own address (D-16): any other address is
-// refused. Name, reply-to and signature stay free.
-function refusedNodeAliasAddress(res, account, email) {
-  if (!isForeignNodeAliasAddress(account, email)) return false;
-  res.status(400).json({
-    error: 'A mail node mailbox sends only from its own address: another address is a separate mailbox',
-    code: 'node_alias_address_mismatch',
-  });
-  return true;
+// The aliases live in services/accountAliases.js (shared with the panel CLI): a node mailbox's
+// alias is another sender name for its own address (D-16), any other address is refused.
+function refuseAlias(res, code) {
+  const [status, error] = ALIAS_ERRORS[code];
+  // The refusals the screens knew before the move had no code, except the node address one.
+  return res.status(status).json(code === 'node_alias_address_mismatch' ? { error, code } : { error });
 }
 
-// The address an alias is stored with: a node mailbox's own address as the mailbox row spells it
-// (the request may differ in case, spacing or IDN form), anything else as given.
-function aliasAddress(account, email) {
-  return account?.mail_node === true ? account.email_address : email;
-}
+const identityChanged = (accountId) => pluginRegistry.runHook('onAccountIdentityChanged', { accountId })
+  .catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
 
 router.get('/:id/aliases', async (req, res) => {
   const { id } = req.params;
   const check = await query('SELECT id FROM email_accounts WHERE id = $1', [id]);
   if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
-
-  const result = await query(
-    'SELECT id, account_id, name, email, reply_to, signature, created_at FROM account_aliases WHERE account_id = $1 ORDER BY created_at',
-    [id]
-  );
-  res.json(result.rows.map(alias => ({
-    ...alias,
-    signature: alias.signature ? sanitizeSignature(alias.signature) : alias.signature,
-  })));
+  res.json(await listAliases(id));
 });
 
 router.post('/:id/aliases', async (req, res) => {
   const { id } = req.params;
-  const { name, email, reply_to, signature } = req.body;
-  if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
-  if (hasHeaderInjectionChars(name) || hasHeaderInjectionChars(email) || hasHeaderInjectionChars(reply_to)) {
-    return res.status(400).json({ error: 'Fields cannot contain control characters' });
-  }
-
-  const check = await query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [id]);
-  if (!check.rows.length) return res.status(404).json({ error: 'Account not found' });
-  if (refusedNodeAliasAddress(res, check.rows[0], email)) return undefined;
-
-  const result = await query(
-    'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-    [id, name, aliasAddress(check.rows[0], email), reply_to || null, sanitizeSignature(signature) || null]
-  );
-  pluginRegistry.runHook('onAccountIdentityChanged', { accountId: id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
-  res.json(result.rows[0]);
+  const result = await createAlias(id, req.body ?? {});
+  if (result.error) return refuseAlias(res, result.error);
+  identityChanged(id);
+  res.json(result.alias);
 });
 
 router.put('/:id/aliases/:aliasId', async (req, res) => {
   const { id, aliasId } = req.params;
-  const { name, email, reply_to, signature } = req.body;
-  if (!name || !email) return res.status(400).json({ error: 'Name and email required' });
-  if (hasHeaderInjectionChars(name) || hasHeaderInjectionChars(email) || hasHeaderInjectionChars(reply_to)) {
-    return res.status(400).json({ error: 'Fields cannot contain control characters' });
-  }
-
-  const check = await query(
-    `SELECT a.id, a.account_id, e.email_address, e.mail_node FROM account_aliases a
-     JOIN email_accounts e ON a.account_id = e.id
-     WHERE a.id = $1 AND e.id = $2`,
-    [aliasId, id]
-  );
-  if (!check.rows.length) return res.status(404).json({ error: 'Alias not found' });
-  if (refusedNodeAliasAddress(res, check.rows[0], email)) return undefined;
-
-  const result = await query(
-    'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 RETURNING *',
-    [name, aliasAddress(check.rows[0], email), reply_to || null, sanitizeSignature(signature) || null, aliasId]
-  );
-  pluginRegistry.runHook('onAccountIdentityChanged', { accountId: check.rows[0].account_id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
-  res.json(result.rows[0]);
+  const result = await updateAlias(id, aliasId, req.body ?? {});
+  if (result.error) return refuseAlias(res, result.error);
+  identityChanged(result.accountId);
+  res.json(result.alias);
 });
 
 router.delete('/:id/aliases/:aliasId', async (req, res) => {
   const { id, aliasId } = req.params;
-
-  const check = await query(
-    `SELECT a.id, a.account_id FROM account_aliases a
-     JOIN email_accounts e ON a.account_id = e.id
-     WHERE a.id = $1 AND e.id = $2`,
-    [aliasId, id]
-  );
-  if (!check.rows.length) return res.status(404).json({ error: 'Alias not found' });
-
-  await query('DELETE FROM account_aliases WHERE id = $1', [aliasId]);
-  pluginRegistry.runHook('onAccountIdentityChanged', { accountId: check.rows[0].account_id }).catch(err => console.warn('onAccountIdentityChanged hook failed:', err.message));
+  const result = await deleteAlias(id, aliasId);
+  if (result.error) return refuseAlias(res, result.error);
+  identityChanged(result.accountId);
   res.json({ ok: true });
 });
 
