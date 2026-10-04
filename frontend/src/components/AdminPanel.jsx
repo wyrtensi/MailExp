@@ -40,6 +40,7 @@ import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
 import MailNodeOpsSection from './MailNodeOpsSection.jsx';
 import MailNodeOutagesSection from './MailNodeOutagesSection.jsx';
+import PanelUpdateSection from './PanelUpdateSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
 import MailNodeForeignAliases from './MailNodeForeignAliases.jsx';
 import DomainMailboxAddForm from './DomainMailboxAddForm.jsx';
@@ -6967,7 +6968,7 @@ export const TAB_GROUPS = [
   { id: 'account-mail', labelKey: 'admin.tabs.groupAccountMail', tabIds: ['accounts', 'notifications', 'rules', 'categories', 'cleanup'] },
   { id: 'display', labelKey: 'admin.tabs.groupDisplay', tabIds: ['appearance', 'shortcuts'] },
   { id: 'security-integrations', labelKey: 'admin.tabs.groupSecurityIntegrations', tabIds: ['security', 'integrations', 'ai', 'ai-actions', 'plugins'] },
-  { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'mail-node', 'audit', 'sso'] },
+  { id: 'admin', labelKey: 'admin.tabs.groupAdmin', tabIds: ['users', 'mail-node', 'audit', 'panel-update', 'sso'] },
 ];
 
 // A manager (not an administrator) sees only their own mail settings: accounts, notifications,
@@ -7048,6 +7049,11 @@ export const TABS = [
     id: 'audit', labelKey: 'admin.tabs.audit',
     adminOnly: true,
     icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>,
+  },
+  {
+    id: 'panel-update', labelKey: 'admin.tabs.panelUpdate',
+    adminOnly: true,
+    icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="16 12 12 8 8 12"/><line x1="12" y1="16" x2="12" y2="8"/></svg>,
   },
   {
     id: 'sso', labelKey: 'admin.tabs.sso',
@@ -8568,6 +8574,7 @@ export function makeSearchIndex(t) {
       [t('admin.quarantine.title'), ['quarantine', 'spam', 'rspamd', 'release', 'held mail']],
     ].map(([label, keywords]) => ({ label, keywords, tab: 'mail-node', adminOnly: true, breadcrumb: t('admin.tabs.mailNode') })),
     { label: tabLabel('audit'), keywords: ['audit', 'audit log', 'journal', 'history', 'who did', 'deleted', 'sent', 'mailbox changes'], tab: 'audit', adminOnly: true, breadcrumb: tabLabel('audit') },
+    { label: tabLabel('panel-update'), keywords: ['update', 'upgrade', 'version', 'release', 'latest', 'deploy', 'rollback', 'restart', 'panel update'], tab: 'panel-update', adminOnly: true, breadcrumb: tabLabel('panel-update') },
     { label: t('admin.sso.title'), localAuthOnly: true, keywords: ['sso', 'oidc', 'single sign on', 'oauth', 'provider', 'identity provider'], tab: 'sso', adminOnly: true, breadcrumb: tabLabel('sso') },
   ];
 }
@@ -8703,6 +8710,7 @@ export default function AdminPanel() {
       {shownTab === 'users' && <UsersTab />}
       {shownTab === 'mail-node' && user?.isAdmin && <MailNodeTab />}
       {shownTab === 'audit' && user?.isAdmin && <AuditLogTab />}
+      {shownTab === 'panel-update' && user?.isAdmin && <PanelUpdateSection />}
       {shownTab === 'sso' && !isGoogleAuthMode(user) && <SSOTab />}
       {shownTab === 'security' && <SecurityPrivacyTab initialSubTab={pendingSubTab} />}
       {shownTab === 'notifications' && <NotificationsTab />}

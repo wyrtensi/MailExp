@@ -24,6 +24,7 @@ describe('AUDIT_ACTIONS', () => {
       'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced', 'tenant.antispam_enforced',
       'tenant.alias_contacts_removal_approved',
       'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
+      'panel.update_requested', 'panel.update_started', 'panel.update_finished', 'panel.update_failed',
     ]);
     // Section 5.14: the type in words, as EOP wrote it for one the panel does not name.
     assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { type: 'Spam', sender: 's@x.test', recipients: ['a@example.com'], messageId: '<m@x>' } }), {
@@ -489,6 +490,22 @@ describe('auditDetail for inbox rules', () => {
     assert.deepEqual(auditDetail({ action: 'rule.updated', details: { name: 'Copy', forwardTo: 'same@example.net', previousForwardTo: 'same@example.net' } }), {
       key: 'admin.audit.detailRuleForward', values: { name: 'Copy', address: 'same@example.net' },
     });
+  });
+});
+
+describe('auditDetail for a panel update', () => {
+  it('shows the version the update went to, and where from when known', () => {
+    assert.deepEqual(auditDetail({ action: 'panel.update_requested', details: { requestId: 'r', target: 'sha-bbbbbbbbbbbb', from: 'sha-aaaaaaaaaaaa' } }), {
+      key: 'admin.audit.detailPanelUpdate', values: { from: 'sha-aaaaaaaaaaaa', target: 'sha-bbbbbbbbbbbb' },
+    });
+    assert.deepEqual(auditDetail({ action: 'panel.update_failed', details: { target: 'sha-bbbbbbbbbbbb', from: null } }), {
+      key: 'admin.audit.detailPanelUpdateTarget', values: { target: 'sha-bbbbbbbbbbbb' },
+    });
+    assert.equal(auditDetail({ action: 'panel.update_finished', details: {} }), null);
+  });
+
+  it('labels the update actions', () => {
+    assert.equal(auditActionLabelKey('panel.update_finished'), 'admin.audit.actionPanelUpdateFinished');
   });
 });
 

@@ -2779,6 +2779,27 @@ export async function demoRequest(method, path, body = {}) {
   const outageAnswer = demoOutageRequest(verb, pathname, body);
   if (outageAnswer !== undefined) return outageAnswer;
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
+  // Panel update (admins only): the demo has no host behind it, so it reports an up-to-date panel
+  // without an update mechanism and refuses to start anything.
+  if (verb === 'GET' && pathname === '/admin/update') {
+    return {
+      current: { sha: 'd'.repeat(40), version: 'sha-dddddddddddd' },
+      latest: { version: 'sha-dddddddddddd', sha: 'd'.repeat(40), checkedAt: new Date().toISOString() },
+      compare: { status: 'identical', aheadBy: 0, url: null },
+      updateAvailable: false,
+      disabled: false,
+      checkError: null,
+      updater: { spool: false, installed: false, version: null },
+      busy: false,
+      pending: null,
+      check: null,
+      run: null,
+      links: {},
+    };
+  }
+  if (verb === 'POST' && (pathname === '/admin/update' || pathname === '/admin/update/check')) {
+    throw demoError('Updating the panel is not available in demo mode');
+  }
   if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
   if ((verb === 'POST' && pathname === '/oauth/microsoft/device')
     || (verb === 'GET' && pathname === '/oauth/microsoft/device/poll')) {
