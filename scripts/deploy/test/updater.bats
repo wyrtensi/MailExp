@@ -97,6 +97,25 @@ request() {
   [ -z "$(rolled_back_version "$S")" ]
 }
 
+@test "forget_rolled_back_if_running drops the record only for the version that runs" {
+  S=$BATS_TEST_TMPDIR/s
+  mkdir -p "$S/update-spool/result"
+  record_rolled_back "$S" sha-0123456789ab
+  [ -z "$(forget_rolled_back_if_running "$S" sha-ba9876543210)" ]
+  [ "$(rolled_back_version "$S")" = sha-0123456789ab ]
+  # Without updater.json (no units) none is written.
+  [ "$(forget_rolled_back_if_running "$S" sha-0123456789ab)" = sha-0123456789ab ]
+  [ -z "$(rolled_back_version "$S")" ]
+  [ ! -e "$S/update-spool/result/updater.json" ]
+  # With updater.json the panel is told: rolledBack null, the running version.
+  record_rolled_back "$S" sha-0123456789ab
+  write_updater_installed "$S" sha-ba9876543210
+  [ "$(jq -r .rolledBack "$S/update-spool/result/updater.json")" = sha-0123456789ab ]
+  forget_rolled_back_if_running "$S" sha-0123456789ab >/dev/null
+  [ "$(jq -c '[.rolledBack, .version]' "$S/update-spool/result/updater.json")" = '[null,"sha-0123456789ab"]' ]
+  [ -z "$(forget_rolled_back_if_running "$S" sha-0123456789ab)" ]
+}
+
 @test "redact_url drops user information from a repository URL" {
   [ "$(redact_url https://user:t0ken@github.com/o/r.git)" = https://github.com/o/r.git ]
   [ "$(redact_url https://github.com/o/r.git)" = https://github.com/o/r.git ]
@@ -330,6 +349,20 @@ id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }
   run_updater
   [ "$(result "$ID1" .state)" = refused ]
   [[ $(result "$ID1" .message) == "the tag latest names a commit outside main"* ]]
+}
+
+@test "a tag latest left in the checkout counts for nothing when origin no longer has it" {
+  stub_install
+  # origin: a copy of the repository whose owner withdrew the promotion; the checkout keeps its tag.
+  git clone -q --bare "$P/app" "$BATS_TEST_TMPDIR/origin.git"
+  git -C "$BATS_TEST_TMPDIR/origin.git" tag -d latest >/dev/null
+  git -C "$P/app" remote set-url origin "$BATS_TEST_TMPDIR/origin.git"
+  [ "$(git -C "$P/app" rev-parse latest)" = "$MIG" ]
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  run_updater
+  [ "$(result "$ID1" .state)" = refused ]
+  [[ $(result "$ID1" .message) == "cannot fetch the tag latest from "* ]]
+  [ ! -e "$UPDATE_LOG" ]
 }
 
 @test "a request with the id of an existing result is dropped and the result stays as it was" {

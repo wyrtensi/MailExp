@@ -61,6 +61,17 @@ record_rolled_back() {
   printf '%s\n' "$2" >"$1/rolled-back-version"
 }
 
+# forget_rolled_back_if_running <state dir> <version>: install.sh, once <version> runs and is
+# ready. A person who went back to the version that was rolled back from (update.sh or
+# install.sh --version over SSH) runs it now: the record is stale and would make the panel say
+# that the running version cannot be installed. Prints the version it forgot.
+forget_rolled_back_if_running() {
+  [ -n "$2" ] && [ "$(rolled_back_version "$1")" = "$2" ] || return 0
+  rm -f "$1/rolled-back-version"
+  if [ -f "$1/update-spool/result/updater.json" ]; then write_updater_installed "$1" "$2"; fi
+  printf '%s\n' "$2"
+}
+
 # write_updater_installed <state dir> <version>: result/updater.json, how the panel learns that
 # the host units are there (no file: the card says the mechanism is not installed) and which
 # version it must not offer again (rolledBack).

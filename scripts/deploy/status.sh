@@ -276,7 +276,7 @@ collect_target() {
       "next "*) NEXT+=("${line#next }") ;;
       "info "*) INFO+=("${line#info }") ;;
     esac
-  done < <(update_notes "${FACT[tenant_worker]}" "${FACT[edge_services]}" <<<"$changed")
+  done < <(update_notes "${FACT[tenant_worker]}" "${FACT[edge_services]}" "$CFG_SYSTEM" <<<"$changed")
   if ! git -C "$APP_DIR" merge-base --is-ancestor "$head" "$full" 2>/dev/null; then
     info "target: $target is not a descendant of the running commit (a downgrade or another branch)"
   fi

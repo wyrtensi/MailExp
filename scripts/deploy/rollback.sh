@@ -211,7 +211,8 @@ main() {
     log "stopping backend and frontend"
     app_compose stop backend frontend >/dev/null
     log "restoring $dump into $scratch"
-    if ! printf 'DROP DATABASE IF EXISTS "%s";\nCREATE DATABASE "%s";\n' "$scratch" "$scratch" | admin_psql >/dev/null; then
+    # client_min_messages: no NOTICE about a scratch database that is not there, in the output.
+    if ! printf 'SET client_min_messages = warning;\nDROP DATABASE IF EXISTS "%s";\nCREATE DATABASE "%s";\n' "$scratch" "$scratch" | admin_psql >/dev/null; then
       restart_old
       die "cannot create the database $scratch; the database $db is unchanged and the panel was started again"
     fi

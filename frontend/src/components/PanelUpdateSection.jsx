@@ -200,9 +200,12 @@ export default function PanelUpdateSection() {
     return () => { alive.current = false; };
   }, []);
 
-  const load = useCallback(async () => {
+  // refresh only when the card opens: a build promoted since the backend last asked GitHub shows up
+  // at once instead of after the backend's 6-hour cache. The poll and the reloads after a request
+  // use the cache.
+  const load = useCallback(async ({ refresh = false } = {}) => {
     try {
-      const next = await api.admin.getPanelUpdate();
+      const next = await api.admin.getPanelUpdate({ refresh });
       if (!alive.current) return;
       hasData.current = true;
       setData(next);
@@ -218,7 +221,7 @@ export default function PanelUpdateSection() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load({ refresh: true }); }, [load]);
 
   useEffect(() => {
     if (!data) return undefined;

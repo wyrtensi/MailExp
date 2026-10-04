@@ -270,6 +270,14 @@ wait_ready() {
   log "panel ready on 127.0.0.1:$CFG_HTTP_PORT, build $sha"
 }
 
+# forget_rolled_back: the version that now runs is no longer one to keep the panel away from
+# (lib/updater.sh forget_rolled_back_if_running).
+forget_rolled_back() {
+  local forgot
+  forgot=$(forget_rolled_back_if_running "$STATE_DIR" "$CFG_VERSION")
+  if [ -n "$forgot" ]; then log "$forgot runs again: the panel no longer treats it as rolled back"; fi
+}
+
 edge_probe() {
   local host=$CFG_DIRECT_HOST root=$STATE_DIR/edge-local-root.crt
   local -a tls=()
@@ -383,6 +391,7 @@ main() {
   if [ "$CFG_SYSTEM" = 1 ]; then apply_ufw; fi
   if [ "$OPT_START" = 1 ]; then
     wait_ready
+    forget_rolled_back
     verify_edge
   fi
   admin_notice

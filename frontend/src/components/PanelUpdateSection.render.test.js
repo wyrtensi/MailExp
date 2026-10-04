@@ -109,7 +109,8 @@ function mockEnvironment() {
     const path = String(url).replace(/^https?:\/\/[^/]+/, '');
     const method = opts.method || 'GET';
     calls.push({ method, path, body: opts.body ? JSON.parse(opts.body) : undefined });
-    const answer = answers[`${method} ${path}`];
+    // ?refresh=1 asks the same endpoint to skip its cache: the same answer (calls keep the query).
+    const answer = answers[`${method} ${path.replace(/\?refresh=1$/, '')}`];
     const value = typeof answer === 'function' ? answer(opts) : answer;
     if (value instanceof Error) throw value;
     if (value?.status >= 400) return { ok: false, status: value.status, json: async () => value.body ?? {} };
@@ -184,6 +185,15 @@ describe('the panel update section', () => {
     assert.equal(get(root, '[data-panel-update-button]').disabled, true);
     assert.equal(get(root, '[data-panel-update-check-button]').disabled, true);
     assert.equal(posts().length, 0, 'no automatic check without an updater');
+  });
+
+  test('opening the card asks for a fresh look at latest; the poll does not', async () => {
+    answers['GET /api/admin/update'] = state({ updateAvailable: true, run: RUN, busy: true });
+    await mount();
+    const gets = () => calls.filter((c) => c.method === 'GET').map((c) => c.path);
+    assert.deepEqual(gets(), ['/api/admin/update?refresh=1']);
+    await pollNow();
+    assert.deepEqual(gets(), ['/api/admin/update?refresh=1', '/api/admin/update']);
   });
 
   test('shows an up to date panel (ru) with no check and the button off', async () => {
