@@ -93,7 +93,7 @@ function QuarantineEntry({ entry, admin, onReleased, onLearnedSpam, onDeleted, o
     message: t(releaseNoteKey(entry.action)),
     note: [
       t('admin.quarantine.releaseTraining'),
-      releaseEopNoteShown(entry.action, letter?.eop) ? t('admin.quarantine.releaseEopNote') : null,
+      releaseEopNoteShown(entry.action, letter?.eop, detail?.spamRule ?? null) ? t('admin.quarantine.releaseEopNote') : null,
       t('admin.quarantine.releaseRawNote'),
     ].filter(Boolean).join(' '),
     confirmLabel: t('admin.quarantine.release'),

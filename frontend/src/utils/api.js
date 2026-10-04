@@ -424,6 +424,8 @@ export const api = {
     takeTenantConnectorReference: () => request('POST', '/mail-node/tenant/connectors/reference'),
     setTenantDomainHold: (domain, hold) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/hold`, { hold }),
     approveTenantInternalRelay: (domain) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/internal-relay`),
+    // Section 5.14: allow removing the alias contacts kept on an Authoritative domain.
+    removeTenantAliasContacts: (domain) => request('POST', `/mail-node/tenant/domains/${encodeURIComponent(domain)}/alias-contacts/remove`),
     // Stage 7c (R-42): the phishing released from EOP's quarantine, the pause switch, a run now.
     getPhishRelease: () => request('GET', '/mail-node/tenant/phish-release'),
     setPhishRelease: (enabled) => request('PUT', '/mail-node/tenant/phish-release', { enabled }),

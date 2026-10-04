@@ -230,7 +230,9 @@ export default function MailNodeTenant({ revision = 0 }) {
           )}
           {antispam.enforcement && !antispam.enforcement.ok && (
             <div role="alert" data-policy-not-enforced style={boxStyle('warning')}>
-              {t('admin.tenant.policyNotEnforced', { fields: (antispam.enforcement.failed ?? []).map((f) => t(policyFieldKey(f))).join(', ') || '—' })}
+              {t(antispam.enforcement.unconfirmed ? 'admin.tenant.policyUnconfirmed' : 'admin.tenant.policyNotEnforced', {
+                fields: (antispam.enforcement.failed ?? []).map((f) => t(policyFieldKey(f))).join(', ') || '—',
+              })}
               {antispam.enforcement.error && <div><Failure failure={antispam.enforcement.error} /></div>}
             </div>
           )}
@@ -388,6 +390,12 @@ function PhishRelease({ canRun, revision }) {
                 at: when(run.at), released: run.counts.released ?? 0, skipped: run.counts.skipped ?? 0, failed: run.counts.failed ?? 0,
               })}
               {run.left && <div>{t('admin.tenant.phishRunLeft')}</div>}
+              {/* Section 5.14: spam, phishing and bulk wait for this version of the spam rule on the node. */}
+              {run.rule && run.rule.state !== 'ok' && !run.paused && !run.noDomains && (
+                <div role="status" data-phish-rule-waiting={run.rule.state} style={boxStyle('warning')}>
+                  {t('admin.tenant.phishRuleWaiting', { count: run.counts?.ruleWaiting ?? 0 })}
+                </div>
+              )}
               {run.throttled && <div><Failure failure={{ code: run.throttled.code }} /></div>}
               {run.error && <div><Failure failure={run.error} /></div>}
             </div>

@@ -140,7 +140,10 @@ const heldRow = (row) => (row.state === 'skipped' && row.reason !== 'gone') || (
 let phish = {
   enabled: true,
   changedAt: null,
-  run: { at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 2, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false },
+  run: {
+    at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 2, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0, ruleWaiting: 0 }, left: false,
+    rule: { state: 'ok' },
+  },
   rows: [
     {
       identity: QID(4), type: 'Spam', messageId: '<offer-12@deals.example.com>', sender: 'offers@deals.example.com', subject: 'Limited offer for your team',
@@ -216,6 +219,10 @@ export function demoTenantRequest(verb, pathname, settings, error, body = null) 
   // The demo's domains keep their manual onboarding: the hold and the approval answer, change nothing.
   const hold = /^\/mail-node\/tenant\/domains\/([^/]+)\/hold$/.exec(pathname);
   if (verb === 'POST' && hold) return clone({ domain: decodeURIComponent(hold[1]), holdInternalRelay: true });
+  // Section 5.14: the demo's domains hold no alias contacts.
+  if (verb === 'POST' && /^\/mail-node\/tenant\/domains\/[^/]+\/alias-contacts\/remove$/.test(pathname)) {
+    throw error('The domain holds no alias contacts for a decision', 'alias_contacts_not_held');
+  }
   if (verb === 'POST' && /^\/mail-node\/tenant\/domains\/[^/]+\/internal-relay$/.test(pathname)) {
     throw error('The domain does not wait for this decision', 'internal_relay_not_needed');
   }

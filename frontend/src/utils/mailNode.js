@@ -91,6 +91,7 @@ const ERROR_KEYS = {
   hold_invalid: 'admin.mailNode.errorHoldInvalid',
   domain_authoritative: 'admin.mailNode.errorDomainAuthoritative',
   internal_relay_not_needed: 'admin.mailNode.errorInternalRelayNotNeeded',
+  alias_contacts_not_held: 'admin.mailNode.errorAliasContactsNotHeld',
   domain_not_found: 'admin.mailNode.errorDomainNotFound',
   domain_known: 'admin.mailNode.errorDomainKnown',
   domain_already_ready: 'admin.mailNode.errorDomainAlreadyReady',
@@ -962,6 +963,7 @@ const ALERT_TITLE_KEYS = {
   certificate: 'admin.nodeOps.alertCertificate',
   containers: 'admin.nodeOps.alertContainers',
   terrl_budget: 'admin.nodeOps.alertTerrlBudget',
+  spam_rule_outdated: 'admin.nodeOps.alertSpamRuleOutdated',
   outage_letters_waiting: 'admin.nodeOps.alertOutageLettersWaiting',
   connector_blocked_tenant: 'admin.nodeOps.alertConnectorBlockedTenant',
   tenant_certificate: 'admin.nodeOps.alertTenantCertificate',
@@ -969,6 +971,7 @@ const ALERT_TITLE_KEYS = {
   tenant_connector_drift: 'admin.nodeOps.alertTenantConnectorDrift',
   tenant_domain_authoritative: 'admin.nodeOps.alertTenantDomainAuthoritative',
   tenant_phish_held: 'admin.nodeOps.alertTenantPhishHeld',
+  tenant_alias_contacts_held: 'admin.nodeOps.alertTenantAliasContactsHeld',
   tenant_antispam_not_enforced: 'admin.nodeOps.alertTenantAntispamNotEnforced',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
@@ -993,6 +996,7 @@ const ALERT_SOURCE_KEYS = {
   tenant_antispam: 'admin.nodeOps.sourceTenant',
   tenant_domains: 'admin.nodeOps.sourceTenant',
   tenant_quarantine: 'admin.nodeOps.sourceTenant',
+  spam_rule: 'admin.nodeOps.sourceSpamRule',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1056,11 +1060,25 @@ export function alertDetail(alert) {
     case 'tenant_phish_held':
       return { key: 'admin.nodeOps.alertDetailTenantPhishHeld', values: { count: d.count ?? 0 }, at: d.soonestExpiresAt ?? null };
     // The anti-spam actions the panel could not set to MoveToJmf (section 5.14).
-    case 'tenant_antispam_not_enforced':
+    // The worker image predates the operation (unknown_op), or the read after the writes failed and
+    // the writes may have gone through (unconfirmed).
+    case 'tenant_antispam_not_enforced': {
+      let key = 'admin.nodeOps.alertDetailTenantAntispamNotEnforced';
+      if (d.code === 'unknown_op') key = 'admin.nodeOps.alertDetailTenantAntispamWorkerOutdated';
+      else if (d.unconfirmed) key = 'admin.nodeOps.alertDetailTenantAntispamUnconfirmed';
+      return { key, values: { fields: (d.fields ?? []).join(', ') || '—', code: d.code ?? '—' }, at: d.checkedAt ?? null };
+    }
+    // The node's spam rule is older than the panel's, or missing (section 5.14).
+    case 'spam_rule_outdated':
       return {
-        key: 'admin.nodeOps.alertDetailTenantAntispamNotEnforced',
-        values: { fields: (d.fields ?? []).join(', ') || '—', code: d.code ?? '—' },
-        at: d.checkedAt ?? null,
+        key: d.state === 'missing' ? 'admin.nodeOps.alertDetailSpamRuleMissing' : 'admin.nodeOps.alertDetailSpamRuleOutdated',
+        values: {}, at: d.checkedAt ?? null,
+      };
+    // Alias contacts kept on an Authoritative domain for an administrator (section 5.14).
+    case 'tenant_alias_contacts_held':
+      return {
+        key: 'admin.nodeOps.alertDetailTenantAliasContactsHeld',
+        values: { count: d.count ?? 0, addresses: (d.addresses ?? []).join(', ') || '—', domains: (d.domains ?? []).join(', ') || '—' },
       };
     case 'tenant_domain_authoritative':
       return { key: 'admin.nodeOps.alertDetailTenantDomainAuthoritative', values: { count: d.count ?? 0, domains: (d.domains ?? []).join(', ') || '—' } };
@@ -1193,6 +1211,7 @@ const TENANT_FAILURE_KEYS = {
   list_failed: 'admin.tenant.failExo',
   quarantine_not_allowed: 'admin.tenant.failQuarantineNotAllowed',
   antispam_not_written: 'admin.tenant.failAntispamNotWritten',
+  unknown_op: 'admin.tenant.failWorkerOutdated',
   mail_node_not_configured: 'admin.mailNode.errorNotConfigured',
   mail_node_unreachable: 'admin.mailNode.errorUnreachable',
   mail_node_auth: 'admin.mailNode.errorAuth',
@@ -1266,6 +1285,7 @@ const QUARANTINE_TYPE_KEYS = {
   Phish: 'admin.tenant.qtypePhish',
   Spam: 'admin.tenant.qtypeSpam',
   HighConfSpam: 'admin.tenant.qtypeHighConfSpam',
+  Bulk: 'admin.tenant.qtypeBulk',
 };
 export function quarantineTypeKey(type) {
   return Object.hasOwn(QUARANTINE_TYPE_KEYS, type ?? '') ? QUARANTINE_TYPE_KEYS[type] : null;

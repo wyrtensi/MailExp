@@ -193,6 +193,19 @@ describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
     assert.equal(buttons(root, 'admin.tenant.phishRunNow')[0].disabled, true);
   });
 
+  test('says spam, phishing and bulk wait for the node\'s spam rule (section 5.14)', async () => {
+    answers['GET /api/mail-node/tenant/phish-release'] = {
+      ...RELEASE, run: { ...RELEASE.run, counts: { ...RELEASE.run.counts, ruleWaiting: 4 }, rule: { state: 'outdated' } },
+    };
+    const root = await mount(React.createElement(MailNodeTenant));
+    const box = root.querySelector('[data-phish-rule-waiting]');
+    assert.equal(box.getAttribute('data-phish-rule-waiting'), 'outdated');
+    assert.match(box.textContent, /admin\.tenant\.phishRuleWaiting/);
+    answers['GET /api/mail-node/tenant/phish-release'] = { ...RELEASE, run: { ...RELEASE.run, rule: { state: 'ok' } } };
+    const again = await mount(React.createElement(MailNodeTenant));
+    assert.equal(again.querySelector('[data-phish-rule-waiting]'), null);
+  });
+
   test('is not shown without a driver or a configured tenant', async () => {
     answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: false, state: {}, jobs: {} };
     const root = await mount(React.createElement(MailNodeTenant));

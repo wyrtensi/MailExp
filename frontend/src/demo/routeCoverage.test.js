@@ -579,6 +579,7 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   const held = await answer('/mail-node/tenant/domains/:param/hold', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/hold', { hold: false });
   assert.equal(held.holdInternalRelay, true);
   await reject('/mail-node/tenant/domains/:param/internal-relay', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/internal-relay', {}, /does not wait/);
+  await reject('/mail-node/tenant/domains/:param/alias-contacts/remove', 'POST', '/mail-node/tenant/domains/demo.mailexpert.local/alias-contacts/remove', {}, /no alias contacts/);
   // Stage 7c: the spam and phishing release (R-42, section 5.14) and a letter's trace (R-30).
   // On as on a new install; "Release now" is refused while it is off.
   const release = await demoRequest('GET', '/mail-node/tenant/phish-release');

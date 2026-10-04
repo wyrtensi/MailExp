@@ -317,6 +317,30 @@ describe('MailNodeDomainOnboarding — the tenant driver (stage 7b)', () => {
     assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/domains/pending.example/internal-relay'));
   });
 
+  test('on an Authoritative domain lists the aliases, keeps their contacts and removes them only after a confirmation (section 5.14)', async () => {
+    const sync = {
+      at, ok: true, acceptedDomain: { visible: true, type: 'Authoritative' },
+      mirror: {
+        ok: true, desired: 1, present: 1, complete: true, left: 0, nodeOnly: ['manual@pending.example'], panelOnly: [], conflicts: [], failed: [],
+        nodeAliases: ['sales@pending.example'], heldAliasContacts: ['sales@pending.example'],
+      },
+    };
+    answers['GET /api/mail-node/domains'] = { domains: [domainRow('pending.example', 'authoritative', { tenantSync: sync })], tenantDriverActive: true };
+    answers['POST /api/mail-node/tenant/domains/pending.example/alias-contacts/remove'] = { job: { id: '9', kind: 'tenant_domain_sync', status: 'queued' } };
+    const host = await mount(React.createElement(MailNodeSection));
+    await click(buttons(host, 'admin.mailNode.showDetails')[0]);
+    // Mailboxes made outside the panel are shown as such (and still mirrored).
+    assert.match(host.querySelector('[data-tenant-node-only]').textContent, /admin\.mailNode\.tenantNodeOnlyNote/);
+    assert.match(host.querySelector('[data-tenant-node-aliases]').textContent, /admin\.mailNode\.tenantNodeAliasesNoteAuthoritative/);
+    const box = host.querySelector('[data-tenant-alias-contacts-held]');
+    assert.match(box.textContent, /admin\.mailNode\.tenantAliasContactsHeld/);
+    await click(buttons(box, 'admin.mailNode.tenantRemoveAliasContacts')[0]);
+    assert.ok(!calls.some((c) => c.path.endsWith('/alias-contacts/remove')), 'a confirmation first');
+    assert.ok(host.textContent.includes('admin.mailNode.tenantRemoveAliasContactsConfirm'));
+    await click(buttons(host.querySelector('[data-tenant-alias-contacts-held]'), 'admin.mailNode.tenantRemoveAliasContacts')[0]);
+    assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/domains/pending.example/alias-contacts/remove'));
+  });
+
   test('shows why Microsoft has not verified the domain yet', async () => {
     const waiting = {
       at, ok: true,
