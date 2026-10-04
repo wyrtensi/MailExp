@@ -129,6 +129,7 @@ function namesInput(flags) {
 
 const create = {
   name: 'create',
+  journal: 'mailbox.added, as the panel',
   summary: 'create a mailbox on the node (its domain must have finished onboarding)',
   usage: 'mailbox create <local@domain> [--name NAME] [--sender-name NAME] [--second-sender-name NAME]',
   help: [
@@ -139,7 +140,6 @@ const create = {
   flags: NAME_FLAGS,
   aliases: NAME_ALIASES,
   positionals: ['address'],
-  mutates: true,
   async run(ctx) {
     const address = String(ctx.args.address);
     const at = address.lastIndexOf('@');
@@ -156,13 +156,13 @@ const create = {
 
 const setNames = {
   name: 'set-names',
+  journal: 'none: the panel does not journal names either',
   summary: 'rename a mailbox or change its sender names',
   usage: 'mailbox set-names <address|id> [--name NAME] [--sender-name NAME] [--second-sender-name NAME]',
   help: NAME_HELP,
   flags: NAME_FLAGS,
   aliases: NAME_ALIASES,
   positionals: ['mailbox'],
-  mutates: true,
   async run(ctx) {
     const input = namesInput(ctx.flags);
     if (Object.values(input).every((value) => value === undefined)) {
@@ -176,6 +176,7 @@ const setNames = {
 
 const requestDelete = {
   name: 'delete',
+  journal: 'mailbox.deletion_requested with the reason',
   summary: 'ask to delete a mailbox with all its mail after the waiting days (D-14)',
   usage: 'mailbox delete <address|id> --reason TEXT [--confirm-address ADDRESS]',
   help: [
@@ -187,7 +188,6 @@ const requestDelete = {
   ],
   flags: { reason: 'string', 'confirm-address': 'string' },
   positionals: ['mailbox'],
-  mutates: true,
   async run(ctx) {
     if (ctx.flags.reason === undefined) throw new UsageError('--reason is required: say why the mailbox is deleted');
     const account = await mailboxRef(ctx.args.mailbox);
@@ -206,10 +206,10 @@ const requestDelete = {
 
 const cancelDelete = {
   name: 'cancel-deletion',
+  journal: 'mailbox.deletion_cancelled',
   summary: 'cancel a pending deletion: the mailbox stays as it is',
   usage: 'mailbox cancel-deletion <address|id>',
   positionals: ['mailbox'],
-  mutates: true,
   async run(ctx) {
     const account = await mailboxRef(ctx.args.mailbox);
     const result = unwrap(await cancelMailboxDeletion({ accountId: account.id }, ctx.actor), MAILBOX_ERRORS);

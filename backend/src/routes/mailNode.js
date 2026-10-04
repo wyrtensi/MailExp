@@ -5,7 +5,7 @@ import { uuidParam } from '../utils/uuid.js';
 import { recordAudit } from '../services/auditLog.js';
 import { MAIL_NODE_ERRORS } from '../services/mailNode/errors.js';
 import { adminDomainList, restartDomain } from '../services/mailNode/domainActions.js';
-import { defaultLimits, listNodeMailboxes, onOtherMailHost } from '../services/mailNode/mailboxActions.js';
+import { defaultLimits, listNodeMailboxes, onOtherMailHost, overrideOf } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
 import { checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
 import {
@@ -528,8 +528,6 @@ router.get('/mailboxes', requireAdmin, async (req, res) => {
   }
   return result.error ? refuse(res, result.error) : res.json(result);
 });
-
-const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
 
 router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {
   const quotaMb = parseWholeNumber(req.body?.quotaMb, 1, MAX_QUOTA_MB);

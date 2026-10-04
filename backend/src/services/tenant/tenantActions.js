@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { getJob, listJobs } from '../jobQueue.js';
 import { recordAudit } from '../auditLog.js';
-import { auditOf } from '../actor.js';
+import { auditOf, jobBy } from '../actor.js';
 import { getEopSettings } from '../mailNode/eopSettings.js';
 import { getDomainRow } from '../mailNode/domains.js';
 import { parseHostName } from '../mailNode/mailcow.js';
@@ -30,6 +30,7 @@ export const TENANT_ERRORS = Object.freeze({
   domain_authoritative: [409, 'The domain is Authoritative already: it is not held on Internal Relay'],
   internal_relay_not_needed: [409, 'The domain does not wait for this decision'],
   alias_contacts_not_held: [409, 'The domain holds no alias contacts for a decision'],
+  alias_contacts_changed: [409, 'The held alias contacts changed since they were shown: look at them again'],
   enabled_invalid: [400, 'enabled must be true or false'],
   phish_release_paused: [409, 'The release of quarantined phishing is paused'],
 });
@@ -79,7 +80,7 @@ async function tenantRefusal() {
 export async function enqueueTenantAction(kind, actor) {
   const error = await tenantRefusal();
   if (error) return { error };
-  const { job, created } = await enqueueTenantJob(kind, { userId: actor?.userId ?? null });
+  const { job, created } = await enqueueTenantJob(kind, jobBy(actor));
   return { job: jobAnswer(job), created };
 }
 
@@ -90,7 +91,7 @@ export async function syncDomainNow(rawDomain, actor) {
   const error = await tenantRefusal();
   if (error) return { error };
   if (!(await getDomainRow(domain))) return { error: 'domain_not_found' };
-  const { job, created } = await enqueueDomainSync(domain, { userId: actor?.userId ?? null });
+  const { job, created } = await enqueueDomainSync(domain, jobBy(actor));
   return { job: jobAnswer(job), created };
 }
 
@@ -108,7 +109,7 @@ export async function setDomainHold(rawDomain, hold, actor) {
     recordAudit(auditOf(actor, { action: 'tenant.domain_hold_changed', details: { domain, hold } }));
   }
   // Released: the next run may make the domain Authoritative.
-  if (!hold) await kickDomainSync(domain, { userId: actor?.userId ?? null });
+  if (!hold) await kickDomainSync(domain, jobBy(actor));
   return { domain, holdInternalRelay: hold };
 }
 
@@ -123,14 +124,15 @@ export async function approveInternalRelay(rawDomain, actor) {
   if (row.tenant_sync?.acceptedDomain?.code !== 'authoritative_in_tenant') return { error: 'internal_relay_not_needed' };
   await query('UPDATE mail_node_domains SET internal_relay_approved_at = NOW(), updated_at = NOW() WHERE domain = $1', [domain]);
   recordAudit(auditOf(actor, { action: 'tenant.internal_relay_approved', details: { domain } }));
-  const { job } = await enqueueDomainSync(domain, { userId: actor?.userId ?? null });
+  const { job } = await enqueueDomainSync(domain, jobBy(actor));
   return { job: jobAnswer(job) };
 }
 
 // Section 5.14: allow the mirror to remove, on an Authoritative domain, the contacts stage 7b made
 // for mailcow aliases made by hand. Mail to those aliases is rejected from the next run on.
-// Journaled with the addresses the last run held: { job, addresses }.
-export async function approveAliasContactsRemoval(rawDomain, actor) {
+// Journaled with the addresses the last run held: { job, addresses }. expected: the addresses the
+// caller showed for the decision; when the last run holds others, nothing is approved.
+export async function approveAliasContactsRemoval(rawDomain, actor, { expected = null } = {}) {
   const domain = parseHostName(rawDomain);
   if (!domain) return { error: 'domain_invalid' };
   const error = await tenantRefusal();
@@ -139,9 +141,11 @@ export async function approveAliasContactsRemoval(rawDomain, actor) {
   if (!row) return { error: 'domain_not_found' };
   const held = row.tenant_sync?.mirror?.heldAliasContacts ?? [];
   if (!held.length) return { error: 'alias_contacts_not_held' };
+  const sameSet = (a, b) => a.length === b.length && [...a].sort().every((v, i) => v === [...b].sort()[i]);
+  if (expected && !sameSet(expected, held)) return { error: 'alias_contacts_changed' };
   await query('UPDATE mail_node_domains SET alias_contacts_approved_at = NOW(), updated_at = NOW() WHERE domain = $1', [domain]);
   recordAudit(auditOf(actor, { action: 'tenant.alias_contacts_removal_approved', details: { domain, addresses: held } }));
-  const { job } = await enqueueDomainSync(domain, { userId: actor?.userId ?? null });
+  const { job } = await enqueueDomainSync(domain, jobBy(actor));
   return { job: jobAnswer(job), addresses: held };
 }
 
@@ -181,7 +185,7 @@ export async function runPhishReleaseNow(actor) {
   const error = await tenantRefusal();
   if (error) return { error };
   if (!(await getReleaseSettings()).enabled) return { error: 'phish_release_paused' };
-  const { job, created } = await enqueueTenantJob(QUARANTINE_RELEASE_KIND, { userId: actor?.userId ?? null });
+  const { job, created } = await enqueueTenantJob(QUARANTINE_RELEASE_KIND, jobBy(actor));
   return { job: jobAnswer(job), created };
 }
 

@@ -30,6 +30,12 @@ export function auditOf(actor, entry) {
   };
 }
 
+// Who queues a job, as the queue functions take it: { userId, via? }. The job keeps via in its
+// payload, so its own journal entries name the CLI (services/tenant/tenantJobs.js jobAudit).
+export function jobBy(actor) {
+  return { userId: actor?.userId ?? null, ...(actor?.via ? { via: actor.via } : {}) };
+}
+
 // The CLI's actor: --as names an administrator who exists and is not disabled; without it the
 // actor is the CLI itself. Answers { actor } or { error: 'admin_not_found' }.
 export async function resolveCliActor(asEmail) {

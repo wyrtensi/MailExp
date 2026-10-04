@@ -47,6 +47,7 @@ const list = {
 
 const release = {
   name: 'release',
+  journal: 'none for queuing; each released message is journaled by MailExpert, as for the button',
   summary: 'run a release pass now (the "Release now" button)',
   usage: 'quarantine release [--wait] [--timeout SEC]',
   help: [
@@ -55,7 +56,6 @@ const release = {
     ...WAIT_HELP,
   ],
   flags: WAIT_FLAGS,
-  mutates: true,
   async run(ctx) {
     const result = unwrap(await runPhishReleaseNow(ctx.actor), TENANT_ERRORS);
     const job = await maybeWait(ctx, result.job);
@@ -66,9 +66,9 @@ const release = {
 function switchCommand(name, enabled) {
   return {
     name,
+    journal: 'tenant.phish_release_changed, when it changes',
     summary: enabled ? 'resume the automatic release' : 'pause the automatic release (messages stay in the quarantine)',
     usage: `quarantine ${name}`,
-    mutates: true,
     async run(ctx) {
       if (!enabled) await confirm(ctx, 'Pause the release? Spam and phishing then wait in EOP\'s quarantine instead of reaching Spam.');
       const result = unwrap(await setPhishRelease(enabled, ctx.actor), TENANT_ERRORS);

@@ -5,12 +5,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // tenant driver (TENANT_DRIVER=fake, the panel's demo/stand mode). What the CLI writes must be what
 // the panel's routes write, journal included, with the actor "cli" or the --as administrator.
 
-const dbState = vi.hoisted(() => ({ db: null }));
+// closed: the pool was ended (the CLI's finish()); a query after that fails, as pg's does.
+const dbState = vi.hoisted(() => ({ db: null, closed: false }));
 const fake = vi.hoisted(() => ({ current: null }));
 vi.mock('../services/db.js', () => ({
-  query: (sql, params) => dbState.db.query(sql, params),
+  query: (sql, params) => (dbState.closed
+    ? Promise.reject(new Error('Cannot use a pool after calling end on the pool'))
+    : dbState.db.query(sql, params)),
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
-  pool: { end: async () => {} },
+  pool: { end: async () => { dbState.closed = true; } },
 }));
 vi.mock('../services/encryption.js', () => ({
   encrypt: (v) => `enc:${v}`,
@@ -27,7 +30,7 @@ const { TENANT_FIXTURES } = await import('../services/tenant/fakes.js');
 const { claimDueJobs, runJob } = await import('../services/jobQueue.js');
 const { registerTenantJobKinds } = await import('../services/tenant/tenantJobs.js');
 const { DOMAIN_SYNC_KIND, registerTenantDomainJobKind } = await import('../services/tenant/tenantDomains.js');
-const { run } = await import('./mailexpert.js');
+const { finish, run } = await import('./mailexpert.js');
 
 const ADMIN = '62000000-0000-4000-8000-000000000001';
 const USER = '62000000-0000-4000-8000-000000000002';
@@ -48,11 +51,11 @@ async function runDue() {
   for (const job of await claimDueJobs(10)) await runJob(job);
 }
 
-async function cli(argv, { interactive = false, answers = [] } = {}) {
+async function cli(argv, { interactive = false, answers = [], ask = null } = {}) {
   const stdout = sink();
   const stderr = sink();
   const code = await run(argv, {
-    stdout, stderr, interactive, ask: async () => answers.shift() ?? '',
+    stdout, stderr, interactive, ask: ask ?? (async () => answers.shift() ?? ''),
     sleep: runDue, now: Date.now, pollMs: 0,
   });
   return { code, out: stdout.text, err: stderr.text, json: () => JSON.parse(stdout.text) };
@@ -94,6 +97,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  dbState.closed = false;
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -191,6 +195,49 @@ describe('mailexpert mailbox', () => {
     await cli(['mailbox', 'set-names', 'old@example.com', '--en', '']);
     expect((await db.query('SELECT 1 FROM account_aliases WHERE account_id = $1', [id])).rows).toEqual([]);
     expect((await cli(['mailbox', 'set-names', 'old@example.com', '--sender-name', 'a\nb'])).err).toContain('(sender_name_invalid)');
+  });
+
+  it('refuses a second sender name equal to the sender name, either way round, and keeps the alias', async () => {
+    const id = await addAccount('old@example.com');
+    await cli(['mailbox', 'set-names', 'old@example.com', '--sender-name', 'Ivan', '--second-sender-name', 'Ivan Petrov']);
+    const same = await cli(['mailbox', 'set-names', 'old@example.com', '--second-sender-name', 'IVAN']);
+    expect(same.code).toBe(1);
+    expect(same.err).toContain('(sender_name_alt_same)');
+    const reverse = await cli(['mailbox', 'set-names', 'old@example.com', '--sender-name', 'ivan petrov']);
+    expect(reverse.err).toContain('(sender_name_alt_same)');
+    expect(await account('old@example.com')).toMatchObject({ sender_name: 'Ivan' });
+    expect((await db.query('SELECT name FROM account_aliases WHERE account_id = $1', [id])).rows).toEqual([{ name: 'Ivan Petrov' }]);
+  });
+
+  it('refuses an empty --name as required, not as invalid characters', async () => {
+    await addAccount('old@example.com');
+    const result = await cli(['mailbox', 'set-names', 'old@example.com', '--name', '  ']);
+    expect(result.code).toBe(1);
+    expect(result.err).toContain('The mailbox name cannot be empty (name_required)');
+  });
+
+  it('writes the names and the second name in one transaction', async () => {
+    const id = await addAccount('old@example.com');
+    await db.exec(`CREATE FUNCTION refuse_alias() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no aliases'; END $$;
+      CREATE TRIGGER refuse_alias BEFORE INSERT ON account_aliases FOR EACH ROW EXECUTE FUNCTION refuse_alias();`);
+    try {
+      const result = await cli(['mailbox', 'set-names', 'old@example.com', '--name', 'New name', '--sender-name', 'Новое', '--en', 'New']);
+      expect(result.code).toBe(3);
+    } finally {
+      await db.exec('DROP TRIGGER refuse_alias ON account_aliases; DROP FUNCTION refuse_alias();');
+    }
+    expect(await account('old@example.com')).toMatchObject({ name: 'old@example.com', sender_name: 'Old' });
+    expect((await db.query('SELECT 1 FROM account_aliases WHERE account_id = $1', [id])).rows).toEqual([]);
+  });
+
+  it('answers not_mail_node for the ID of a mailbox that is not on the node, as the route does', async () => {
+    const { rows: [row] } = await db.query(
+      "INSERT INTO email_accounts (added_by, name, email_address, mail_node) VALUES ($1, 'g', 'g@gmail.example', false) RETURNING id", [ADMIN],
+    );
+    const result = await cli(['mailbox', 'show', row.id, '--json']);
+    expect(result.code).toBe(1);
+    expect(result.json()).toEqual({ error: 'Only a mailbox on the mail node waits before it is deleted: remove this one directly', code: 'not_mail_node' });
+    expect((await cli(['mailbox', 'show', 'g@gmail.example'])).err).toContain('(mailbox_not_found)');
   });
 
   it('asks to delete a mailbox with the typed address and a reason, then cancels it, both journaled', async () => {
@@ -326,6 +373,39 @@ describe('mailexpert domain', () => {
       expect((await domainRow('example.com')).alias_contacts_approved_at).toBeTruthy();
       const [entry] = (await auditSettled(1)).filter((e) => e.action === 'tenant.alias_contacts_removal_approved');
       expect(entry).toMatchObject({ actor_email: 'cli', details: { domain: 'example.com', addresses: ['info@example.com'], via: 'cli' } });
+    });
+
+    it('approves only the alias contacts it showed: a run that changed them meanwhile approves nothing', async () => {
+      await db.query(`UPDATE mail_node_domains SET state = 'authoritative',
+        tenant_sync = '{"mirror":{"ok":true,"heldAliasContacts":["info@example.com"]}}' WHERE domain = 'example.com'`);
+      // While the administrator reads the question, a tenant run holds another alias too.
+      const ask = async () => {
+        await db.query(`UPDATE mail_node_domains
+          SET tenant_sync = '{"mirror":{"ok":true,"heldAliasContacts":["info@example.com","sales@example.com"]}}' WHERE domain = 'example.com'`);
+        return 'y';
+      };
+      const result = await cli(['domain', 'approve-alias-removal', 'example.com'], { interactive: true, ask });
+      expect(result.code).toBe(1);
+      expect(result.err).toContain('(alias_contacts_changed)');
+      expect((await domainRow('example.com')).alias_contacts_approved_at).toBeNull();
+      expect((await db.query('SELECT 1 FROM jobs WHERE kind = $1', [DOMAIN_SYNC_KIND])).rows).toEqual([]);
+    });
+
+    it('keeps the queued tenant run and the journal when the CLI closes its pool right after the answer', async () => {
+      await cli(['mailbox', 'create', 'late@example.com']);
+      await db.query(`UPDATE mail_node_domains SET steps = '{"node_configured":{"at":"2026-10-01T10:00:00Z"}}' WHERE domain = 'new.example'`);
+      await cli(['domain', 'restart', 'new.example', '--yes']);
+      // What main() does: finish(), then exit. Nothing after it may need the pool.
+      await finish();
+      expect(dbState.closed).toBe(true);
+      const { rows: jobs } = await db.query(
+        "SELECT payload->>'domain' AS domain, payload->>'via' AS via, max_attempts FROM jobs WHERE kind = $1 ORDER BY id", [DOMAIN_SYNC_KIND],
+      );
+      expect(jobs).toEqual([
+        { domain: 'example.com', via: 'cli', max_attempts: 6 },
+        { domain: 'new.example', via: 'cli', max_attempts: 6 },
+      ]);
+      expect((await audit()).map((e) => e.action)).toEqual(expect.arrayContaining(['mailbox.added', 'mail_node.domain_state_changed']));
     });
   });
 

@@ -97,8 +97,8 @@ describe('mailexpert tenant', () => {
     expect(after.out).toMatch(/connection test:\s+ok/);
     expect(after.out).toContain('anti-spam policy: read at');
     const [entry] = (await auditSettled(1)).filter((e) => e.action === 'tenant.connection_tested');
-    // A job queued without --as has no user: the job's own journal names MailExpert.
-    expect(entry).toMatchObject({ actor_user_id: null, details: { ok: true } });
+    // The job's own journal entry names the CLI that queued it (payload.via), not MailExpert.
+    expect(entry).toMatchObject({ actor_user_id: null, actor_email: 'cli', details: { ok: true, via: 'cli' } });
   });
 
   it('checks and fixes the anti-spam policy as the --as administrator', async () => {
@@ -110,6 +110,10 @@ describe('mailexpert tenant', () => {
     const status = await cli(['tenant', 'status', '--json']);
     expect(status.json().state.antispam).toMatchObject({ ok: true });
     expect(status.json().state.antispam.enforcement).toBeTruthy();
+    // What the job changed is journaled as the --as administrator, through the CLI.
+    for (const entry of (await audit()).filter((e) => e.action === 'tenant.antispam_enforced')) {
+      expect(entry).toMatchObject({ actor_user_id: ADMIN, actor_email: 'admin@example.com', details: { via: 'cli' } });
+    }
   });
 
   it('answers the job already queued instead of a second one', async () => {

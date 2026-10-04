@@ -1,4 +1,6 @@
-import { CliError, WAIT_FLAGS, WAIT_HELP, confirm, jobLine, maybeWait, nodeAction, unwrap } from '../common.js';
+import {
+  CliError, WAIT_FLAGS, WAIT_HELP, confirm, jobLine, maybeWait, nodeAction, refusal, unwrap,
+} from '../common.js';
 import { UsageError } from '../args.js';
 import { fmtDate, fmtValue, keyValues, table } from '../output.js';
 import { parseHostName } from '../../services/mailNode/mailcow.js';
@@ -123,6 +125,7 @@ const show = {
 
 const restart = {
   name: 'restart',
+  journal: 'mail_node.domain_state_changed, and mail_node.applied when the node settings change',
   summary: 'restart the domain\'s onboarding from node_created',
   usage: 'domain restart <domain>',
   help: [
@@ -130,7 +133,6 @@ const restart = {
     'held; its DKIM mode, send limit and mailboxes stay. Its node settings are applied again.',
   ],
   positionals: ['domain'],
-  mutates: true,
   async run(ctx) {
     const domain = domainArg(ctx);
     await confirm(ctx, `Restart the onboarding of ${domain} from the first step?`);
@@ -145,12 +147,12 @@ const restart = {
 
 const sync = {
   name: 'sync',
+  journal: 'none for queuing; what the tenant run changes is journaled by MailExpert, as for the button',
   summary: 'run the domain\'s tenant steps now (queues the tenant job)',
   usage: 'domain sync <domain> [--wait] [--timeout SEC]',
   help: WAIT_HELP,
   flags: WAIT_FLAGS,
   positionals: ['domain'],
-  mutates: true,
   async run(ctx) {
     const result = unwrap(await syncDomainNow(domainArg(ctx), ctx.actor), TENANT_ERRORS);
     const job = await maybeWait(ctx, result.job);
@@ -160,10 +162,10 @@ const sync = {
 
 const hold = {
   name: 'hold',
+  journal: 'tenant.domain_hold_changed, when the hold changes',
   summary: 'keep the domain on Internal Relay (the default)',
   usage: 'domain hold <domain>',
   positionals: ['domain'],
-  mutates: true,
   async run(ctx) {
     const result = unwrap(await setDomainHold(domainArg(ctx), true, ctx.actor), TENANT_ERRORS);
     return { data: result, lines: [`${result.domain}: held on Internal Relay`] };
@@ -172,6 +174,7 @@ const hold = {
 
 const allowAuthoritative = {
   name: 'allow-authoritative',
+  journal: 'tenant.domain_hold_changed, when the hold changes',
   summary: 'let a complete recipient mirror make the domain Authoritative',
   usage: 'domain allow-authoritative <domain>',
   help: [
@@ -179,7 +182,6 @@ const allowAuthoritative = {
     'for, mailcow aliases made by hand included (D-16).',
   ],
   positionals: ['domain'],
-  mutates: true,
   async run(ctx) {
     const domain = domainArg(ctx);
     await confirm(ctx, `Let ${domain} become Authoritative once its recipient mirror is complete?`);
@@ -190,12 +192,12 @@ const allowAuthoritative = {
 
 const internalRelay = {
   name: 'internal-relay',
+  journal: 'tenant.internal_relay_approved',
   summary: 'approve moving a domain the tenant has as Authoritative to Internal Relay',
   usage: 'domain internal-relay <domain> [--wait] [--timeout SEC]',
   help: WAIT_HELP,
   flags: WAIT_FLAGS,
   positionals: ['domain'],
-  mutates: true,
   async run(ctx) {
     const domain = domainArg(ctx);
     await confirm(ctx, `Move ${domain} to Internal Relay in the tenant?`);
@@ -207,6 +209,7 @@ const internalRelay = {
 
 const approveAliasRemoval = {
   name: 'approve-alias-removal',
+  journal: 'tenant.alias_contacts_removal_approved with the addresses',
   summary: 'allow the mirror to remove the contacts of mailcow aliases on an Authoritative domain',
   usage: 'domain approve-alias-removal <domain> [--wait] [--timeout SEC]',
   help: [
@@ -216,15 +219,15 @@ const approveAliasRemoval = {
   ],
   flags: WAIT_FLAGS,
   positionals: ['domain'],
-  mutates: true,
   async run(ctx) {
     const domain = domainArg(ctx);
     const { addresses } = unwrap(await heldAliasContactsOf(domain), TENANT_ERRORS);
-    if (addresses.length) {
-      ctx.note(`Contacts held on ${domain}: ${addresses.join(', ')}`);
-      await confirm(ctx, 'Remove them? Mail to these addresses will be rejected.');
-    }
-    const result = unwrap(await approveAliasContactsRemoval(domain, ctx.actor), TENANT_ERRORS);
+    // Nothing held: nothing to approve, and nothing is approved.
+    if (!addresses.length) throw refusal(TENANT_ERRORS, 'alias_contacts_not_held');
+    ctx.note(`Contacts held on ${domain}: ${addresses.join(', ')}`);
+    await confirm(ctx, 'Remove them? Mail to these addresses will be rejected.');
+    // Only the addresses shown: if a run changed them meanwhile, nothing is approved.
+    const result = unwrap(await approveAliasContactsRemoval(domain, ctx.actor, { expected: addresses }), TENANT_ERRORS);
     const job = await maybeWait(ctx, result.job);
     return { data: { ...result, job }, lines: [`${domain}: removal of ${result.addresses.length} alias contacts approved`, jobLine(job)] };
   },

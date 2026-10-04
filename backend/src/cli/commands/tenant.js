@@ -73,14 +73,14 @@ const status = {
   },
 };
 
-function enqueueCommand(name, kind, summary, usageExtra = []) {
+function enqueueCommand(name, kind, summary, journal, usageExtra = []) {
   return {
     name,
+    journal,
     summary,
     usage: `tenant ${name} [--wait] [--timeout SEC]`,
     help: [...usageExtra, ...WAIT_HELP],
     flags: WAIT_FLAGS,
-    mutates: true,
     async run(ctx) {
       const result = unwrap(await enqueueTenantAction(kind, ctx.actor), TENANT_ERRORS);
       const job = await maybeWait(ctx, result.job);
@@ -94,8 +94,10 @@ export default {
   summary: 'the Microsoft tenant: status, connection test, anti-spam policy',
   commands: [
     status,
-    enqueueCommand('test', TENANT_JOB_KINDS.test, 'test the connection to the tenant through the worker (the "Test connection" button)'),
-    enqueueCommand('antispam', TENANT_JOB_KINDS.antispam, 'check and fix the Default anti-spam policy (the "Check and fix" button)', [
+    enqueueCommand('test', TENANT_JOB_KINDS.test, 'test the connection to the tenant through the worker (the "Test connection" button)',
+      'tenant.connection_tested, written by the job'),
+    enqueueCommand('antispam', TENANT_JOB_KINDS.antispam, 'check and fix the Default anti-spam policy (the "Check and fix" button)',
+      'tenant.antispam_enforced, written by the job when it changes the policy', [
       'Sets the spam, high confidence spam, phishing and bulk actions of the Default policy to',
       'MoveToJmf where they differ (section 5.14); what changed is journaled.',
     ]),

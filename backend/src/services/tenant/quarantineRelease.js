@@ -75,7 +75,7 @@ export const MAX_RELEASE_ATTEMPTS = 3;
 export const RELEASE_DOMAIN_STATES = Object.freeze(['connector_ready', 'ready', 'authoritative']);
 export const RECHECK_EXHAUSTED_MS = 6 * 60 * 60 * 1000;
 export const RELEASE_CHECK_MS = 5 * 1000;
-const MAX_JOB_ATTEMPTS = 4;
+export const RELEASE_JOB_MAX_ATTEMPTS = 4;
 const FOLLOW_UP_MS = 30 * 1000;
 // A claim older than this is a run that died; a younger one belongs to a run still going.
 export const CLAIM_STALE_MINUTES = 10;
@@ -586,7 +586,7 @@ export async function handleReleaseJob(job, ctx, { now = Date.now() } = {}) {
   } finally {
     await unlockRun(jobId);
   }
-  if (result.left) await enqueueJob({ kind: QUARANTINE_RELEASE_KIND, delayMs: FOLLOW_UP_MS });
+  if (result.left) await enqueueJob({ kind: QUARANTINE_RELEASE_KIND, delayMs: FOLLOW_UP_MS, maxAttempts: RELEASE_JOB_MAX_ATTEMPTS });
   if (ctx?.complete) await ctx.complete((tx) => saveTenantState({ phishRelease: result }, tx));
   else await saveTenantState({ phishRelease: result });
   return result;
@@ -601,7 +601,9 @@ export async function enqueueReleaseSlot(now = Date.now(), slotMs = 10 * 60 * 10
   if (!(await getReleaseSettings()).enabled) return null;
   const { rows: [busy] } = await query(`SELECT id FROM jobs WHERE kind = $1 AND status IN ('queued', 'running') LIMIT 1`, [QUARANTINE_RELEASE_KIND]);
   if (busy) return null;
-  const { job } = await enqueueJob({ kind: QUARANTINE_RELEASE_KIND, dedupeKey: `slot-${Math.floor(now / slotMs)}` });
+  const { job } = await enqueueJob({
+    kind: QUARANTINE_RELEASE_KIND, dedupeKey: `slot-${Math.floor(now / slotMs)}`, maxAttempts: RELEASE_JOB_MAX_ATTEMPTS,
+  });
   return job;
 }
 
@@ -660,5 +662,5 @@ export async function listHeld({ limit = 200, now = Date.now() } = {}) {
 }
 
 export function registerQuarantineReleaseKind() {
-  registerJobKind(QUARANTINE_RELEASE_KIND, { maxAttempts: MAX_JOB_ATTEMPTS, handler: (job, ctx) => handleReleaseJob(job, ctx) });
+  registerJobKind(QUARANTINE_RELEASE_KIND, { maxAttempts: RELEASE_JOB_MAX_ATTEMPTS, handler: (job, ctx) => handleReleaseJob(job, ctx) });
 }

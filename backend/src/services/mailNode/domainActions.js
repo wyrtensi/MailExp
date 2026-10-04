@@ -1,5 +1,5 @@
 import { recordAudit } from '../auditLog.js';
-import { auditOf } from '../actor.js';
+import { auditOf, jobBy } from '../actor.js';
 import { MailNodeError, getMailNodeConfig, listDomains, parseHostName } from './mailcow.js';
 import { bindNodeIdentities, listDomainRows, mergeDomains, restartOnboarding } from './domains.js';
 import { getEopSettings, tenantDriverActive } from './eopSettings.js';
@@ -57,6 +57,7 @@ export async function restartDomain(rawDomain, actor) {
   const apply = await applyQuietly(() => applyDomain({
     domain, userId, ...(actor?.via ? { actor } : {}), trigger: 'onboarding_restarted',
   }));
-  kickDomainSync(domain, { userId });
+  // Awaited: the CLI ends its database pool right after the answer, which would lose the job.
+  await kickDomainSync(domain, jobBy(actor));
   return { ok: true, domain, state: result.to, ...(apply ? { apply } : {}) };
 }

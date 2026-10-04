@@ -1,9 +1,9 @@
 import { query, withTransaction } from '../db.js';
 import { encrypt } from '../encryption.js';
 import { recordAudit } from '../auditLog.js';
-import { auditOf } from '../actor.js';
+import { auditOf, jobBy } from '../actor.js';
 import { createKeyedSerializer } from '../../utils/keyedSerializer.js';
-import { addSecondSenderName, normalizeAddress, parseSenderNames } from '../../utils/senderNames.js';
+import { SENDER_NAME_MAX, addSecondSenderName, normalizeAddress, parseSenderNames } from '../../utils/senderNames.js';
 import {
   createAlias, deleteAlias, hasHeaderInjectionChars, listAliases, updateAlias,
 } from '../accountAliases.js';
@@ -31,6 +31,7 @@ export const MAILBOX_ERRORS = Object.freeze({
   ...MAIL_NODE_ERRORS,
   local_part_invalid: [400, 'The name before @ may hold letters, digits, dot, dash and underscore'],
   name_invalid: [400, 'Name and email address cannot contain control characters'],
+  name_required: [400, 'The mailbox name cannot be empty'],
   sender_name_invalid: [400, 'Sender names cannot contain control characters'],
   mailbox_pending_deletion: [409, 'This mailbox is pending deletion: cancel the deletion to keep it'],
   mailbox_exists: [409, 'This mailbox is already in MailExpert'],
@@ -49,6 +50,7 @@ export const MAILBOX_ERRORS = Object.freeze({
   // tell from the others (the panel's alias editor can).
   mailbox_ambiguous: [409, 'More than one mailbox row has this address: name it by its ID'],
   sender_name_alt_ambiguous: [409, 'The mailbox has more than one sender name for its address: change them in the panel'],
+  sender_name_alt_same: [400, 'The second sender name must differ from the sender name'],
 });
 
 const SECRET_FIELDS = ['auth_pass', 'smtp_auth_pass', 'oauth_access_token', 'oauth_refresh_token', 'oauth_id_token'];
@@ -79,7 +81,7 @@ export async function defaultLimits(emails) {
   return (email) => defaultRateLimit(eop, own.get(email.toLowerCase().split('@')[1]) ?? null);
 }
 
-const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
+export const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
 
 // The node mailboxes MailExpert knows (GET /api/mail-node/mailboxes), with quota and usage as the
 // node reports them, and the send limit: the node's (rateLimit, null when the mailbox has none of
@@ -129,14 +131,19 @@ export async function listNodeMailboxes({ details = false } = {}) {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // A node mailbox named by its ID or its address: { account } (without secrets) or { error }:
-// mailbox_not_found, or mailbox_ambiguous when two rows have the address (two rows may share one
+// mailbox_not_found, not_mail_node for the ID of a mailbox that is not on the node (as the deletion
+// route answers), or mailbox_ambiguous when two rows have the address (two rows may share one
 // mailcow mailbox; the ID tells them apart).
 export async function findNodeMailbox(ref) {
   const text = String(ref ?? '').trim();
   if (!text) return { error: 'mailbox_not_found' };
-  const { rows } = UUID.test(text)
-    ? await query('SELECT * FROM email_accounts WHERE id = $1 AND mail_node = true', [text])
-    : await query('SELECT * FROM email_accounts WHERE mail_node = true AND lower(email_address) = ANY($1::text[]) ORDER BY created_at, id',
+  if (UUID.test(text)) {
+    const { rows: [row] } = await query('SELECT * FROM email_accounts WHERE id = $1', [text]);
+    if (!row) return { error: 'mailbox_not_found' };
+    if (!row.mail_node) return { error: 'not_mail_node' };
+    return { account: withoutSecrets(row) };
+  }
+  const { rows } = await query('SELECT * FROM email_accounts WHERE mail_node = true AND lower(email_address) = ANY($1::text[]) ORDER BY created_at, id',
       [[...new Set([text.toLowerCase(), normalizeAddress(text)])]]);
   if (!rows.length) return { error: 'mailbox_not_found' };
   if (rows.length > 1) return { error: 'mailbox_ambiguous' };
@@ -225,7 +232,8 @@ async function createNodeMailboxNow(input, actor, onCreated) {
   if (onCreated) onCreated(account);
   // R-32 with DBEB: the tenant gets the mailbox's recipient (services/tenant/tenantDomains.js). In an
   // Authoritative domain EOP rejects the address until then, so the mailbox shows it.
-  if (MIRRORED_STATES.includes(panelDomain.state)) kickDomainSync(domain, { userId: actor?.userId ?? null });
+  // Awaited: the CLI ends its database pool right after the answer, which would lose the job.
+  if (MIRRORED_STATES.includes(panelDomain.state)) await kickDomainSync(domain, jobBy(actor));
   return {
     account: withoutSecrets(account),
     aliases: secondName ? [secondName] : [],
@@ -239,39 +247,51 @@ async function createNodeMailboxNow(input, actor, onCreated) {
 // the panel), senderName (the main one, email_accounts.sender_name; '' clears it) and senderNameAlt
 // (the second one, an alias with the mailbox's own address, D-16: made when there is none, renamed
 // when there is one, removed with ''). A field left undefined stays. Checked as the add form checks
-// them (parseSenderNames). Answers { account, aliases }.
+// them (parseSenderNames); a second name equal to the main one (whichever of them changes) is
+// refused rather than dropped, which would remove the alias. Everything is written in one
+// transaction. Answers { account, aliases }.
 export async function setNodeMailboxNames(ref, { name, senderName, senderNameAlt } = {}) {
   const found = await findNodeMailbox(ref);
   if (found.error) return found;
   const { account } = found;
-  if (name !== undefined && (typeof name !== 'string' || !name.trim() || hasHeaderInjectionChars(name))) return { error: 'name_invalid' };
-  // The second name is compared with the main one it will stand next to: the new one, else the
-  // stored one.
-  const names = parseSenderNames({ senderName: senderName ?? account.sender_name, senderNameAlt });
+  if (name !== undefined) {
+    if (typeof name !== 'string' || !name.trim()) return { error: 'name_required' };
+    if (hasHeaderInjectionChars(name)) return { error: 'name_invalid' };
+  }
+  const names = parseSenderNames({ senderName, senderNameAlt });
   if (names.error) return { error: 'sender_name_invalid' };
   const own = (await listAliases(account.id))
     .filter((alias) => normalizeAddress(alias.email) === normalizeAddress(account.email_address));
   if (senderNameAlt !== undefined && own.length > 1) return { error: 'sender_name_alt_ambiguous' };
-  // The second name repeating the first is dropped, as on the add form; '' removes it.
-  const alt = senderNameAlt === undefined ? undefined : names.senderNameAlt;
+  const clean = (value) => (typeof value === 'string' ? value.trim().slice(0, SENDER_NAME_MAX) : '');
+  // The names as they will be: the new ones, else the stored ones.
+  const primary = senderName !== undefined ? clean(senderName) : (account.sender_name ?? '');
+  const second = senderNameAlt !== undefined ? clean(senderNameAlt) : (own.length === 1 ? own[0].name : '');
+  if (primary && second && primary.toLowerCase() === second.toLowerCase()) return { error: 'sender_name_alt_same' };
+  const alt = senderNameAlt === undefined ? undefined : (second || null);
   const updates = [];
   if (name !== undefined) updates.push(['name', name.trim().slice(0, 200)]);
-  if (senderName !== undefined) updates.push(['sender_name', names.senderName]);
-  if (updates.length) {
-    await query(
-      `UPDATE email_accounts SET ${updates.map(([column], i) => `${column} = $${i + 2}`).join(', ')} WHERE id = $1`,
-      [account.id, ...updates.map(([, value]) => value)],
-    );
-  }
-  // The alias editor's own actions (services/accountAliases.js), with the mailbox's address.
-  if (alt === null && own.length) await deleteAlias(account.id, own[0].id);
-  else if (alt && own.length) {
-    const result = await updateAlias(account.id, own[0].id, { ...own[0], name: alt, email: account.email_address });
-    if (result.error) return result;
-  } else if (alt) {
-    const result = await createAlias(account.id, { name: alt, email: account.email_address });
-    if (result.error) return result;
-  }
+  if (senderName !== undefined) updates.push(['sender_name', primary || null]);
+  const result = await withTransaction(async (client) => {
+    if (updates.length) {
+      await client.query(
+        `UPDATE email_accounts SET ${updates.map(([column], i) => `${column} = $${i + 2}`).join(', ')} WHERE id = $1`,
+        [account.id, ...updates.map(([, value]) => value)],
+      );
+    }
+    // The alias editor's own actions (services/accountAliases.js), with the mailbox's address.
+    let changed = {};
+    if (alt === null && own.length) changed = await deleteAlias(account.id, own[0].id, client);
+    else if (alt && own.length) changed = await updateAlias(account.id, own[0].id, { ...own[0], name: alt, email: account.email_address }, client);
+    else if (alt) changed = await createAlias(account.id, { name: alt, email: account.email_address }, client);
+    // A refusal rolls the names back too.
+    if (changed.error) throw Object.assign(new Error(changed.error), { refusal: changed.error });
+    return null;
+  }).catch((err) => {
+    if (err?.refusal) return { error: err.refusal };
+    throw err;
+  });
+  if (result?.error) return result;
   const { rows: [row] } = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
   const aliases = (await listAliases(account.id)).map(({ id, name: aliasName, email }) => ({ id, name: aliasName, email }));
   return { account: withoutSecrets(row), aliases };

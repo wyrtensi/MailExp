@@ -19,6 +19,9 @@ import { EXIT, UsageError, parseArgs } from './args.js';
 import { CliError } from './common.js';
 import { resolveCliActor } from '../services/actor.js';
 import { pool } from '../services/db.js';
+import { auditWritesSettled } from '../services/auditLog.js';
+import { registerTenantJobKinds } from '../services/tenant/tenantJobs.js';
+import { registerTenantDomainJobKind } from '../services/tenant/tenantDomains.js';
 import mailbox from './commands/mailbox.js';
 import domain from './commands/domain.js';
 import tenant from './commands/tenant.js';
@@ -76,7 +79,7 @@ function commandUsage(command) {
     '',
     `${sentence(command.summary)}.`,
     ...(command.help?.length ? ['', ...command.help] : []),
-    ...(command.mutates ? ['', 'Journaled as the panel journals it, with the actor "cli" (or --as).'] : []),
+    ...(command.journal ? ['', `Journal: ${command.journal}.`, 'Entries the CLI writes name the actor "cli" (or the --as administrator), with details.via "cli".'] : []),
     '',
     ...GLOBAL_HELP,
   ];
@@ -112,7 +115,9 @@ const writeLines = (stream, lines) => stream.write(`${lines.join('\n')}\n`);
 // streams, the terminal check and the prompt (tests). Exported so tests drive it without a process.
 export async function run(argv, overrides = {}) {
   const io = { ...defaultIo(), ...overrides };
-  const json = argv.includes('--json');
+  // Read from the parsed flags once the command line is understood (a flag's value may be the
+  // word "--json"); usage errors before that go to stderr either way.
+  let json = false;
   const fail = (code, message, exit, extra = {}) => {
     if (json) writeLines(io.stdout, [JSON.stringify({ error: message, code, ...extra }, null, 2)]);
     else writeLines(io.stderr, [`error: ${message} (${code})`]);
@@ -151,6 +156,7 @@ export async function run(argv, overrides = {}) {
     writeLines(io.stderr, [`error: ${err.message}`, `usage: mailexpert ${command.usage}`, `(see mailexpert ${group.name} ${command.name} --help)`]);
     return EXIT.usage;
   }
+  json = !!parsed.flags.json;
   if (parsed.flags.help) {
     writeLines(io.stdout, commandUsage(command));
     return EXIT.ok;
@@ -188,9 +194,21 @@ export async function run(argv, overrides = {}) {
   }
 }
 
-async function main() {
-  const code = await run(process.argv.slice(2));
+// Before the process ends: the journal writes still running (recordAudit is not awaited by the
+// actions) end first, then the pool closes. Every job the actions queued is written by then (they
+// await the queue).
+export async function finish() {
+  await auditWritesSettled();
   await pool.end().catch(() => {});
+}
+
+async function main() {
+  // The tenant's job kinds, as the backend registers them: nothing runs them here, but a job is then
+  // queued with its kind's settings even where a caller does not pass them.
+  registerTenantJobKinds();
+  registerTenantDomainJobKind();
+  const code = await run(process.argv.slice(2));
+  await finish();
   process.exit(code);
 }
 

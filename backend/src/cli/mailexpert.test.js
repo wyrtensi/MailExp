@@ -122,7 +122,25 @@ describe('help and usage', () => {
   });
 });
 
+describe('journal help', () => {
+  it('says what each changing command journals, and that names are not journaled', async () => {
+    expect((await cli(['mailbox', 'create', '--help'])).out).toContain('Journal: mailbox.added');
+    expect((await cli(['mailbox', 'set-names', '--help'])).out).toContain('Journal: none');
+    expect((await cli(['domain', 'list', '--help'])).out).not.toContain('Journal:');
+  });
+});
+
 describe('output', () => {
+  it('takes --json from the parsed flags, not from a flag\'s value', async () => {
+    const result = await cli(['mailbox', 'delete', 'anna@example.com', '--reason', '--json', '--confirm-address', 'anna@example.com']);
+    expect(result.code).toBe(0);
+    expect(actions.requestMailboxDeletion).toHaveBeenCalledWith(
+      { accountId: ACCOUNT.id, email: 'anna@example.com', reason: '--json' }, CLI_ACTOR,
+    );
+    expect(result.out).toContain('deletion of anna@example.com asked for');
+    expect(() => JSON.parse(result.out)).toThrow();
+  });
+
   it('prints a table for people and the action\'s answer with --json', async () => {
     const human = await cli(['domain', 'list']);
     expect(human.code).toBe(0);

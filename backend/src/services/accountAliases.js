@@ -6,6 +6,7 @@ import { isForeignNodeAliasAddress } from '../utils/senderNames.js';
 // with. Shared by routes/accounts.js and the panel CLI (src/cli/mailexpert.js). A node mailbox's
 // alias is another sender name for its own address (D-16): any other address is refused. Name,
 // reply-to and signature stay free. Answers the alias or { error: code } (ALIAS_ERRORS). The
+// db: a transaction's client, so the alias changes with what goes with it (the pool by default). The
 // caller tells the plugins the account's identity changed (routes/accounts.js); the CLI changes
 // only node mailboxes, whose aliases never add an address, so nothing they cache goes stale.
 
@@ -34,8 +35,8 @@ function fieldsRefusal({ name, email, reply_to: replyTo }) {
   return null;
 }
 
-export async function listAliases(accountId) {
-  const result = await query(
+export async function listAliases(accountId, db = { query }) {
+  const result = await db.query(
     'SELECT id, account_id, name, email, reply_to, signature, created_at FROM account_aliases WHERE account_id = $1 ORDER BY created_at',
     [accountId],
   );
@@ -46,13 +47,13 @@ export async function listAliases(accountId) {
 }
 
 // { alias } or { error }.
-export async function createAlias(accountId, fields) {
+export async function createAlias(accountId, fields, db = { query }) {
   const refusal = fieldsRefusal(fields);
   if (refusal) return { error: refusal };
-  const check = await query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [accountId]);
+  const check = await db.query('SELECT id, email_address, mail_node FROM email_accounts WHERE id = $1', [accountId]);
   if (!check.rows.length) return { error: 'account_not_found' };
   if (isForeignNodeAliasAddress(check.rows[0], fields.email)) return { error: 'node_alias_address_mismatch' };
-  const result = await query(
+  const result = await db.query(
     'INSERT INTO account_aliases (account_id, name, email, reply_to, signature) VALUES ($1, $2, $3, $4, $5) RETURNING *',
     [accountId, fields.name, aliasAddress(check.rows[0], fields.email), fields.reply_to || null, sanitizeSignature(fields.signature) || null],
   );
@@ -60,10 +61,10 @@ export async function createAlias(accountId, fields) {
 }
 
 // { alias, accountId } or { error }; accountId: the account the alias was found on.
-export async function updateAlias(accountId, aliasId, fields) {
+export async function updateAlias(accountId, aliasId, fields, db = { query }) {
   const refusal = fieldsRefusal(fields);
   if (refusal) return { error: refusal };
-  const check = await query(
+  const check = await db.query(
     `SELECT a.id, a.account_id, e.email_address, e.mail_node FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
      WHERE a.id = $1 AND e.id = $2`,
@@ -71,7 +72,7 @@ export async function updateAlias(accountId, aliasId, fields) {
   );
   if (!check.rows.length) return { error: 'alias_not_found' };
   if (isForeignNodeAliasAddress(check.rows[0], fields.email)) return { error: 'node_alias_address_mismatch' };
-  const result = await query(
+  const result = await db.query(
     'UPDATE account_aliases SET name = $1, email = $2, reply_to = $3, signature = $4 WHERE id = $5 RETURNING *',
     [fields.name, aliasAddress(check.rows[0], fields.email), fields.reply_to || null, sanitizeSignature(fields.signature) || null, aliasId],
   );
@@ -79,14 +80,14 @@ export async function updateAlias(accountId, aliasId, fields) {
 }
 
 // { ok, accountId } or { error }.
-export async function deleteAlias(accountId, aliasId) {
-  const check = await query(
+export async function deleteAlias(accountId, aliasId, db = { query }) {
+  const check = await db.query(
     `SELECT a.id, a.account_id FROM account_aliases a
      JOIN email_accounts e ON a.account_id = e.id
      WHERE a.id = $1 AND e.id = $2`,
     [aliasId, accountId],
   );
   if (!check.rows.length) return { error: 'alias_not_found' };
-  await query('DELETE FROM account_aliases WHERE id = $1', [aliasId]);
+  await db.query('DELETE FROM account_aliases WHERE id = $1', [aliasId]);
   return { ok: true, accountId: check.rows[0].account_id };
 }
