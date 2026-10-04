@@ -56,6 +56,7 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'tenant.quarantine_released': 'admin.audit.actionTenantQuarantineReleased',
   'tenant.phish_release_changed': 'admin.audit.actionTenantPhishReleaseChanged',
   'tenant.message_traced': 'admin.audit.actionTenantMessageTraced',
+  'tenant.antispam_enforced': 'admin.audit.actionTenantAntispamEnforced',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -329,7 +330,14 @@ export function auditDetail(entry) {
     case 'tenant.quarantine_released':
       return {
         key: 'admin.audit.detailTenantQuarantineReleased',
-        values: { sender: details.sender ?? '', recipients: (details.recipients ?? []).join(', '), messageId: details.messageId ?? '' },
+        values: {
+          sender: details.sender ?? '', recipients: (details.recipients ?? []).join(', '), messageId: details.messageId ?? '', type: details.type ?? '—',
+        },
+      };
+    case 'tenant.antispam_enforced':
+      return {
+        key: 'admin.audit.detailTenantAntispamEnforced',
+        values: { fields: (details.changed ?? []).map((c) => `${c.field}: ${c.from} → ${c.to}`).join(', ') || '—' },
       };
     case 'tenant.phish_release_changed':
       return { key: details.enabled ? 'admin.audit.detailTenantPhishReleaseOn' : 'admin.audit.detailTenantPhishReleaseOff', values: {} };

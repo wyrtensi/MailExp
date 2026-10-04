@@ -70,16 +70,17 @@ export function sizeLabel(bytes) {
 }
 
 // Whether the panel's spam filing rule (R-11, backend services/mailNode/nodeApply.js) files a letter
-// with this EOP verdict in Spam: phishing and malware always, spam, bulk and spoofing unless EOP
+// with this EOP verdict in Spam: phishing, malware, spam and spoofing always (the panel releases spam
+// and phishing from EOP's quarantine itself, section 5.14), bulk and the spam verdicts unless EOP
 // released it from its own quarantine (SFV:SKQ). A released quarantine entry goes through the rule
 // like any letter, so such a letter lands in Spam again.
-const EOP_ALWAYS_SPAM = new Set(['PHSH', 'HPHSH', 'HPHISH', 'MALW']);
+const EOP_ALWAYS_SPAM = new Set(['PHSH', 'HPHSH', 'HPHISH', 'MALW', 'SPM', 'HSPM', 'SPOOF']);
 export function eopSendsToSpam(eop) {
   const verdict = String(eop?.verdict ?? '').toUpperCase();
   const category = String(eop?.category ?? '').toUpperCase();
   if (EOP_ALWAYS_SPAM.has(category)) return true;
   if (verdict === 'SKQ') return false;
-  return ['SPM', 'SKS', 'SKB'].includes(verdict) || ['SPM', 'HSPM', 'BULK', 'SPOOF'].includes(category);
+  return ['SPM', 'SKS', 'SKB'].includes(verdict) || category === 'BULK';
 }
 
 // Why the letter is in Spam, as keys in the order they matter: rspamd marked it as spam (its score

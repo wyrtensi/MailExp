@@ -1,7 +1,8 @@
 // The Microsoft tenant of the demo (stage 7a; backend routes/mailNodeTenant.js and
 // services/tenant/*): a fake tenant driver that is connected. The jobs finish at once; the
 // answers are the backend fakes' recorded examples (services/tenant/fixtures.json): the Default
-// anti-spam policy quarantines phishing (one conflict), no connector is blocked, and the
+// anti-spam policy quarantines phishing, which the connection test only reads (one conflict) and
+// the poll sets to MoveToJmf as the backend does (section 5.14), no connector is blocked, and the
 // application certificate expires in 25 days, so the warning and its alert show. Stage 7b: the
 // poll reads both connectors (the first read is the reference, nothing drifted), "Take as the
 // reference" works, and a domain's "Run the tenant steps now" finishes at once without changing
@@ -24,15 +25,18 @@ const CERTIFICATE = {
   notAfter: new Date(STARTED + 25 * DAY_MS).toISOString(),
 };
 
-const POLICY = {
+// The tenant's Default policy, changed by the demo's enforcement as the tenant would keep it.
+const policy = {
   identity: 'Default', SpamAction: 'MoveToJmf', HighConfidenceSpamAction: 'MoveToJmf', BulkSpamAction: 'MoveToJmf',
   PhishSpamAction: 'Quarantine', HighConfidencePhishAction: 'Quarantine', BulkThreshold: 7, RedirectToRecipients: [], WhenChanged: null,
 };
-// What fits the spam filing of the node (backend services/tenant/antispam.js).
+// What fits the spam filing of the node (backend services/tenant/antispam.js), and the fields the
+// panel sets to MoveToJmf (section 5.14).
 const EXPECTED = {
-  SpamAction: ['MoveToJmf', 'AddXHeader'], HighConfidenceSpamAction: ['MoveToJmf', 'AddXHeader'], BulkSpamAction: ['MoveToJmf', 'AddXHeader'],
-  PhishSpamAction: ['MoveToJmf', 'AddXHeader'], HighConfidencePhishAction: ['Quarantine'],
+  SpamAction: ['MoveToJmf'], HighConfidenceSpamAction: ['MoveToJmf'], BulkSpamAction: ['MoveToJmf', 'AddXHeader'],
+  PhishSpamAction: ['MoveToJmf'], HighConfidencePhishAction: ['Quarantine'],
 };
+const ENFORCED = ['SpamAction', 'HighConfidenceSpamAction', 'PhishSpamAction'];
 function conflicts(policy) {
   return Object.entries(EXPECTED)
     .filter(([field, expected]) => policy[field] && !expected.includes(policy[field]))
@@ -94,7 +98,15 @@ function runTest(settings, now) {
 }
 
 function readPolicy(now) {
-  return { at: iso(now), ok: true, policy: { ...POLICY }, conflicts: conflicts(POLICY) };
+  return { at: iso(now), ok: true, policy: { ...policy }, conflicts: conflicts(policy) };
+}
+
+// The backend's syncAntispam: what differs is set to MoveToJmf and read again.
+function syncPolicy(now) {
+  const changed = ENFORCED.filter((field) => policy[field] && policy[field] !== 'MoveToJmf')
+    .map((field) => ({ field, from: policy[field], to: 'MoveToJmf' }));
+  for (const { field } of changed) policy[field] = 'MoveToJmf';
+  return { ...readPolicy(now), enforcement: { at: iso(now), ok: true, changed, failed: [] } };
 }
 
 function runPoll(now) {
@@ -104,14 +116,14 @@ function runPoll(now) {
     ...state, certificate: { at, ...CERTIFICATE }, blockedConnectors: { at, ok: true, items: [] }, connectors,
     ...(state.connectorReference ? {} : { connectorReference: { at, by: null, auto: true, inbound: connectors.inbound, outbound: connectors.outbound } }),
   };
-  if (!state.antispam) state.antispam = readPolicy(now);
+  if (!state.antispam || !state.antispam.enforcement) state.antispam = syncPolicy(now);
 }
 
 function finish(kind, settings) {
   const now = Date.now();
   if (kind === KINDS.test) runTest(settings, now);
   if (kind === KINDS.poll) runPoll(now);
-  if (kind === KINDS.antispam) state = { ...state, antispam: readPolicy(now) };
+  if (kind === KINDS.antispam) state = { ...state, antispam: syncPolicy(now) };
   const job = { id: String(nextJobId++), kind, status: 'done', errorCode: null, error: null, createdAt: iso(now), updatedAt: iso(now) };
   jobs.set(job.id, job);
   return job;
@@ -119,28 +131,34 @@ function finish(kind, settings) {
 
 const latest = (kind) => [...jobs.values()].filter((job) => job.kind === kind).at(-1) ?? null;
 
-// Stage 7c (R-42): the release of quarantined phishing, off as on a new install (until experiment 17), with an earlier run of 8 minutes ago: one message
-// released to a demo mailbox, one kept because a recipient is not on the node (it raises the
+// Stage 7c (R-42), widened in section 5.14: the release of quarantined spam and phishing, on as on
+// a new install, with an earlier run of 8 minutes ago: high confidence phishing and spam released
+// to demo mailboxes, a message kept because a recipient is not on the node (it raises the
 // tenant_phish_held alert), one that left the quarantine.
 const QID = (n) => [`c14401cf-aa9a-465b-cfd5-00000000000${n}`, `4c2ca98e-94ea-db3a-7eb8-00000000000${n}`].join('\\');
 const heldRow = (row) => (row.state === 'skipped' && row.reason !== 'gone') || (row.state === 'failed' && row.reason === 'attempts_exhausted');
 let phish = {
-  enabled: false,
+  enabled: true,
   changedAt: null,
-  run: { at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 1, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false },
+  run: { at: iso(STARTED - 8 * 60000), ok: true, counts: { released: 2, skipped: 1, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false },
   rows: [
     {
-      identity: QID(1), messageId: '<invoice-7781@billing.example.net>', sender: 'billing@billing.example.net', subject: 'Your invoice is overdue',
+      identity: QID(4), type: 'Spam', messageId: '<offer-12@deals.example.com>', sender: 'offers@deals.example.com', subject: 'Limited offer for your team',
+      recipients: ['sales@demo.mailexpert.local'], receivedAt: iso(STARTED - 40 * 60000), expiresAt: iso(STARTED + 29 * DAY_MS),
+      state: 'released', reason: null, error: null, attempts: 1, byPanel: true, releasedAt: iso(STARTED - 8 * 60000), updatedAt: iso(STARTED - 8 * 60000),
+    },
+    {
+      identity: QID(1), type: 'HighConfPhish', messageId: '<invoice-7781@billing.example.net>', sender: 'billing@billing.example.net', subject: 'Your invoice is overdue',
       recipients: ['info@demo.mailexpert.local'], receivedAt: iso(STARTED - 50 * 60000), expiresAt: iso(STARTED + 29 * DAY_MS),
       state: 'released', reason: null, error: null, attempts: 1, byPanel: true, releasedAt: iso(STARTED - 8 * 60000), updatedAt: iso(STARTED - 8 * 60000),
     },
     {
-      identity: QID(2), messageId: '<reset-55@login.example.org>', sender: 'security@login.example.org', subject: 'Password reset required',
+      identity: QID(2), type: 'Phish', messageId: '<reset-55@login.example.org>', sender: 'security@login.example.org', subject: 'Password reset required',
       recipients: ['info@demo.mailexpert.local', 'partner@example.org'], receivedAt: iso(STARTED - 3 * 3600000), expiresAt: iso(STARTED + 29 * DAY_MS),
       state: 'skipped', reason: 'foreign_recipients', error: null, attempts: 0, byPanel: false, releasedAt: null, updatedAt: iso(STARTED - 3 * 3600000),
     },
     {
-      identity: QID(3), messageId: '<old-1@example.net>', sender: 'noreply@example.net', subject: 'Account notice',
+      identity: QID(3), type: 'HighConfPhish', messageId: '<old-1@example.net>', sender: 'noreply@example.net', subject: 'Account notice',
       recipients: ['sales@demo.mailexpert.local'], receivedAt: iso(STARTED - 31 * DAY_MS), expiresAt: iso(STARTED - DAY_MS),
       state: 'skipped', reason: 'gone', error: null, attempts: 0, byPanel: false, releasedAt: null, updatedAt: iso(STARTED - DAY_MS),
     },
@@ -222,7 +240,7 @@ export function demoTenantRequest(verb, pathname, settings, error, body = null) 
     if (!configured(settings)) {
       throw error('Fill in the tenant ID, its onmicrosoft.com domain, the application ID and the certificate thumbprint first', 'tenant_not_configured');
     }
-    if (!phish.enabled) throw error('The release of quarantined phishing is paused', 'phish_release_paused');
+    if (!phish.enabled) throw error('The release of quarantined spam and phishing is paused', 'phish_release_paused');
     phish = { ...phish, run: { ...phish.run, at: iso(Date.now()), counts: { released: 0, skipped: 0, failed: 0, waiting: 0, gone: 0, busy: 0 }, left: false } };
     return clone({ job: finish(KINDS.phish, settings), created: true });
   }

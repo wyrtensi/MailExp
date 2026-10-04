@@ -164,6 +164,13 @@ export default function MailNodeDomainTenant({ domain, active = false, onChanged
                 <div role="status" style={warningStyle}>{t('admin.mailNode.tenantMirrorConflicts', { addresses: list(mirror.conflicts) })}</div>
               )}
               {mirror.nodeOnly?.length > 0 && <div>{t('admin.mailNode.tenantNodeOnly')}: <span style={monoStyle}>{list(mirror.nodeOnly)}</span></div>}
+              {/* Section 5.14: aliases made by hand in mailcow are not mirrored; listed with what that means. */}
+              {mirror.nodeAliases?.length > 0 && (
+                <div role="status" data-tenant-node-aliases style={warningStyle}>
+                  {t('admin.mailNode.tenantNodeAliases')}: <span style={monoStyle}>{list(mirror.nodeAliases)}</span>
+                  <div>{t('admin.mailNode.tenantNodeAliasesNote')}</div>
+                </div>
+              )}
               {mirror.panelOnly?.length > 0 && <div>{t('admin.mailNode.tenantPanelOnly')}: <span style={monoStyle}>{list(mirror.panelOnly)}</span></div>}
             </div>
           )}

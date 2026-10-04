@@ -41,7 +41,12 @@ describe('quarantine helpers', () => {
 
   it('follows the panel\'s filing rule for EOP verdicts', () => {
     assert.equal(eopSendsToSpam({ verdict: 'SPM', category: 'SPM' }), true);
-    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPM' }), false);
+    // Released from quarantine (section 5.14): spam, high confidence spam and spoofing still go to
+    // Spam, bulk does not.
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPM' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'HSPM' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'SPOOF' }), true);
+    assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'BULK' }), false);
     assert.equal(eopSendsToSpam({ verdict: 'SKQ', category: 'PHSH' }), true);
     assert.equal(eopSendsToSpam({ verdict: 'NSPM', category: 'NONE' }), false);
     assert.equal(eopSendsToSpam({ category: 'BULK' }), true);

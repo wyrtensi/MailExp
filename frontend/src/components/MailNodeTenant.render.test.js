@@ -119,6 +119,30 @@ async function click(element) {
   await flush();
 }
 
+describe('MailNodeTenant — the anti-spam actions MailExpert sets (section 5.14)', () => {
+  test('shows what it set, and what it could not with the reason', async () => {
+    answers['GET /api/mail-node/tenant/phish-release'] = { enabled: true, releases: [], held: { count: 0 } };
+    answers['GET /api/mail-node/tenant'] = {
+      driver: 'worker', configured: true, jobs: {},
+      state: {
+        ...STATE,
+        antispam: {
+          ...STATE.antispam,
+          enforcement: {
+            at: '2026-10-03T08:00:00.000Z', ok: false, changed: [{ field: 'HighConfidenceSpamAction', from: 'Quarantine', to: 'MoveToJmf' }],
+            failed: ['SpamAction'], error: { code: 'antispam_not_written', message: 'still Quarantine' },
+          },
+        },
+      },
+    };
+    const root = await mount(React.createElement(MailNodeTenant));
+    assert.match(root.querySelector('[data-policy-enforced]').textContent, /admin\.tenant\.policyEnforced/);
+    const failed = root.querySelector('[data-policy-not-enforced]');
+    assert.match(failed.textContent, /admin\.tenant\.policyNotEnforced/);
+    assert.match(failed.textContent, /admin\.tenant\.failAntispamNotWritten/);
+  });
+});
+
 describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
   const QID = ['c14401cf-aa9a-465b-cfd5-08d0f0ca37c5', '4c2ca98e-94ea-db3a-7eb8-3b63657d4db7'].join('\\');
   const RELEASE = {
@@ -126,8 +150,8 @@ describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
     run: { at: '2026-10-03T08:00:00.000Z', ok: true, counts: { released: 1, skipped: 1, failed: 0 }, left: false },
     held: { count: 1, soonestExpiresAt: null },
     releases: [
-      { identity: QID, state: 'released', reason: null, sender: 'billing@phish.example.net', recipients: ['info@example.com'], subject: 'Invoice', receivedAt: '2026-10-03T07:40:00.000Z' },
-      { identity: `${QID}x`, state: 'skipped', reason: 'foreign_recipients', sender: 'x@phish.example.net', recipients: ['info@example.com', 'a@other.example.org'], subject: 'Reset', receivedAt: null },
+      { identity: QID, type: 'Spam', state: 'released', reason: null, sender: 'billing@phish.example.net', recipients: ['info@example.com'], subject: 'Invoice', receivedAt: '2026-10-03T07:40:00.000Z' },
+      { identity: `${QID}x`, type: 'Malware', state: 'skipped', reason: 'foreign_recipients', sender: 'x@phish.example.net', recipients: ['info@example.com', 'a@other.example.org'], subject: 'Reset', receivedAt: null },
       {
         identity: `${QID}y`, state: 'failed', reason: 'read_failed', error: 'exo_failed: Something went wrong', errorCode: 'exo_failed',
         sender: null, recipients: [], subject: null, receivedAt: null,
@@ -153,6 +177,9 @@ describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
     assert.match(rows[1].textContent, /admin\.tenant\.phishReasonForeign/);
     assert.equal(rows[1].getAttribute('data-phish-held-row'), 'true');
     assert.match(rows[1].textContent, /a@other\.example\.org/);
+    // Section 5.14: the type, in words for the four the panel releases, as EOP wrote it otherwise.
+    const types = rows.map((r) => r.querySelector('[data-phish-type]').textContent);
+    assert.deepEqual(types, ['admin.tenant.qtypeSpam', 'Malware', '—']);
 
     await click(buttons(root, 'admin.tenant.phishRunNow')[0]);
     assert.ok(calls.some((c) => c.method === 'POST' && c.path === '/api/mail-node/tenant/phish-release/run'));
