@@ -2,6 +2,9 @@
   "name": "mailexpert-backend",
   "version": "3.3.0",
   "type": "module",
+  "bin": {
+    "mailexpert": "src/cli/mailexpert.js"
+  },
   "engines": {
     "node": ">=22.19 <23"
   },

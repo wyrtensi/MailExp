@@ -1,6 +1,7 @@
 import { query } from '../db.js';
 import { JobError, enqueueJob, listJobs, registerJobKind } from '../jobQueue.js';
 import { recordAudit } from '../auditLog.js';
+import { auditOf } from '../actor.js';
 import { getEopSettings } from '../mailNode/eopSettings.js';
 import { SYSTEM_ACTOR } from '../mailNode/domains.js';
 import { getTenantDriver, tenantOf } from './driver.js';
@@ -8,7 +9,9 @@ import { TenantError, asRows } from './exoRunner.js';
 import { ENFORCED_ACTION, enforcementPlan, policyConflicts, summarizePolicy } from './antispam.js';
 import { readConnectors } from './connectors.js';
 import { enqueueDueDomainSyncs } from './tenantDomains.js';
-import { enqueueReleaseSlot, registerQuarantineReleaseKind } from './quarantineRelease.js';
+import {
+  QUARANTINE_RELEASE_KIND, RELEASE_JOB_MAX_ATTEMPTS, enqueueReleaseSlot, registerQuarantineReleaseKind,
+} from './quarantineRelease.js';
 import { pruneMessageTraces, registerMessageTraceKind } from './messageTrace.js';
 
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
@@ -161,13 +164,14 @@ export async function readAntispam(session, now = Date.now()) {
 // (error: the first refused write, or antispam_not_written when the tenant answered "done" but the
 // second read still shows another action). What changed is journaled (tenant.antispam_enforced);
 // a failure is kept for the alert tenant_antispam_not_enforced. A failed first read writes nothing.
-export async function syncAntispam(session, { now = Date.now(), actor = null, lockId = null } = {}) {
+// actor: the id of the user who asked, or null; via: 'cli' when the panel CLI queued the job.
+export async function syncAntispam(session, { now = Date.now(), actor = null, via = null, lockId = null } = {}) {
   // One run at a time (the poll and "Check and fix" at once): two would both write and journal the
   // same change. A run that finds another going answers null and changes nothing.
   const holder = lockId ?? `antispam-${now}-${Math.random().toString(36).slice(2)}`;
   if (!(await lockAntispam(holder))) return null;
   try {
-    return await enforceAntispam(session, { now, actor });
+    return await enforceAntispam(session, { now, actor, via });
   } finally {
     await query(
       `UPDATE integration_config SET config = '{}'::jsonb, updated_at = NOW() WHERE provider = $1 AND config->>'run' = $2`,
@@ -189,7 +193,7 @@ async function lockAntispam(holder) {
   return rows.length > 0;
 }
 
-async function enforceAntispam(session, { now, actor }) {
+async function enforceAntispam(session, { now, actor, via }) {
   const first = await readAntispam(session, now);
   if (!first.ok) return first;
   const at = first.at;
@@ -220,7 +224,7 @@ async function enforceAntispam(session, { now, actor }) {
   const failed = plan.filter((s) => after.policy[s.field] !== ENFORCED_ACTION).map((s) => s.field);
   if (failed.length && !error) error = { code: 'antispam_not_written', message: 'The tenant answered the change but the policy still shows another action' };
   if (changed.length) {
-    recordAudit({ ...(actor ? { actorUserId: actor } : { actorEmail: SYSTEM_ACTOR }), action: 'tenant.antispam_enforced', details: { changed } });
+    recordAudit(actorAudit(actor, via, { action: 'tenant.antispam_enforced', details: { changed } }));
   }
   return { ...after, enforcement: { at, ok: !failed.length, changed, failed, ...(failed.length ? { error } : {}) } };
 }
@@ -268,9 +272,31 @@ export async function poll(context, { previous = {}, now = Date.now() } = {}) {
   return patch;
 }
 
+// Attempts of each kind an administrator queues. Passed when queuing too, so a process that never
+// registered the kinds (the panel CLI) queues them with the same limit as the backend.
+export const TENANT_JOB_MAX_ATTEMPTS = Object.freeze({
+  [TENANT_JOB_KINDS.test]: 1,
+  [TENANT_JOB_KINDS.poll]: 1,
+  [TENANT_JOB_KINDS.antispam]: 1,
+});
+// A function, not a table entry: quarantineRelease.js imports this module, so its constants may not
+// be set yet while this one is evaluated.
+const maxAttemptsOf = (kind) => (kind === QUARANTINE_RELEASE_KIND ? RELEASE_JOB_MAX_ATTEMPTS : TENANT_JOB_MAX_ATTEMPTS[kind] ?? null);
+
+// A journal entry's actor for what a job does on someone's behalf: the user who queued it, the
+// panel CLI (payload.via, also in details.via) or, for a job nobody queued, MailExpert.
+export function actorAudit(userId, via, entry) {
+  if (via) return auditOf({ userId: userId ?? null, via }, entry);
+  return userId ? { ...entry, actorUserId: userId } : { ...entry, actorEmail: SYSTEM_ACTOR };
+}
+
+export function jobAudit(job, entry) {
+  return actorAudit(job?.created_by ?? null, job?.payload?.via ?? null, entry);
+}
+
 export function registerTenantJobKinds() {
   registerJobKind(TENANT_JOB_KINDS.test, {
-    maxAttempts: 1,
+    maxAttempts: TENANT_JOB_MAX_ATTEMPTS[TENANT_JOB_KINDS.test],
     handler: async (job, ctx) => {
       const context = await tenantContext();
       const { connection, certificate } = await testConnection(context);
@@ -280,18 +306,17 @@ export function registerTenantJobKinds() {
         ...(certificate ? { certificate } : {}),
         ...(antispam ? { antispam } : {}),
       }, tx));
-      recordAudit({
-        ...(job.created_by ? { actorUserId: job.created_by } : { actorEmail: SYSTEM_ACTOR }),
+      recordAudit(jobAudit(job, {
         action: 'tenant.connection_tested',
         details: {
           ok: connection.ok,
           failed: Object.entries(connection.steps).filter(([, s]) => !s.ok).map(([step, s]) => `${step}:${s.code}`),
         },
-      });
+      }));
     },
   });
   registerJobKind(TENANT_JOB_KINDS.poll, {
-    maxAttempts: 1,
+    maxAttempts: TENANT_JOB_MAX_ATTEMPTS[TENANT_JOB_KINDS.poll],
     handler: async (job, ctx) => {
       const context = await tenantContext();
       const patch = await poll(context, { previous: await getTenantState() });
@@ -299,10 +324,12 @@ export function registerTenantJobKinds() {
     },
   });
   registerJobKind(TENANT_JOB_KINDS.antispam, {
-    maxAttempts: 1,
+    maxAttempts: TENANT_JOB_MAX_ATTEMPTS[TENANT_JOB_KINDS.antispam],
     handler: async (job, ctx) => {
       const context = await tenantContext();
-      const antispam = await syncAntispam(context.session, { actor: job.created_by ?? null, lockId: `job-${job.id}` });
+      const antispam = await syncAntispam(context.session, {
+        actor: job.created_by ?? null, via: job.payload?.via ?? null, lockId: `job-${job.id}`,
+      });
       // Another run is setting the policy: it keeps its own result.
       if (!antispam) return;
       await ctx.complete((tx) => saveTenantState({ antispam }, tx));
@@ -314,11 +341,14 @@ export function registerTenantJobKinds() {
 }
 
 // Queues a job of a kind for an administrator's button, or answers the one of that kind still
-// queued or running (a double click, two administrators): { job, created }.
-export async function enqueueTenantJob(kind, { userId = null } = {}) {
+// queued or running (a double click, two administrators): { job, created }. via: 'cli' when the
+// panel CLI queues it, kept in the payload for the job's journal entries (jobAudit).
+export async function enqueueTenantJob(kind, { userId = null, via = null } = {}) {
   const [waiting] = await listJobs({ kind, statuses: ['queued', 'running'], limit: 1 });
   if (waiting) return { job: waiting, created: false };
-  return enqueueJob({ kind, createdBy: userId });
+  return enqueueJob({
+    kind, createdBy: userId, maxAttempts: maxAttemptsOf(kind), ...(via ? { payload: { via } } : {}),
+  });
 }
 
 // The poll of the current ten-minute slot, once (the slot is the dedupe key: a restart in the same
@@ -335,7 +365,10 @@ export async function enqueuePoll(now = Date.now()) {
     [TENANT_JOB_KINDS.poll, now - POLL_INTERVAL_MS / 2],
   );
   if (recent) return null;
-  const { job } = await enqueueJob({ kind: TENANT_JOB_KINDS.poll, dedupeKey: `slot-${Math.floor(now / POLL_INTERVAL_MS)}` });
+  const { job } = await enqueueJob({
+    kind: TENANT_JOB_KINDS.poll, dedupeKey: `slot-${Math.floor(now / POLL_INTERVAL_MS)}`,
+    maxAttempts: TENANT_JOB_MAX_ATTEMPTS[TENANT_JOB_KINDS.poll],
+  });
   return job;
 }
 

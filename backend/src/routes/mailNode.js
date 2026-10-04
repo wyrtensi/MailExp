@@ -3,24 +3,25 @@ import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { uuidParam } from '../utils/uuid.js';
 import { recordAudit } from '../services/auditLog.js';
-import { DISK_WARN_PERCENT, checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
+import { MAIL_NODE_ERRORS } from '../services/mailNode/errors.js';
+import { adminDomainList, restartDomain } from '../services/mailNode/domainActions.js';
+import { defaultLimits, listNodeMailboxes, onOtherMailHost, overrideOf } from '../services/mailNode/mailboxActions.js';
+import { routeActor } from '../services/actor.js';
+import { checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
 import {
   DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
   DEFAULT_QUOTA_MB,
   MAX_DELETE_AFTER_DAYS,
-  MAX_PANEL_IPS,
   MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
   DKIM_KEY_SIZE,
   MailNodeError,
   RATE_LIMIT_FRAMES,
   addDomain,
-  getDiskStatus,
   getMailbox,
   getMailNodeConfig,
   listDomains,
-  listMailboxes,
   parseHostName,
   parseNetworkList,
   parsePingUrl,
@@ -42,18 +43,14 @@ import {
   nodeRefusal,
   parseExpectedValues,
   recordCreatedDomain,
-  restartOnboarding,
   setExpectedValues,
-  MAX_EXPECTED_MX,
 } from '../services/mailNode/domains.js';
 import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
 import { getTenantDriver } from '../services/tenant/driver.js';
 import { DRIVER_STEPS, kickDomainSync } from '../services/tenant/tenantDomains.js';
 import {
   EOP_FIELDS,
-  MAX_LICENSES,
   MAX_SEND_LIMIT_PER_HOUR,
-  MAX_TERRL,
   eopSettingsConflict,
   getEopSettings,
   parseEopSettings,
@@ -67,7 +64,6 @@ import {
   applyPrefilter,
   applyInBackground,
   applyQuietly,
-  defaultRateLimit,
   getNodeApplyResult,
 } from '../services/mailNode/nodeApply.js';
 import {
@@ -84,8 +80,6 @@ import { readPostfixLog } from '../services/mailNode/postfixLog.js';
 import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from '../services/mailNode/terrl.js';
 import {
   ALERT_DEFAULTS,
-  MAX_DEFERRED_COUNT,
-  MAX_DEFERRED_MINUTES,
   checkAlertsNow,
   getAlertSettings,
   getAlertState,
@@ -105,70 +99,15 @@ router.param('id', uuidParam('id'));
 // Sent instead of the stored API key; posting it back keeps the stored key.
 const REDACTED_SECRET = '••••••••';
 
-const ERRORS = {
-  mail_host_invalid: [400, 'Mail host must be a host name such as mail.example.com'],
-  api_key_required: [400, 'API key is required'],
-  quota_invalid: [400, `Quota must be a whole number of MB from 1 to ${MAX_QUOTA_MB}`],
-  domain_invalid: [400, 'Domain must be a domain name such as example.com'],
-  ping_url_invalid: [400, 'Ping URL must be an https address'],
-  mailboxes_invalid: [400, `Mailbox limit must be a whole number from 1 to ${MAX_DOMAIN_MAILBOXES}`],
-  delete_after_days_invalid: [400, `Days before a deletion must be a whole number from 1 to ${MAX_DELETE_AFTER_DAYS}`],
-  mail_node_not_configured: [409, 'The mail node is not set up'],
-  mailbox_not_found: [404, 'Mail node mailbox not found'],
-  domain_not_ready: [400, 'Mailboxes can be created only on a domain that finished its onboarding'],
-  domain_not_on_node: [404, 'The mail node has no such domain'],
-  domain_not_found: [404, 'The panel does not know this domain'],
-  domain_known: [409, 'The panel knows this domain already'],
-  domain_already_ready: [409, 'The domain is ready already'],
-  domain_not_recreated: [409, 'The node reports the creation time the panel knows already'],
-  domain_node_changed: [409, 'The node reports another creation time than the one shown: reload the list'],
-  node_created_required: [400, 'The creation time shown for the domain is required'],
-  domain_nothing_to_restart: [409, 'The domain is at the first step with nothing to clear'],
-  mail_node_host_mismatch: [409, 'The mailbox is on another mail host than the one in the mail node settings'],
-  step_invalid: [400, 'No such onboarding step'],
-  step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
-  step_by_tenant_driver: [409, 'MailExpert confirms this step itself through the tenant driver'],
-  mark_ready_by_tenant_driver: [409, 'With the tenant driver the domain goes through the tenant steps; it cannot be marked ready by hand'],
-  outbound_connector_invalid: [400, 'Outbound connector must be its name in EAC: letters, digits, spaces, dots, dashes and underscores, up to 64 characters'],
-  dbeb_external_domain_invalid: [400, 'The external domain of the DBEB contacts must be a domain name such as relay.example.com'],
-  eop_host_invalid: [400, 'EOP host must be a host name such as contoso-com.mail.protection.outlook.com'],
-  certificate_host_invalid: [400, 'Certificate host must be a host name such as mail.example.com'],
-  dkim_mode_invalid: [400, 'DKIM mode must be mailcow or eop'],
-  send_limit_invalid: [400, `Send limit must be a whole number of messages per hour from 1 to ${MAX_SEND_LIMIT_PER_HOUR}`],
-  terrl_invalid: [400, `TERRL must be a whole number of recipients from 1 to ${MAX_TERRL}`],
-  tenant_id_invalid: [400, 'Tenant ID must be a GUID'],
-  tenant_domain_invalid: [400, "Tenant domain must be the tenant's initial domain such as contoso.onmicrosoft.com"],
-  app_id_invalid: [400, 'Application ID must be a GUID'],
-  thumbprint_invalid: [400, 'Certificate thumbprint must be 40 hexadecimal characters'],
-  tls_policy_invalid: [400, 'TLS policy must be secure, dane, dane-only, verify, fingerprint, encrypt or default'],
-  tls_parameters_invalid: [400, 'TLS policy parameters must be name=value pairs up to 255 characters that fit the policy: match= takes hostname, nexthop, dot-nexthop or host names for secure and verify, fingerprints for fingerprint (required), and nothing for the other policies'],
-  panel_ips_invalid: [400, `Panel addresses must be up to ${MAX_PANEL_IPS} IP addresses or networks such as 203.0.113.10 or 203.0.113.0/28`],
-  rate_limit_invalid: [400, `Send limit must be a whole number of messages from 1 to ${MAX_SEND_LIMIT_PER_HOUR} per second, minute, hour or day`],
-  node_ip_invalid: [400, 'Node address must be an IPv4 address such as 203.0.113.10'],
-  expected_mx_invalid: [400, `Expected MX must be up to ${MAX_EXPECTED_MX} host names such as contoso-com.mail.protection.outlook.com`],
-  tenant_txt_invalid: [400, 'Verification TXT must be printable text up to 255 characters without quotes, such as MS=ms12345678'],
-  dkim_cname_invalid: [400, 'DKIM selector CNAME must be a host name'],
-  licenses_invalid: [400, `Licenses must be a whole number from 1 to ${MAX_LICENSES}`],
-  tenant_created_invalid: [400, 'Tenant creation date must be a date such as 2026-09-14, not in the future'],
-  queue_id_invalid: [400, 'Queue ID must be a Postfix queue ID such as 53A99193F13'],
-  queue_action_invalid: [400, 'Queue action must be hold, unhold, deliver or delete'],
-  queue_delete_unconfirmed: [400, 'Deleting a queued message must be confirmed'],
-  queue_item_not_found: [404, 'The mail queue has no message with this ID'],
-  queue_item_held: [409, 'A held message is released first, then delivered'],
-  deferred_count_invalid: [400, `Deferred message threshold must be a whole number from 1 to ${MAX_DEFERRED_COUNT}`],
-  deferred_minutes_invalid: [400, `Deferred age threshold must be a whole number of minutes from 1 to ${MAX_DEFERRED_MINUTES}`],
-  alert_check_failed: [502, 'The alert check failed'],
-};
 
 export function refuse(res, code) {
-  const [status, error] = ERRORS[code];
+  const [status, error] = MAIL_NODE_ERRORS[code];
   return res.status(status).json({ error, code });
 }
 
-// Whether a node mailbox row is on another host than the node the settings name now.
-export function onOtherMailHost(row, cfg) {
-  return String(row.imap_host ?? '').trim().toLowerCase() !== cfg.mailHost;
-}
+// Whether a node mailbox row is on another host than the node the settings name now
+// (services/mailNode/mailboxActions.js; routes/accounts.js imports it from here).
+export { onOtherMailHost };
 
 // A mailcow failure: 502 (or the status the error carries), the node's own message and a code the
 // screens translate.
@@ -269,28 +208,21 @@ router.put('/config', requireAdmin, async (req, res) => {
 // the error, since no mailbox can be created then anyway. Reading the node never changes a row
 // beyond binding an empty node identity.
 router.get('/domains', async (req, res) => {
+  // Administrators: every domain and its onboarding (services/mailNode/domainActions.js, which the
+  // panel CLI shares).
+  if (await isAdmin(req)) {
+    const result = await adminDomainList();
+    return result.error ? refuse(res, result.error) : res.json(result);
+  }
   const cfg = await getMailNodeConfig();
   if (!cfg) return refuse(res, 'mail_node_not_configured');
   let onNode;
-  let nodeError;
   try {
     onNode = await listDomains(cfg);
   } catch (err) {
-    if (!(err instanceof MailNodeError)) throw err;
-    nodeError = err;
-  }
-  // Administrators: whether the tenant driver runs the tenant steps (stage 7b), so the onboarding
-  // shows those steps as MailExpert's instead of offering "Done".
-  const driverActive = async () => tenantDriverActive(await getEopSettings());
-  if (nodeError) {
-    if (!(await isAdmin(req))) return mailNodeFailure(res, nodeError);
-    return res.json({
-      domains: mergeDomains(null, await listDomainRows()), node: { error: nodeError.message, code: nodeError.code },
-      tenantDriverActive: await driverActive(),
-    });
+    return mailNodeFailure(res, err);
   }
   const domains = mergeDomains(onNode, await bindNodeIdentities(onNode, await listDomainRows()));
-  if (await isAdmin(req)) return res.json({ domains, tenantDriverActive: await driverActive() });
   res.json({
     domains: domains
       .filter((d) => d.onNode && d.active && canCreateMailboxes(d.state))
@@ -431,17 +363,8 @@ router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
 // applied again, as for a new domain. The journal keeps the steps that were confirmed (who and
 // when). A domain with nothing to clear is refused.
 router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  const result = await restartOnboarding({ domain, userId: req.session.userId });
-  if (result.error) return refuse(res, result.error);
-  recordAudit({
-    actorUserId: req.session.userId, action: 'mail_node.domain_state_changed',
-    details: { domain, from: result.from, to: result.to, how: 'restarted', ...(result.steps ? { steps: result.steps } : {}) },
-  });
-  const apply = await applyDomainQuietly(req, domain, 'onboarding_restarted');
-  kickDomainSync(domain, { userId: req.session.userId });
-  return res.json({ ok: true, domain, state: result.to, ...(apply ? { apply } : {}) });
+  const result = await restartDomain(req.params.domain, routeActor(req));
+  return result.error ? refuse(res, result.error) : res.json(result);
 });
 
 // "Apply settings" for one domain: its relayhost, DKIM key and the send limits of its mailboxes.
@@ -592,57 +515,18 @@ router.put('/eop', requireAdmin, async (req, res) => {
   if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'eop_settings' }));
 });
 
-// The send limit a mailbox gets when nobody set its own, for each domain of the given addresses.
-async function defaultLimits(emails) {
-  const domains = [...new Set(emails.map((email) => email.toLowerCase().split('@')[1]))];
-  const [eop, { rows }] = await Promise.all([
-    getEopSettings(),
-    query('SELECT domain, mailbox_send_limit FROM mail_node_domains WHERE domain = ANY($1::text[])', [domains]),
-  ]);
-  const own = new Map(rows.map((row) => [row.domain, row.mailbox_send_limit]));
-  return (email) => defaultRateLimit(eop, own.get(email.toLowerCase().split('@')[1]) ?? null);
-}
-
-const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_value, frame: row.node_rl_frame } : null);
-
 // The node mailboxes MailExpert knows, with quota and usage as the node reports them, and the send
 // limit: the node's (rateLimit, null when the mailbox has none of its own), an administrator's
 // (rateLimitOverride) and the default the mailbox has without one (rateLimitDefault).
+// services/mailNode/mailboxActions.js, shared with the panel CLI.
 router.get('/mailboxes', requireAdmin, async (req, res) => {
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuse(res, 'mail_node_not_configured');
-  const { rows } = await query(
-    'SELECT id, email_address, node_rl_value, node_rl_frame FROM email_accounts WHERE mail_node = true ORDER BY email_address'
-  );
-  const defaultFor = await defaultLimits(rows.map((row) => row.email_address));
-  let onNode;
+  let result;
   try {
-    onNode = new Map((await listMailboxes(cfg)).map((m) => [m.email, m]));
+    result = await listNodeMailboxes();
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  // The disk is read fresh here; the scheduled check alone pings the ping URL.
-  const disk = await getDiskStatus(cfg).then(
-    (d) => ({ ...d, warn: d.usedPercent >= DISK_WARN_PERCENT }),
-    (err) => ({ error: err.message, code: err.code || 'mail_node_failed' }),
-  );
-  res.json({
-    disk,
-    mailboxes: rows.map((row) => {
-      const m = onNode.get(row.email_address.toLowerCase());
-      return {
-        accountId: row.id,
-        email: row.email_address,
-        onNode: !!m,
-        active: m?.active ?? false,
-        quotaMb: m?.quotaMb ?? null,
-        usedBytes: m?.usedBytes ?? null,
-        rateLimit: m?.rateLimit ?? null,
-        rateLimitOverride: overrideOf(row),
-        rateLimitDefault: defaultFor(row.email_address),
-      };
-    }),
-  });
+  return result.error ? refuse(res, result.error) : res.json(result);
 });
 
 router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {

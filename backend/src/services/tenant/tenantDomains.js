@@ -48,7 +48,7 @@ export const DRIVER_STEPS = Object.freeze(['tenant_verified', 'internal_relay', 
 // The states whose domain is an accepted domain the mirror keeps.
 export const MIRRORED_STATES = Object.freeze(['internal_relay', 'connector_ready', 'ready', 'authoritative']);
 export const CONTACT_BATCH = 25;
-const MAX_ATTEMPTS = 6;
+export const DOMAIN_SYNC_MAX_ATTEMPTS = 6;
 const ACCEPTED_FIRST_WAIT_MS = 60 * 1000;
 const ACCEPTED_MAX_WAIT_MS = 10 * 60 * 1000;
 // A run that wrote contacts on a 'ready' domain looks again this soon: the next one may find the
@@ -668,21 +668,26 @@ export async function persistSync(domain, result, db = { query }) {
 
 // A domain's sync, unless one is queued already (a running one does not count: it may have read the
 // node before the change that asks for this one). { job, created }.
-export async function enqueueDomainSync(domain, { userId = null, delayMs = 0, dedupeKey = null } = {}, db = { query }) {
+// via: 'cli' when the panel CLI asks (kept in the payload). The attempts are passed, not left to
+// the registry: the CLI's process never needs the kind registered to queue it.
+export async function enqueueDomainSync(domain, { userId = null, via = null, delayMs = 0, dedupeKey = null } = {}, db = { query }) {
   const { rows: [waiting] } = await db.query(
     `SELECT * FROM jobs WHERE kind = $1 AND status = 'queued' AND payload->>'domain' = $2 ORDER BY id LIMIT 1`,
     [DOMAIN_SYNC_KIND, domain],
   );
   if (waiting) return { job: waiting, created: false };
-  return enqueueJob({ kind: DOMAIN_SYNC_KIND, payload: { domain }, createdBy: userId, delayMs, dedupeKey }, db);
+  return enqueueJob({
+    kind: DOMAIN_SYNC_KIND, payload: { domain, ...(via ? { via } : {}) }, createdBy: userId, delayMs, dedupeKey,
+    maxAttempts: DOMAIN_SYNC_MAX_ATTEMPTS,
+  }, db);
 }
 
 // Queues a domain's sync after something changed it (added, adopted, a step confirmed, a mailbox
 // made), when the driver runs the tenant steps; never fails the caller. Resolves the job or null.
-export async function kickDomainSync(domain, { userId = null } = {}) {
+export async function kickDomainSync(domain, { userId = null, via = null } = {}) {
   try {
     if (!tenantDriverActive(await getEopSettings())) return null;
-    return (await enqueueDomainSync(domain, { userId })).job;
+    return (await enqueueDomainSync(domain, { userId, via })).job;
   } catch (err) {
     console.error(`Tenant sync of ${domain} could not be queued: ${err?.code || err?.message}`);
     return null;
@@ -816,7 +821,7 @@ export async function removeRecipientBeforeDelete(row) {
 let registered = false;
 
 export function registerTenantDomainJobKind({ beforeNodeDelete = null } = {}) {
-  registerJobKind(DOMAIN_SYNC_KIND, { maxAttempts: MAX_ATTEMPTS, handler: (job) => handleDomainSync(job) });
+  registerJobKind(DOMAIN_SYNC_KIND, { maxAttempts: DOMAIN_SYNC_MAX_ATTEMPTS, handler: (job) => handleDomainSync(job) });
   if (beforeNodeDelete && !registered) {
     beforeNodeDelete.push(removeRecipientBeforeDelete);
     registered = true;
