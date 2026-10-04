@@ -129,11 +129,12 @@ stage_requests() {
       # Out of the container's reach first, then removed (rm never follows a link).
       log "removing ${name//[^A-Za-z0-9._-]/?} from the request directory: not a request"
       junk=$(mktemp -u "$STAGE_DIR/junk.XXXXXX")
-      mv -f -- "$path" "$junk" && rm -rf -- "$junk"
+      if mv -f -- "$path" "$junk" 2>/dev/null; then rm -rf -- "$junk"; fi
       continue
     fi
     rm -rf -- "${STAGE_DIR:?}/$name"
-    mv -f -- "$path" "$STAGE_DIR/$name"
+    # The container may remove it meanwhile: then there is nothing to take.
+    mv -f -- "$path" "$STAGE_DIR/$name" 2>/dev/null || continue
   done < <(find "$REQUEST_DIR" -mindepth 1 -maxdepth 1 -print0)
 }
 
@@ -255,7 +256,8 @@ do_update() {
     return 0
   fi
   if auto_rollback_allowed "$PREFLIGHT"; then auto=true; fi
-  before=$(jq -r '.migrationsApplied // empty' <<<"$PREFLIGHT")
+  # Counted the same way before and after (as update.sh does), right before the switch.
+  before=$(migration_count 2>/dev/null | tr -d '[:space:]') || before=''
   log "update $id: $from -> $target"
   set_result "$id" "state=\"updating\"" "startedAt=$(json_str "$(now)")" "autoRollback=$auto" \
     "message=$(json_str "updating $from -> $target")"
