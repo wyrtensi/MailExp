@@ -356,7 +356,9 @@ export const api = {
     saveAccessSync: (data) => request('PUT', '/admin/access-sync', data),
     runAccessSync: () => request('POST', '/admin/access-sync/run'),
     // Update of the panel from the admin UI (the host's updater does the work; see utils/panelUpdate.js).
-    getPanelUpdate: () => request('GET', '/admin/update'),
+    // refresh: asks the backend to look at GitHub's `latest` now instead of its 6-hour cache (the
+    // backend allows that once a minute); used when the card opens, never by the poll.
+    getPanelUpdate: ({ refresh = false } = {}) => request('GET', refresh ? '/admin/update?refresh=1' : '/admin/update'),
     checkPanelUpdate: (target) => request('POST', '/admin/update/check', { target }),
     startPanelUpdate: (target) => request('POST', '/admin/update', { target, confirm: target }),
     googleApps: {
