@@ -143,6 +143,27 @@ describe('MailNodeTenant — the anti-spam actions MailExpert sets (section 5.14
   });
 });
 
+describe('MailNodeTenant — the policy and the spam rule of the node (section 5.14)', () => {
+  const FITTING = { ...STATE, antispam: { ...STATE.antispam, conflicts: [] } };
+  const fits = async (props) => {
+    answers['GET /api/mail-node/tenant'] = { driver: 'worker', configured: false, state: FITTING, jobs: {} };
+    const root = await mount(React.createElement(MailNodeTenant, props));
+    const line = root.querySelector('[data-policy-fits]');
+    return { state: line.getAttribute('data-policy-fits'), text: line.textContent };
+  };
+
+  test('says the actions fit only when the node holds the rule', async () => {
+    assert.deepEqual(await fits({ spamRule: 'ok' }), { state: 'ok', text: 'admin.tenant.policyFits' });
+    assert.deepEqual(await fits({}), { state: 'policy', text: 'admin.tenant.policyFits' });
+  });
+
+  test('says the rule is missing, outdated or not checked instead of that they fit', async () => {
+    assert.deepEqual(await fits({ spamRule: 'missing' }), { state: 'missing', text: 'admin.tenant.policyFitsRuleMissing' });
+    assert.deepEqual(await fits({ spamRule: 'outdated' }), { state: 'outdated', text: 'admin.tenant.policyFitsRuleOutdated' });
+    assert.deepEqual(await fits({ spamRule: null }), { state: 'unknown', text: 'admin.tenant.policyFitsRuleUnknown' });
+  });
+});
+
 describe('MailNodeTenant — the phishing release (R-42, stage 7c)', () => {
   const QID = ['c14401cf-aa9a-465b-cfd5-08d0f0ca37c5', '4c2ca98e-94ea-db3a-7eb8-3b63657d4db7'].join('\\');
   const RELEASE = {

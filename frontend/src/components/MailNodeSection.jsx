@@ -375,7 +375,7 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
               {t('admin.mailNode.addDomain')}
             </button>
           </div>
-          <span style={hintStyle}>{t('admin.mailNode.newDomainNote')}</span>
+          <span style={hintStyle}>{t(tenantDriver ? 'admin.mailNode.newDomainNoteDriver' : 'admin.mailNode.newDomainNote')}</span>
         </>
       )}
 

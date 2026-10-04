@@ -421,7 +421,7 @@ test('the demo EOP settings refuse and normalize like the server', async () => {
 
 test('the demo applies the node settings: the node and its domains, and the spam rule only by its own action', async () => {
   const before = await demoRequest('GET', '/mail-node/apply');
-  assert.deepEqual(before.node.items.find(i => i.item === 'prefilter'), { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs' });
+  assert.deepEqual(before.node.items.find(i => i.item === 'prefilter'), { item: 'prefilter', target: null, status: 'pending', code: 'prefilter_differs', rule: 'missing' });
   const result = await demoRequest('POST', '/mail-node/apply');
   assert.deepEqual(result.node.map(i => i.item), ['tls_policy', 'relayhost', 'fail2ban', 'prefilter', 'forwarding_hosts']);
   // The forwarding hosts wait for the spam filing rule.

@@ -38,6 +38,20 @@ const POLL_LIMIT = 200;
 // In the interface language ("5 окт. 2026, 08:00"), as the rest of the panel.
 const when = (iso) => formatDateTime(iso) || '—';
 
+// The policy without conflicts, said with the node's spam rule: the actions deliver spam, phishing
+// and bulk to the node, which files them into Spam only with the rule (section 5.14). undefined: the
+// screen does not know the rule, the policy alone is judged.
+function PolicyFits({ spamRule }) {
+  const { t } = useTranslation();
+  if (spamRule === undefined || spamRule === 'ok') {
+    return <div data-policy-fits={spamRule ?? 'policy'} style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>;
+  }
+  const key = spamRule === 'outdated'
+    ? 'admin.tenant.policyFitsRuleOutdated'
+    : (spamRule === 'missing' ? 'admin.tenant.policyFitsRuleMissing' : 'admin.tenant.policyFitsRuleUnknown');
+  return <div role="status" data-policy-fits={spamRule ?? 'unknown'} style={boxStyle('warning')}>{t(key)}</div>;
+}
+
 // One failure line: the translated reason, with the server's short message when it has one.
 function Failure({ failure }) {
   const { t } = useTranslation();
@@ -50,7 +64,7 @@ function Failure({ failure }) {
   );
 }
 
-// Settings -> Integrations -> EOP -> "Microsoft tenant" (stage 7a, admins only): the tenant driver
+// Settings -> Mail node -> EOP -> "Microsoft tenant" (stage 7a, admins only): the tenant driver
 // the panel runs with, the application certificate the tenant worker holds (thumbprint and expiry;
 // the PFX itself never enters the panel, R-35), "Test connection" (a Graph token and EXO whoami
 // through the job queue, its result step by step), the blocked inbound connectors the poll found
@@ -59,7 +73,9 @@ function Failure({ failure }) {
 // compared with their reference, with "Take as the reference" after a deliberate change. Every
 // job button queues a job and the section follows it until it ends. `revision` changes when the
 // EOP settings were saved.
-export default function MailNodeTenant({ revision = 0 }) {
+// `spamRule`: the node's spam filing rule from its last apply (utils/mailNode.js spamRuleState),
+// when the screen knows it; the policy fits the node only once the rule is there.
+export default function MailNodeTenant({ revision = 0, spamRule }) {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -239,7 +255,7 @@ export default function MailNodeTenant({ revision = 0 }) {
             </div>
           )}
           {(antispam.conflicts ?? []).length === 0
-            ? <div style={{ marginTop: 6 }}>{t('admin.tenant.policyFits')}</div>
+            ? <PolicyFits spamRule={spamRule} />
             : (antispam.conflicts.map((c) => (
               <div key={c.field} data-policy-conflict={c.field} style={boxStyle(c.severity === 'error' ? 'error' : 'warning')}>
                 <span style={{ fontWeight: 600, color: SEVERITY_COLORS[c.severity] ?? 'var(--red)' }}>{t(policyFieldKey(c.field))}: {c.action}</span>
@@ -400,7 +416,7 @@ function PhishRelease({ canRun, revision }) {
               {/* Section 5.14: spam, phishing and bulk wait for this version of the spam rule on the node. */}
               {run.rule && run.rule.state !== 'ok' && !run.paused && !run.noDomains && (
                 <div role="status" data-phish-rule-waiting={run.rule.state} style={boxStyle('warning')}>
-                  {t('admin.tenant.phishRuleWaiting', { count: run.counts?.ruleWaiting ?? 0 })}
+                  {t('admin.tenant.phishRuleWaiting', { n: run.counts?.ruleWaiting ?? 0 })}
                 </div>
               )}
               {run.throttled && <div><Failure failure={{ code: run.throttled.code }} /></div>}

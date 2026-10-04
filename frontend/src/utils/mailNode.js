@@ -651,6 +651,17 @@ export function prefilterPending(nodeResult) {
   return (nodeResult?.items ?? []).some((i) => i.item === 'prefilter' && i.status === 'pending');
 }
 
+// The node's spam filing rule as its last apply saw it (backend nodeApply.js prefilterCheck): 'ok',
+// 'missing' or 'outdated'; null when no apply has read it. The tenant's anti-spam policy only fits
+// the node once this is 'ok' (section 5.14).
+export function spamRuleState(nodeResult) {
+  const item = (nodeResult?.items ?? []).find((i) => i.item === 'prefilter');
+  if (!item) return null;
+  if (item.status === 'ok' || item.status === 'changed') return 'ok';
+  if (item.status === 'pending') return item.rule === 'outdated' ? 'outdated' : 'missing';
+  return null;
+}
+
 // Whether the domain's last apply left mailcow's DKIM key in place for the administrator to delete.
 export function dkimDeleteWaiting(domain) {
   return (domain?.apply?.items ?? []).some((i) => i.item === 'dkim' && i.code === 'dkim_delete_unconfirmed');

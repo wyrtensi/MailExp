@@ -41,6 +41,7 @@ import {
   parseTlsParameters,
   prefilterDoneKey,
   prefilterPending,
+  spamRuleState,
   rateFrameKey,
   rateLimitError,
   rateLimitState,
@@ -530,6 +531,13 @@ describe('the result of applying the settings to the node', () => {
     assert.equal(prefilterPending({ items: [{ item: 'prefilter', status: 'pending' }] }), true);
     assert.equal(prefilterPending({ items: [{ item: 'prefilter', status: 'ok' }] }), false);
     assert.equal(prefilterPending(null), false);
+    assert.equal(spamRuleState({ items: [{ item: 'prefilter', status: 'pending', code: 'prefilter_differs', rule: 'missing' }] }), 'missing');
+    assert.equal(spamRuleState({ items: [{ item: 'prefilter', status: 'pending', code: 'prefilter_differs', rule: 'outdated' }] }), 'outdated');
+    assert.equal(spamRuleState({ items: [{ item: 'prefilter', status: 'pending' }] }), 'missing');
+    assert.equal(spamRuleState({ items: [{ item: 'prefilter', status: 'changed' }] }), 'ok');
+    assert.equal(spamRuleState({ items: [{ item: 'prefilter', status: 'ok' }] }), 'ok');
+    assert.equal(spamRuleState({ items: [{ item: 'prefilter', status: 'failed' }] }), null);
+    assert.equal(spamRuleState(null), null);
     assert.equal(dkimDeleteWaiting({ apply: { items: [{ item: 'dkim', status: 'skipped', code: 'dkim_delete_unconfirmed' }] } }), true);
     assert.equal(dkimDeleteWaiting({ apply: { items: [{ item: 'dkim', status: 'ok' }] } }), false);
     assert.equal(dkimDeleteWaiting({ apply: null }), false);
