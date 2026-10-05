@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 // everyday ways (personal Gmail and our mailbox) are large cards side by side so the choice is
 // explicit; manual server setup (administrators only) is a small link under them. The options come
 // from utils/addAccount.js, which decides what is offered and why an option is inactive; an
-// inactive option can still be chosen and says why instead of showing its form.
+// inactive option can still be chosen and says why instead of showing its form. Every choice is a
+// plain toggle button (aria-pressed), so Tab and Enter work without a custom keyboard model.
 const SECONDARY_KINDS = new Set(['manual']);
 
 export default function AddAccountTabs({ options, active, onSelect, renderForm }) {
@@ -15,7 +16,7 @@ export default function AddAccountTabs({ options, active, onSelect, renderForm }
   const secondary = options.filter((option) => SECONDARY_KINDS.has(option.kind));
   return (
     <div>
-      <div role="radiogroup" aria-label={t('admin.accounts.addTitle')} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginBottom: 10 }}>
+      <div role="group" aria-label={t('admin.accounts.addTitle')} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, marginBottom: 10 }}>
         {primary.map((option) => {
           const selected = option.kind === current?.kind;
           return (
@@ -23,8 +24,7 @@ export default function AddAccountTabs({ options, active, onSelect, renderForm }
               key={option.kind}
               id={`add-account-tab-${option.kind}`}
               type="button"
-              role="radio"
-              aria-checked={selected}
+              aria-pressed={selected}
               aria-controls="add-account-panel"
               onClick={() => onSelect(option.kind)}
               style={{
