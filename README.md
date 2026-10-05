@@ -48,6 +48,7 @@ Status: under active development; what is done and what comes next is in [ROADMA
 
 | I want to | Read |
 |---|---|
+| take over the project: what it is, what is done, what is left | [Handoff](docs/HANDOFF.md) (in Russian) |
 | install it on a server | [Quick start](docs/operations/quickstart.md) (in Russian), then [operations](docs/operations/README.md) |
 | let an AI agent install or update it | [AGENTS.md](AGENTS.md) and the [`mailexpert-rollout` skill](.claude/skills/mailexpert-rollout/SKILL.md) |
 | learn the screens | [User guide](docs/user-guide/README.md) (in Russian) |
