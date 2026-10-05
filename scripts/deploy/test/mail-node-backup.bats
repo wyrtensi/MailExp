@@ -715,11 +715,16 @@ keys() {
   # The owner removed the override on the old node before its move backup.
   repo_copy "$FIRST" 0000000a "$(cat "$MOCK_DIR/repo/$FIRST.host")" mailcow move
   rm "$MOCK_DIR/repo/0000000a$(printf 'c%.0s' $(seq 56))/backup/mailexpert/docker-compose.override.yml"
+  # An override set aside by an earlier run stays as it is.
+  printf 'services: {}\n# owner\n' >"$MC/docker-compose.override.yml.pre-restore"
   run bash "$RESTORE" 0000000a --mailcow-dir "$MC" --update
   [ "$status" -eq 0 ]
   [ ! -e "$MC/docker-compose.override.yml" ]
-  grep -q '# old' "$MC/docker-compose.override.yml.pre-restore"
-  [[ $output == *"docker-compose.override.yml: the snapshot has none"* ]]
+  grep -q '# owner' "$MC/docker-compose.override.yml.pre-restore"
+  set -- "$MC"/docker-compose.override.yml.pre-restore.*
+  [ "$#" -eq 1 ] && [[ $1 =~ \.pre-restore\.[0-9]+$ ]]
+  grep -q '# old' "$1"
+  [[ $output == *"docker-compose.override.yml: the snapshot has none; the one here is set aside as docker-compose.override.yml.pre-restore."* ]]
 }
 
 @test "a restore that stopped half way is run again" {

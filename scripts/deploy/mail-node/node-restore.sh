@@ -15,7 +15,8 @@
 #      directory under /var/backups/mailexpert-node;
 #   2. puts mailcow.conf (with the .env link mailcow expects), data/conf, data/assets/ssl and
 #      docker-compose.override.yml in place (an override the snapshot does not have is set aside
-#      as docker-compose.override.yml.pre-restore), and node.env when this server has none;
+#      as docker-compose.override.yml.pre-restore, or .pre-restore.<epoch> when that name is taken),
+#      and node.env when this server has none;
 #   3. pulls mailcow's images and starts it, which creates its volumes;
 #   4. restores vmail straight from the repository into the vmail volume, Dovecot stopped: only
 #      files missing or changed are downloaded, and mail no longer in the snapshot is removed;
@@ -131,7 +132,7 @@ fresh_server_problem() {
 # place_files <dir with the restored backup>: mailcow.conf and the node's files where mailcow and
 # setup.sh read them.
 place_files() {
-  local src=$1/mailexpert
+  local src=$1/mailexpert aside
   install -m 600 "$1/mailcow.conf" "$MAILCOW_DIR/mailcow.conf"
   ln -sfn mailcow.conf "$MAILCOW_DIR/.env"
   mkdir -p "$MAILCOW_DIR/data/conf" "$MAILCOW_DIR/data/assets"
@@ -145,8 +146,12 @@ place_files() {
   if [ -f "$src/docker-compose.override.yml" ]; then
     cp -p "$src/docker-compose.override.yml" "$MAILCOW_DIR/"
   elif [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then
-    mv -f "$MAILCOW_DIR/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml.pre-restore"
-    log "docker-compose.override.yml: the snapshot has none; the one here is set aside as docker-compose.override.yml.pre-restore"
+    # An earlier run's set-aside copy (perhaps the owner's original) is never overwritten.
+    aside=docker-compose.override.yml.pre-restore
+    if [ -e "$MAILCOW_DIR/$aside" ]; then aside=$aside.$(date +%s); fi
+    mv -n "$MAILCOW_DIR/docker-compose.override.yml" "$MAILCOW_DIR/$aside"
+    [ ! -e "$MAILCOW_DIR/docker-compose.override.yml" ] || die "could not set $MAILCOW_DIR/docker-compose.override.yml aside: $aside exists"
+    log "docker-compose.override.yml: the snapshot has none; the one here is set aside as $aside"
   fi
   if [ -f "$NODE_CONF" ]; then
     log "$NODE_CONF exists here and stays; the backup's copy is not used"
