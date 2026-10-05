@@ -61,6 +61,9 @@ Usage: install.sh --version sha-<commit> --signin cf|direct|both
 --no-start      prepare everything, start neither the panel nor the tunnel (before a move)
 
 Values are stored in <prefix>/install.conf: a rerun without flags repeats the last install.
+<prefix>/compose.local.yml, if it exists, is added after the production overlay to every compose
+command of the panel (install, update, backup, restore, rollback, status, the CLI): the operator's
+own additions, kept across updates.
 Secrets are never flags: add them with configure.sh (stdin).
 Exit codes: 0 done, 1 failure, 2 invalid input, 3 waiting for secrets from configure.sh.
 EOF
@@ -228,6 +231,7 @@ require_generated_secrets() {
 # ever turning unhealthy. The wait is bounded so that update.sh gets to its rollback.
 app_up() {
   log "starting the panel (compose project $CFG_PROJECT)"
+  if [ -f "$LOCAL_COMPOSE" ]; then log "with the local compose override $LOCAL_COMPOSE"; fi
   timeout "$READY_TIMEOUT" "${APP_COMPOSE[@]}" up -d --quiet-pull ||
     die "the panel did not start within ${READY_TIMEOUT}s; see: docker compose -p $CFG_PROJECT logs backend"
   clear_standby

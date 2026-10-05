@@ -4,13 +4,19 @@
 
 # set_install_paths: the paths and commands derived from OPT_PREFIX and the CFG_* values. The
 # compose commands are arrays as well as functions: `timeout` runs a program, not a function.
+# <prefix>/compose.local.yml, when the operator put one there, is added after the production
+# overlay to every compose command of the panel: local additions that a checkout of another
+# version does not overwrite. Relative paths in it resolve against <prefix>/app, the project
+# directory.
 # shellcheck disable=SC2034 # read by the scripts that source this file
 set_install_paths() {
   APP_DIR=$OPT_PREFIX/app EDGE_DIR=$OPT_PREFIX/edge STATE_DIR=$OPT_PREFIX/state
   BACKUP_DIR=$OPT_PREFIX/backups ENV_FILE=$OPT_PREFIX/.env EDGE_ENV=$OPT_PREFIX/edge/.env
   BACKEND_IMAGE=$CFG_IMAGE_PREFIX/mailexpert-backend:$CFG_VERSION
+  LOCAL_COMPOSE=$OPT_PREFIX/compose.local.yml
   APP_COMPOSE=(docker compose -p "$CFG_PROJECT" --project-directory "$APP_DIR" --env-file "$ENV_FILE"
     -f "$APP_DIR/docker-compose.yml" -f "$APP_DIR/deploy/compose.prod.yml")
+  if [ -f "$LOCAL_COMPOSE" ]; then APP_COMPOSE+=(-f "$LOCAL_COMPOSE"); fi
   EDGE_COMPOSE=(docker compose -p "$CFG_EDGE_PROJECT" --project-directory "$EDGE_DIR" --env-file "$EDGE_ENV"
     -f "$EDGE_DIR/compose.yml")
 }
