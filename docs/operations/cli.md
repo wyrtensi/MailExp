@@ -76,8 +76,10 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 - `--` — всё после него позиционные аргументы. Одиночный `-` — тоже аргумент.
 - Один параметр дважды — ошибка (`--name is given twice`). Неизвестный параметр, лишний аргумент и
   недостающий аргумент — ошибка использования, код выхода 2.
-- Короткие формы есть только у `-y` и `-h`.
-- `--help` отвечает при любой остальной строке и ничего не выполняет.
+- Короткие формы есть только у `-y` (`--yes`) и `-h` (`--help`); других однобуквенных параметров нет.
+- `--help` (или `-h`) отвечает справкой и ничего не выполняет, даже если не хватает аргументов или
+  их слишком много. Ошибки в самих параметрах (неизвестный параметр, параметр дважды, значение у
+  булева, нет значения) разбираются раньше и дают ошибку использования с кодом 2, а не справку.
 
 ### Общие параметры
 
@@ -115,7 +117,8 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 ### Задания и `--wait`
 
 Команды, ставящие задание тенанта: `domain sync`, `domain internal-relay`, `domain approve-alias-removal`,
-`tenant test`, `tenant antispam`, `quarantine release`. CLI ставит задание в очередь и, без `--wait`,
+`tenant test`, `tenant antispam`, `quarantine release`; `domain allow-authoritative` (снятие удержания)
+тоже ставит прогон домена, но отвечает состоянием домена, а не заданием. CLI ставит задание в очередь и, без `--wait`,
 сразу отвечает его состоянием (`job <ID> (<вид>) queued`, либо `already queued`, если такое задание уже
 стоит и новое не создано; в JSON это `created: false`). Выполняет задание воркер backend (опрос раз в
 секунду): если backend остановлен, задание ждёт.
@@ -329,8 +332,9 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 `domain hold` и `domain allow-authoritative` — `{ "domain": "<DOMAIN>", "holdInternalRelay": false }`
 (`true` у `hold`).
 
-Команды, ставящие задание, — `{ "created": true, "job": {...} }`; `created: false` значит, что такое
-задание уже стояло. Задание:
+`domain sync`, `tenant test`, `tenant antispam`, `quarantine release` — `{ "created": true, "job": {...} }`;
+`created: false` значит, что такое задание уже стояло. `domain internal-relay` — `{ "job": {...} }`,
+`domain approve-alias-removal` — `{ "job": {...}, "addresses": [...] }`, без `created`. Задание:
 
 ```json
 {
@@ -347,7 +351,7 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 С `--wait` поле `job` — итоговое состояние. `jobs list` — `{ "jobs": [ { ...задание, "domain": "<DOMAIN>" } ] }`,
 `jobs show` — `{ "job": {...} }`. `tenant status` — состояние тенанта (`driver`, `configured`, `state`,
 `connectorDrift`, `jobs`) плюс `worker`: `{ "reachable", "at", "code", "source" }`. `quarantine list` —
-`{ "messages": [...] }`, `quarantine pause`/`resume` — `{ "enabled": ..., "changedAt": ... }`.
+`{ "held": {...}, "messages": [...] }` (сводка и сами сообщения), `quarantine pause`/`resume` — `{ "enabled": ..., "changedAt": ... }`.
 
 ## 6. Коды ошибок, которые встретятся
 

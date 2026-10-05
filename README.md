@@ -101,20 +101,21 @@ From MailFlow, kept and extended:
 - **Spam reporting** — mark messages as spam or not spam from the context menu, toolbar, or bulk actions; feedback will feed into automated filtering in a future release
 - **Snooze** — snooze messages until a chosen time; they reappear at the top of the inbox
 - **AI assistant** — use an OpenAI-compatible API provider or a ChatGPT Codex subscription; summarise threads, draft replies, ask questions about a message
-- **Password recovery** — recover your account via a recovery email address configured in profile settings
 - **User management** — admin panel, invite-only registration, invite emails
-- **Two-factor authentication** — TOTP (any authenticator app), email OTP fallback, persistent device trust; admin-configurable enforcement policy
+- **Optional local-sign-in security** — two-factor authentication (TOTP, email code fallback, device trust), a recovery email and a lock-screen PIN, set by administrators as policy; production installs sign in through Google or Cloudflare Access and normally do not use them
 - **SSO / OIDC** — single sign-on via any OpenID Connect provider; group claims from the IdP can be mapped to the MailExpert admin role, with optional RP-initiated (end-session) logout to sign out of the provider too
-- **Microsoft 365 / OAuth2** — work accounts via Azure App Registration; personal Outlook.com via device code flow
-- **Todoist integration** — create tasks directly from emails; tasks include a deep link back to the original message
-- **GTD workflow** — optional Getting-Things-Done rail: label threads Todo / Watch / Delegated / Someday / Reference (each backed by a real IMAP folder) with the t / w / d keys; opt in per account, see below
+- **Microsoft 365 / OAuth2** — an optional administrator path: work accounts via Azure App Registration; personal Outlook.com via device code flow
+- **Todoist integration** — create tasks directly from emails; tasks include a deep link back to the original message; the Todoist token is per user
+- **Plugins** — an administrator enables plugins for everyone; the bundled one is GTD
+- **GTD workflow** — optional Getting-Things-Done rail: label threads Todo / Watch / Delegated / Someday / Reference (each backed by a real IMAP folder) with the t / w / d keys, see below
 
 ---
 
 ## GTD (Getting Things Done)
 
-An optional Getting-Things-Done workflow, off by default and enabled per account
-under Settings → Categories → GTD. When on, a rail beside the message list
+An optional Getting-Things-Done workflow, off by default. Plugins are enabled by an
+administrator for everyone; the GTD folders are then set per mailbox under
+Settings → Categories → GTD. When on, a rail beside the message list
 groups threads into five states, each backed by a real IMAP folder — so the labels
 are just server-side folders that sync to every mail client and survive MailExpert
 itself:
@@ -407,6 +408,8 @@ risks are described in [docs/operations/google-oauth.md](docs/operations/google-
 
 ### Microsoft 365 / Outlook (OAuth2)
 
+This is an optional, administrator-only path: the team's mailboxes otherwise connect
+automatically (mail node mailboxes through EOP, Gmail through the Google apps).
 Microsoft has disabled basic (password) auth for Outlook.com, Hotmail, and most
 Microsoft 365 accounts, so they connect via OAuth2 under **Settings → Integrations →
 Microsoft 365** (not the normal Add Account form). This is a one-time setup: you
@@ -436,7 +439,9 @@ both of these, then follow the consent note:
 
 **3. Add the optional ID token claims.** MailExpert takes the mailbox address only from
 verified claims, so under **Token configuration → Add optional claim → ID** add **`email`**,
-**`xms_edov`** and **`upn`**. Without them the sign-in is refused with `email_not_verified`. A
+**`xms_edov`** and **`upn`**. Without them the sign-in is refused with `email_not_verified`.
+For personal accounts (Outlook.com, Hotmail) Microsoft does not document when `xms_edov` is
+sent: before relying on personal accounts, check with a test sign-in that the mailbox connects. A
 mailbox is bound to the Microsoft account that connected it (tenant and object id); reconnecting
 only updates that account's mailbox, and an administrator can reset the binding. Details:
 [docs/operations/microsoft-oauth.md](docs/operations/microsoft-oauth.md) (in Russian).

@@ -39,7 +39,7 @@ Google-приложений для ящиков Gmail — отдельно, в [
 
 ```bash
 sudo git clone --branch latest https://github.com/wyrtensi/MailExpert.git /opt/mailexpert/app
-V=sha-$(git -C /opt/mailexpert/app rev-parse HEAD | cut -c1-12)
+V=sha-$(sudo git -C /opt/mailexpert/app rev-parse HEAD | cut -c1-12)
 sudo /opt/mailexpert/app/scripts/deploy/install.sh \
   --version "$V" \
   --signin cf|direct|both \

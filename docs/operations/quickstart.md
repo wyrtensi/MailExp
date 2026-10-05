@@ -35,7 +35,7 @@ IPv4 панели, `<ADMIN_EMAIL>` — адрес Google первого адми
 
 | Что | Зачем |
 |---|---|
-| VPS **Ubuntu 24.04**, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска (для панели с узлом — 4 vCPU / 8 ГБ) | `install.sh` ставит Docker, файрвол, swap и таймеры только на Ubuntu 24.04 и проверяет ресурсы; другая ОС — только с `--no-system`, а Docker Engine с Compose 2.24.4+ тогда ставите вы |
+| VPS **Ubuntu 24.04**, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска; почтовый узел — всегда отдельный сервер, 4 vCPU / 8 ГБ (раздел 8) | `install.sh` ставит Docker, файрвол, swap и таймеры только на Ubuntu 24.04 и проверяет ресурсы; другая ОС — только с `--no-system`, а Docker Engine с Compose 2.24.4+ тогда ставите вы |
 | SSH-доступ root по ключу | все команды ниже — от root |
 | Зона DNS `example.com` в Cloudflare, A-запись `<DIRECT_HOST>` → IP сервера (TTL 300) | сертификат выпускается через DNS-01 Cloudflare |
 | Токен Cloudflare API только на правку DNS этой зоны (`DNS_API_TOKEN`) | для сертификата |
@@ -103,8 +103,9 @@ SSH его можно просто запустить снова):
   --signin direct --direct-host <DIRECT_HOST> --admin-email <ADMIN_EMAIL>
 ```
 
-Дальше он запускает панель и Caddy, ждёт готовности, проверяет `https://<DIRECT_HOST>` через Caddy,
-включает `ufw`, таймеры бэкапа и проверки здоровья и исполнитель обновлений из панели, и пишет `done`.
+Дальше он запускает панель и Caddy, включает `ufw`, ждёт готовности панели, проверяет
+`https://<DIRECT_HOST>` через Caddy, затем настраивает бэкапы, таймеры бэкапа и проверки здоровья и
+исполнитель обновлений из панели и пишет `done`.
 Если ключи restic были внесены, при первом успешном запуске в терминале **один раз** печатается ключ
 восстановления (`RESTIC_REPOSITORY` и `RESTIC_PASSWORD`).
 
@@ -139,7 +140,7 @@ $D/backup.sh --show-recovery-key
 
 Нужен для ящиков на своих доменах через Microsoft EOP. Это **отдельный** сервер Ubuntu 24.04
 (4 vCPU / 8 ГБ, у провайдера с открытым портом 25 и своим PTR); на одном сервере с панелью узел не
-поддерживается. Порядок — [mail-node.md, разделы 3-6](mail-node.md), коротко:
+поддерживается. Порядок — [mail-node.md, разделы 2-6е](mail-node.md), коротко:
 
 1. DNS: A-запись `<MAIL_HOST>` и PTR на IP узла.
 2. Docker и mailcow по инструкции mailcow, `./generate_config.sh` (имя — `<MAIL_HOST>`).
@@ -164,6 +165,7 @@ $D/backup.sh --show-recovery-key
 
   ```bash
   $D/update.sh --check latest      # предпроверка, ничего не меняет
+  systemctl reset-failed mailexpert-update 2>/dev/null; systemctl stop mailexpert-update 2>/dev/null
   systemd-run --unit=mailexpert-update --property=RemainAfterExit=yes $D/update.sh latest
   journalctl -u mailexpert-update -f -o cat
   ```

@@ -142,7 +142,7 @@ local shell (the double quotes expand it before `ssh` sends the command); the fl
 human's:
 
 ```bash
-ssh root@<PANEL_HOST> "systemctl reset-failed mailexpert-install 2>/dev/null; systemd-run --unit=mailexpert-install --property=RemainAfterExit=yes <PREFIX>/app/scripts/deploy/install.sh --version $S --signin direct --direct-host <DIRECT_HOST> --admin-email <ADMIN_EMAIL>"
+ssh root@<PANEL_HOST> "systemctl reset-failed mailexpert-install 2>/dev/null; systemctl stop mailexpert-install 2>/dev/null; systemd-run --unit=mailexpert-install --property=RemainAfterExit=yes <PREFIX>/app/scripts/deploy/install.sh --version $S --signin direct --direct-host <DIRECT_HOST> --admin-email <ADMIN_EMAIL>"
 ssh root@<PANEL_HOST> "journalctl -u mailexpert-install -o cat --no-pager -n 100"
 ssh root@<PANEL_HOST> "systemctl show mailexpert-install -p SubState -p ExecMainStatus"
 ```
@@ -157,8 +157,9 @@ install -m 600 /dev/null /root/mailexpert-secrets.env    # the human edits it: K
 shred -u /root/mailexpert-secrets.env
 ```
 
-`configure.sh` exits 0 stored, 2 invalid input (it lists the problems, nothing stored). Then rerun
-the same `systemd-run` (GATE 4; `systemctl reset-failed mailexpert-install` first). `install.sh` is
+`configure.sh` exits 0 stored, 1 failure (for example `install.sh` held the lock too long), 2
+invalid input (it lists the problems, nothing stored). Then rerun the same command line, with its
+`reset-failed` and `stop` of `mailexpert-install` first (GATE 4). `install.sh` is
 idempotent: rerunning after a failure or a dropped connection is the fix, not a risk. Exit 0 ends
 with `done`; exit 1 shows the failing step (`docker compose -p mailexpert logs backend`, `-p edge
 logs caddy`); exit 2 is invalid flags.
@@ -176,7 +177,7 @@ the version, the commands with exit codes, the warnings `install.sh` printed (`b
 ufw), and what is left to the human: recovery key, Google apps for Gmail mailboxes
 (`docs/operations/google-oauth.md`), the mail node.
 
-Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sections 3-5. mailcow's
+Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sections 2-6е (as in quickstart.md, section 8). mailcow's
 `generate_config.sh` is interactive: the human runs it. The node's MailExpert scripts are cloned
 to `/opt/mailexpert-node-src` at the **panel's commit**, then `setup.sh --dry-run` (show the diff)
 and `setup.sh` with `--panel-ip <PANEL_IP>`; the API key and the node settings are entered by the
