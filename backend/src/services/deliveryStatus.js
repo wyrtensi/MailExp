@@ -350,22 +350,30 @@ async function readOutcomesOf(letters) {
   return out;
 }
 
-// Whether the mailbox sent this letter: { owned, sentAt, recipients }. owned: the panel's journal
+// Whether the mailbox sent this letter: { owned, sentAt, recipients, bccOnly, authorId }. owned: the panel's journal
 // shows it sent from the mailbox (message.sent with this Message-ID), or a copy lies in the
 // mailbox's Sent folder from its own login address. recipients: the journal's To, Cc and Bcc (a
 // Set of addresses), null when only a Sent copy says so (a copy made outside the panel has no Bcc).
-// sentAt: the journal's time, else the copy's date.
+// sentAt: the journal's time, else the copy's date. bccOnly: the journal's addresses that were in
+// Bcc and not in To or Cc (a Set, empty without the journal); authorId: who sent it (the journal's
+// actor), null without the journal.
 export async function sentLetterOf(accountId, messageId) {
-  if (!accountId || !messageId) return { owned: false, sentAt: null, recipients: null };
+  const none = { owned: false, sentAt: null, recipients: null, bccOnly: new Set(), authorId: null };
+  if (!accountId || !messageId) return none;
   const { rows: journal } = await query(`
-    SELECT details, occurred_at FROM mailbox_audit_log
+    SELECT details, occurred_at, actor_user_id FROM mailbox_audit_log
      WHERE action = 'message.sent' AND account_id = $1 AND details->>'messageId' = $2
      ORDER BY occurred_at LIMIT 1`, [accountId, messageId]);
   if (journal.length) {
     const d = journal[0].details ?? {};
     const lists = [d.to, d.cc, d.bcc].filter(Array.isArray);
     const recipients = lists.length ? new Set(lists.flat().map(addressOf).filter(Boolean)) : null;
-    return { owned: true, sentAt: new Date(journal[0].occurred_at).toISOString(), recipients };
+    const open = new Set([d.to, d.cc].filter(Array.isArray).flat().map(addressOf).filter(Boolean));
+    const bccOnly = new Set((Array.isArray(d.bcc) ? d.bcc : []).map(addressOf).filter((a) => a && !open.has(a)));
+    return {
+      owned: true, sentAt: new Date(journal[0].occurred_at).toISOString(), recipients, bccOnly,
+      authorId: journal[0].actor_user_id ?? null,
+    };
   }
   const { rows: copies } = await query(`
     SELECT m.date FROM messages m JOIN email_accounts a ON a.id = m.account_id
@@ -373,8 +381,8 @@ export async function sentLetterOf(accountId, messageId) {
        AND lower(btrim(m.from_email)) = lower(btrim(a.email_address))
        AND ${sentCopyCondition('m', 'a')}
      ORDER BY m.date LIMIT 1`, [accountId, messageId]);
-  if (!copies.length) return { owned: false, sentAt: null, recipients: null };
-  return { owned: true, sentAt: copies[0].date ? new Date(copies[0].date).toISOString() : null, recipients: null };
+  if (!copies.length) return none;
+  return { ...none, owned: true, sentAt: copies[0].date ? new Date(copies[0].date).toISOString() : null };
 }
 
 // The log, prepared once per read for any number of letters: queued letters by Message-ID and by
