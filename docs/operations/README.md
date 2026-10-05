@@ -22,6 +22,7 @@
 |---|---|
 | [quickstart.md](quickstart.md) | быстрый старт: панель на чистом VPS, почтовый узел по желанию, установка агентом |
 | [deployment.md](deployment.md) | установка панели, режимы входа, CLI, обновление, откат, переезд панели |
+| [ports.md](ports.md) | порты всех модулей: входящие, исходящие, Docker/loopback, production и стенды |
 | [cli.md](cli.md) | справочник командной строки панели `mailexpert` |
 | [../user-guide/README.md](../user-guide/README.md) | руководство по экранам панели для пользователей и администраторов |
 | [mail-node.md](mail-node.md) | почтовый узел: mailcow, файрвол, EOP, тенант Microsoft, бэкап и переезд узла |
