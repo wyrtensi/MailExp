@@ -49,10 +49,28 @@ key_target() {
   return 1
 }
 
-# value_problem <key> <value>: prints what is wrong with the value, nothing when it is fine.
+# tunnel_token_ok <value>: status 0 when the value looks like the token of a remotely managed
+# Cloudflare tunnel: base64 of a JSON object with the account tag "a", the tunnel id "t" and the
+# secret "s". Missing padding is tolerated; jq is not needed (configure.sh may run before
+# install.sh installed it).
+tunnel_token_ok() {
+  local token=$1 json field re
+  [[ $token =~ ^[A-Za-z0-9+/]{40,}={0,2}$ ]] || return 1
+  while [ $((${#token} % 4)) -ne 0 ]; do token+='='; done
+  json=$(printf '%s' "$token" | base64 -d 2>/dev/null) || return 1
+  for field in a t s; do
+    re="\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]+\""
+    [[ $json =~ $re ]] || return 1
+  done
+}
+
+# value_problem <key> <value>: prints what is wrong with the value, nothing when it is fine. The
+# messages never quote the value.
 value_problem() {
   case $1 in
     CF_ACCESS_ISSUER) [[ $2 =~ ^https://[a-z0-9-]+\.cloudflareaccess\.com$ ]] || echo "must be https://<TEAM>.cloudflareaccess.com" ;;
+    CF_ACCESS_AUDIENCE) [[ $2 =~ ^[0-9a-f]{64}$ ]] || echo "must be the Application Audience (AUD) tag of the Access application: 64 lowercase hex characters" ;;
+    TUNNEL_TOKEN) tunnel_token_ok "$2" || echo "must be the token of a remotely managed tunnel (the long base64 value after --token in the install command Zero Trust shows)" ;;
     HEALTHCHECK_PING_URL | BACKUP_PING_URL) [[ $2 =~ ^https:// ]] || echo "must be an https:// URL" ;;
     RESTIC_REPOSITORY) restic_repository_ok "$2" || echo "must be s3:https://<endpoint>/<bucket>[/<path>]" ;;
     RESTIC_PASSWORD) [ "${#2}" -ge 16 ] || echo "must be at least 16 characters" ;;

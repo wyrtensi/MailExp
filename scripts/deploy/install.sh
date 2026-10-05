@@ -30,6 +30,9 @@ exit_on_unexpected_failure
 # update.sh raises it: long backfill migrations run before the backend listens.
 READY_TIMEOUT=${MAILEXPERT_READY_TIMEOUT:-180}
 EDGE_TIMEOUT=180
+# How long verify_edge waits for https://<CF_HOST> to show Cloudflare Access before it warns.
+CF_CHECK_TIMEOUT=${MAILEXPERT_CF_CHECK_TIMEOUT:-60}
+[[ $CF_CHECK_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_CF_CHECK_TIMEOUT must be a number of seconds" 2
 # How long to wait for install.lock: another install.sh or configure.sh, or a backup while it
 # dumps the database (minutes on a large one). The updater's automatic rollback raises it.
 LOCK_TIMEOUT=${MAILEXPERT_LOCK_TIMEOUT:-600}
@@ -291,6 +294,26 @@ edge_probe() {
   curl -fs -o /dev/null "${tls[@]}" --resolve "$host:443:127.0.0.1" "https://$host/api/health"
 }
 
+# verify_cf_access: whether https://<CF_HOST> is behind Cloudflare Access of the team that
+# CF_ACCESS_ISSUER names (lib/edge.sh cf_access_check). A warning, never a failure: DNS and the
+# connector can take minutes, and status.sh repeats the check. Waits up to CF_CHECK_TIMEOUT only
+# for what time can fix.
+verify_cf_access() {
+  local issuer state team message deadline=$((SECONDS + CF_CHECK_TIMEOUT))
+  issuer=$(env_get "$ENV_FILE" CF_ACCESS_ISSUER) || issuer=''
+  while :; do
+    IFS=$'\t' read -r state team message < <(cf_access_check "$CFG_CF_HOST" "$CFG_HTTP_PORT" "$issuer")
+    if [ "$state" = ok ]; then
+      log "edge: $message"
+      return 0
+    fi
+    if ! cf_access_transient "$state" || [ "$SECONDS" -ge "$deadline" ]; then break; fi
+    sleep 5
+  done
+  warn "edge: $message"
+  warn "edge: the install goes on; check again later with status.sh (docs/operations/cloudflare.md)"
+}
+
 verify_edge() {
   local services deadline=$((SECONDS + EDGE_TIMEOUT))
   [ "$CFG_EDGE" = 1 ] || return 0
@@ -299,6 +322,7 @@ verify_edge() {
     edge_compose ps --status running --services | grep -qx cloudflared ||
       die "cloudflared is not running; see: docker compose -p $CFG_EDGE_PROJECT logs cloudflared"
     log "tunnel connector running; in Zero Trust the public hostname $CFG_CF_HOST must point to http://127.0.0.1:$CFG_HTTP_PORT"
+    verify_cf_access
   fi
   grep -qx caddy <<<"$services" || return 0
   until edge_probe; do

@@ -7,22 +7,31 @@ setup() {
   load helper
   P=$BATS_TEST_TMPDIR/p
   CONFIGURE=$DEPLOY_DIR/configure.sh
+  # The shapes Cloudflare hands out: a 64-hex AUD tag and a tunnel token (base64 of {a, t, s}).
+  AUD=$(printf 'a%.0s' {1..32})$(printf '0%.0s' {1..32})
+  TOKEN=$(tunnel_token value456)
+}
+
+# tunnel_token <secret> [json]: a token shaped like Cloudflare's, the JSON replaceable.
+tunnel_token() {
+  local json=${2:-"{\"a\":\"0123456789abcdef0123456789abcdef\",\"t\":\"11111111-2222-4333-8444-555555555555\",\"s\":\"$1\"}"}
+  printf '%s' "$json" | base64 | tr -d '\n'
 }
 
 @test "stores app and edge secrets in their files and prints no value" {
-  run bash "$CONFIGURE" --prefix "$P" <<'EOF'
+  run bash "$CONFIGURE" --prefix "$P" <<EOF
 # owner secrets
 CF_ACCESS_ISSUER=https://team-x.cloudflareaccess.com
-CF_ACCESS_AUDIENCE=aud-value-123
+CF_ACCESS_AUDIENCE=$AUD
 
-TUNNEL_TOKEN=tunnel-value-456==
+TUNNEL_TOKEN=$TOKEN
 DNS_API_TOKEN=dns-value-789
 HEALTHCHECK_PING_URL=https://hc-ping.example.com/ping-value-000
 EOF
   [ "$status" -eq 0 ]
-  [ "$(env_get "$P/.env" CF_ACCESS_AUDIENCE)" = aud-value-123 ]
+  [ "$(env_get "$P/.env" CF_ACCESS_AUDIENCE)" = "$AUD" ]
   [ "$(env_get "$P/.env" HEALTHCHECK_PING_URL)" = https://hc-ping.example.com/ping-value-000 ]
-  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = tunnel-value-456== ]
+  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = "$TOKEN" ]
   [ "$(env_get "$P/edge/.env" DNS_API_TOKEN)" = dns-value-789 ]
   run env_get "$P/.env" TUNNEL_TOKEN
   [ "$status" -eq 1 ]
@@ -37,9 +46,48 @@ EOF
 }
 
 @test "owner secrets are replaced on rotation" {
-  bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=old"
-  bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=new"
-  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = new ]
+  bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$(tunnel_token old-secret)"
+  bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$(tunnel_token new-secret)"
+  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = "$(tunnel_token new-secret)" ]
+}
+
+@test "CF_ACCESS_AUDIENCE must be a 64-hex AUD tag; the value is never echoed" {
+  for bad in aud-value-123 "${AUD}0" "${AUD:1}" "$(tr a A <<<"$AUD")" "${AUD:0:63}g"; do
+    run bash "$CONFIGURE" --prefix "$P" <<<"CF_ACCESS_AUDIENCE=$bad"
+    [ "$status" -eq 2 ]
+    [[ $output == *"CF_ACCESS_AUDIENCE: must be the Application Audience (AUD) tag"* ]]
+    [[ $output != *"$bad"* ]]
+  done
+  [ ! -e "$P/.env" ]
+}
+
+@test "TUNNEL_TOKEN must be base64 of a JSON object with a, t and s; the value is never echoed" {
+  local -a bad=(
+    tunnel-value-456==
+    "$(printf 'x%.0s' {1..60})"
+    "$(tunnel_token s '{"a":"0123456789abcdef0123456789abcdef","t":"11111111-2222-4333-8444-555555555555"}')"
+    "$(tunnel_token s '{"account":"0123456789abcdef0123456789abcdef","tunnel":"11111111-2222-4333-8444-555555555555","s":"x"}')"
+    "$(tunnel_token s '{"a":"","t":"11111111-2222-4333-8444-555555555555","s":"secret-secret"}')"
+    "$(printf 'not json at all, but long enough to pass the length check' | base64 | tr -d '\n')"
+  )
+  for value in "${bad[@]}"; do
+    run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$value"
+    [ "$status" -eq 2 ]
+    [[ $output == *"TUNNEL_TOKEN: must be the token of a remotely managed tunnel"* ]]
+    [[ $output != *"$value"* ]]
+  done
+  [ ! -e "$P/edge/.env" ]
+}
+
+@test "a tunnel token without its base64 padding is accepted" {
+  local padded unpadded
+  # 'ab' makes the JSON length leave padding on the base64 form.
+  for secret in ab abc abcd; do
+    padded=$(tunnel_token "$secret")
+    unpadded=${padded%%=*}
+    run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$unpadded"
+    [ "$status" -eq 0 ]
+  done
 }
 
 @test "CRLF input is accepted" {
@@ -49,7 +97,7 @@ EOF
 }
 
 @test "one bad line writes nothing" {
-  run bash "$CONFIGURE" --prefix "$P" <<<$'TUNNEL_TOKEN=good\nNOT_A_KEY=x'
+  run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$TOKEN"$'\nNOT_A_KEY=x'
   [ "$status" -eq 2 ]
   [[ $output == *NOT_A_KEY* ]]
   [ ! -e "$P/.env" ] && [ ! -e "$P/edge/.env" ]
@@ -109,14 +157,14 @@ EOF
   mkdir -p "$P/state"
   flock "$P/state/install.lock" sleep 4 &
   sleep 0.5
-  MAILEXPERT_LOCK_TIMEOUT=1 run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=locked-value"
+  MAILEXPERT_LOCK_TIMEOUT=1 run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$TOKEN"
   [ "$status" -eq 1 ]
-  [[ $output == *"another install.sh or configure.sh"* && $output != *locked-value* ]]
+  [[ $output == *"another install.sh or configure.sh"* && $output != *"$TOKEN"* ]]
   [ ! -e "$P/edge/.env" ]
-  run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=locked-value"
+  run bash "$CONFIGURE" --prefix "$P" <<<"TUNNEL_TOKEN=$TOKEN"
   [ "$status" -eq 0 ]
   [[ $output == *waiting* ]]
-  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = locked-value ]
+  [ "$(env_get "$P/edge/.env" TUNNEL_TOKEN)" = "$TOKEN" ]
   wait
 }
 

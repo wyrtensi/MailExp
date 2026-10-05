@@ -168,7 +168,7 @@ stub_install() {
 printf '%s\n' "$*" >>"$DOCKER_LOG"
 case " $* " in
   *" ps "*"{{.Service}} {{.State}} {{.Health}}"*)
-    printf '%s\n' "frontend running healthy" "backend running healthy" "postgres running healthy" "redis running healthy" ;;
+    printf '%s\n' "frontend running healthy" "backend running healthy" "postgres running healthy" "redis running healthy" "cloudflared running " ;;
   *" ps "*"{{.Service}} {{.Image}}"*)
     printf '%s\n' "frontend ghcr.io/wyrtensi/mailexpert-frontend:$STUB_TAG" "backend ghcr.io/wyrtensi/mailexpert-backend:$STUB_TAG" "postgres postgres:16-alpine" ;;
   *" exec -T postgres "*)
@@ -194,13 +194,16 @@ STUB_EOF
   cat >"$STUB/curl" <<'STUB_EOF'
 #!/usr/bin/env bash
 case " $* " in
+  *"https://cf.example.com/api/health"*)
+    printf '%s\n' "$*" >>"$CURL_CF_LOG"
+    printf '%s\037%s\037' "${STUB_CF_CODE:-302}" "${STUB_CF_LOCATION-https://team-x.cloudflareaccess.com/cdn-cgi/access/login/cf.example.com}" ;;
   *"/api/health/ready"*) exit "${STUB_READY:-0}" ;;
   *"/api/version"*) printf '{"version":"x","sha":"%s"}\n' "$STUB_SHA" ;;
 esac
 exit 0
 STUB_EOF
   chmod +x "$STUB/id" "$STUB/docker" "$STUB/curl"
-  export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log
+  export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log CURL_CF_LOG=$BATS_TEST_TMPDIR/curl-cf.log
 
   P=$BATS_TEST_TMPDIR/p
   mkdir -p "$P/app/backend/migrations" "$P/state" "$P/backups" "$P/edge"
@@ -229,6 +232,55 @@ STUB_EOF
   [[ $output == *"result: no problems"* ]]
   [[ $output == *"warning: backup: restic is not configured"* ]]
   [[ $output != *"do-not-print-me"* ]]
+}
+
+# cf_install: the panel of stub_install behind the tunnel on cf.example.com.
+cf_install() {
+  stub_install
+  printf '%s\n' "VERSION=sha-${OLD:0:12}" SIGNIN=cf CF_HOST=cf.example.com ADMIN_EMAILS=admin@example.com EDGE=1 \
+    PROJECT=me-test HTTP_PORT=18090 SYSTEM=0 "REPO_URL=$P/app" >"$P/install.conf"
+  printf '%s\n' COMPOSE_PROFILES= SESSION_SECRET=do-not-print-me CF_ACCESS_ISSUER=https://team-x.cloudflareaccess.com \
+    "CF_ACCESS_AUDIENCE=$(printf 'f%.0s' {1..64})" >"$P/.env"
+}
+
+@test "the tunnel: Cloudflare Access of the issuer's team in front of <CF_HOST> is reported, no warning" {
+  cf_install
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.cf_access.state' <<<"$output")" = ok ]
+  [ "$(jq -r '.cf_access.team' <<<"$output")" = team-x.cloudflareaccess.com ]
+  [ "$(jq -r '.warnings | map(select(startswith("cloudflare access:"))) | length' <<<"$output")" = 0 ]
+  [[ $output != *ffffffff* && $output != *do-not-print-me* ]]
+  [ "$(grep -c . "$CURL_CF_LOG")" = 1 ]
+  run bash "$SCRIPT" --prefix "$P"
+  [[ $output == *"cf_access            ok"* ]]
+}
+
+@test "the tunnel: a team mismatch or a missing Access app is a warning with the next step, not a problem" {
+  cf_install
+  STUB_CF_LOCATION=https://team-y.cloudflareaccess.com/cdn-cgi/access/login/cf.example.com run bash "$SCRIPT" --prefix "$P" --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.cf_access.state' <<<"$output")" = team_mismatch ]
+  [ "$(jq -r '.warnings | map(select(startswith("cloudflare access: Access for cf.example.com belongs to team-y"))) | length' <<<"$output")" = 1 ]
+  [ "$(jq -r '.problems | length' <<<"$output")" = 0 ]
+  STUB_CF_CODE=200 STUB_CF_LOCATION='' run bash "$SCRIPT" --prefix "$P"
+  [ "$status" -eq 0 ]
+  [[ $output == *"warning: cloudflare access: https://cf.example.com/api/health answers 200 without Cloudflare Access"* ]]
+}
+
+@test "without the tunnel Cloudflare is not asked" {
+  stub_install
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$(jq -r '.cf_access' <<<"$output")" = null ]
+  [ ! -e "$CURL_CF_LOG" ]
+}
+
+@test "on a standby server Cloudflare is not asked" {
+  cf_install
+  : >"$P/state/standby"
+  STUB_READY=1 run bash "$SCRIPT" --prefix "$P" --json
+  [ "$(jq -r '.cf_access' <<<"$output")" = null ]
+  [ ! -e "$CURL_CF_LOG" ]
 }
 
 @test "--target: pending migrations, the mail node as next, images checked in the registry" {
