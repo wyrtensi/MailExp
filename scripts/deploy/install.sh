@@ -295,23 +295,13 @@ edge_probe() {
 }
 
 # verify_cf_access: whether https://<CF_HOST> is behind Cloudflare Access of the team that
-# CF_ACCESS_ISSUER names (lib/edge.sh cf_access_check). A warning, never a failure: DNS and the
+# CF_ACCESS_ISSUER names (lib/edge.sh cf_access_wait). A warning, never a failure: DNS and the
 # connector can take minutes, and status.sh repeats the check. Waits up to CF_CHECK_TIMEOUT only
 # for what time can fix.
 verify_cf_access() {
-  local issuer state team message deadline=$((SECONDS + CF_CHECK_TIMEOUT))
+  local issuer
   issuer=$(env_get "$ENV_FILE" CF_ACCESS_ISSUER) || issuer=''
-  while :; do
-    IFS=$'\t' read -r state team message < <(cf_access_check "$CFG_CF_HOST" "$CFG_HTTP_PORT" "$issuer")
-    if [ "$state" = ok ]; then
-      log "edge: $message"
-      return 0
-    fi
-    if ! cf_access_transient "$state" || [ "$SECONDS" -ge "$deadline" ]; then break; fi
-    sleep 5
-  done
-  warn "edge: $message"
-  warn "edge: the install goes on; check again later with status.sh (docs/operations/cloudflare.md)"
+  cf_access_wait "$CFG_CF_HOST" "$CFG_HTTP_PORT" "$issuer" "$CF_CHECK_TIMEOUT"
 }
 
 verify_edge() {

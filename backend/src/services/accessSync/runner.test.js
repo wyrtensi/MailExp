@@ -5,6 +5,7 @@ vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
 vi.mock('../auth/userStatus.js', () => ({ disableUsersByEmail: vi.fn() }));
 vi.mock('./settings.js', () => ({
   loadRunConfig: vi.fn(), loadState: vi.fn(), loadStoredConfig: vi.fn(), saveState: vi.fn(), accessSyncMaxDisables: vi.fn(),
+  withAccessSyncTransaction: vi.fn(async (fn) => fn('locked-db')),
 }));
 
 import { query, withTransaction } from '../db.js';
@@ -81,6 +82,9 @@ describe('runAccessSync', () => {
     const result = await run();
     expect(result.outcome).toBe('updated');
     expect(saved()).toEqual({ ...reset, lastRun: result });
+    // Read and written inside the settings' locked transaction (settings.race.pglite.test.js).
+    expect(loadStoredConfig).toHaveBeenLastCalledWith('locked-db');
+    expect(saveState.mock.calls.at(-1)[1]).toBe('locked-db');
   });
 
   it('writes nothing when the policy is already in line', async () => {

@@ -3,7 +3,7 @@ import { EXIT, UsageError, parseCount } from '../args.js';
 import { fmtDate, keyValues } from '../output.js';
 import {
   ACCESS_SYNC_ERRORS, accessSyncSnapshot, enqueueAccessSync, getAccessSyncJob, journalSyncRequested,
-  mergedConfigInput, saveAccessSyncConfig, setAccessSyncToken,
+  patchAccessSyncConfig, setAccessSyncToken,
 } from '../../services/accessSync/actions.js';
 
 // mailexpert access ...: the sync of approved users into a Cloudflare Access policy
@@ -100,10 +100,8 @@ const config = {
     if ([account, app, policy, enable, disable].every((value) => value === undefined)) {
       throw new UsageError('nothing to change: give --account, --app, --policy, --enable or --disable');
     }
-    const input = await mergedConfigInput({
-      accountId: account, appId: app, policyId: policy, enabled: enable ? true : disable ? false : undefined,
-    });
-    const result = unwrap(await saveAccessSyncConfig(input, ctx.actor, { onEnabled: () => enqueueAccessSync(ctx.actor) }), ACCESS_SYNC_ERRORS);
+    const patch = { accountId: account, appId: app, policyId: policy, enabled: enable ? true : disable ? false : undefined };
+    const result = unwrap(await patchAccessSyncConfig(patch, ctx.actor, { onEnabled: () => enqueueAccessSync(ctx.actor) }), ACCESS_SYNC_ERRORS);
     return savedLines(result);
   },
 };

@@ -7,13 +7,13 @@ vi.mock('../services/accessSync/index.js', () => ({
 }));
 vi.mock('../services/accessSync/settings.js', async (importOriginal) => ({
   ...(await importOriginal()),
-  loadStoredConfig: vi.fn(), loadState: vi.fn(), saveConfig: vi.fn(),
+  loadStoredConfig: vi.fn(), loadState: vi.fn(), saveConfig: vi.fn(), updateConfig: vi.fn(),
 }));
 
 import express from 'express';
 import accessSyncRoutes from './accessSync.js';
 import { requestAccessSync, runAccessSyncNow, withAccessSyncLock } from '../services/accessSync/index.js';
-import { AccessSyncConfigError, loadState, loadStoredConfig, saveConfig } from '../services/accessSync/settings.js';
+import { AccessSyncConfigError, loadState, loadStoredConfig, saveConfig, updateConfig } from '../services/accessSync/settings.js';
 import { query } from '../services/db.js';
 
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
@@ -46,6 +46,12 @@ beforeEach(() => {
   vi.stubEnv('AUTH_MODE', 'google');
   vi.stubEnv('ACCESS_SYNC_MAX_DISABLES', '5');
   loadStoredConfig.mockResolvedValue(STORED);
+  // The real updateConfig reads, builds and saves in one locked transaction; here it is built on
+  // the two mocks so the tests can still say what was read and what was saved.
+  updateConfig.mockImplementation(async (build) => {
+    const before = await loadStoredConfig();
+    return { before, saved: await saveConfig(build(before)) };
+  });
   loadState.mockResolvedValue({ baseline: ['person@example.com'], abortedCandidates: null, lastRun: LAST_RUN });
 });
 afterEach(() => { vi.unstubAllEnvs(); });

@@ -4,7 +4,7 @@ import { getAuthSettings } from '../auth/authSettings.js';
 import { enqueueJob, getJob, registerJobKind } from '../jobQueue.js';
 import { requestAccessSync, runAccessSyncNow, withAccessSyncLock } from './index.js';
 import {
-  AccessSyncConfigError, accessSyncMaxDisables, loadState, loadStoredConfig, publicConfig, saveConfig,
+  AccessSyncConfigError, accessSyncMaxDisables, loadState, loadStoredConfig, publicConfig, updateConfig,
 } from './settings.js';
 
 // The Cloudflare Access sync's administrator actions, shared by the admin API (routes/accessSync.js)
@@ -46,18 +46,34 @@ export async function accessSyncSnapshot() {
   };
 }
 
-// Saves the settings (settings.js saveConfig: a blank token keeps the stored one) under the sync
-// lock and journals what changed: access.config_changed with the changed fields and whether the
+// Saves the settings (settings.js updateConfig: a blank token keeps the stored one; one transaction
+// under the advisory lock shared with runs and other processes) under the in-process sync lock
+// and journals what changed: access.config_changed with the changed fields and whether the
 // token was replaced, never the token. When the sync is on, onEnabled asks for a run (the screen:
 // the in-process scheduler; the CLI: a queued job). Answers { saved } or { error: code }.
-export async function saveAccessSyncConfig(input, actor, { onEnabled = () => requestAccessSync('config') } = {}) {
+export function saveAccessSyncConfig(input, actor, options) {
+  return applyAccessSyncConfig(() => input, actor, options);
+}
+
+// The CLI changes one thing at a time: the given fields replace the stored ones, the rest stay.
+// The merge happens inside the settings transaction (settings.js updateConfig), so a save made
+// meanwhile by the screen or another CLI call is never overwritten with what was read before it.
+export function patchAccessSyncConfig(patch, actor, options) {
+  const given = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined));
+  return applyAccessSyncConfig((stored) => ({
+    enabled: stored.enabled === true,
+    accountId: stored.accountId,
+    appId: stored.appId,
+    policyId: stored.policyId,
+    ...given,
+  }), actor, options);
+}
+
+async function applyAccessSyncConfig(build, actor, { onEnabled = () => requestAccessSync('config'), afterRead } = {}) {
   let before;
   let saved;
   try {
-    saved = await withAccessSyncLock(async () => {
-      before = await loadStoredConfig();
-      return saveConfig(input);
-    });
+    ({ before, saved } = await withAccessSyncLock(() => updateConfig(build, { afterRead })));
   } catch (err) {
     if (err instanceof AccessSyncConfigError) return { error: err.code };
     throw err;
@@ -74,25 +90,12 @@ export async function saveAccessSyncConfig(input, actor, { onEnabled = () => req
   return { saved, job: job ?? null };
 }
 
-// The stored settings as saveConfig takes them, with the given fields replaced: the CLI changes
-// one thing at a time and keeps the rest.
-export async function mergedConfigInput(patch) {
-  const stored = await loadStoredConfig();
-  return {
-    enabled: stored.enabled === true,
-    accountId: stored.accountId,
-    appId: stored.appId,
-    policyId: stored.policyId,
-    ...Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)),
-  };
-}
-
 // Stores a new API token, keeping the other settings. The token is checked for shape only; the
 // next run tells whether Cloudflare accepts it.
 export async function setAccessSyncToken(token, actor, options) {
   const value = typeof token === 'string' ? token.trim() : '';
   if (!TOKEN_RE.test(value)) return { error: 'token_invalid' };
-  return saveAccessSyncConfig(await mergedConfigInput({ apiToken: value }), actor, options);
+  return patchAccessSyncConfig({ apiToken: value }, actor, options);
 }
 
 // Journals that an administrator asked for a run now (the screen's button or the CLI).

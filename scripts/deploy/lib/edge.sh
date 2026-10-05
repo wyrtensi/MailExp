@@ -75,7 +75,9 @@ caddy_record_applied() {
 #
 # An unauthenticated request to a host behind Access is answered by Cloudflare itself: a redirect
 # to https://<TEAM>.cloudflareaccess.com/cdn-cgi/access/login/..., or, with Access's managed OAuth
-# on, 401 with a WWW-Authenticate header that names the team domain. Either proves that the host
+# on, 401 with a WWW-Authenticate header whose resource_metadata points to
+# https://<host>/.well-known/oauth-protected-resource (the team is then not named, so it is not
+# compared). Either proves that the host
 # resolves to Cloudflare and that an Access application covers it. It does not prove the tunnel
 # route: Access answers before the request reaches the tunnel. Only a signed-in visit does that.
 
@@ -105,6 +107,15 @@ cf_redirect_team() {
   return 0
 }
 
+# cf_oauth_resource_metadata <www-authenticate> <host>: status 0 when the header points to the
+# OAuth protected resource metadata of <host> itself, as Access's managed OAuth answers a client it
+# takes for a non-browser one (resource_metadata="https://<host>/.well-known/oauth-protected-resource").
+cf_oauth_resource_metadata() {
+  local auth=${1,,}
+  auth=${auth//\"/}
+  [[ $auth == *"resource_metadata=https://$2/.well-known/oauth-protected-resource"* ]]
+}
+
 # cf_access_verdict <curl exit> <http code> <redirect url> <www-authenticate> <host> <port>
 # <CF_ACCESS_ISSUER or empty>: prints "<state>\t<team host or ->\t<message>". States: ok,
 # dns_missing, unreachable, tunnel_down, origin_error, access_missing, redirect_elsewhere,
@@ -126,6 +137,10 @@ cf_access_verdict() {
     3??) team=$(cf_redirect_team "$location") ;;
     401) team=$(cf_team_host "$auth") ;;
   esac
+  if [ -z "$team" ] && [ "$code" = 401 ] && cf_oauth_resource_metadata "$auth" "$host"; then
+    printf 'ok\t-\thttps://%s is behind Cloudflare Access (managed OAuth answered; it does not name the team, so CF_ACCESS_ISSUER was not compared); this does not test the tunnel route itself: sign in once to see the panel\n' "$host"
+    return 0
+  fi
   if [ -z "$team" ]; then
     case $code in
       530)
@@ -163,4 +178,24 @@ cf_access_check() {
 cf_access_transient() {
   case $1 in dns_missing | unreachable | tunnel_down | origin_error) return 0 ;; esac
   return 1
+}
+
+# cf_access_wait <host> <port> <CF_ACCESS_ISSUER or empty> <timeout seconds> [interval, default 5]:
+# install.sh's check. Repeats cf_access_check while the state is one time can fix and the timeout
+# has not passed; logs an ok, warns about anything else with its next step. Never fails: DNS and
+# the connector can take minutes, and status.sh repeats the check.
+cf_access_wait() {
+  local host=$1 port=$2 issuer=$3 interval=${5:-5} state team message deadline=$((SECONDS + $4))
+  while :; do
+    IFS=$'\t' read -r state team message < <(cf_access_check "$host" "$port" "$issuer")
+    if [ "$state" = ok ]; then
+      log "edge: $message"
+      return 0
+    fi
+    if ! cf_access_transient "$state" || [ "$SECONDS" -ge "$deadline" ]; then break; fi
+    sleep "$interval"
+  done
+  warn "edge: $message"
+  warn "edge: the install goes on; check again later with status.sh (docs/operations/cloudflare.md)"
+  return 0
 }

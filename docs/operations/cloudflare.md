@@ -150,8 +150,9 @@ curl -fsS -X POST "$CF_API/accounts/<ACCOUNT_ID>/access/identity_providers" \
 
 1. **Networking** → **Tunnels** (прежде Zero Trust → Networks → Tunnels) → **Create a tunnel** →
    тип **Cloudflared** → имя, например `mailexpert`.
-2. На шаге установки Cloudflare показывает команду вида `cloudflared service install eyJhIjoi...`.
-   Скопируйте **только длинное значение после `install`** (оно начинается с `eyJ`) — это
+2. На шаге установки Cloudflare показывает команду вида `cloudflared service install eyJhIjoi...`
+   (или `cloudflared tunnel run --token eyJhIjoi...`). Скопируйте **только значение `eyJ...` после
+   `install` или `--token`** — это
    `TUNNEL_TOKEN`. Команду не запускайте. Позже токен открывается там же: туннель → Configure (или
    кнопка с командой установки).
 3. Маршрут: туннель → вкладка **Routes** → **Add route** → **Published application** (прежде
@@ -300,9 +301,10 @@ DNS_API_TOKEN=<из шага 4>
 
 `install.sh` в режимах `cf` и `both` после запуска туннеля сам спрашивает
 `https://<CF_HOST>/api/health` с сервера — без cookies и без перехода по редиректу — и ждёт ответа
-Access: редирект на `https://<TEAM>.cloudflareaccess.com/...` (или, если в Access включён managed
-OAuth, `401` с заголовком `WWW-Authenticate` с адресом команды). Команду он сравнивает с
-`CF_ACCESS_ISSUER`. Результат — строка `edge: ...`; несовпадение и отсутствие Access —
+Access: редирект на `https://<TEAM>.cloudflareaccess.com/...`. Команду из адреса редиректа он
+сравнивает с `CF_ACCESS_ISSUER`. Если в приложении включён managed OAuth и Access ответит `401` с
+`WWW-Authenticate: Bearer resource_metadata="https://<CF_HOST>/.well-known/oauth-protected-resource"`,
+это тоже считается «Access на месте», но команда в таком ответе не названа и не сравнивается. Результат — строка `edge: ...`; несовпадение и отсутствие Access —
 предупреждение с точным следующим шагом, **установку оно не останавливает** (DNS может
 обновляться минуты). Ждёт он не дольше `MAILEXPERT_CF_CHECK_TIMEOUT` секунд (по умолчанию 60) и
 только то, что может пройти само (DNS, коннектор). `update.sh` запускает `install.sh`, поэтому проверка
@@ -363,7 +365,7 @@ $M access status
 | `dns_missing` | у `<CF_HOST>` нет записи DNS или она ещё не разошлась | маршрут туннеля создаёт CNAME сам; через API — шаг 2; подождите несколько минут и повторите `status.sh` |
 | `redirect_elsewhere` | имя перенаправляет не на Access (правило Redirect, другой сервис) | уберите перенаправление, создайте приложение Access |
 | Caddy не получает сертификат `<DIRECT_HOST>` | у `DNS_API_TOKEN` нет DNS Edit или Zone Read на эту зону, или токен на другую зону | шаг 4; `docker compose -p edge logs caddy` |
-| `configure.sh`: `TUNNEL_TOKEN: must be the token of a remotely managed tunnel` | скопирована вся команда, кавычки или токен туннеля, управляемого локально | только значение после `install`, шаг 2 |
+| `configure.sh`: `TUNNEL_TOKEN: must be the token of a remotely managed tunnel` | скопирована вся команда, кавычки или токен туннеля, управляемого локально | только значение `eyJ...` после `install` или `--token`, шаг 2 |
 | Синхронизация: `policy_not_allow`, `policy_not_attached`, `Cloudflare getPolicy failed (403)` | не Allow-политика; политика не привязана к приложению; у токена нет «Access: Apps and Policies Edit» | раздел 5; `mailexpert access status` |
 
 Ссылки: [туннель через API](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel-api/),
