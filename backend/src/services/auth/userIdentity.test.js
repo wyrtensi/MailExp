@@ -227,6 +227,13 @@ describe('bindSessionUser', () => {
     expect(req.session).toMatchObject({ userId: 'u1', username: 'user@example.com', isAdmin: false, authMethod: 'cloudflare' });
   });
 
+  it('keeps the screen lock when the same user switches sign-in method', async () => {
+    const req = { session: session({ userId: 'u1', authMethod: 'google', locked: true }) };
+    await bindSessionUser(req, USER, 'cloudflare');
+    expect(req.session.regenerate).toHaveBeenCalledOnce();
+    expect(req.session).toMatchObject({ userId: 'u1', authMethod: 'cloudflare', locked: true });
+  });
+
   it('starts a new session for another user or method', async () => {
     const req = { session: session({ userId: 'u2', authMethod: 'google', locked: true }) };
     await bindSessionUser(req, USER, 'google');

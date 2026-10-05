@@ -1,8 +1,18 @@
 import { query } from '../services/db.js';
+import { closeUserSockets } from '../services/websocket.js';
+
+// End the session of a user who no longer has access, and the live sockets of that user:
+// a socket is authenticated once, at upgrade, and would keep receiving their mail events.
+// The socket server comes from the app (index.js sets imapManager), not an import of index.js.
+function endUserAccess(req) {
+  const { userId } = req.session;
+  req.session.destroy(() => {});
+  closeUserSockets(req.app?.get('imapManager')?.wss, userId);
+}
 
 // A disabled user loses access at the next request, whatever session they still hold.
 function refuseDisabled(req, res) {
-  req.session.destroy(() => {});
+  endUserAccess(req);
   return res.status(403).json({ error: 'user_disabled', code: 'user_disabled' });
 }
 
@@ -13,7 +23,7 @@ export async function requireAuth(req, res, next) {
   try {
     const result = await query('SELECT id, disabled_at FROM users WHERE id = $1', [req.session.userId]);
     if (!result.rows.length) {
-      req.session.destroy(() => {});
+      endUserAccess(req);
       return res.status(401).json({ error: 'Not authenticated' });
     }
     if (result.rows[0].disabled_at) return refuseDisabled(req, res);
