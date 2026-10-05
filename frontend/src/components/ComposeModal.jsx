@@ -8,6 +8,7 @@ import { api } from '../utils/api.js';
 import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
+import { quotePayload } from '../utils/composeQuote.js';
 import { QUOTE_HEADER_ATTR, identityName, quoteHeaderHtml, quoteHeaderPlain, senderLanguage, switchQuoteText } from '../utils/quoteHeader.js';
 import { useEditor, EditorContent, useEditorState, NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import { Extension } from '@tiptap/core';
@@ -346,6 +347,26 @@ export default function ComposeModal() {
   const imageInputRef = useRef(null);
   const signatureRef = useRef(null);
   const quotedHtmlRef = useRef(null);
+  // The rich quote as the writer last left it. The quote's contentEditable is unmounted while the
+  // composer is minimized or switches between the mobile and desktop layouts; it is filled from
+  // here whenever it mounts and saved back here when it unmounts, so the quote survives both.
+  // <style> blocks are stripped: marketing emails use global rules like "div { margin: 0 !important }"
+  // that leak out of contentEditable into the app UI. Inline style attributes are preserved.
+  const lastQuoteHtmlRef = useRef(undefined);
+  if (lastQuoteHtmlRef.current === undefined) {
+    lastQuoteHtmlRef.current = quotedBodyHtml ? DOMPurify.sanitize(quotedBodyHtml, { FORBID_TAGS: ['style'] }) : null;
+  }
+  // Ref-based rather than React-rendered content, to avoid React cursor conflicts.
+  const attachQuotedHtml = useCallback((el) => {
+    if (el) {
+      quotedHtmlRef.current = el;
+      if (lastQuoteHtmlRef.current != null) el.innerHTML = lastQuoteHtmlRef.current;
+    } else {
+      if (quotedHtmlRef.current) lastQuoteHtmlRef.current = quotedHtmlRef.current.innerHTML;
+      quotedHtmlRef.current = null;
+    }
+  }, []);
+  const liveQuoteHtml = () => quotedHtmlRef.current?.innerHTML ?? lastQuoteHtmlRef.current;
   const composeWindowRef = useRef(null);
   const titleBarRef = useRef(null);
   const posRef = useRef(null);
@@ -716,15 +737,6 @@ export default function ComposeModal() {
     }
   }, [fromValue, fromSignature, draftSignature, plaintextEmail]);
 
-  // Initialise quoted HTML contentEditable once on mount (ref-based to avoid React cursor conflicts)
-  useEffect(() => {
-    if (quotedHtmlRef.current && quotedBodyHtml) {
-      // Strip <style> blocks — marketing emails use global rules like "div { margin: 0 !important }"
-      // that leak out of contentEditable into the app UI. Inline style attributes are preserved.
-      quotedHtmlRef.current.innerHTML = DOMPurify.sanitize(quotedBodyHtml, { FORBID_TAGS: ['style'] });
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   // The quote header ("On <date>, <sender> wrote:" / "<дата>, <отправитель> написал(а):") follows
   // the language of the From name (utils/quoteHeader.js): switching between a Russian and a Latin
   // name rewrites it in the plain text and in the HTML header paragraph. A header the writer edited
@@ -891,10 +903,7 @@ export default function ComposeModal() {
         subject,
         body: bodyToSend,
         bodyIsHtml: !plaintextEmail,
-        ...(quotedBody ? { quotedBody } : {}),
-        ...(!plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
-          ? { quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml }
-          : {}),
+        ...quotePayload({ plaintextEmail, quotedBody, quotedBodyHtml, liveQuoteHtml: liveQuoteHtml() }),
         ...(signatureContentRef.current || fromSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
@@ -1021,10 +1030,7 @@ export default function ComposeModal() {
         references: composeData?.references || undefined,
         body: bodyToSend,
         bodyIsHtml: !plaintextEmail,
-        ...(quotedBody ? { quotedBody } : {}),
-        ...(!plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
-          ? { quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml }
-          : {}),
+        ...quotePayload({ plaintextEmail, quotedBody, quotedBodyHtml, liveQuoteHtml: liveQuoteHtml() }),
         ...(signatureContentRef.current || fromSignature != null || draftSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
@@ -1625,7 +1631,7 @@ export default function ComposeModal() {
           {(quotedBody || quotedBodyHtml) && (
             !plaintextEmail && quotedBodyHtml ? (
               <div
-                ref={quotedHtmlRef}
+                ref={attachQuotedHtml}
                 contentEditable
                 suppressContentEditableWarning
                 spellCheck={false}
@@ -2276,7 +2282,7 @@ export default function ComposeModal() {
         {(quotedBody || quotedBodyHtml) ? (
           !plaintextEmail && quotedBodyHtml ? (
             <div
-              ref={quotedHtmlRef}
+              ref={attachQuotedHtml}
               contentEditable
               suppressContentEditableWarning
               spellCheck={false}
