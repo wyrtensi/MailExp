@@ -10,6 +10,7 @@ import {
   accountEventPatch,
   computeAccountHealth,
   reconnectMenuAction,
+  canReconnectOAuth,
   reconnectUrlFor,
   withProvisionalHealth,
 } from './accountHealth.js';
@@ -133,11 +134,30 @@ describe('reconnectMenuAction', () => {
     const google = { id: 'acc-1', oauth_provider: 'google', email_address: 'a@gmail.com', health: 'oauth_reconnect_required' };
     assert.deepEqual(reconnectMenuAction(google), { kind: 'oauth', url: reconnectUrlFor(google) });
     const microsoft = { id: 'acc-2', oauth_provider: 'microsoft', health: 'oauth_reconnect_required' };
-    assert.deepEqual(reconnectMenuAction(microsoft), { kind: 'oauth', url: `${MICROSOFT_OAUTH_PATH}?account=acc-2` });
+    assert.deepEqual(reconnectMenuAction(microsoft, { isAdmin: true }), { kind: 'oauth', url: `${MICROSOFT_OAUTH_PATH}?account=acc-2` });
   });
 
-  it('keeps the IMAP reconnect for every other account', () => {
+  it('leaves a Microsoft reconnect to an administrator', () => {
+    const microsoft = { id: 'acc-2', oauth_provider: 'microsoft', health: 'oauth_reconnect_required' };
+    assert.deepEqual(reconnectMenuAction(microsoft, { isAdmin: false }), { kind: 'admin_required' });
+    assert.deepEqual(reconnectMenuAction(microsoft), { kind: 'admin_required' });
+    // A Google mailbox is reconnected by whoever sees it, as before.
+    const google = { id: 'acc-1', oauth_provider: 'google', health: 'oauth_reconnect_required' };
+    assert.equal(reconnectMenuAction(google, { isAdmin: false }).kind, 'oauth');
+  });
+
+  it('keeps the IMAP reconnect for every other account, admin or not', () => {
     assert.deepEqual(reconnectMenuAction({ oauth_provider: 'google', health: 'failed' }), { kind: 'imap' });
+    assert.deepEqual(reconnectMenuAction({ oauth_provider: 'microsoft', health: 'failed' }, { isAdmin: false }), { kind: 'imap' });
     assert.deepEqual(reconnectMenuAction({ oauth_provider: null, health: 'oauth_reconnect_required' }), { kind: 'imap' });
+  });
+});
+
+describe('canReconnectOAuth', () => {
+  it('lets only an administrator reconnect a Microsoft mailbox', () => {
+    assert.equal(canReconnectOAuth({ oauth_provider: 'microsoft' }, { isAdmin: true }), true);
+    assert.equal(canReconnectOAuth({ oauth_provider: 'microsoft' }, { isAdmin: false }), false);
+    assert.equal(canReconnectOAuth({ oauth_provider: 'microsoft' }), false);
+    assert.equal(canReconnectOAuth({ oauth_provider: 'google' }, { isAdmin: false }), true);
   });
 });
