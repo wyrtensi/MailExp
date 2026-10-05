@@ -222,6 +222,28 @@ describe('DeliveryDetails', () => {
     assert.equal(empty.querySelector('[data-delivery-note]').getAttribute('data-delivery-note'), 'none');
   });
 
+  // The mailbox's own outgoing server refused one recipient at RCPT and took the letter for the
+  // rest (backend services/sendDelivery.js, source 'submission').
+  test('says a recipient refused at sending as such, with the outgoing server words', async () => {
+    answers['GET /api/mail/messages/m-8/delivery'] = {
+      messageId: '<s@x>', node: false, log: null,
+      recipients: [{
+        recipient: 'gone@partner.example', state: 'failed', source: 'submission', at: '2026-10-02T10:00:05.000Z', statusCode: '5.1.1',
+        diagnostic: '550 5.1.1 User unknown', explanation: { key: 'permanent', class: 'permanent', code: '5.1.1' }, log: null, report: null,
+        submission: { state: 'failed', at: '2026-10-02T10:00:05.000Z', statusCode: '5.1.1', diagnostic: '550 5.1.1 User unknown', reply: '550 5.1.1 User unknown', responseCode: 550 },
+      }],
+    };
+    const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-8', deliveryState: 'failed' }));
+    await click(toggle(host));
+    const row = host.querySelector('[data-delivery-recipient="gone@partner.example"]');
+    assert.ok(row.textContent.includes('message.delivery.state.refusedAtSubmission (5.1.1)'));
+    assert.ok(row.textContent.includes('message.delivery.code.permanent'));
+    const words = row.querySelector('[data-delivery-submission] q[data-delivery-remote-words]');
+    assert.equal(words.textContent, '550 5.1.1 User unknown');
+    assert.ok(row.querySelector('[data-delivery-submission]').textContent.startsWith('message.delivery.submissionReply'));
+    assert.equal(row.querySelector('[data-delivery-report]'), null);
+  });
+
   test('says a letter the mailbox did not send has no details', async () => {
     answers['GET /api/mail/messages/m-7/delivery'] = { messageId: '<in@x>', owned: false, node: false, log: null, recipients: [] };
     const host = await mount(React.createElement(DeliveryDetails, { messageId: 'm-7' }));

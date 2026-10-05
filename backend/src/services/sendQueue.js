@@ -217,6 +217,10 @@ function summarize(row, { userId, isAdmin }) {
     author: row.created_by ? { id: row.created_by, email: row.author_email || null } : null,
     canManage,
     errorCode: row.error_code || null,
+    // Sent, but the server refused these recipients at RCPT. Its author and administrators see
+    // them (one may be a Bcc).
+    ...(canManage && row.status === 'done' && Array.isArray(row.payload?.rejected) && row.payload.rejected.length
+      ? { rejected: row.payload.rejected } : {}),
     error: unsent || row.status === 'queued' ? (row.last_error || null) : null,
     ...(unsent ? { keptUntil: new Date(new Date(row.updated_at).getTime() + JOB_KEPT_FAILED_MS).toISOString() } : {}),
     attempts: row.attempts,
@@ -345,20 +349,24 @@ export async function rescheduleScheduled(id, { userId, isAdmin, sendAt, resend 
 // needs_attention (lease_expired, or delivered_unrecorded when the delivery was marked in time), but
 // the server did take it. It is done, and its content goes, so a resend never
 // sends it twice. Resolves the row, or null.
-async function settleSweptDelivery(jobId) {
+async function settleSweptDelivery(jobId, rejected = []) {
   return withTransaction(async (tx) => {
     const { rows: [row] } = await tx.query(
-      `UPDATE jobs SET status = 'done', finished_at = now(), error_code = NULL, last_error = NULL, updated_at = now()
+      `UPDATE jobs SET status = 'done', finished_at = now(), error_code = NULL, last_error = NULL, updated_at = now(),
+                       payload = CASE WHEN jsonb_array_length($3::jsonb) > 0
+                                      THEN payload || jsonb_build_object('rejected', $3::jsonb) ELSE payload END
         WHERE id = $1 AND status = 'needs_attention' AND error_code IN ('lease_expired', $2)
        RETURNING *`,
-      [jobId, DELIVERED_UNRECORDED]
+      [jobId, DELIVERED_UNRECORDED, JSON.stringify(rejected)]
     );
     if (row) await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [jobId]);
     return row || null;
   });
 }
 
-// Resolves { messageId, postSend, completed, settledRow }: completed when the queue finished the job
+// Resolves { messageId, rejected, postSend, completed, settledRow }: rejected the addresses the
+// server refused at RCPT while it took the letter for the others (kept in the job's payload as its
+// result); completed when the queue finished the job
 // (and will report it), settledRow when it was finished here because its claim was gone (see
 // settleSweptDelivery).
 async function handleSendJob(job, ctx, imapManager) {
@@ -390,9 +398,17 @@ async function handleSendJob(job, ctx, imapManager) {
   let settledRow = null;
   let completed = false;
   let delivered = false;
-  // Sent: the job is done and the letter's content goes, in one transaction.
+  let rejected = [];
+  // Sent: the job is done and the letter's content goes, in one transaction. The recipients the
+  // server refused stay with the job as its result (GET /scheduled/:id, the author's notice).
   const complete = () => ctx.complete(async (tx) => {
     await tx.query('DELETE FROM outgoing_messages WHERE job_id = $1', [job.id]);
+    if (rejected.length) {
+      await tx.query(
+        `UPDATE jobs SET payload = payload || jsonb_build_object('rejected', $2::jsonb) WHERE id = $1`,
+        [job.id, JSON.stringify(rejected)]
+      );
+    }
   });
   const sent = await deliverOutgoingMessage({
     account,
@@ -401,13 +417,14 @@ async function handleSendJob(job, ctx, imapManager) {
     imapManager,
     detachPostSend: true,
     markEffectStarted: () => ctx.markEffectStarted(),
-    onDelivered: async () => {
+    onDelivered: async (_messageId, outcome = {}) => {
       delivered = true;
+      rejected = Array.isArray(outcome.rejected) ? outcome.rejected : [];
       // Recorded first, apart from the job's completion: should the worker stop before the job is
       // done, the sweep labels it delivered_unrecorded, never an uncertain send to offer again.
       await ctx.markEffectDone(DELIVERED_UNRECORDED);
       completed = await complete();
-      if (!completed) settledRow = await settleSweptDelivery(job.id);
+      if (!completed) settledRow = await settleSweptDelivery(job.id, rejected);
     },
   });
   // The server took the letter but recording it failed (deliverOutgoingMessage logged why): one
@@ -416,7 +433,7 @@ async function handleSendJob(job, ctx, imapManager) {
   if (delivered && !completed && !settledRow) {
     try {
       completed = await complete();
-      if (!completed) settledRow = await settleSweptDelivery(job.id);
+      if (!completed) settledRow = await settleSweptDelivery(job.id, rejected);
     } catch (err) {
       console.error(`[send] Recording delivered job ${job.id} failed again:`, err?.message);
       throw new JobError('The mail server accepted the letter, but recording it as sent failed. Do not send it again.', {
@@ -424,21 +441,24 @@ async function handleSendJob(job, ctx, imapManager) {
       });
     }
   }
-  return { ...sent, completed, settledRow };
+  return { ...sent, rejected, completed, settledRow };
 }
 
 // Tells the author (their open tabs) how the letter ended, and the tabs to refresh their list. A
-// sent letter is reported once its Sent copy is handled (postSend); a failure names the letter's
-// subject to its author only, so they know which one it was. Every failure is journaled, a letter
-// whose author is gone included.
-async function onSendSettled(job, postSend = null) {
+// sent letter is reported once its Sent copy is handled (postSend), with the recipients the server
+// refused (rejected; the job's payload carries them too once its completion was written); a failure
+// names the letter's subject to its author only, so they know which one it was. Every failure is
+// journaled, a letter whose author is gone included.
+async function onSendSettled(job, postSend = null, rejected = null) {
   if (listedChange(job)) broadcast({ type: 'scheduled_changed', accountId: job.account_id });
   if (job.status === 'done') {
     if (!job.created_by) return;
     const copy = postSend ? await postSend : {};
+    const refused = rejected ?? (Array.isArray(job.payload?.rejected) ? job.payload.rejected : []);
     broadcast({
       type: 'send_done', jobId: String(job.id), accountId: job.account_id,
       sentFolder: copy.sentFolder ?? null, sentCopySaved: copy.sentCopySaved ?? null,
+      ...(refused.length ? { rejected: refused } : {}),
     }, job.created_by);
     return;
   }
@@ -466,16 +486,16 @@ export function registerSendJobKind({ imapManager }) {
   registerJobKind(SEND_JOB_KIND, {
     maxAttempts: SEND_MAX_ATTEMPTS,
     handler: async (job, ctx) => {
-      const { postSend, completed, settledRow } = await handleSendJob(job, ctx, imapManager);
+      const { postSend, rejected, completed, settledRow } = await handleSendJob(job, ctx, imapManager);
       // Finished here, not by the queue (its claim was swept): reported here too. Kept for onSettled
       // only when the queue will call it.
-      if (settledRow) onSendSettled(settledRow, postSend).catch(err => console.error('[send] Reporting a send failed:', err?.message));
-      else if (completed) postSends.set(String(job.id), postSend);
+      if (settledRow) onSendSettled(settledRow, postSend, rejected).catch(err => console.error('[send] Reporting a send failed:', err?.message));
+      else if (completed) postSends.set(String(job.id), { postSend, rejected });
     },
     onSettled: (row) => {
-      const postSend = postSends.get(String(row.id)) || null;
+      const kept = postSends.get(String(row.id)) || null;
       postSends.delete(String(row.id));
-      return onSendSettled(row, postSend);
+      return onSendSettled(row, kept?.postSend ?? null, kept?.rejected ?? null);
     },
   });
 }

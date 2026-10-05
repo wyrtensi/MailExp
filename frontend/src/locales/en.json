@@ -158,6 +158,8 @@
     "sent": {
       "title": "Message sent",
       "noCopy": "Sent, but not saved to your Sent folder",
+      "someRejectedTitle": "Not delivered to some recipients",
+      "someRejected": "The mail server refused delivery to {{addresses}}. The others got the letter.",
       "action": "View"
     },
     "gmailQuotaExceeded": "Gmail's daily sending limit for this account has been reached. Try again tomorrow, or send fewer or smaller messages.",
@@ -465,6 +467,7 @@
         "leftQueue": "Outcome unknown: the letter left the mail node's queue without a final answer (an administrator may have deleted it)",
         "stale": "No news for days: outcome unknown",
         "sentDiscard": "Discarded on the mail node by a rule: not delivered to anyone",
+        "refusedAtSubmission": "Not delivered: your mail server refused this recipient when the letter was sent",
         "other": "Status: {{state}}"
       },
       "notSent": "This letter was not sent from this mailbox, so there are no delivery details for it.",
@@ -485,6 +488,7 @@
       "report": "Delivery report",
       "reportFrom": "from {{mta}}",
       "reportWords": "The remote server wrote",
+      "submissionReply": "Your mail server said",
       "none": "No delivery report came back for this letter. Delivery to each recipient is not confirmed: only failures and delays come back as reports.",
       "noneNode": "The mail node's log shows nothing more for this letter.",
       "noMessageId": "The letter has no Message-ID, so its delivery cannot be traced.",

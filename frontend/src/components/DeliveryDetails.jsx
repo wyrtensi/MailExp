@@ -237,8 +237,9 @@ function EopTrace({ eop, letterId, refresh }) {
   );
 }
 
-// A remote server's own words (a reply in the node's log, a report's diagnostic): quoted plain
-// text, never a link, and said to be the remote server's, not MailExpert's.
+// A remote server's own words (a reply in the node's log, a report's diagnostic, the outgoing
+// server's refusal at sending): quoted plain text, never a link, and said to be that server's, not
+// MailExpert's.
 function RemoteWords({ text, label }) {
   return (
     <>
@@ -258,6 +259,7 @@ function RecipientRow({ row }) {
   const explain = explanationKey(row.explanation);
   const log = row.log;
   const report = row.report;
+  const submission = row.submission;
   const finalRecipient = log?.finalRecipient || report?.finalRecipient || null;
   const reportState = report ? reportStateKey(report.state) : null;
   return (
@@ -273,6 +275,11 @@ function RecipientRow({ row }) {
       {explain && <div data-delivery-explanation={row.explanation.key} style={{ color: 'var(--text-primary)' }}>{t(explain)}</div>}
       {finalRecipient && (
         <div data-delivery-final style={{ fontSize: 11 }}>{t('message.delivery.finalRecipient', { address: finalRecipient })}</div>
+      )}
+      {submission?.reply && (
+        <dl data-delivery-submission style={dlStyle}>
+          <RemoteWords text={submission.reply} label={t('message.delivery.submissionReply')} />
+        </dl>
       )}
       {log && (
         <dl style={dlStyle}>

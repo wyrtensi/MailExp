@@ -72,7 +72,7 @@ describe('mailSendTransport + gmailApiSender, end to end (mocked fetch only)', (
     const { transport } = await createAccountSendTransport(gmailAccount);
     const info = await transport.sendMail(mailOptions, { threadId: null });
 
-    expect(info).toEqual({ via: 'smtp', messageId: mailOptions.messageId });
+    expect(info).toEqual({ via: 'smtp', messageId: mailOptions.messageId, rejected: [], rejectedErrors: [] });
     expect(fetchMock).toHaveBeenCalledTimes(1); // one Gmail API attempt, no Message-ID GET on the SMTP path
     expect(markGmailApiDisabled).toHaveBeenCalledWith('app-1');
     expect(smtpSendMail).toHaveBeenCalledWith(mailOptions);

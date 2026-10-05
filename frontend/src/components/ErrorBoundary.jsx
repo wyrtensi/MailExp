@@ -1,4 +1,6 @@
 import React from 'react';
+import { claimReloadInto, fetchServerBuild, isStaleBuildError } from '../utils/staleBuild.js';
+import { BOUNDARY_TEXT, currentBoundaryLanguage } from '../utils/boundaryText.js';
 
 // Catches render-time exceptions so a single thrown error cannot blank the whole app.
 //
@@ -7,26 +9,69 @@ import React from 'react';
 // the failure users report as "the app stopped responding and I see a blank page" (#441),
 // and it is unactionable: the person seeing it cannot say what broke, and neither can we.
 //
-// Deliberately dependency-free. It imports nothing but React, uses inline styles with literal
-// fallbacks behind every CSS variable, and never touches the store, i18n or the API — because
-// any of those may be exactly what failed. A fallback that can itself throw is not a fallback.
+// Deliberately dependency-free. It imports nothing but React and the dependency-free
+// utils/staleBuild.js and utils/boundaryText.js (its own small en/ru dictionary), uses inline
+// styles with literal fallbacks behind every CSS variable, and never touches the store, i18n or
+// the API client — because any of those may be exactly what failed. A fallback that can itself throw is not a fallback.
 //
 // Not a substitute for fixing the underlying error. It converts an undiagnosable blank page
 // into a readable message the user can send us.
+//
+// One error is not a bug: a tab opened before a server update fails to load the screens it
+// fetches on demand (utils/staleBuild.js). That reloads into the new version by itself, but only
+// once GET /api/version answers a build other than the one this page runs: never into the
+// browser's offline page or the edge's maintenance page, and never when the server runs this very
+// build (the file is really missing, a reload would not help). An update applied from the panel
+// restarts the server, so it keeps asking for about a minute before it hands the reload to the
+// user, and it reloads into a given build once per tab.
+const PROBE_ATTEMPTS = 20;
+const PROBE_INTERVAL_MS = 3000;
+// The build this bundle was made from (Dockerfile VITE_BUILD_SHA); the server answers its own.
+const RUNNING_BUILD = import.meta.env?.VITE_BUILD_SHA || 'dev';
+const sessionStore = () => { try { return window.sessionStorage; } catch { return null; } };
+
 export default class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { error: null, copied: false };
+    // staleBuild: null, or 'reloading' while it checks the server and reloads, or 'manual'.
+    this.state = { error: null, copied: false, staleBuild: null };
   }
 
   static getDerivedStateFromError(error) {
-    return { error };
+    return { error, staleBuild: isStaleBuildError(error) ? 'reloading' : null };
   }
 
   componentDidCatch(error, info) {
     // Keep the full component stack in the console for anyone with devtools open; the UI
     // below shows only the message, which is what a user can reasonably be asked to relay.
     console.error('Unhandled render error:', error, info?.componentStack);
+    if (isStaleBuildError(error)) this.reloadIntoNewBuild();
+  }
+
+  async reloadIntoNewBuild() {
+    const {
+      probeServer = fetchServerBuild,
+      runningBuild = RUNNING_BUILD,
+      storage = sessionStore(),
+      reloadPage = () => window.location.reload(),
+      probeAttempts = PROBE_ATTEMPTS,
+      probeIntervalMs = PROBE_INTERVAL_MS,
+    } = this.props;
+    for (let attempt = 0; attempt < probeAttempts; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, probeIntervalMs));
+      const serverBuild = await probeServer().catch(() => null);
+      if (!serverBuild) continue;
+      // The same build: the file is missing from the build itself, a reload brings no new app.
+      if (serverBuild === runningBuild) break;
+      // Claimed only once the server has answered, so time spent offline (or waiting out a
+      // restart) does not use up the one automatic reload into that build.
+      if (claimReloadInto(storage, serverBuild)) {
+        reloadPage();
+        return;
+      }
+      break;
+    }
+    this.setState({ staleBuild: 'manual' });
   }
 
   handleCopy = () => {
@@ -53,8 +98,9 @@ export default class ErrorBoundary extends React.Component {
   };
 
   render() {
-    const { error, copied } = this.state;
+    const { error, copied, staleBuild } = this.state;
     if (!error) return this.props.children;
+    const text = BOUNDARY_TEXT[this.props.lang ?? currentBoundaryLanguage()] ?? BOUNDARY_TEXT.en;
 
     const button = {
       padding: '8px 16px', fontSize: 14, borderRadius: 7, cursor: 'pointer',
@@ -73,11 +119,12 @@ export default class ErrorBoundary extends React.Component {
       }}>
         <div style={{ maxWidth: 520, width: '100%' }}>
           <h1 style={{ fontSize: 20, fontWeight: 600, margin: '0 0 8px' }}>
-            MailExpert hit an error and stopped
+            {staleBuild ? text.updatedTitle : text.errorTitle}
           </h1>
           <p style={{ margin: '0 0 16px', fontSize: 14, lineHeight: 1.6, color: 'var(--text-secondary, #555)' }}>
-            Reloading usually clears it. If it happens again right after a server update, the
-            app and the server may be out of step — a hard reload picks up the newer version.
+            {staleBuild === 'reloading' && text.reloading}
+            {staleBuild === 'manual' && text.manual}
+            {!staleBuild && text.errorBody}
           </p>
 
           <pre style={{
@@ -96,16 +143,15 @@ export default class ErrorBoundary extends React.Component {
               onClick={() => window.location.reload()}
               style={{ ...button, background: 'var(--accent, #6366f1)', color: '#fff', borderColor: 'transparent' }}
             >
-              Reload
+              {text.reload}
             </button>
             <button type="button" onClick={this.handleCopy} style={button}>
-              {copied ? 'Copied' : 'Copy details'}
+              {copied ? text.copied : text.copy}
             </button>
           </div>
 
           <p style={{ margin: '16px 0 0', fontSize: 12.5, color: 'var(--text-tertiary, #888)' }}>
-            Copy the details and send them to your administrator: they point at the cause
-            rather than the symptom.
+            {text.footer}
           </p>
         </div>
       </div>

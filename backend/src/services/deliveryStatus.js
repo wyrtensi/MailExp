@@ -19,6 +19,9 @@ import { explainDeliveryCode } from './mailNode/deliveryCodes.js';
 //   remote reply, the TLS of the connection and EOP's acceptance id.
 // - Delivery status notifications that come back to the mailbox (services/deliveryReport.js), for
 //   any mailbox.
+// - The mailbox's own outgoing server refusing a recipient at RCPT while it took the letter for the
+//   others (services/sendDelivery.js, source 'submission'), for any mailbox: failed, with the
+//   server's reply. The letter never left for that recipient, so this is the last word.
 // The outcome stays when the log no longer covers the letter or the report is deleted. A delay with
 // no news for DELAY_STALE_MS (Postfix's queue lifetime of five days plus a day) is no longer marked
 // in the list and reads "outcome unknown"; a deferred letter whose queue entry left the queue
@@ -208,12 +211,18 @@ function stable(value) {
 
 const isFailed = (o) => FAILED_STATES.includes(o.state);
 
-// Which source's outcome a row shows: a failure wins over what is not one (a non-delivery report
+// The row's field that keeps each source's own details.
+const FIELD_OF_SOURCE = Object.freeze({ log: 'log', dsn: 'report', submission: 'submission' });
+const SOURCE_OF_FIELD = Object.freeze({ log: 'log', report: 'dsn', submission: 'submission' });
+
+// Which source's outcome a row shows: a refusal at submission whenever there is one (the letter
+// never left for that recipient, so nothing later can be about it); else a failure wins over what is not one (a non-delivery report
 // Microsoft sends after accepting the letter beats the log's "sent", whatever the two clocks say;
 // the node's own bounce wins over a report's delay); between two failures the log (it has the
 // relay and the reply); otherwise the later, the report winning unless it is clearly older than the
 // log line (clock skew) and a report without a time counting as the latest word.
-function winnerOf(log, report) {
+function winnerOf(log, report, submission = null) {
+  if (submission) return 'submission';
   if (!log) return 'report';
   if (!report) return 'log';
   if (isFailed(log) !== isFailed(report)) return isFailed(report) ? 'report' : 'log';
@@ -223,17 +232,18 @@ function winnerOf(log, report) {
 }
 
 // One recipient's row after an outcome of one source (pure): { row, changed }. row: the table's
-// fields { state, source, statusCode, diagnostic, eventAt, log, report }; existing: the row before
-// (null for none); incoming: { source: 'log' | 'dsn', state, at, statusCode, diagnostic, details }.
-// Each source keeps its latest outcome: an older log line is ignored (one clock); a report replaces
-// an older one, and one without a time replaces any. For the same log line seen again, the TLS
+// fields { state, source, statusCode, diagnostic, eventAt, log, report, submission }; existing: the
+// row before (null for none); incoming: { source: 'log' | 'dsn' | 'submission', state, at,
+// statusCode, diagnostic, details }. Each source keeps its latest outcome: an older log line is
+// ignored (one clock); a report or a refusal at submission replaces an older one, and one without a
+// time replaces any. For the same log line seen again, the TLS
 // and the acceptance already found are kept when this read no longer shows them.
 export function mergeOutcome(existing, incoming) {
   let own = {
     state: incoming.state, at: incoming.at ?? null, statusCode: incoming.statusCode ?? null,
     diagnostic: incoming.diagnostic ?? null, ...(incoming.details ?? {}),
   };
-  const field = incoming.source === 'log' ? 'log' : 'report';
+  const field = FIELD_OF_SOURCE[incoming.source] ?? 'report';
   const before = existing?.[field] ?? null;
   if (before) {
     const older = field === 'log' ? time(before.at) > time(own.at) : !!(own.at && before.at && time(before.at) > time(own.at));
@@ -245,18 +255,21 @@ export function mergeOutcome(existing, incoming) {
     }
     if (stable(before) === stable(own)) return { row: existing, changed: false };
   }
-  const next = { log: existing?.log ?? null, report: existing?.report ?? null, [field]: own };
-  const winner = winnerOf(next.log, next.report);
+  const next = {
+    log: existing?.log ?? null, report: existing?.report ?? null, submission: existing?.submission ?? null, [field]: own,
+  };
+  const winner = winnerOf(next.log, next.report, next.submission);
   const won = next[winner];
   return {
     row: {
       state: won.state,
-      source: winner === 'log' ? 'log' : 'dsn',
+      source: SOURCE_OF_FIELD[winner],
       statusCode: won.statusCode ?? null,
       diagnostic: won.diagnostic ?? null,
       eventAt: won.at ?? null,
       log: next.log,
       report: next.report,
+      ...(next.submission ? { submission: next.submission } : {}),
     },
     changed: true,
   };
@@ -265,7 +278,7 @@ export function mergeOutcome(existing, incoming) {
 const fromRow = (row) => ({
   recipient: row.recipient, state: row.state, source: row.source, statusCode: row.status_code,
   diagnostic: row.diagnostic, eventAt: row.event_at ? new Date(row.event_at).toISOString() : null,
-  log: row.log, report: row.report,
+  log: row.log, report: row.report, ...(row.submission ? { submission: row.submission } : {}),
 });
 
 const normalized = (outcome) => ({ ...outcome, recipient: String(outcome.recipient ?? '').trim().toLowerCase() });
@@ -296,14 +309,15 @@ export async function recordOutcomes(accountId, messageId, source, outcomes) {
       const r = merged.row;
       await client.query(`
         INSERT INTO message_delivery_status
-          (account_id, message_id, recipient, state, source, status_code, diagnostic, event_at, log, report)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          (account_id, message_id, recipient, state, source, status_code, diagnostic, event_at, log, report, submission)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (account_id, message_id, recipient) DO UPDATE SET
           state = EXCLUDED.state, source = EXCLUDED.source, status_code = EXCLUDED.status_code,
           diagnostic = EXCLUDED.diagnostic, event_at = EXCLUDED.event_at, log = EXCLUDED.log,
-          report = EXCLUDED.report, updated_at = NOW()`,
+          report = EXCLUDED.report, submission = EXCLUDED.submission, updated_at = NOW()`,
       [accountId, messageId, recipient, r.state, r.source, r.statusCode, r.diagnostic, r.eventAt,
-        r.log ? JSON.stringify(r.log) : null, r.report ? JSON.stringify(r.report) : null]);
+        r.log ? JSON.stringify(r.log) : null, r.report ? JSON.stringify(r.report) : null,
+        r.submission ? JSON.stringify(r.submission) : null]);
       existing.set(recipient, { recipient, ...r });
       changed += 1;
     }
@@ -336,22 +350,30 @@ async function readOutcomesOf(letters) {
   return out;
 }
 
-// Whether the mailbox sent this letter: { owned, sentAt, recipients }. owned: the panel's journal
+// Whether the mailbox sent this letter: { owned, sentAt, recipients, bccOnly, authorId }. owned: the panel's journal
 // shows it sent from the mailbox (message.sent with this Message-ID), or a copy lies in the
 // mailbox's Sent folder from its own login address. recipients: the journal's To, Cc and Bcc (a
 // Set of addresses), null when only a Sent copy says so (a copy made outside the panel has no Bcc).
-// sentAt: the journal's time, else the copy's date.
+// sentAt: the journal's time, else the copy's date. bccOnly: the journal's addresses that were in
+// Bcc and not in To or Cc (a Set, empty without the journal); authorId: who sent it (the journal's
+// actor), null without the journal.
 export async function sentLetterOf(accountId, messageId) {
-  if (!accountId || !messageId) return { owned: false, sentAt: null, recipients: null };
+  const none = { owned: false, sentAt: null, recipients: null, bccOnly: new Set(), authorId: null };
+  if (!accountId || !messageId) return none;
   const { rows: journal } = await query(`
-    SELECT details, occurred_at FROM mailbox_audit_log
+    SELECT details, occurred_at, actor_user_id FROM mailbox_audit_log
      WHERE action = 'message.sent' AND account_id = $1 AND details->>'messageId' = $2
      ORDER BY occurred_at LIMIT 1`, [accountId, messageId]);
   if (journal.length) {
     const d = journal[0].details ?? {};
     const lists = [d.to, d.cc, d.bcc].filter(Array.isArray);
     const recipients = lists.length ? new Set(lists.flat().map(addressOf).filter(Boolean)) : null;
-    return { owned: true, sentAt: new Date(journal[0].occurred_at).toISOString(), recipients };
+    const open = new Set([d.to, d.cc].filter(Array.isArray).flat().map(addressOf).filter(Boolean));
+    const bccOnly = new Set((Array.isArray(d.bcc) ? d.bcc : []).map(addressOf).filter((a) => a && !open.has(a)));
+    return {
+      owned: true, sentAt: new Date(journal[0].occurred_at).toISOString(), recipients, bccOnly,
+      authorId: journal[0].actor_user_id ?? null,
+    };
   }
   const { rows: copies } = await query(`
     SELECT m.date FROM messages m JOIN email_accounts a ON a.id = m.account_id
@@ -359,8 +381,8 @@ export async function sentLetterOf(accountId, messageId) {
        AND lower(btrim(m.from_email)) = lower(btrim(a.email_address))
        AND ${sentCopyCondition('m', 'a')}
      ORDER BY m.date LIMIT 1`, [accountId, messageId]);
-  if (!copies.length) return { owned: false, sentAt: null, recipients: null };
-  return { owned: true, sentAt: copies[0].date ? new Date(copies[0].date).toISOString() : null, recipients: null };
+  if (!copies.length) return none;
+  return { ...none, owned: true, sentAt: copies[0].date ? new Date(copies[0].date).toISOString() : null };
 }
 
 // The log, prepared once per read for any number of letters: queued letters by Message-ID and by
@@ -477,7 +499,7 @@ export async function captureLetter({ accountId, login, messageId, log, eopHost 
 // What the screens get for one recipient: the stored row with the code explained. A delay with no
 // news for DELAY_STALE_MS reads unknown (stale: the state it had).
 export function presentOutcome(row, { now = Date.now() } = {}) {
-  const text = row.diagnostic ?? row.report?.diagnostic ?? row.log?.reply ?? '';
+  const text = row.diagnostic ?? row.submission?.reply ?? row.report?.diagnostic ?? row.log?.reply ?? '';
   const stale = DELAYED_STATES.includes(row.state) && row.eventAt && now - Date.parse(row.eventAt) > DELAY_STALE_MS;
   return {
     recipient: row.recipient,
@@ -490,6 +512,7 @@ export function presentOutcome(row, { now = Date.now() } = {}) {
     explanation: ['sent', 'unknown'].includes(row.state) || stale ? null : explainDeliveryCode({ code: row.statusCode, text }),
     log: row.log,
     report: row.report,
+    submission: row.submission ?? null,
   };
 }
 

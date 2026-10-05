@@ -64,7 +64,11 @@ function connectionTo() {
       return { release: () => {} };
     },
     async status(path) { return { path, uidNext: server.folders[path].uidNext }; },
-    async search(q) { return uidSet(q.uid, server.folders[this.mailbox.path].uids); },
+    // Nothing here is flagged \Deleted by another client (imapManager.js expungeUids asks).
+    async search(q) { return q.deleted ? [] : uidSet(q.uid, server.folders[this.mailbox.path].uids); },
+    // The \Deleted STORE expungeUids sends before the EXPUNGE; the server takes it.
+    async messageFlagsAdd() { return true; },
+    async messageFlagsRemove() { return true; },
     async messageCopy(range, destination) {
       const uids = uidSet(range, server.folders[this.mailbox.path].uids);
       server.commands.push('COPY');

@@ -10,7 +10,7 @@ vi.mock('../services/db.js', () => ({
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
 }));
 vi.mock('../middleware/auth.js', () => ({
-  requireAuth: (req, _res, next) => { req.session = { userId: 'user-1' }; next(); },
+  requireAuth: (req, _res, next) => { req.session = { userId: req.get('x-test-user') || 'user-1' }; next(); },
   requireAdmin: (_req, _res, next) => next(),
 }));
 const node = vi.hoisted(() => ({ cfg: null, log: [], calls: 0, eopFails: false }));
@@ -40,7 +40,7 @@ const { default: routes } = await import('./delivery.js');
 const { MailNodeError } = await import('../services/mailNode/mailcow.js');
 const { clearPostfixLogCache, parsePostfixLog, readPostfixLog } = await import('../services/mailNode/postfixLog.js');
 const { STAND_DELIVERY } = await import('../services/mailNode/postfixLog.fixtures.js');
-const { captureFromLog } = await import('../services/deliveryStatus.js');
+const { captureFromLog, recordOutcomes } = await import('../services/deliveryStatus.js');
 const { recordDeliveryReport, deliveryReportOf } = await import('../services/deliveryReport.js');
 const { NDR_STATUS, NDR_STRUCTURE } = await import('../services/deliveryReport.fixtures.js');
 const { listMessages } = await import('../services/messageService.js');
@@ -114,8 +114,8 @@ beforeEach(async () => {
   clearPostfixLogCache();
 });
 
-const details = async (id) => {
-  const res = await fetch(`${base}/api/mail/messages/${id}/delivery`);
+const details = async (id, user = null) => {
+  const res = await fetch(`${base}/api/mail/messages/${id}/delivery`, user ? { headers: { 'x-test-user': user } } : {});
   return { status: res.status, body: await res.json() };
 };
 
@@ -185,6 +185,62 @@ describe('GET /api/mail/messages/:id/delivery', () => {
     // A node mailbox on another host than the node settings name: no log either.
     node.cfg = { ...CFG, mailHost: 'other-node.example' };
     expect((await details(ACCEPTED_ROW)).body).toMatchObject({ node: false, log: null });
+  });
+
+  // The mailbox's own outgoing server refused one recipient at RCPT and took the letter for the
+  // rest (services/sendDelivery.js records it with source 'submission', migration 0091).
+  it('shows a recipient the outgoing server refused at sending as failed, with its reply, and the list marks it', async () => {
+    await db.query(
+      `INSERT INTO mailbox_audit_log (account_id, account_email, action, details, occurred_at)
+       VALUES ($1, 'office@example.net', 'message.sent', '{"messageId": "<orig-ndr@example.net>"}', NOW())`,
+      [OTHER_BOX],
+    );
+    await recordOutcomes(OTHER_BOX, '<orig-ndr@example.net>', 'submission', [{
+      recipient: 'Gone@Partner.Example', state: 'failed', at: '2026-10-02T09:59:01.000Z', statusCode: '5.1.1',
+      diagnostic: '550 5.1.1 <gone@partner.example>: Recipient address rejected: User unknown',
+      details: { reply: '550 5.1.1 <gone@partner.example>: Recipient address rejected: User unknown', responseCode: 550 },
+    }]);
+    const { body } = await details(OTHER_ROW);
+    expect(body).toMatchObject({ owned: true, node: false });
+    expect(body.recipients).toHaveLength(1);
+    expect(body.recipients[0]).toMatchObject({
+      recipient: 'gone@partner.example', state: 'failed', source: 'submission', statusCode: '5.1.1',
+      explanation: { key: 'permanent', class: 'permanent', code: '5.1.1' },
+      submission: { reply: '550 5.1.1 <gone@partner.example>: Recipient address rejected: User unknown', responseCode: 550 },
+      log: null, report: null,
+    });
+    const { messages } = await listMessages({ accountId: OTHER_BOX, folder: 'Sent' });
+    expect(messages[0].delivery_state).toBe('failed');
+  });
+
+  // A refusal at sending names the recipient: one who was only in Bcc is shown to the letter's
+  // author and to administrators, as GET /scheduled/:id does, and to nobody else.
+  it('shows a Bcc recipient refused at sending only to the author and administrators', async () => {
+    const AUTHOR = '53000000-0000-4000-8000-000000000001';
+    const COLLEAGUE = '53000000-0000-4000-8000-000000000002';
+    const ADMIN = '53000000-0000-4000-8000-000000000003';
+    await db.exec('DELETE FROM users');
+    await db.query(
+      `INSERT INTO users (id, username, is_admin) VALUES ($1, 'author', false), ($2, 'colleague', false), ($3, 'root', true)`,
+      [AUTHOR, COLLEAGUE, ADMIN],
+    );
+    await db.query(
+      `INSERT INTO mailbox_audit_log (account_id, account_email, actor_user_id, action, details, occurred_at)
+       VALUES ($1, 'office@example.net', $2, 'message.sent', $3, NOW())`,
+      [OTHER_BOX, AUTHOR, JSON.stringify({
+        messageId: '<orig-ndr@example.net>', to: ['Boss <boss@partner.example>'], cc: [], bcc: ['hidden@partner.example', 'boss@partner.example'],
+      })],
+    );
+    const refusal = (recipient) => ({
+      recipient, state: 'failed', at: '2026-10-02T09:59:01.000Z', statusCode: '5.1.1', diagnostic: '550 5.1.1 User unknown',
+      details: { reply: '550 5.1.1 User unknown', responseCode: 550 },
+    });
+    await recordOutcomes(OTHER_BOX, '<orig-ndr@example.net>', 'submission', [refusal('hidden@partner.example'), refusal('boss@partner.example')]);
+    const seen = async (user) => (await details(OTHER_ROW, user)).body.recipients.map((r) => r.recipient);
+    // boss@ was in To as well, so everyone sees it; hidden@ was only in Bcc.
+    expect(await seen(COLLEAGUE)).toEqual(['boss@partner.example']);
+    expect(await seen(AUTHOR)).toEqual(['boss@partner.example', 'hidden@partner.example']);
+    expect(await seen(ADMIN)).toEqual(['boss@partner.example', 'hidden@partner.example']);
   });
 
   it('gives nothing for a letter the mailbox did not send, whatever aliases a user added to it', async () => {

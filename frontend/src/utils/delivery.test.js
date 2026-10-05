@@ -20,6 +20,9 @@ test('a sent recipient says where the letter went, never that it was read', () =
   assert.equal(deliveryStateKey({ state: 'sent', log: { relayKind: 'other' } }), 'message.delivery.state.sent');
   assert.equal(deliveryStateKey({ state: 'bounced' }), 'message.delivery.state.bounced');
   assert.equal(deliveryStateKey({ state: 'failed' }), 'message.delivery.state.failed');
+  // Refused by the mailbox's own outgoing server when the letter was sent: not a delivery report.
+  assert.equal(deliveryStateKey({ state: 'failed', source: 'submission' }), 'message.delivery.state.refusedAtSubmission');
+  assert.equal(deliveryTone({ state: 'failed', source: 'submission' }), 'failed');
   assert.equal(deliveryStateKey({ state: 'sent', log: { relayKind: 'discard' } }), 'message.delivery.state.sentDiscard');
 });
 

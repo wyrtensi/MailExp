@@ -34,6 +34,9 @@ const STATE_KEYS = Object.freeze({
 const OTHER_STATE_KEY = 'message.delivery.state.other';
 const STALE_KEY = 'message.delivery.state.stale';
 const LEFT_QUEUE_KEY = 'message.delivery.state.leftQueue';
+// The mailbox's own outgoing server refused the recipient when the letter was sent (source
+// 'submission', backend services/sendDelivery.js).
+const REFUSED_AT_SUBMISSION_KEY = 'message.delivery.state.refusedAtSubmission';
 const SENT_KEYS = Object.freeze({
   eop: 'message.delivery.state.sentEop',
   local: 'message.delivery.state.sentLocal',
@@ -67,8 +70,10 @@ export function deliveryMark(state) {
 // The words for one recipient's state. A letter the log shows sent was handed to the next server:
 // EOP (relay named <EOP_HOST>), a mailbox on the node itself, or another server; never "read".
 // A rule on the node that discarded it is said as such. A delay with no news for the queue
-// lifetime (stale) and a letter that left the queue without a final line read as unknown.
+// lifetime (stale) and a letter that left the queue without a final line read as unknown. A
+// recipient the outgoing server refused at sending reads as such, not as a delivery report.
 export function deliveryStateKey(row) {
+  if (row?.state === 'failed' && row.source === 'submission') return REFUSED_AT_SUBMISSION_KEY;
   if (row?.state === 'sent') return own(SENT_KEYS, row.log?.relayKind) ?? SENT_KEYS.other;
   if (row?.state === 'unknown' && row.stale) return STALE_KEY;
   if (row?.state === 'unknown' && row.log?.leftQueue) return LEFT_QUEUE_KEY;

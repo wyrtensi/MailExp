@@ -8,10 +8,12 @@ vi.mock('./auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./smtpTransport.js', () => ({ createAccountSmtpTransport: vi.fn() }));
 vi.mock('../utils/mailUtils.js', () => ({ resolveSentFolder: vi.fn() }));
+vi.mock('./deliveryStatus.js', async (importOriginal) => ({ ...(await importOriginal()), recordOutcomes: vi.fn(async () => 1) }));
 import { query } from './db.js';
+import { recordOutcomes } from './deliveryStatus.js';
 import { createAccountSmtpTransport } from './smtpTransport.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
-import { deliverOutgoingMessage } from './sendDelivery.js';
+import { deliverOutgoingMessage, refusedRecipients } from './sendDelivery.js';
 
 const account = {
   id: 'a1', email_address: 'me@example.com', name: 'Me', oauth_provider: 'microsoft', // non-Gmail OAuth: exercises serverAutoSaves without the Gmail-API send path
@@ -55,8 +57,9 @@ describe('a delivered letter', () => {
       return {};
     });
     const result = await deliver();
-    expect(onDelivered).toHaveBeenCalledWith('<m1@example.com>');
-    expect(result).toEqual({ messageId: '<m1@example.com>', sentFolder: null, sentCopySaved: null });
+    expect(onDelivered).toHaveBeenCalledWith('<m1@example.com>', { rejected: [] });
+    expect(result).toEqual({ messageId: '<m1@example.com>', rejected: [], sentFolder: null, sentCopySaved: null });
+    expect(recordOutcomes).not.toHaveBeenCalled();
   });
 
   it('stays delivered, with a Sent-copy warning, after a post-delivery failure', async () => {
@@ -76,6 +79,67 @@ describe('a delivered letter', () => {
     const options = sendMail.mock.calls[0][0];
     expect(options.to).toBeUndefined();
     expect(options.bcc).toContain('hidden@example.com');
+  });
+});
+
+// The server took the letter but refused some recipients at RCPT (upstream maathimself/mailflow#518):
+// nodemailer resolves, with the refusals in info.rejected / info.rejectedErrors.
+describe('recipients the server refused while it took the letter', () => {
+  const refusal = (recipient, response, responseCode = 550) => Object.assign(new Error(`Recipient command failed: ${response}`), {
+    code: 'EENVELOPE', command: 'RCPT TO', recipient, response, responseCode,
+  });
+
+  it('delivers to the others and reports, records and logs the refused ones', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sendMail.mockResolvedValueOnce({
+      accepted: ['you@example.com'],
+      rejected: ['Gone@Example.com'],
+      rejectedErrors: [refusal('Gone@Example.com', '550 5.1.1 <Gone@Example.com>: Recipient address rejected: User unknown')],
+    });
+    const result = await deliver({ to: ['you@example.com', 'Gone <Gone@Example.com>'] });
+    expect(onDelivered).toHaveBeenCalledWith('<m1@example.com>', { rejected: ['gone@example.com'] });
+    expect(result.rejected).toEqual(['gone@example.com']);
+    expect(recordOutcomes).toHaveBeenCalledWith('a1', '<m1@example.com>', 'submission', [{
+      recipient: 'gone@example.com', state: 'failed', at: expect.any(String), statusCode: '5.1.1',
+      diagnostic: '550 5.1.1 <Gone@Example.com>: Recipient address rejected: User unknown',
+      details: { reply: '550 5.1.1 <Gone@Example.com>: Recipient address rejected: User unknown', responseCode: 550 },
+    }]);
+    // The log names the codes, never the server's reply (it repeats the address unredacted).
+    const line = console.warn.mock.calls.map(c => c.join(' ')).find(l => l.includes('SMTP refused'));
+    expect(line).toContain('5.1.1');
+    expect(line).not.toContain('Gone@Example.com');
+    expect(line).not.toContain('gone@example.com');
+    // Only the accepted recipient is learned as a contact.
+    await new Promise(r => setImmediate(r));
+    await new Promise(r => setImmediate(r));
+    const learned = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO contacts')).map(([, params]) => params[5]);
+    expect(learned).toContain('you@example.com');
+    expect(learned).not.toContain('gone@example.com');
+  });
+
+  it('stays delivered when recording the refusals fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    recordOutcomes.mockRejectedValueOnce(new Error('database unavailable'));
+    sendMail.mockResolvedValueOnce({ rejected: ['gone@example.com'], rejectedErrors: [refusal('gone@example.com', '550 No such user')] });
+    await expect(deliver()).resolves.toMatchObject({ messageId: '<m1@example.com>', rejected: ['gone@example.com'] });
+  });
+});
+
+describe('refusedRecipients', () => {
+  it('pairs each refused address with its reply, and falls back to the basic code', () => {
+    expect(refusedRecipients({
+      rejected: ['a@example.com', 'b@example.com', 'a@example.com'],
+      rejectedErrors: [{ recipient: 'b@example.com', response: '554 Relay access denied', responseCode: 554 }],
+    })).toEqual([
+      { recipient: 'a@example.com', statusCode: null, diagnostic: null, responseCode: null },
+      { recipient: 'b@example.com', statusCode: '554', diagnostic: '554 Relay access denied', responseCode: 554 },
+    ]);
+  });
+
+  it('finds nothing in a send without refusals, or in the Gmail API answer', () => {
+    expect(refusedRecipients({})).toEqual([]);
+    expect(refusedRecipients(undefined)).toEqual([]);
+    expect(refusedRecipients({ via: 'api', messageId: '<m@x>' })).toEqual([]);
   });
 });
 

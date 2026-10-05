@@ -169,8 +169,13 @@ async function sendViaGmailApiWithFallback(account, mailOptions, { threadId = nu
         status: smtp.status, code: smtp.code, definite: true, mailSendFallbackSetupFailed: true,
       });
     }
-    await smtp.transport.sendMail(mailOptions);
-    return { via: 'smtp', messageId: mailOptions.messageId };
+    // Nodemailer resolves a send whose server refused some recipients at RCPT: hand the refusals
+    // on, as the plain SMTP transport does (sendDelivery.js refusedRecipients).
+    const info = await smtp.transport.sendMail(mailOptions);
+    return {
+      via: 'smtp', messageId: mailOptions.messageId,
+      rejected: info?.rejected ?? [], rejectedErrors: info?.rejectedErrors ?? [],
+    };
   }
 }
 

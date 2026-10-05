@@ -62,7 +62,15 @@ router.get('/messages/:id/delivery', async (req, res) => {
     }
   }
 
-  const outcomes = await readOutcomes(letter.account_id, letter.message_id);
+  // A recipient the outgoing server refused at sending who was only in Bcc is the author's and the
+  // administrators' to see (as GET /scheduled/:id shows it): anyone else who can open the letter
+  // would otherwise learn its Bcc from the refusal.
+  let outcomes = await readOutcomes(letter.account_id, letter.message_id);
+  if (outcomes.some((o) => o.source === 'submission' && sent.bccOnly.has(o.recipient))) {
+    const { rows: [viewer] } = await query('SELECT is_admin FROM users WHERE id = $1', [req.session.userId]);
+    const seesBcc = !!viewer?.is_admin || (!!sent.authorId && sent.authorId === req.session.userId);
+    if (!seesBcc) outcomes = outcomes.filter((o) => !(o.source === 'submission' && sent.bccOnly.has(o.recipient)));
+  }
   let log = null;
   if (node) {
     const stored = outcomes.some((outcome) => outcome.log);
