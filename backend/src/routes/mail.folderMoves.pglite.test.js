@@ -71,6 +71,43 @@ const rows = async (ids) => (await db.query('SELECT * FROM messages WHERE id = A
 const moves = async () => (await db.query('SELECT * FROM message_moves ORDER BY id')).rows;
 
 describe('renaming a folder with DB-first moves into it', () => {
+  it.each(['/', '.'])('rewrites snooze source and destination trees with delimiter %s and wakes the message', async (delimiter) => {
+    const otherAccount = '40000000-0000-4000-8000-000000000002';
+    const oldPath = `Parent${delimiter}Later_%`;
+    const newPath = `Parent${delimiter}Next`;
+    const child = `${oldPath}${delimiter}Child`;
+    await db.query("INSERT INTO email_accounts (id, name, email_address) VALUES ($1, 'Other', 'other@example.com')", [otherAccount]);
+    await db.query('INSERT INTO folders (account_id, path, name, delimiter) VALUES ($1, $2, $2, $3)', [ACCOUNT, oldPath, delimiter]);
+    await db.query('UPDATE messages SET folder = $1 WHERE id = $2', [child, A]);
+    const cases = [
+      [ACCOUNT, '<a@example.com>', oldPath, child],
+      [ACCOUNT, '<destination@example.com>', child, 'Snoozed'],
+      [ACCOUNT, '<source@example.com>', 'INBOX', oldPath],
+      [ACCOUNT, '<unrelated@example.com>', `${oldPath}Sibling`, 'Parent/LaterXYZ/Child'],
+      [otherAccount, '<other@example.com>', oldPath, child],
+    ];
+    for (const [account, header, original, snoozed] of cases) {
+      await db.query(`INSERT INTO snoozed_messages (account_id, message_id_header, original_folder, snoozed_folder, snooze_until)
+        VALUES ($1, $2, $3, $4, NOW() - INTERVAL '10 minutes')`, [account, header, original, snoozed]);
+    }
+    expect(await call('/folders/rename', { accountId: ACCOUNT, oldPath, newName: 'Next' }))
+      .toEqual({ status: 200, body: { ok: true, newPath } });
+    const snoozes = (await db.query('SELECT account_id, message_id_header, original_folder, snoozed_folder FROM snoozed_messages ORDER BY message_id_header')).rows;
+    expect(snoozes).toEqual(cases.map(([account, header, original, snoozed]) => ({
+      account_id: account, message_id_header: header,
+      original_folder: account === ACCOUNT && (original === oldPath || original === child) ? newPath + original.slice(oldPath.length) : original,
+      snoozed_folder: account === ACCOUNT && (snoozed === oldPath || snoozed === child) ? newPath + snoozed.slice(oldPath.length) : snoozed,
+    })).sort((a, b) => a.message_id_header.localeCompare(b.message_id_header)));
+    const mgr = mgrState.mgr;
+    mgr._secondaryLoginBlocked = () => false;
+    mgr.moveMessageGetNewUid = vi.fn(async () => 22);
+    mgr.setFlag = vi.fn(async () => {});
+    await ImapManager.prototype._runSnoozeWakeup.call(mgr);
+    expect(mgr.moveMessageGetNewUid).toHaveBeenCalledWith(expect.objectContaining({ id: ACCOUNT }), 11, `${newPath}${delimiter}Child`, newPath, { background: true });
+    expect((await rows([A]))[0]).toMatchObject({ folder: newPath, uid: 22, is_read: false });
+    expect((await db.query('SELECT * FROM snoozed_messages WHERE message_id_header = $1', ['<a@example.com>'])).rows).toEqual([]);
+  });
+
   it('rewrites the queued moves and the moved rows to the new path, and their guards', async () => {
     const mgr = mgrState.mgr;
     await mgr.moveQueue.enqueue(ACCOUNT, await rows([A]), 'Projects/2026');
