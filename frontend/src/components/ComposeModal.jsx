@@ -1032,14 +1032,10 @@ export default function ComposeModal() {
         if (pendingCc) { setCcChips(prev => [...prev, pendingCc]); setCcInput(''); }
         if (pendingBcc) { setBccChips(prev => [...prev, pendingBcc]); setBccInput(''); }
 
-        // Sync baselines so isDirty() returns false until the user makes new changes.
-        // Use the same body expression as isDirty() — not bodyToSend — so that an
-        // empty TipTap editor (getHTML() → '<p></p>', isEmpty → true → '') produces
-        // a consistent '' on both sides rather than a permanent dirty mismatch.
+        // Track the submitted snapshot so edits made during the request stay dirty.
+        // bodyToSend already normalizes an empty TipTap editor to ''.
         // Include pending inputs in the To/CC/BCC baselines since they're now saved.
-        initialBodyRef.current = plaintextEmail ? body
-          : (htmlMode ? htmlSource
-          : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
+        initialBodyRef.current = bodyToSend;
         initialSubjectRef.current = subject;
         initialToRef.current = normalizeTo([...toChips, ...(pendingTo ? [pendingTo] : [])]);
         initialCcRef.current = normalizeTo([...ccChips, ...(pendingCc ? [pendingCc] : [])]);
