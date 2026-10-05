@@ -20,6 +20,27 @@ merge_restored_keys() {
   done
 }
 
+# tenant_files_missing <local env> <restored env> <app dir>: when the tenant profile is on once
+# the restored keys fill this server's .env, prints each file the tenant worker needs and this
+# server lacks (the PFX in TENANT_CERT_DIR, TENANT_PFX_PASSWORD_FILE; relative paths and compose's
+# defaults resolve against the checkout, compose's project directory). Paths only, never contents.
+tenant_files_missing() {
+  local key value
+  local -A eff=()
+  for key in COMPOSE_PROFILES TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE; do
+    value=$(env_get "$1" "$key") || value=
+    if [ -z "$value" ]; then value=$(env_get "$2" "$key") || value=; fi
+    eff[$key]=$value
+  done
+  [[ ",${eff[COMPOSE_PROFILES]// /}," == *,tenant,* ]] || return 0
+  for value in "${eff[TENANT_CERT_DIR]:-./tenant-cert}/app.pfx" \
+    "${eff[TENANT_PFX_PASSWORD_FILE]:-./tenant-secrets/app.pfx.password}"; do
+    case $value in /*) ;; *) value=$3/${value#./} ;; esac
+    [ -f "$value" ] || printf '%s\n' "$value"
+  done
+  return 0
+}
+
 # space_problem <free kB> <last dump bytes>: an update needs twice the dump free: the local
 # pre-update dump, and room to restore it next to the current database if the update is undone.
 space_problem() {

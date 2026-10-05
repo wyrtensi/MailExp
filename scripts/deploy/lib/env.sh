@@ -17,6 +17,12 @@ APP_OWNER_KEYS=(CF_ACCESS_ISSUER CF_ACCESS_AUDIENCE AUTH_GOOGLE_CLIENT_ID AUTH_G
   AWS_DEFAULT_REGION)
 # shellcheck disable=SC2034
 EDGE_OWNER_KEYS=(TUNNEL_TOKEN DNS_API_TOKEN)
+# The tenant worker (profile "tenant"), written into .env by hand (docs/operations/mail-node.md,
+# section 6e); restore.sh brings them back from a snapshot. The PFX and its password file
+# they point to are not in the snapshot.
+# shellcheck disable=SC2034 # read by restore.sh and tests
+TENANT_KEYS=(COMPOSE_PROFILES TENANT_WORKER_URL TENANT_WORKER_TOKEN TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE
+  TENANT_ID TENANT_APP_ID TENANT_ORGANIZATION)
 # Written once and never replaced by configure.sh: the generated keys, and RESTIC_PASSWORD, which
 # a replacement would not change in the repository, only lock this server out of it.
 # shellcheck disable=SC2034
