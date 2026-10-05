@@ -1,12 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+vi.mock('../services/websocket.js', () => ({ closeUserSockets: vi.fn() }));
 
 const { query } = await import('../services/db.js');
+const { closeUserSockets } = await import('../services/websocket.js');
 const { requireAuth, requireAdmin } = await import('./auth.js');
 
+const wss = { clients: new Set() };
+
 async function run(middleware, session) {
-  const req = { session: { ...session, destroy: vi.fn((cb) => cb?.()) } };
+  const req = {
+    session: { ...session, destroy: vi.fn((cb) => cb?.()) },
+    app: { get: (key) => (key === 'imapManager' ? { wss } : undefined) },
+  };
   const res = {
     statusCode: 200,
     body: undefined,
@@ -20,6 +27,7 @@ async function run(middleware, session) {
 
 beforeEach(() => {
   query.mockReset();
+  closeUserSockets.mockReset();
 });
 
 describe('requireAuth', () => {
@@ -41,6 +49,7 @@ describe('requireAuth', () => {
     const { req, res } = await run(requireAuth, { userId: 'u1' });
     expect(res.statusCode).toBe(401);
     expect(req.session.destroy).toHaveBeenCalled();
+    expect(closeUserSockets).toHaveBeenCalledWith(wss, 'u1');
   });
 
   it('refuses and signs out a disabled user', async () => {
@@ -49,7 +58,14 @@ describe('requireAuth', () => {
     expect(res.statusCode).toBe(403);
     expect(res.body).toEqual({ error: 'user_disabled', code: 'user_disabled' });
     expect(req.session.destroy).toHaveBeenCalled();
+    expect(closeUserSockets).toHaveBeenCalledWith(wss, 'u1');
     expect(next).not.toHaveBeenCalled();
+  });
+
+  it('leaves the sockets alone for an active user', async () => {
+    query.mockResolvedValue({ rows: [{ id: 'u1', disabled_at: null }] });
+    await run(requireAuth, { userId: 'u1' });
+    expect(closeUserSockets).not.toHaveBeenCalled();
   });
 });
 

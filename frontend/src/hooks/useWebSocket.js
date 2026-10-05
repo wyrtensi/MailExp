@@ -10,6 +10,7 @@ import { accountEventPatch } from '../utils/accountHealth.js';
 import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/events.js';
 import { recordDiagEvent } from '../utils/diagEvents.js';
 import { notifySendFailed, notifySendRefused, settleSend } from '../utils/sendTracker.js';
+import { WS_CLOSE_ACTIONS, wsCloseAction } from '../utils/wsClose.js';
 
 function _applyServerCounts(counts) {
   useStore.getState().setUnreadCounts(counts);
@@ -27,9 +28,6 @@ async function _forwardNativeNewMailNotification(notification) {
     message: notification.message,
   }).catch(() => {});
 }
-
-// Auth-related close codes that should not trigger reconnect
-const NO_RECONNECT_CODES = new Set([4001, 4003]);
 
 // Module-level timer for debouncing backfill_progress refreshes
 let backfillRefreshTimer = null;
@@ -113,13 +111,38 @@ export function useWebSocket(enabled = true) {
 
     ws.onclose = (event) => {
       clearInterval(ws._pingInterval);
-      if (!enabledRef.current || !mountedRef.current || NO_RECONNECT_CODES.has(event.code)) return;
+      if (!enabledRef.current || !mountedRef.current) return;
+      const action = wsCloseAction(event);
+      if (action === WS_CLOSE_ACTIONS.STOP) return;
+      if (action === WS_CLOSE_ACTIONS.LOCKED) {
+        // The same flow as an API call's 423: App shows the lock screen and unmounts the mail
+        // view; after unlock it mounts again and opens a new socket.
+        window.dispatchEvent(new CustomEvent('mailexpert:locked'));
+        return;
+      }
+      if (action === WS_CLOSE_ACTIONS.SIGNED_OUT) {
+        // One API call confirms it: its 401 sends the tab to sign-in (mailexpert:session_expired),
+        // its 423 to the lock screen, and either unmounts this hook before the timer fires (connect
+        // checks mountedRef). If the session turns out fine, or the call fails for another reason,
+        // reconnect with the usual backoff.
+        api.getUnreadCounts()
+          .then((counts) => useStore.getState().setUnreadCounts(counts))
+          .catch(() => {})
+          .finally(() => {
+            if (enabledRef.current && mountedRef.current) scheduleReconnect();
+          });
+        return;
+      }
+      scheduleReconnect();
+    };
+
+    function scheduleReconnect() {
       const attempt = reconnectAttempt.current;
       const delay = Math.min(BACKOFF_BASE * 2 ** attempt, BACKOFF_MAX);
       const jitter = Math.random() * 0.3 * delay;
       reconnectAttempt.current = attempt + 1;
       reconnectTimer.current = setTimeout(connect, delay + jitter);
-    };
+    }
 
     ws.onerror = () => ws.close();
     wsRef.current = ws;

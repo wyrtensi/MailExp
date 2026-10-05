@@ -71,6 +71,9 @@ async function resolveFlow(accountParam) {
 // Step 1: redirect user to Microsoft login
 router.get('/microsoft', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
+  // The screen-lock gate in index.js (#235) covers only /api. Only the start legs are refused:
+  // the provider's callback lands in another tab while this one's auto-lock keeps counting.
+  if (req.session.locked) return res.redirect(errorRedirect('locked'));
 
   const { clientId, tenantId, redirectUri } = getMsConfig();
   if (!clientId || !tenantId) return res.redirect(errorRedirect('not_configured'));
@@ -115,6 +118,10 @@ router.get('/microsoft', async (req, res) => {
 });
 
 // Step 2: Microsoft redirects back here with auth code
+// Not refused for a locked session, by design: the provider sends the browser back in another
+// tab while the panel tab's auto-lock keeps counting, so a flow started unlocked must still
+// finish. A locked session cannot start one (the start legs refuse it), so this only completes
+// a flow begun before the lock, for the user who began it.
 router.get('/microsoft/callback', async (req, res) => {
   const { code, state, error } = req.query;
 
@@ -324,6 +331,8 @@ function deviceErrorDetail(err) {
 // `account` (body or query) names the Microsoft mailbox to reconnect; without it, a mailbox is added.
 router.post('/microsoft/device', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
+  // Same answer as the /api lock gate in index.js, which does not cover /oauth.
+  if (req.session.locked) return res.status(423).json({ error: 'Locked', locked: true });
   const { clientId, tenantId } = getMsConfig();
   if (!clientId || !tenantId) {
     return res.status(400).json({ error: 'Microsoft integration not configured. Set Client ID and Tenant ID in the Integrations tab.' });
@@ -376,6 +385,9 @@ router.post('/microsoft/device', async (req, res) => {
 // Step 2: poll for token — called repeatedly by the frontend until resolved.
 router.get('/microsoft/device/poll', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
+  // The poll is made by the panel tab that is now locked, so refusing it costs nothing; the
+  // pending flow is kept, so polling can resume after unlock until it expires.
+  if (req.session.locked) return res.status(423).json({ error: 'Locked', locked: true });
   const flow = deviceFlows.get(req.session.userId);
   if (!flow) return res.status(400).json({ status: 'error', error: 'No pending device code flow' });
   if (Date.now() > flow.expiresAt) {
