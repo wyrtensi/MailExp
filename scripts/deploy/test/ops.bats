@@ -44,6 +44,17 @@ setup() {
   [ "$status" -eq 2 ]
 }
 
+@test "tenant_file_targets: nothing with the profile off; this server's paths first, then the snapshot's, then compose's defaults" {
+  printf '%s\n' COMPOSE_PROFILES=extra TENANT_CERT_DIR=/srv/certs >"$D"
+  printf '%s\n' COMPOSE_PROFILES= TENANT_PFX_PASSWORD_FILE=/srv/secrets/pw >"$S"
+  [ -z "$(tenant_file_targets /opt/me/app "$D" "$S")" ]
+  printf '%s\n' COMPOSE_PROFILES=tenant TENANT_CERT_DIR=/srv/other TENANT_PFX_PASSWORD_FILE=/srv/other/pw >"$S"
+  [ "$(tenant_file_targets /opt/me/app "$D" "$S")" = $'/srv/certs/app.pfx\n/srv/other/pw' ]
+  [ "$(tenant_file_targets /opt/me/app "$S")" = $'/srv/other/app.pfx\n/srv/other/pw' ]
+  printf '%s\n' COMPOSE_PROFILES=tenant TENANT_CERT_DIR=./certs >"$S"
+  [ "$(tenant_file_targets /opt/me/app "$S")" = $'/opt/me/app/certs/app.pfx\n/opt/me/app/tenant-secrets/app.pfx.password' ]
+}
+
 @test "space_problem: twice the last dump must be free" {
   [ -z "$(space_problem $((2 * 1024 * 1024)) $((1024 * 1024 * 1024)))" ]
   [ "$(space_problem $((1024 * 1024)) $((1024 * 1024 * 1024)))" = "free space: 1024 MB, the update needs 2048 MB (twice the last dump)" ]
