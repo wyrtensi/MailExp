@@ -44,8 +44,8 @@ router.get('/', async (req, res) => {
       OR c.primary_email ILIKE $${p}
       OR c.organization ILIKE $${p}
       OR (jsonb_typeof(c.emails) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.emails) ae WHERE ae->>'value' ILIKE $${p}))
-      OR (jsonb_typeof(c.phones) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.phones) ap WHERE ap->>'value' ILIKE ${p}))
-      OR (jsonb_typeof(c.urls) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.urls) au WHERE au->>'value' ILIKE ${p}))
+      OR (jsonb_typeof(c.phones) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.phones) ap WHERE ap->>'value' ILIKE $${p}))
+      OR (jsonb_typeof(c.urls) = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(c.urls) au WHERE au->>'value' ILIKE $${p}))
     )`);
     p++;
   }
