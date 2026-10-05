@@ -234,3 +234,61 @@ describe('minimizing and restoring the composer', () => {
     assert.ok(minimizeBtn(), 'the full toolbar is mounted again');
   });
 });
+
+// The rich quote is a contentEditable filled from composeData once. Minimizing (and crossing the
+// mobile/desktop layout) unmounts it; when it comes back it must still hold the quote as the writer
+// left it, or a send or autosave after the restore drops the quote as if it had been deleted.
+describe('the rich quote across minimize and restore', () => {
+  const QUOTE_HTML = '<div>On Mon, Bob wrote:</div><blockquote>The old letter.</blockquote>';
+
+  async function openReply() {
+    saved.length = 0;
+    useStore.setState({ plaintextEmail: false, composeMinimized: false });
+    useStore.getState().openCompose({
+      accountId: 'acct', isReply: true, to: ['Bob <bob@example.invalid>'], cc: [], subject: 'Re: Contract',
+      body: '', quotedBody: '\n\nOn Mon, Bob wrote:\n> The old letter.', quotedBodyHtml: QUOTE_HTML,
+    });
+    const root = createRoot(document.getElementById('root'));
+    await React.act(async () => { root.render(React.createElement(ComposeModal)); });
+    await React.act(async () => {});
+    return () => React.act(async () => root.unmount());
+  }
+  const quoteEl = () => [...document.querySelectorAll('[contenteditable="true"]')]
+    .find(el => !el.classList.contains('ProseMirror') && el.querySelector('blockquote'));
+  const setMinimized = (value) => React.act(async () => { useStore.getState().setComposeMinimized(value); });
+  const typeBody = (text) => React.act(async () => { document.querySelector('.ProseMirror').editor.commands.insertContent(text); });
+
+  test('a kept quote is still in the draft saved after a restore', async () => {
+    const close = await openReply();
+    try {
+      assert.ok(quoteEl(), 'the rich quote is mounted');
+      await setMinimized(true);
+      assert.equal(quoteEl(), undefined, 'precondition: minimizing unmounts the quote');
+      await setMinimized(false);
+      assert.match(quoteEl()?.innerHTML ?? '', /The old letter\./, 'the restored quote shows the quote again');
+      await typeBody('Thanks.');
+      await hideTab();
+      assert.equal(saved.length, 1);
+      assert.match(saved[0].quotedBodyHtml, /The old letter\./);
+      assert.match(saved[0].quotedBody, /The old letter\./);
+    } finally {
+      await close();
+    }
+  });
+
+  test('a quote the writer edited stays edited while minimized and after the restore', async () => {
+    const close = await openReply();
+    try {
+      await React.act(async () => { quoteEl().innerHTML = '<blockquote>Only this part.</blockquote>'; });
+      await typeBody('Thanks.');
+      await setMinimized(true);
+      await hideTab();
+      assert.equal(saved.length, 1);
+      assert.equal(saved[0].quotedBodyHtml, '<blockquote>Only this part.</blockquote>');
+      await setMinimized(false);
+      assert.equal(quoteEl()?.innerHTML, '<blockquote>Only this part.</blockquote>');
+    } finally {
+      await close();
+    }
+  });
+});

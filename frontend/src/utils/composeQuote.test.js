@@ -39,6 +39,25 @@ test('a rich quote holding only an image is not empty', () => {
   );
 });
 
+test('a rich quote holding only media, a rule, a table or a background image is not empty', () => {
+  for (const html of [
+    '<svg viewBox="0 0 1 1"><rect width="1" height="1"></rect></svg>',
+    '<video src="cid:v"></video>',
+    '<audio src="cid:a"></audio>',
+    '<picture><source srcset="cid:p"></picture>',
+    '<object data="cid:o"></object>',
+    '<embed src="cid:e">',
+    '<iframe src="about:blank"></iframe>',
+    '<canvas></canvas>',
+    '<hr>',
+    '<table><tr><td></td></tr></table>',
+    '<div style="background-image: url(cid:banner); height: 200px"></div>',
+    '<td background="cid:banner"></td>',
+  ]) {
+    assert.equal(isEmptyQuoteHtml(html), false, html);
+  }
+});
+
 test('before the rich quote is mounted, the original rich quote is used', () => {
   assert.deepEqual(
     quotePayload({ plaintextEmail: false, quotedBody: QUOTE_TEXT, quotedBodyHtml: QUOTE_HTML, liveQuoteHtml: null }),
