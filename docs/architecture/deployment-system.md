@@ -22,7 +22,7 @@ IPv4 панели, `<PREFIX>` — каталог установки (по умо
 | backend | API, WebSocket, синхронизация IMAP/Gmail, очередь заданий, опросы узла и тенанта, миграции при старте; **один процесс** | `ghcr.io/wyrtensi/mailexpert-backend:sha-<12>` | в PostgreSQL и Redis |
 | postgres | PostgreSQL 16, единственная база панели | `postgres:16-alpine`, том `<project>_postgres_data` | всё: пользователи, ящики, письма, журнал, зашифрованные пароли |
 | redis | Redis 7: сессии, кэш | `redis:7-alpine`, том `<project>_redis_data` | сессии (`noeviction`) |
-| tenant-worker | необязательный: EXO PowerShell за белым списком операций, подписывает ассерции Graph сертификатом приложения | `ghcr.io/wyrtensi/mailexpert-tenant-worker:sha-<12>`, профиль compose `tenant` | PFX и пароль — файлы на хосте, только чтение |
+| tenant-worker | необязательный: EXO PowerShell за белым списком операций, подписывает ассерции Graph сертификатом приложения | `ghcr.io/wyrtensi/mailexpert-tenant-worker:sha-<12>`, профиль compose `tenant` | PFX и пароль — файлы на хосте, только чтение; входят в снимок restic панели |
 | edge: caddy | TLS для `<DIRECT_HOST>` (DNS-01 через Cloudflare) | `ghcr.io/wyrtensi/mailexpert-edge:sha-<12>`, **закреплён по digest** в `<PREFIX>/edge/.env` (`EDGE_IMAGE`) | сертификаты в томе `caddy_data` |
 | edge: cloudflared | исходящий туннель к `<CF_HOST>` | `cloudflare/cloudflared:<версия>` из `deploy/edge/compose.yml` | нет (токен в `edge/.env`) |
 | таймеры панели | `mailexpert-backup.timer` (restic в S3), `mailexpert-health.timer` (Healthchecks) | systemd на хосте панели, скрипты из `<PREFIX>/app/scripts/deploy` | `<PREFIX>/state/` |
@@ -295,8 +295,10 @@ CI после зелёной сборки (backend, frontend, edge, tenant-worke
 - **Блокировки хоста и бэкап**: `update.sh`, `rollback.sh` и `restore.sh` держат `state/update.lock`
   монопольно; `install.sh`, `configure.sh` и `restore.sh` (на запись ключей) — `state/install.lock`.
   `backup.sh` держит `state/backup.lock` весь прогон, а `update.lock` (разделяемо) и `install.lock` —
-  только пока снимает дамп базы и копирует `.env`, `edge/.env` и `install.conf`: снимок не смешивает
-  схему и ключи, которые в этот момент меняются. Загрузка в restic, чистка и проверки идут уже без
+  только пока снимает дамп базы и копирует `.env`, `edge/.env`, `install.conf` и, при профиле
+  `tenant`, PFX исполнителя и файл его пароля (в снимке — `tenant/`, root, 0600; `restore.sh`
+  возвращает их на пути из `.env`, владелец 10001, 0400, только если на сервере их нет): снимок не
+  смешивает схему и ключи, которые в этот момент меняются. Репозиторий зашифрован `RESTIC_PASSWORD`. Загрузка в restic, чистка и проверки идут уже без
   них. Бэкап берёт все три блокировки разом или ни одной (ждёт до часа, потом пинг `fail`), поэтому
   не держит одну, ожидая другую, и не стопорит обновление, бэкап перед которым ждёт `backup.lock`.
   Разделяемую блокировку бэкапа проверка здоровья, исполнитель и `status.sh` обновлением не

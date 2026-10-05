@@ -40,26 +40,105 @@ add_restored_profile() {
   printf '%s\n' COMPOSE_PROFILES
 }
 
-# tenant_files_missing <local env> <restored env> <app dir>: when the tenant profile is on here or
-# in the snapshot (restore.sh adds the snapshot's to this server's profiles), prints each file the
-# tenant worker needs and this server lacks (the PFX in TENANT_CERT_DIR, TENANT_PFX_PASSWORD_FILE;
-# relative paths and compose's defaults resolve against the checkout, compose's project
-# directory). Paths only, never contents.
-tenant_files_missing() {
-  local key value
+# The tenant worker's files (docs/operations/mail-node.md, section 6e): the PFX in TENANT_CERT_DIR
+# and its password in TENANT_PFX_PASSWORD_FILE. The worker runs as this uid
+# (deploy/tenant-worker/Dockerfile): it owns both files (0400) and their directories (0500).
+# A panel snapshot holds them as tenant/app.pfx and tenant/app.pfx.password, in this order.
+# shellcheck disable=SC2034 # read by backup.sh, restore.sh and tests
+TENANT_WORKER_UID=10001
+# shellcheck disable=SC2034
+TENANT_SNAPSHOT_FILES=(app.pfx app.pfx.password)
+
+# tenant_file_targets <app dir> <env file...>: when the tenant profile is on in any of the files,
+# prints the PFX path, then the password file path. Each key comes from the first file that sets
+# it, else compose's default; relative paths resolve against the checkout, compose's project
+# directory. Nothing when the profile is off everywhere. Paths only, never contents.
+tenant_file_targets() {
+  local app=$1 file key value on=0
   local -A eff=()
-  profile_on "$1" tenant || profile_on "$2" tenant || return 0
+  shift
+  for file in "$@"; do
+    if profile_on "$file" tenant; then on=1; fi
+  done
+  [ "$on" = 1 ] || return 0
   for key in TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE; do
-    value=$(env_get "$1" "$key") || value=
-    if [ -z "$value" ]; then value=$(env_get "$2" "$key") || value=; fi
+    value=
+    for file in "$@"; do
+      value=$(env_get "$file" "$key") || value=
+      [ -z "$value" ] || break
+    done
     eff[$key]=$value
   done
   for value in "${eff[TENANT_CERT_DIR]:-./tenant-cert}/app.pfx" \
     "${eff[TENANT_PFX_PASSWORD_FILE]:-./tenant-secrets/app.pfx.password}"; do
-    case $value in /*) ;; *) value=$3/${value#./} ;; esac
-    [ -f "$value" ] || printf '%s\n' "$value"
+    case $value in /*) ;; *) value=$app/${value#./} ;; esac
+    printf '%s\n' "$value"
   done
+}
+
+# tenant_files_missing <local env> <restored env> <app dir>: when the tenant profile is on here or
+# in the snapshot (restore.sh adds the snapshot's to this server's profiles), prints each file the
+# tenant worker needs and this server lacks (tenant_file_targets, this server's settings first).
+tenant_files_missing() {
+  local path
+  while IFS= read -r path; do
+    [ -f "$path" ] || printf '%s\n' "$path"
+  done < <(tenant_file_targets "$3" "$1" "$2")
   return 0
+}
+
+# place_tenant_files <snapshot dir> <local env> <restored env> <app dir>: puts the snapshot's
+# tenant/app.pfx and tenant/app.pfx.password where tenant_file_targets points, only where this
+# server has no file yet (the ones set here stay), owned by the worker's uid, 0400, in a directory
+# created 0500 for it when absent. All or nothing: when a missing file is not in the snapshot
+# either (an older snapshot, or one made while the file was missing), nothing is placed and
+# tenant_files_missing names the paths. Prints each path written, never contents.
+place_tenant_files() {
+  local src=$1/tenant i=0 path dir
+  local -a targets=() todo=()
+  mapfile -t targets < <(tenant_file_targets "$4" "$2" "$3")
+  for path in "${targets[@]}"; do
+    if [ ! -f "$path" ]; then
+      [ -f "$src/${TENANT_SNAPSHOT_FILES[$i]}" ] || return 0
+      todo+=("$i")
+    fi
+    i=$((i + 1))
+  done
+  for i in "${todo[@]}"; do
+    path=${targets[$i]}
+    dir=$(dirname "$path")
+    if [ ! -d "$dir" ]; then
+      mkdir -p "$(dirname "$dir")"
+      install -d -o "$TENANT_WORKER_UID" -g 0 -m 0500 "$dir"
+    fi
+    install -o "$TENANT_WORKER_UID" -g 0 -m 0400 "$src/${TENANT_SNAPSHOT_FILES[$i]}" "$path"
+    printf '%s\n' "$path"
+  done
+}
+
+# stage_tenant_files <staging dir> <env file> <app dir>: with the tenant profile on, copies the PFX
+# and its password file into <staging dir>/tenant (root, 0600) for the snapshot. A file that is
+# absent is skipped with a warning naming its key and path, and listed in TENANT_STAGE_MISSING
+# ("<path> (<key>)", space-separated) for the caller: a move backup fails on it, others report it
+# in their ping. Never prints contents.
+TENANT_STAGE_MISSING=''
+stage_tenant_files() {
+  local i=0 path
+  local -a targets=() keys=(TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE)
+  TENANT_STAGE_MISSING=''
+  mapfile -t targets < <(tenant_file_targets "$3" "$2")
+  [ "${#targets[@]}" -gt 0 ] || return 0
+  install -d -o 0 -g 0 -m 0700 "$1/tenant"
+  for path in "${targets[@]}"; do
+    if [ -f "$path" ]; then
+      install -o 0 -g 0 -m 0600 "$path" "$1/tenant/${TENANT_SNAPSHOT_FILES[$i]}"
+      log "tenant: ${TENANT_SNAPSHOT_FILES[$i]} added"
+    else
+      warn "tenant: the profile is on but $path (${keys[$i]}) is missing: the snapshot is made without it"
+      TENANT_STAGE_MISSING+="${TENANT_STAGE_MISSING:+ }$path (${keys[$i]})"
+    fi
+    i=$((i + 1))
+  done
 }
 
 # space_problem <free kB> <last dump bytes>: an update needs twice the dump free: the local

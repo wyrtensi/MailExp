@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Backs up the panel into the restic repository named in .env (any S3-compatible storage): a
 # pg_dump with the row counts taken in the same database snapshot, plus .env, edge/.env and
-# install.conf, which hold the keys that make the dump usable. restic encrypts the repository
-# with RESTIC_PASSWORD, kept on the server and by the owner (the recovery key).
+# install.conf, which hold the keys that make the dump usable, and, with the tenant profile on,
+# the tenant worker's PFX and its password file: everything restore.sh needs on a fresh server.
+# restic encrypts the repository with RESTIC_PASSWORD, kept on the server and by the owner (the
+# recovery key).
 #
 # Nightly by mailexpert-backup.timer; by hand; by update.sh (--tag pre-update --keep-dump); before
 # a move, once the panel is stopped (--with-redis --tag move; the server then turns standby, see
@@ -25,6 +27,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/app.sh"
 # shellcheck source=lib/backup.sh
 . "$LIB_DIR/backup.sh"
+# shellcheck source=lib/ops.sh
+. "$LIB_DIR/ops.sh"
 exit_on_unexpected_failure
 
 # How long to wait for the locks (take_backup_locks): another backup.sh (update.sh's pre-update
@@ -67,9 +71,9 @@ finish() {
 
 # Locks. backup.lock: one backup.sh at a time, held to the end (the staging directory and the
 # restic repository are shared). update.lock and install.lock: held only for the capture, while
-# the database is dumped and .env, edge/.env and install.conf are copied next to the dump, so the
-# snapshot never mixes a schema or keys that update.sh, rollback.sh, restore.sh, install.sh or
-# configure.sh are changing. They are released before the upload, the retention and the checks,
+# the database is dumped and .env, edge/.env, install.conf and the tenant files are copied next
+# to the dump, so the snapshot never mixes a schema or keys that update.sh, rollback.sh,
+# restore.sh, install.sh or configure.sh are changing. They are released before the upload, the retention and the checks,
 # which can take hours: an installer (the updater's automatic rollback among them) then waits
 # only for a dump. update.lock is held shared, so lock_held, which the health check, the updater
 # and status.sh ask, does not mistake a backup for an update.
@@ -132,6 +136,7 @@ stage_files() {
   cp -p "$ENV_FILE" "$dir/env"
   if [ -f "$EDGE_ENV" ]; then cp -p "$EDGE_ENV" "$dir/edge.env"; fi
   cp -p "$OPT_PREFIX/install.conf" "$dir/install.conf"
+  stage_tenant_files "$dir" "$ENV_FILE" "$APP_DIR"
   if [ "$2" = 1 ]; then
     app_compose exec -T redis redis-cli SAVE >/dev/null
     app_compose cp redis:/data/dump.rdb "$dir/redis.rdb"
@@ -200,7 +205,7 @@ verify_snapshot() {
 
 main() {
   local prefix=/opt/mailexpert tag=nightly verify=0 redis=0 keep='' show_key=0 local_only=0
-  local started seconds bytes counts snapshot weekday checks
+  local started seconds bytes counts snapshot weekday checks ping_note=''
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix | --tag | --keep-dump)
@@ -277,6 +282,14 @@ main() {
   [ "$local_only" = 0 ] || return 0
 
   stage_files "$STAGING" "$redis"
+  if [ -n "$TENANT_STAGE_MISSING" ]; then
+    # The move's snapshot is the one the new server restores: without these files its tenant
+    # worker cannot start. Fail before the upload, so this server stays active.
+    if [ "$tag" = move ]; then
+      die "move: the tenant profile is on and $TENANT_STAGE_MISSING missing here: put the files back (docs/operations/mail-node.md, section 6e) or turn the profile off, then run the move backup again; this server stays active"
+    fi
+    ping_note="; warning: tenant profile on, missing and not in this snapshot: $TENANT_STAGE_MISSING"
+  fi
   load_restic_env
   load_restic_host mailexpert
   release_capture_locks
@@ -297,7 +310,7 @@ main() {
       ;;
   esac
   write_backup_last "$snapshot" "$tag" "$bytes" "$seconds" "$counts" "$VERIFY_SECONDS"
-  send_ping "$PING_URL" success "snapshot ${snapshot:0:8} ($tag): dump $bytes bytes in ${seconds}s${VERIFY_SECONDS:+, verified, restored in ${VERIFY_SECONDS}s}"
+  send_ping "$PING_URL" success "snapshot ${snapshot:0:8} ($tag): dump $bytes bytes in ${seconds}s${VERIFY_SECONDS:+, verified, restored in ${VERIFY_SECONDS}s}$ping_note"
   log "backup done"
   if [ "$tag" = move ]; then mark_moved_away "$snapshot"; fi
 }

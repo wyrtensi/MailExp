@@ -71,7 +71,7 @@ STUB_EOF
 }
 
 # tenant_files: the certificate and its password where the snapshot's .env points (the owner
-# copies them from their own restricted backup; restic does not hold them).
+# copied them there: the snapshot below, like one made before backups held them, has none).
 tenant_files() {
   mkdir -p "$P/tenant-cert" "$P/tenant-secrets"
   printf 'pfx' >"$P/tenant-cert/app.pfx"
@@ -149,4 +149,81 @@ tenant_files() {
   run env_get "$P/.env" COMPOSE_PROFILES
   [ "$status" -eq 1 ]
   [ "$(env_get "$P/.env" ENCRYPTION_KEY)" = old-key ]
+}
+
+PFX_CONTENT=synthetic-pfx-bytes
+PASSWORD_CONTENT=synthetic-pfx-password
+
+# snapshot_tenant_files [name...]: the PFX and its password in the snapshot, where backup.sh
+# stages them (tenant/app.pfx, tenant/app.pfx.password); both by default.
+snapshot_tenant_files() {
+  local which=("$@") f
+  if [ ${#which[@]} -eq 0 ]; then which=(app.pfx app.pfx.password); fi
+  mkdir -p "$SNAPSHOT/tenant"
+  for f in "${which[@]}"; do
+    case $f in
+      app.pfx) printf '%s' "$PFX_CONTENT" >"$SNAPSHOT/tenant/app.pfx" ;;
+      app.pfx.password) printf '%s' "$PASSWORD_CONTENT" >"$SNAPSHOT/tenant/app.pfx.password" ;;
+    esac
+  done
+}
+
+@test "the snapshot's PFX and password file go to the configured paths, owner 10001, 0400 in 0500" {
+  stub_restore
+  snapshot_tenant_files
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  cmp -s "$P/tenant-cert/app.pfx" "$SNAPSHOT/tenant/app.pfx"
+  cmp -s "$P/tenant-secrets/app.pfx.password" "$SNAPSHOT/tenant/app.pfx.password"
+  [ "$(stat -c '%u %g %a' "$P/tenant-cert/app.pfx")" = '10001 0 400' ]
+  [ "$(stat -c '%u %g %a' "$P/tenant-secrets/app.pfx.password")" = '10001 0 400' ]
+  [ "$(stat -c '%u %g %a' "$P/tenant-cert")" = '10001 0 500' ]
+  [ "$(stat -c '%u %g %a' "$P/tenant-secrets")" = '10001 0 500' ]
+  [[ $output == *"tenant worker files from the snapshot: $P/tenant-cert/app.pfx $P/tenant-secrets/app.pfx.password"* ]]
+  [[ $output != *"$PFX_CONTENT"* && $output != *"$PASSWORD_CONTENT"* && $output != *"$TOKEN"* ]]
+  grep -q pg_restore "$DOCKER_LOG"
+}
+
+@test "tenant files this server has stay; only the missing one comes from the snapshot" {
+  stub_restore
+  snapshot_tenant_files
+  mkdir -p "$P/tenant-cert"
+  printf 'pfx-set-here' >"$P/tenant-cert/app.pfx"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  [ "$(cat "$P/tenant-cert/app.pfx")" = pfx-set-here ]
+  cmp -s "$P/tenant-secrets/app.pfx.password" "$SNAPSHOT/tenant/app.pfx.password"
+  [ "$(stat -c '%u %a' "$P/tenant-secrets/app.pfx.password")" = '10001 400' ]
+  [[ $output == *"tenant worker files from the snapshot: $P/tenant-secrets/app.pfx.password"* ]]
+}
+
+@test "the snapshot's tenant files with compose's default paths land in the checkout" {
+  stub_restore
+  snapshot_tenant_files
+  sed -i '/^TENANT_CERT_DIR=/d; /^TENANT_PFX_PASSWORD_FILE=/d' "$SNAPSHOT/env"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  cmp -s "$P/app/tenant-cert/app.pfx" "$SNAPSHOT/tenant/app.pfx"
+  cmp -s "$P/app/tenant-secrets/app.pfx.password" "$SNAPSHOT/tenant/app.pfx.password"
+  [ "$(stat -c '%u %a' "$P/app/tenant-cert")" = '10001 500' ]
+}
+
+@test "a snapshot with only one of the tenant files: nothing placed, exit 2 naming the path" {
+  stub_restore
+  snapshot_tenant_files app.pfx
+  cp -p "$P/.env" "$BATS_TEST_TMPDIR/env.before"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 2 ]
+  [[ $output == *"$P/tenant-secrets/app.pfx.password"* ]]
+  [ ! -e "$P/tenant-cert" ] && [ ! -e "$P/tenant-secrets" ]
+  cmp -s "$P/.env" "$BATS_TEST_TMPDIR/env.before"
+}
+
+@test "the snapshot's tenant files are not placed when the tenant profile is off everywhere" {
+  stub_restore
+  snapshot_tenant_files
+  sed -i '/^COMPOSE_PROFILES=/d' "$SNAPSHOT/env"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  [ ! -e "$P/tenant-cert" ] && [ ! -e "$P/tenant-secrets" ]
 }
