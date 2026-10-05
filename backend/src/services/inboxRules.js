@@ -1,4 +1,5 @@
 import { query } from './db.js';
+import { parseHeadersInput } from './messageParser.js';
 import { resolveArchiveFolder, isAllMailFolder, resolveTrashFolder, resolveAllTrashPaths, getDeleteStrategy, adjustFolderCounts } from '../utils/mailUtils.js';
 
 async function getRulesForAccount(accountId) {
@@ -182,8 +183,9 @@ export async function applyInboxRules(messages, account, imapManager) {
     }
   }
 
-  // parsedHeaders is already present on each msg from messageParser.js — no DB
-  // fetch needed; header conditions can use msg.parsedHeaders directly.
+  const headerRules = new Set(rules.filter(r =>
+    Array.isArray(r.conditions) && r.conditions.some(c => c?.field === 'header')
+  ));
 
   // Lazy resolver cache shared across the message loop. Populated on first actual use
   // inside applyAction so resolvers are never called for actions that are deduped or
@@ -209,6 +211,22 @@ export async function applyInboxRules(messages, account, imapManager) {
   );
 
   for (const msg of messages) {
+    // Arrival messages already have headers. Manual sweeps only have DB metadata.
+    // Unavailable headers must not be treated as absent: negative conditions could
+    // otherwise move or delete a message that the rule explicitly excludes.
+    let headersUnavailable = false;
+    if (headerRules.size && !msg.parsedHeaders) {
+      try {
+        const headers = parseHeadersInput(await imapManager.fetchHeaders(account, msg.uid, msg.folder));
+        if (!Object.keys(headers).length) headersUnavailable = true;
+        else msg.parsedHeaders = headers;
+      } catch {
+        headersUnavailable = true;
+      }
+      if (headersUnavailable) {
+        console.warn(`inboxRules: headers unavailable for message ${msg.id}; skipping header-dependent rules`);
+      }
+    }
     const deferredDestinations = [];
     let forwardBarrierPassed = lastForwardRuleIndex === -1;
 
@@ -245,7 +263,7 @@ export async function applyInboxRules(messages, account, imapManager) {
       const rule = rules[ruleIndex];
       let matches;
       try {
-        matches = evaluateRule(rule, msg);
+        matches = !(headersUnavailable && headerRules.has(rule)) && evaluateRule(rule, msg);
       } catch (err) {
         console.error(`inboxRules: rule ${rule.id} evaluation error for msg ${msg.id}:`, err.message);
         if (!forwardBarrierPassed && ruleIndex === lastForwardRuleIndex) {

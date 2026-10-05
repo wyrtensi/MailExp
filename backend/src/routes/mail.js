@@ -798,20 +798,21 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     if (bufferMap.size === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
     // Deduplicate filenames: invoice.pdf → invoice (2).pdf
-    const usedNames = new Map();
+    const usedNames = new Set();
     const entries = [];
     for (const att of eligible) {
       const buf = bufferMap.get(att.part);
       if (!buf) continue;
-      let name = safeFilename(att.filename);
-      if (usedNames.has(name)) {
-        const n = usedNames.get(name) + 1;
-        usedNames.set(name, n);
-        const dot = name.lastIndexOf('.');
-        name = dot > 0 ? `${name.slice(0, dot)} (${n})${name.slice(dot)}` : `${name} (${n})`;
-      } else {
-        usedNames.set(name, 1);
+      // Archiver strips leading word/drive prefixes ending in a colon.
+      const originalName = safeFilename(att.filename).replace(/:/g, '_');
+      let name = originalName;
+      const dot = originalName.lastIndexOf('.');
+      let n = 2;
+      while (usedNames.has(name)) {
+        name = dot > 0 ? `${originalName.slice(0, dot)} (${n})${originalName.slice(dot)}` : `${originalName} (${n})`;
+        n++;
       }
+      usedNames.add(name);
       entries.push({ name, buf });
     }
 
@@ -1320,6 +1321,17 @@ router.post('/folders/rename', async (req, res) => {
       UPDATE messages SET folder = $4 || substr(folder, length($2) + 1)
       WHERE account_id = $1
         AND (folder = $2 OR substr(folder, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
+    // Pending snoozes follow both their parked folder and their wakeup destination.
+    await query(`
+      UPDATE snoozed_messages SET
+        original_folder = CASE WHEN original_folder = $2 OR substr(original_folder, 1, length($3)) = $3
+                               THEN $4 || substr(original_folder, length($2) + 1) ELSE original_folder END,
+        snoozed_folder = CASE WHEN snoozed_folder = $2 OR substr(snoozed_folder, 1, length($3)) = $3
+                              THEN $4 || substr(snoozed_folder, length($2) + 1) ELSE snoozed_folder END
+      WHERE account_id = $1
+        AND (original_folder = $2 OR substr(original_folder, 1, length($3)) = $3
+             OR snoozed_folder = $2 OR substr(snoozed_folder, 1, length($3)) = $3)`,
       [accountId, oldPath, childPrefix, newPath]);
     // Queued moves into or out of the renamed tree follow it; their guards are keyed by path.
     await query(`

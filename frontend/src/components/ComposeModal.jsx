@@ -363,6 +363,14 @@ export default function ComposeModal() {
   // Prevents the signature from being reset by a store refresh (same fromValue, accounts updated).
   const signatureInitializedRef = useRef(false);
   const prevFromValueRef = useRef(fromValue);
+  const savedMetadataRef = useRef(null);
+  const getDraftMetadata = () => ({
+    ...resolveFrom(fromValue),
+    priority,
+    quotedBody,
+    quotedBodyHtml: plaintextEmail ? null : (quotedHtmlRef.current?.innerHTML ?? quotedBodyHtml),
+    editedSignature: plaintextEmail ? plainSig : signatureContentRef.current,
+  });
 
   // Edit/save timestamps driving the autosave rule. Refs, not state: they are written from the
   // editor's onUpdate on every keystroke and must never cause a render. Both are seeded at mount
@@ -698,11 +706,15 @@ export default function ComposeModal() {
       if (signatureRef.current) signatureRef.current.innerHTML = sanitized;
       signatureContentRef.current = sanitized;
       setPlainSig(stripHtml(signature));
+      // Late account loading initializes the default signature without a user edit.
+      if (!fromValueChanged && savedMetadataRef.current) {
+        savedMetadataRef.current.editedSignature = plaintextEmail ? stripHtml(signature) : sanitized;
+      }
     } else if (fromValueChanged && fromSignature == null) {
       signatureContentRef.current = '';
       setPlainSig('');
     }
-  }, [fromValue, fromSignature, draftSignature]);
+  }, [fromValue, fromSignature, draftSignature, plaintextEmail]);
 
   // Initialise quoted HTML contentEditable once on mount (ref-based to avoid React cursor conflicts)
   useEffect(() => {
@@ -969,9 +981,15 @@ export default function ComposeModal() {
     }
   };
 
+  // Capture initialized DOM values, including sanitized HTML, before any user edit.
+  useEffect(() => {
+    savedMetadataRef.current = getDraftMetadata();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- opening baseline only
+
   const isDirty = () => {
     const currentBody = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
     return (
+      JSON.stringify(getDraftMetadata()) !== JSON.stringify(savedMetadataRef.current) ||
       currentBody !== initialBodyRef.current ||
       subject !== initialSubjectRef.current ||
       normalizeTo(toChips) !== initialToRef.current ||
@@ -990,6 +1008,7 @@ export default function ComposeModal() {
     setSavingDraft(true);
     try {
       const bodyToSend = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
+      const submittedMetadata = getDraftMetadata();
       const result = await api.saveDraft({
         accountId,
         priority,
@@ -1004,7 +1023,7 @@ export default function ComposeModal() {
         ...(!plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
           ? { quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml }
           : {}),
-        ...(signatureContentRef.current || fromSignature != null
+        ...(signatureContentRef.current || fromSignature != null || draftSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
         // The server replaces the previous copy only in the mailbox it lives in.
@@ -1034,14 +1053,11 @@ export default function ComposeModal() {
         if (pendingCc) { setCcChips(prev => [...prev, pendingCc]); setCcInput(''); }
         if (pendingBcc) { setBccChips(prev => [...prev, pendingBcc]); setBccInput(''); }
 
-        // Sync baselines so isDirty() returns false until the user makes new changes.
-        // Use the same body expression as isDirty() — not bodyToSend — so that an
-        // empty TipTap editor (getHTML() → '<p></p>', isEmpty → true → '') produces
-        // a consistent '' on both sides rather than a permanent dirty mismatch.
+        // Track the submitted snapshot so edits made during the request stay dirty.
+        // bodyToSend already normalizes an empty TipTap editor to ''.
         // Include pending inputs in the To/CC/BCC baselines since they're now saved.
-        initialBodyRef.current = plaintextEmail ? body
-          : (htmlMode ? htmlSource
-          : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
+        savedMetadataRef.current = submittedMetadata;
+        initialBodyRef.current = bodyToSend;
         initialSubjectRef.current = subject;
         initialToRef.current = normalizeTo([...toChips, ...(pendingTo ? [pendingTo] : [])]);
         initialCcRef.current = normalizeTo([...ccChips, ...(pendingCc ? [pendingCc] : [])]);

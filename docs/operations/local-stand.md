@@ -5,6 +5,11 @@
 
 Скрипт: [`scripts/deploy/test/stage.sh`](../../scripts/deploy/test/stage.sh).
 
+Порты стенда и отличие от production — [общая карта](ports.md). Внешний TCP
+`127.0.0.1:443` проходит через порт `9443` внутри `me-stage` к stage-edge; панель на внутреннем
+loopback `8080`. Дополнительная установка `mxu` (`/opt/mailexpert-u`) использует внутренний
+`127.0.0.1:8090` по текущей настройке владельца. Mailcow, fake-eop и stage-dns наружу не публикуются.
+
 ## Что внутри
 
 Один контейнер `me-stage` (Docker-in-Docker) с ограничением 4 CPU и 8 ГБ памяти. В нём:

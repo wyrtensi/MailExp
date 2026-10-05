@@ -78,7 +78,7 @@ async function hideTab() {
 }
 
 // Opens a draft the way MessageList does for a click in the Drafts folder. Returns an unmount.
-async function openDraft({ plaintextEmail, body }) {
+async function openDraft({ plaintextEmail, body, ...metadata }) {
   saved.length = 0;
   useStore.setState({ plaintextEmail });
   useStore.getState().openCompose({
@@ -90,6 +90,7 @@ async function openDraft({ plaintextEmail, body }) {
     subject: 'Contract',
     body,
     bodyIsHtml: !plaintextEmail,
+    ...metadata,
   });
   const root = createRoot(document.getElementById('root'));
   await React.act(async () => { root.render(React.createElement(ComposeModal)); });
@@ -182,6 +183,65 @@ describe('restoring a scheduled letter preserves its original format', () => {
   }
 });
 
+describe('editing while a draft save is pending', () => {
+  for (const trigger of ['manual', 'autosave']) {
+    test(`${trigger} save keeps later editor changes dirty`, async () => {
+      const saveDraft = api.saveDraft;
+      let finishSave;
+      api.saveDraft = async (payload) => {
+        saved.push(payload);
+        if (saved.length === 1) return new Promise(resolve => { finishSave = resolve; });
+        return { uid: 9, folder: 'Drafts' };
+      };
+      const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+      try {
+        const editor = document.querySelector('.ProseMirror').editor;
+        await React.act(async () => { editor.commands.insertContent(' First edit.'); });
+        if (trigger === 'manual') {
+          const saveButton = [...document.querySelectorAll('button')]
+            .find(button => button.textContent.trim() === 'compose.saveDraft');
+          assert.ok(saveButton);
+          await React.act(async () => { saveButton.click(); });
+        } else {
+          await hideTab();
+        }
+        assert.equal(saved.length, 1);
+        const submittedBody = saved[0].body;
+        await React.act(async () => { editor.commands.insertContent(' Later edit.'); });
+        const editedBody = editor.getHTML();
+        assert.notEqual(editedBody, submittedBody);
+        await React.act(async () => { finishSave({ uid: 8, folder: 'Drafts' }); });
+
+        const unload = new window.Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(unload);
+        assert.equal(unload.defaultPrevented, true, 'the later edit still needs refresh protection');
+        await hideTab();
+        assert.equal(saved.length, 2, 'the later edit is autosaved');
+        assert.equal(saved[1].body, editedBody);
+        assert.equal(saved[1].existingUid, 8, 'the second save replaces the first saved copy');
+      } finally {
+        api.saveDraft = saveDraft;
+        await close();
+      }
+    });
+  }
+
+  test('saving an empty rich-text body leaves an unchanged editor clean', async () => {
+    const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+    try {
+      const editor = document.querySelector('.ProseMirror').editor;
+      await React.act(async () => { editor.commands.clearContent(); });
+      await hideTab();
+      assert.equal(saved.length, 1);
+      assert.equal(saved[0].body, '');
+      await hideTab();
+      assert.equal(saved.length, 1, 'the empty editor is not saved repeatedly');
+    } finally {
+      await close();
+    }
+  });
+});
+
 // Minimizing used to be local React state inside ComposeModal, invisible to the store — so
 // clicking Compose again while minimized just reset composeData to a blank message; the mounted
 // instance never noticed. `composeMinimized` now lives in the store (see store/compose.test.js
@@ -209,4 +269,158 @@ describe('minimizing and restoring the composer', () => {
     assert.equal(useStore.getState().composeData.subject, 'Contract', 'the original draft was kept, not replaced');
     assert.ok(minimizeBtn(), 'the full toolbar is mounted again');
   });
+});
+
+async function changeValue(element, value) {
+  assert.ok(element);
+  await React.act(async () => {
+    const prototype = element.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLTextAreaElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value);
+    element.dispatchEvent(new window.Event('change', { bubbles: true }));
+    element.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+}
+
+function refreshProtected() {
+  const event = new window.Event('beforeunload', { cancelable: true });
+  window.dispatchEvent(event);
+  return event.defaultPrevented;
+}
+
+describe('draft metadata dirty protection', () => {
+  for (const field of ['priority', 'sender', 'signature', 'quote', 'plain signature', 'plain quote']) {
+    test(`${field}-only edits are protected and become clean after saving`, async () => {
+      const plain = field.startsWith('plain');
+      const close = await openDraft({ plaintextEmail: plain, body: plain ? 'Original' : '<p>Original</p>',
+        priority: 'normal', draftSignature: '<p>Signature</p>', quotedBody: 'Quote', quotedBodyHtml: '<p>Quote</p>' });
+      try {
+        await hideTab();
+        assert.equal(saved.length, 0, 'initial signature/quote defaults stay clean');
+        if (field === 'priority') await changeValue(document.querySelector('#compose-priority'), 'low');
+        else if (field === 'sender') {
+          await React.act(async () => useStore.setState({ accounts: [...useStore.getState().accounts,
+            { id: 'other', enabled: true, email_address: 'other@example.invalid', name: 'Other' }] }));
+          await changeValue([...document.querySelectorAll('select')].find(el => [...el.options].some(o => o.value === 'account:other')), 'account:other');
+        } else if (plain) {
+          const textarea = [...document.querySelectorAll('textarea')].find(el => el.value === (field === 'plain signature' ? 'Signature' : 'Quote'));
+          await changeValue(textarea, '');
+        } else {
+          const editable = [...document.querySelectorAll('[contenteditable="true"]')].find(el => el.textContent === (field === 'signature' ? 'Signature' : 'Quote'));
+          assert.ok(editable);
+          await React.act(async () => { editable.innerHTML = ''; editable.dispatchEvent(new window.Event('input', { bubbles: true })); });
+        }
+        assert.equal(refreshProtected(), true);
+        await hideTab();
+        assert.equal(saved.length, 1);
+        if (field === 'priority') assert.equal(saved[0].priority, 'low');
+        if (field === 'sender') assert.equal(saved[0].accountId, 'other');
+        if (field.endsWith('signature')) assert.equal(saved[0].editedSignature, '');
+        if (field === 'quote') assert.equal(saved[0].quotedBodyHtml, '');
+        if (field === 'plain quote') assert.equal(saved[0].quotedBody, undefined);
+        assert.equal(refreshProtected(), false);
+        await hideTab();
+        assert.equal(saved.length, 1);
+      } finally { await close(); useStore.setState({ accounts: useStore.getState().accounts.filter(a => a.id === 'acct') }); }
+    });
+  }
+  test('priority changed during a request remains dirty against the submitted snapshot', async () => {
+    const originalSave = api.saveDraft;
+    let finish;
+    api.saveDraft = payload => { saved.push(payload); return new Promise(resolve => { finish = resolve; }); };
+    const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>', priority: 'normal' });
+    try {
+      await changeValue(document.querySelector('#compose-priority'), 'low');
+      await hideTab();
+      assert.equal(saved.length, 1);
+      await changeValue(document.querySelector('#compose-priority'), 'high');
+      await React.act(async () => finish({ uid: 8, folder: 'Drafts' }));
+      assert.equal(refreshProtected(), true);
+      await hideTab();
+      assert.equal(saved.length, 2);
+      assert.equal(saved[0].priority, 'low');
+      assert.equal(saved[1].priority, 'high');
+      await React.act(async () => finish({ uid: 9, folder: 'Drafts' }));
+      assert.equal(refreshProtected(), false);
+    } finally { api.saveDraft = originalSave; await close(); }
+  });
+});
+
+describe('draft metadata baselines', () => {
+  test('switching back to the same resolved sender stays clean', async () => {
+    await React.act(async () => useStore.setState({ accounts: [...useStore.getState().accounts,
+      { id: 'other', enabled: true, email_address: 'other@example.invalid', name: 'Other' }] }));
+    const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+    try {
+      const sender = [...document.querySelectorAll('select')].find(el => [...el.options].some(o => o.value === 'account:other'));
+      await changeValue(sender, 'account:other');
+      assert.equal(refreshProtected(), true);
+      await changeValue(sender, 'account:acct');
+      assert.equal(refreshProtected(), false);
+      await hideTab();
+      assert.equal(saved.length, 0);
+    } finally { await close(); useStore.setState({ accounts: useStore.getState().accounts.filter(a => a.id === 'acct') }); }
+  });
+  test('a signature loaded after mounting stays clean', async () => {
+    const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+    try {
+      await React.act(async () => useStore.setState({ accounts: useStore.getState().accounts.map(a => ({ ...a, signature: '<p>Default</p>' })) }));
+      assert.equal(refreshProtected(), false);
+      await hideTab();
+      assert.equal(saved.length, 0);
+    } finally { await close(); useStore.setState({ accounts: useStore.getState().accounts.map(a => ({ ...a, signature: null })) }); }
+  });
+  test('live signature and quote edits during save remain dirty', async () => {
+    const originalSave = api.saveDraft;
+    let finish;
+    api.saveDraft = payload => { saved.push(payload); return new Promise(resolve => { finish = resolve; }); };
+    const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>', draftSignature: '<p>Signature</p>', quotedBodyHtml: '<p>Quote</p>' });
+    try {
+      const signature = [...document.querySelectorAll('[contenteditable="true"]')].find(el => el.textContent === 'Signature');
+      const quote = [...document.querySelectorAll('[contenteditable="true"]')].find(el => el.textContent === 'Quote');
+      const edit = async (el, html) => React.act(async () => { el.innerHTML = html; el.dispatchEvent(new window.Event('input', { bubbles: true })); });
+      await edit(signature, '<p>First</p>');
+      await hideTab();
+      assert.equal(saved.length, 1);
+      await edit(signature, '');
+      await edit(quote, '');
+      await React.act(async () => finish({ uid: 8, folder: 'Drafts' }));
+      assert.equal(refreshProtected(), true);
+      await hideTab();
+      assert.equal(saved.length, 2);
+      assert.equal(saved[0].editedSignature, '<p>First</p>');
+      assert.equal(saved[0].quotedBodyHtml, '<p>Quote</p>');
+      assert.equal(saved[1].editedSignature, '');
+      assert.equal(saved[1].quotedBodyHtml, '');
+      await React.act(async () => finish({ uid: 9, folder: 'Drafts' }));
+      assert.equal(refreshProtected(), false);
+    } finally { api.saveDraft = originalSave; await close(); }
+  });
+});
+
+test('priority-only edit opens the unsaved changes close dialog', async () => {
+  const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>', priority: 'normal' });
+  try {
+    await changeValue(document.querySelector('#compose-priority'), 'low');
+    await React.act(async () => document.querySelector('button[title="compose.toolbar.close"]').click());
+    assert.match(document.body.textContent, /compose.closeDraft.title/);
+    assert.match(document.body.textContent, /compose.closeDraft.keepEditing/);
+  } finally { await close(); }
+});
+
+test('alias-only sender change saves the resolved identity and stays clean', async () => {
+  await React.act(async () => useStore.setState({ accounts: useStore.getState().accounts.map(a => ({ ...a,
+    aliases: [{ id: 'alias1', email: 'alias@example.invalid', name: 'Alias' }] })) }));
+  const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+  try {
+    const sender = [...document.querySelectorAll('select')].find(el => [...el.options].some(o => o.value === 'alias:alias1:acct'));
+    await changeValue(sender, 'alias:alias1:acct');
+    assert.equal(refreshProtected(), true);
+    await hideTab();
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].accountId, 'acct');
+    assert.equal(saved[0].aliasId, 'alias1');
+    assert.equal(refreshProtected(), false);
+    await hideTab();
+    assert.equal(saved.length, 1);
+  } finally { await close(); useStore.setState({ accounts: useStore.getState().accounts.map(a => ({ ...a, aliases: [] })) }); }
 });

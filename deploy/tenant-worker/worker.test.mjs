@@ -201,6 +201,31 @@ const post = (base, route, body, token = TOKEN) => fetch(`${base}${route}`, {
   method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
 });
 
+for (const [code, status, returnedCode = code] of [
+  ['exo_throttled', 429],
+  ['exo_exists', 409],
+  ['quarantine_not_allowed', 403],
+  ['exo_not_found', 422],
+  ['unknown_provider_error', 502, 'exo_failed'],
+]) {
+  test(`the handler: runner error ${code} returns ${returnedCode} with HTTP ${status}`, async () => {
+    const runner = createRunner({ spawnRunner: () => fakeRunnerProcess({
+      answer: () => ({ ok: false, error: { code, message: 'The operation failed' } }),
+    }) });
+    const { base, close } = await serve(createHandler({ token: TOKEN, certificate, runner }));
+    try {
+      const res = await post(base, '/ops/whoami', { tenant });
+      const body = await res.json();
+      assert.equal(body.error.code, returnedCode);
+      assert.equal(res.status, status);
+      assert.equal(body.ok, false);
+    } finally {
+      runner.stop();
+      await close();
+    }
+  });
+}
+
 test('the handler: auth, whitelist, thumbprint, one op at a time', async () => {
   const spawned = [];
   const runner = createRunner({ spawnRunner: () => { const c = fakeRunnerProcess(); spawned.push(c); return c; } });
