@@ -71,9 +71,11 @@ export function addAccountOptions({ isAdmin = false, googleStatus = null, domain
   return options;
 }
 
-// The tab "Add account" opens on: the first way that can be used now, else the first listed.
+// The way "Add account" opens on: personal Gmail, the everyday case, even while Gmail is
+// unavailable (the panel then says why) or the statuses are still loading; otherwise the first
+// listed. It never falls through to manual server setup on its own.
 export function defaultAddKind(options = []) {
-  return (options.find((option) => option.enabled) ?? options[0])?.kind ?? null;
+  return (options.find((option) => option.kind === 'gmail') ?? options[0])?.kind ?? null;
 }
 
 // How a mailbox of the install shows up in the suggestions. Mailboxes are shared, so every

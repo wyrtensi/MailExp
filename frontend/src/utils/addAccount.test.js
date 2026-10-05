@@ -217,14 +217,15 @@ describe('gmailStartErrorKey', () => {
 });
 
 describe('defaultAddKind', () => {
-  it('opens on the first way that can be used now', () => {
+  it('opens on personal Gmail even when another way is usable and Gmail is not', () => {
     const options = addAccountOptions({ isAdmin: true, googleStatus: { configured: false, available: false }, domainStatus: { configured: true } });
-    assert.equal(defaultAddKind(options), 'domain');
+    assert.equal(defaultAddKind(options), 'gmail');
     assert.equal(defaultAddKind(addAccountOptions({ googleStatus: { configured: true, available: true }, domainStatus: { configured: true } })), 'gmail');
   });
 
-  it('falls back to the first tab while nothing is usable, and to null without tabs', () => {
-    assert.equal(defaultAddKind(addAccountOptions({})), 'gmail');
+  it('opens on Gmail while the statuses load, and never on manual setup by itself', () => {
+    assert.equal(defaultAddKind(addAccountOptions({ isAdmin: true })), 'gmail');
+    assert.equal(defaultAddKind([{ kind: 'domain', enabled: false }, { kind: 'manual', enabled: true }]), 'domain');
     assert.equal(defaultAddKind([]), null);
   });
 });

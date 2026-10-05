@@ -1140,9 +1140,9 @@
       "addAccount": "Add account",
       "saving": "Saving…",
       "add": {
-        "gmailTitle": "Gmail",
-        "gmailDescription": "Sign in with Google. MailExpert never sees the password.",
-        "manualTitle": "Other server",
+        "gmailTitle": "Personal Gmail",
+        "gmailDescription": "Your own @gmail.com mailbox: sign in with Google, MailExpert never sees the password.",
+        "manualTitle": "Other server (IMAP and SMTP by hand)",
         "manualDescription": "Enter the IMAP and SMTP settings yourself.",
         "emailLabel": "Gmail address",
         "emailPh": "name@gmail.com",
