@@ -12,6 +12,7 @@ describe('microsoftOAuthErrorKey', () => {
     assert.equal(microsoftOAuthErrorKey('invalid_state'), 'admin.integrations.microsoft.errorInvalidState');
     assert.equal(microsoftOAuthErrorKey('access_denied'), 'admin.integrations.microsoft.errorAccessDenied');
     assert.equal(microsoftOAuthErrorKey('not_configured'), 'admin.integrations.microsoft.errorNotConfigured');
+    assert.equal(microsoftOAuthErrorKey('admin_required'), 'admin.integrations.microsoft.errorAdminRequired');
   });
 
   it('falls back for anything else, inherited names included', () => {

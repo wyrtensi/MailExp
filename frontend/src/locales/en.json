@@ -1875,6 +1875,7 @@
         "savedNote": "Configuration saved. Click \"Connect account\" to authorize.",
         "connectedNote": "Microsoft 365 account connected successfully! Check the Accounts tab.",
         "errorAccessDenied": "Microsoft sign-in was cancelled. The mailbox was not connected.",
+        "errorAdminRequired": "Only an administrator can connect or reconnect a Microsoft mailbox. Ask an administrator.",
         "errorInvalidState": "The sign-in link expired or does not name a Microsoft mailbox. Please try again.",
         "errorNotConfigured": "Microsoft sign-in is not configured by an administrator.",
         "errorEmailNotVerified": "Microsoft did not confirm this account's email address (the app registration needs the email + xms_edov or upn optional claims). The mailbox was not connected.",

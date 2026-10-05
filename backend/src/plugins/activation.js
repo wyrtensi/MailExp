@@ -18,6 +18,9 @@ import { query, withTransaction } from '../services/db.js';
 export const ENABLED_PLUGINS_KEY = 'enabled_plugins';
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// After a failed read the "nothing enabled" answer is kept only this long, so a database blip
+// switches plugins off for seconds, not for the whole TTL.
+export const ERROR_CACHE_TTL_MS = 5 * 1000;
 let cache = null; // { value: Set<pluginId>, expiry }
 
 export function invalidateEnabledPluginsCache() {
@@ -40,14 +43,17 @@ export function parseEnabledPlugins(text) {
 export async function getEnabledPlugins() {
   if (cache && cache.expiry > Date.now()) return cache.value;
   let value;
+  let ttl = CACHE_TTL_MS;
   try {
     const { rows } = await query('SELECT value FROM system_settings WHERE key = $1', [ENABLED_PLUGINS_KEY]);
     value = new Set(parseEnabledPlugins(rows[0]?.value));
   } catch {
-    // A settings read blip degrades to "nothing enabled" rather than throwing on a hot path.
+    // A settings read blip degrades to "nothing enabled" rather than throwing on a hot path, and
+    // is retried soon: briefly cached so a hot path does not hammer a struggling database.
     value = new Set();
+    ttl = ERROR_CACHE_TTL_MS;
   }
-  cache = { value, expiry: Date.now() + CACHE_TTL_MS };
+  cache = { value, expiry: Date.now() + ttl };
   return value;
 }
 

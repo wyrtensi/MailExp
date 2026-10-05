@@ -7,7 +7,7 @@ vi.mock('../services/db.js', () => ({
 }));
 import { query } from '../services/db.js';
 import {
-  ENABLED_PLUGINS_KEY, getEnabledPlugins, isPluginEnabled, setPluginEnabled, invalidateEnabledPluginsCache,
+  ENABLED_PLUGINS_KEY, ERROR_CACHE_TTL_MS, getEnabledPlugins, isPluginEnabled, setPluginEnabled, invalidateEnabledPluginsCache,
   parseEnabledPlugins,
 } from './activation.js';
 
@@ -45,6 +45,23 @@ describe('panel-wide plugin switch', () => {
   it('degrades to empty on a read failure', async () => {
     query.mockRejectedValueOnce(new Error('db boom'));
     expect(await getEnabledPlugins()).toEqual(new Set());
+  });
+
+  it('keeps the empty answer of a failed read for seconds only, then reads again', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      query.mockRejectedValueOnce(new Error('db boom'));
+      expect(await isPluginEnabled('gtd')).toBe(false);
+      expect(await isPluginEnabled('gtd')).toBe(false); // still inside the short window
+      expect(query).toHaveBeenCalledTimes(1);
+      now.mockReturnValue(1_000_000 + ERROR_CACHE_TTL_MS + 1);
+      query.mockResolvedValueOnce({ rows: [{ value: '["gtd"]' }] });
+      expect(await isPluginEnabled('gtd')).toBe(true);
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(ERROR_CACHE_TTL_MS).toBeLessThanOrEqual(10_000);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('caches until invalidated, and isPluginEnabled answers from the same read', async () => {

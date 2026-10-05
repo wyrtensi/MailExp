@@ -18,6 +18,7 @@ const MICROSOFT_ERROR_KEYS = {
   already_connected: 'admin.integrations.microsoft.errorAlreadyConnected',
   account_mismatch: 'admin.integrations.microsoft.errorAccountMismatch',
   redirect_not_configured: 'admin.integrations.microsoft.errorRedirectNotConfigured',
+  admin_required: 'admin.integrations.microsoft.errorAdminRequired',
 };
 
 // The Microsoft mailbox to reconnect by device code, from an OAuth result (a popup message or the

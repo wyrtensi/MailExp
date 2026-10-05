@@ -11,11 +11,13 @@ vi.mock('../plugins/activation.js', () => ({
   setPluginEnabled: vi.fn(),
 }));
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
+vi.mock('../index.js', () => ({ imapManager: { broadcast: vi.fn() } }));
 
 import express from 'express';
 import { pluginRegistry } from '../plugins/registry.js';
 import { getEnabledPlugins, setPluginEnabled } from '../plugins/activation.js';
 import { recordAudit } from '../services/auditLog.js';
+import { imapManager } from '../index.js';
 import pluginsRoutes from './plugins.js';
 
 const MANIFEST = { id: 'gtd', name: 'Getting Things Done', version: '1.0.0', tier: 1 };
@@ -43,6 +45,7 @@ beforeEach(() => {
   getEnabledPlugins.mockReset();
   setPluginEnabled.mockReset().mockResolvedValue({ enabled: new Set(), changed: true });
   recordAudit.mockClear();
+  imapManager.broadcast.mockClear();
   listSpy = vi.spyOn(pluginRegistry, 'list').mockReturnValue([MANIFEST]);
   hasSpy = vi.spyOn(pluginRegistry, 'has').mockImplementation((id) => id === 'gtd');
   getSpy = vi.spyOn(pluginRegistry, 'get').mockImplementation((id) => (id === 'gtd' ? MANIFEST : undefined));
@@ -88,6 +91,9 @@ describe('PATCH /api/plugins/:id', () => {
       actorUserId: 'u1', action: 'plugin.enabled', details: { pluginId: 'gtd', name: 'Getting Things Done' },
     }]);
     expect(runHookSpy).toHaveBeenCalledWith('onPluginActivationChanged', { pluginId: 'gtd', enabled: true });
+    // Every signed-in browser is told to re-read the list (no user id: all of them).
+    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'plugins_changed', pluginId: 'gtd', enabled: true });
+    expect(imapManager.broadcast.mock.calls[0]).toHaveLength(1);
   });
 
   it('disables a plugin and journals plugin.disabled', async () => {
@@ -98,11 +104,14 @@ describe('PATCH /api/plugins/:id', () => {
     expect(runHookSpy).toHaveBeenCalledWith('onPluginActivationChanged', { pluginId: 'gtd', enabled: false });
   });
 
-  it('journals nothing when the plugin was already in that state', async () => {
+  it('journals, runs and broadcasts nothing when the plugin was already in that state', async () => {
     setPluginEnabled.mockResolvedValueOnce({ enabled: new Set(['gtd']), changed: false });
     const res = await req('PATCH', '/gtd', { enabled: true });
     expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: 'gtd', enabled: true });
     expect(recordAudit).not.toHaveBeenCalled();
+    expect(runHookSpy).not.toHaveBeenCalled();
+    expect(imapManager.broadcast).not.toHaveBeenCalled();
   });
 
   it('403s a user who is not an administrator without touching the switch', async () => {
@@ -112,6 +121,7 @@ describe('PATCH /api/plugins/:id', () => {
     expect(setPluginEnabled).not.toHaveBeenCalled();
     expect(recordAudit).not.toHaveBeenCalled();
     expect(runHookSpy).not.toHaveBeenCalled();
+    expect(imapManager.broadcast).not.toHaveBeenCalled();
   });
 
   it('404s an unknown plugin without touching the switch', async () => {
