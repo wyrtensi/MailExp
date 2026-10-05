@@ -61,6 +61,7 @@ const U = '51000000-0000-4000-8000-000000000004'; // Trash, uid 22
 const D = '51000000-0000-4000-8000-000000000005'; // Drafts, uid 31
 const G = '51000000-0000-4000-8000-000000000006'; // Gmail INBOX, uid 41
 const N = '51000000-0000-4000-8000-000000000007'; // mailbox without Trash, INBOX uid 51
+const ND = '51000000-0000-4000-8000-000000000008'; // mailbox without Trash, draft uid 52
 
 let db;
 let server;
@@ -103,13 +104,13 @@ beforeEach(async () => {
     `INSERT INTO folders (account_id, path, name, special_use) VALUES
        ($1, 'INBOX', 'INBOX', NULL), ($1, 'Trash', 'Trash', '\\Trash'), ($1, 'Drafts', 'Drafts', '\\Drafts'),
        ($2, 'INBOX', 'INBOX', NULL), ($2, '[Gmail]/Trash', 'Trash', '\\Trash'), ($2, '[Gmail]/All Mail', 'All Mail', '\\All'),
-       ($3, 'INBOX', 'INBOX', NULL), ($3, 'Archive', 'Archive', NULL)`,
+       ($3, 'INBOX', 'INBOX', NULL), ($3, 'Archive', 'Archive', NULL), ($3, 'Entwuerfe', 'Entwuerfe', '\\Drafts')`,
     [ACCOUNT, GMAIL, BARE]
   );
   const letters = [
     [A, ACCOUNT, 11, 'INBOX', false], [B, ACCOUNT, 12, 'INBOX', true], [T, ACCOUNT, 21, 'Trash', false],
     [U, ACCOUNT, 22, 'Trash', true], [D, ACCOUNT, 31, 'Drafts', true], [G, GMAIL, 41, 'INBOX', false],
-    [N, BARE, 51, 'INBOX', true],
+    [N, BARE, 51, 'INBOX', true], [ND, BARE, 52, 'Entwuerfe', true],
   ];
   mailServer = new Map();
   for (const [id, accountId, uid, folder, isRead] of letters) {
@@ -189,6 +190,27 @@ async function settleAll(next = 900) {
 }
 
 describe('a repeated delete never expunges what the first one moved to Trash', () => {
+  it.each([
+    ['draft only', [ND], [ND]],
+    ['draft and ordinary message', [ND, N], [ND]],
+    ['multiple accounts', [ND, N, A, D], [ND, A, D]],
+    ['ordinary message only', [N], []],
+  ])('bulk delete without Trash: %s', async (_name, ids, deleted) => {
+    const result = await bulkDelete(ids);
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({ ok: true, deleted: expect.any(Array) });
+    expect(result.body.deleted.sort()).toEqual([...deleted].sort());
+    const remaining = (await db.query('SELECT id FROM messages WHERE id = ANY($1::uuid[])', [ids])).rows.map(r => r.id);
+    expect(remaining.sort()).toEqual(ids.filter(id => ![ND, D].includes(id)).sort());
+    expect(await row(N)).toEqual({ uid: 51, folder: 'INBOX' });
+    if (ids.includes(ND)) {
+      expect(box(BARE, 'Entwuerfe').has(52)).toBe(false);
+      expect(deltas(BARE, 'Entwuerfe')).toEqual([[-1, 0]]);
+    }
+    expect(box(BARE, 'INBOX').has(51)).toBe(true);
+    expect((await moves()).map(m => m.message_row_id)).toEqual(ids.includes(A) ? [A] : []);
+  });
+
   it('a double delete from INBOX: the second is a no-op while the move is queued and after it settled', async () => {
     expect(await del(A, 'INBOX')).toEqual({ status: 200, body: { ok: true } });
     const [op] = await moves();

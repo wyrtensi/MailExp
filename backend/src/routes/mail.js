@@ -1834,18 +1834,17 @@ router.post('/messages/bulk-delete', async (req, res) => {
         continue;
       }
 
-      if (!trashPath) {
-        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length} messages`);
-        continue;
-      }
-
       // Drafts, and letters the client saw in Trash, are permanently deleted. A letter in Trash
       // the client saw elsewhere is there already. The rest move to Trash.
       const isDraft = m => allDraftsPaths.has(m.folder);
+      const eligible = trashPath ? msgs : msgs.filter(isDraft);
+      if (!trashPath && eligible.length < msgs.length) {
+        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length - eligible.length} messages`);
+      }
       const inTrash = m => !isDraft(m) && allTrashPaths.has(m.folder);
-      const toExpunge = msgs.filter(m => isDraft(m) || (inTrash(m) && wantsForever(intent, m.id, allTrashPaths)));
-      alreadyTrashed.push(...msgs.filter(m => inTrash(m) && !wantsForever(intent, m.id, allTrashPaths)));
-      const toMove    = msgs.filter(m => !isDraft(m) && !inTrash(m));
+      const toExpunge = eligible.filter(m => isDraft(m) || (inTrash(m) && wantsForever(intent, m.id, allTrashPaths)));
+      alreadyTrashed.push(...eligible.filter(m => inTrash(m) && !wantsForever(intent, m.id, allTrashPaths)));
+      const toMove    = eligible.filter(m => !isDraft(m) && !inTrash(m));
 
       // A letter whose move into Trash has not reached the server has no uid there to expunge.
       movePending.push(...toExpunge.filter(m => isPendingUid(m.uid)));
