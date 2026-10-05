@@ -727,6 +727,60 @@ keys() {
   [[ $output == *"docker-compose.override.yml: the snapshot has none; the one here is set aside as docker-compose.override.yml.pre-restore."* ]]
 }
 
+@test "data/conf and the certificates are the snapshot's: --update sets aside what the move snapshot no longer has" {
+  configured
+  printf 'smtpd_banner = old\n' >"$MC/data/conf/postfix/old.cf"
+  mkdir -p "$MC/data/conf/rspamd/custom"
+  printf 'old\n' >"$MC/data/conf/rspamd/custom/allow.map"
+  printf 'old key\n' >"$MC/data/assets/ssl/old.pem"
+  run bash "$BACKUP" --tag manual
+  [ "$status" -eq 0 ]
+  FIRST=$(latest_id)
+  fresh_node
+  run bash "$RESTORE" latest --mailcow-dir "$MC" --rehearsal < <(keys)
+  [ "$status" -eq 0 ]
+  [ -f "$MC/data/conf/postfix/old.cf" ] && [ -f "$MC/data/conf/rspamd/custom/allow.map" ] && [ -f "$MC/data/assets/ssl/old.pem" ]
+  # A fresh server had nothing of its own to set aside.
+  set -- "$MC"/.pre-restore-*
+  [ ! -e "$1" ]
+  # The owner removed a file, a directory and a certificate on the old node before its move backup,
+  # and changed one: postfix's directory is now a file in the snapshot.
+  repo_copy "$FIRST" 0000000a "$(cat "$MOCK_DIR/repo/$FIRST.host")" mailcow move
+  SNAP=$MOCK_DIR/repo/0000000a$(printf 'c%.0s' $(seq 56))/backup/mailexpert
+  rm "$SNAP/conf/postfix/old.cf" "$SNAP/ssl/old.pem"
+  rm -r "$SNAP/conf/rspamd"
+  printf 'myhostname = mail.example.com\n# move\n' >"$SNAP/conf/postfix/extra.cf"
+  rm -r "$SNAP/conf/dovecot"
+  printf 'now a file\n' >"$SNAP/conf/dovecot"
+  mkdir -p "$MC/data/conf/dovecot"
+  printf 'old\n' >"$MC/data/conf/dovecot/extra.conf"
+  run bash "$RESTORE" 0000000a --mailcow-dir "$MC" --update
+  [ "$status" -eq 0 ]
+  [ ! -e "$MC/data/conf/postfix/old.cf" ] && [ ! -e "$MC/data/conf/rspamd" ] && [ ! -e "$MC/data/assets/ssl/old.pem" ]
+  grep -q '# move' "$MC/data/conf/postfix/extra.cf"
+  [ -f "$MC/data/conf/dovecot" ] && grep -q 'now a file' "$MC/data/conf/dovecot"
+  [ -f "$MC/data/assets/ssl/cert.pem" ]
+  # Set aside, not deleted: one holding directory, the paths kept.
+  set -- "$MC"/.pre-restore-*
+  [ "$#" -eq 1 ] && [[ $1 =~ /\.pre-restore-[0-9]+$ ]]
+  HOLD=$1
+  [ "$(stat -c %a "$HOLD")" = 700 ]
+  grep -q 'smtpd_banner = old' "$HOLD/data/conf/postfix/old.cf"
+  grep -q old "$HOLD/data/conf/rspamd/custom/allow.map"
+  grep -q 'old key' "$HOLD/data/assets/ssl/old.pem"
+  grep -q old "$HOLD/data/conf/dovecot/extra.conf"
+  [ ! -e "$HOLD/data/conf/postfix/extra.cf" ] && [ ! -e "$HOLD/data/assets/ssl/cert.pem" ]
+  # Listed by path, the directory once and not its files, the contents never.
+  [[ $output == *"not in the snapshot, set aside: data/conf/postfix/old.cf"* ]]
+  [[ $output == *"not in the snapshot, set aside: data/conf/rspamd"* ]]
+  [[ $output != *"data/conf/rspamd/custom"* ]]
+  [[ $output == *"not in the snapshot, set aside: data/assets/ssl/old.pem"* ]]
+  [[ $output == *"not in the snapshot, set aside: data/conf/dovecot"* ]]
+  [[ $output == *"set aside in $HOLD"* ]]
+  [[ $output != *"old key"* && $output != *smtpd_banner* ]]
+  [ "$(marker STATE)" = live ]
+}
+
 @test "a restore that stopped half way is run again" {
   configured
   run bash "$BACKUP" --tag manual

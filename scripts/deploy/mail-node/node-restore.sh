@@ -14,9 +14,12 @@
 #   1. restores the snapshot's /backup (mailcow's dump and the node's files) into a temporary
 #      directory under /var/backups/mailexpert-node;
 #   2. puts mailcow.conf (with the .env link mailcow expects), data/conf, data/assets/ssl and
-#      docker-compose.override.yml in place (an override the snapshot does not have is set aside
-#      as docker-compose.override.yml.pre-restore, or .pre-restore.<epoch> when that name is taken),
-#      and node.env when this server has none;
+#      docker-compose.override.yml in place, exactly as the snapshot has them: what data/conf and
+#      data/assets/ssl hold here but the snapshot does not (or as another kind: a directory for a
+#      file) is moved, never deleted, into one holding directory of the run,
+#      <mailcow dir>/.pre-restore-<epoch>/ (0700, the same paths under it), each path logged; an
+#      override the snapshot does not have is set aside as docker-compose.override.yml.pre-restore,
+#      or .pre-restore.<epoch> when that name is taken; node.env only when this server has none;
 #   3. pulls mailcow's images and starts it, which creates its volumes;
 #   4. restores vmail straight from the repository into the vmail volume, Dovecot stopped: only
 #      files missing or changed are downloaded, and mail no longer in the snapshot is removed;
@@ -80,6 +83,8 @@ REHEARSAL_SERVICES=(postfix-mailcow ofelia-mailcow watchdog-mailcow)
 WORK=''
 REHEARSAL=0
 RESTORE_LOG=''
+# Where this run sets aside what data/conf and data/assets/ssl hold but the snapshot does not.
+HOLD_DIR=''
 
 usage() {
   sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
@@ -129,17 +134,62 @@ fresh_server_problem() {
   return 0
 }
 
+# entry_kind <path>: link, dir or file, without following a symbolic link.
+entry_kind() {
+  if [ -L "$1" ]; then echo link; elif [ -d "$1" ]; then echo dir; else echo file; fi
+}
+
+# set_aside <path relative to MAILCOW_DIR>: moved, never deleted, into this run's holding directory
+# (MAILCOW_DIR/.pre-restore-<epoch>, 0700: certificates' keys may be among it) under the same path.
+set_aside() {
+  local rel=$1 n=1 base
+  if [ -z "$HOLD_DIR" ]; then
+    base=$MAILCOW_DIR/.pre-restore-$(date +%s)
+    HOLD_DIR=$base
+    until mkdir -m 700 "$HOLD_DIR" 2>/dev/null; do
+      [ "$n" -lt 100 ] || die "could not create a holding directory $base-<n> in $MAILCOW_DIR"
+      n=$((n + 1)) && HOLD_DIR=$base-$n
+    done
+  fi
+  mkdir -p "$HOLD_DIR/$(dirname "$rel")"
+  mv -n "$MAILCOW_DIR/$rel" "$HOLD_DIR/$rel"
+  if [ -e "$MAILCOW_DIR/$rel" ] || [ -L "$MAILCOW_DIR/$rel" ]; then die "could not set $MAILCOW_DIR/$rel aside into $HOLD_DIR"; fi
+  log "not in the snapshot, set aside: $rel"
+}
+
+# mirror_dir <snapshot's copy> <directory relative to MAILCOW_DIR>: the directory becomes exactly
+# the snapshot's. What is here but not in the snapshot, or of another kind there (a directory where
+# the snapshot has a file, a link where it has a file), is set aside whole (a directory once, with
+# what it holds), then the snapshot's files are copied over the rest. The backup copies these
+# directories whole, so nothing in them is the server's own to keep.
+mirror_dir() {
+  local src=$1 rel=$2 dst=$MAILCOW_DIR/$2 path sub
+  local -a paths
+  mkdir -p "$dst"
+  mapfile -d '' -t paths < <(cd "$dst" && find . -mindepth 1 -print0)
+  # find lists a directory before what it holds: once it is set aside, those are gone here.
+  for path in "${paths[@]}"; do
+    sub=${path#./}
+    [ -e "$dst/$sub" ] || [ -L "$dst/$sub" ] || continue
+    if [ -e "$src/$sub" ] || [ -L "$src/$sub" ]; then
+      [ "$(entry_kind "$dst/$sub")" != "$(entry_kind "$src/$sub")" ] || continue
+    fi
+    set_aside "$rel/$sub"
+  done
+  cp -a "$src/." "$dst/"
+}
+
 # place_files <dir with the restored backup>: mailcow.conf and the node's files where mailcow and
-# setup.sh read them.
+# setup.sh read them. data/conf and data/assets/ssl mirror the snapshot (mirror_dir).
 place_files() {
   local src=$1/mailexpert aside
   install -m 600 "$1/mailcow.conf" "$MAILCOW_DIR/mailcow.conf"
   ln -sfn mailcow.conf "$MAILCOW_DIR/.env"
   mkdir -p "$MAILCOW_DIR/data/conf" "$MAILCOW_DIR/data/assets"
-  if [ -d "$src/conf" ]; then cp -a "$src/conf/." "$MAILCOW_DIR/data/conf/"; fi
-  if [ -d "$src/ssl" ]; then
-    mkdir -p "$MAILCOW_DIR/data/assets/ssl"
-    cp -a "$src/ssl/." "$MAILCOW_DIR/data/assets/ssl/"
+  if [ -d "$src/conf" ]; then mirror_dir "$src/conf" data/conf; fi
+  if [ -d "$src/ssl" ]; then mirror_dir "$src/ssl" data/assets/ssl; fi
+  if [ -n "$HOLD_DIR" ]; then
+    log "set aside in $HOLD_DIR (the same paths under it): put back by hand what the node still needs"
   fi
   # The override is the snapshot's or none: one left by a rehearsal of an older snapshot (or put
   # here before the restore) would start mailcow with settings the restored node no longer has.
