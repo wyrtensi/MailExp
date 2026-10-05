@@ -7,6 +7,10 @@
 #     to run next to a database volume or containers of the project;
 #   - owner secrets this server does not have (Access, Google sign-in, pings, tunnel and DNS
 #     tokens) are filled in from the snapshot; the ones set here stay;
+#   - so are the tenant worker's settings (COMPOSE_PROFILES, TENANT_*); the snapshot's tenant
+#     profile is appended to a COMPOSE_PROFILES this server already has. Its PFX and password file
+#     are not in the snapshot: with the profile on, restore.sh stops before any change until they
+#     are in the places those settings name;
 #   - install.conf, the port and the compose project stay as installed here;
 #   - the database is restored and checked (row counts, no pending migration, every credential
 #     decrypts), and Redis from a --with-redis snapshot;
@@ -69,17 +73,23 @@ names() {
 # restore_secrets <dir>: generated keys from the snapshot replace this server's; owner secrets
 # fill the gaps. Under install.sh's lock, like every other write to .env.
 restore_secrets() {
-  local files=$1 generated owner edge=''
+  local files=$1 generated owner tenant edge=''
   take_install_lock "$STATE_DIR" 600 restore.sh
   cp -p "$ENV_FILE" "$ENV_FILE.pre-restore"
   generated=$(merge_restored_keys "$ENV_FILE" "$files/env" overwrite "${GENERATED_SECRET_KEYS[@]}")
   owner=$(merge_restored_keys "$ENV_FILE" "$files/env" fill "${APP_OWNER_KEYS[@]}")
+  # COMPOSE_PROFILES first: an empty list here takes the snapshot's, a list without the snapshot's
+  # tenant gets it appended (the TENANT_* keys alone would leave the worker off).
+  tenant=$(merge_restored_keys "$ENV_FILE" "$files/env" fill COMPOSE_PROFILES)
+  if [ -z "$tenant" ]; then tenant=$(add_restored_profile "$ENV_FILE" "$files/env" tenant); fi
+  tenant=$(printf '%s\n' "$tenant" "$(merge_restored_keys "$ENV_FILE" "$files/env" fill "${TENANT_KEYS[@]}")" | grep .) || tenant=
   if [ -f "$files/edge.env" ] && [ -f "$EDGE_ENV" ]; then
     edge=$(merge_restored_keys "$EDGE_ENV" "$files/edge.env" fill "${EDGE_OWNER_KEYS[@]}")
   fi
   exec 9>&-
   log "generated keys from the snapshot: $(names "$generated")"
   log "owner secrets from the snapshot: $(names "$owner"); edge: $(names "$edge")"
+  log "tenant worker settings from the snapshot: $(names "$tenant")"
   log "the .env from before the restore is kept as $ENV_FILE.pre-restore"
 }
 
@@ -120,7 +130,7 @@ check_restored() {
 }
 
 main() {
-  local prefix=/opt/mailexpert snapshot='' host='' no_start=0 started files version counts f picked id from at
+  local prefix=/opt/mailexpert snapshot='' host='' no_start=0 started files version counts f picked id from at missing
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
@@ -177,6 +187,9 @@ main() {
   [ "$version" = "$CFG_VERSION" ] ||
     die "the snapshot was made by $version, this server has $CFG_VERSION: run install.sh --prefix $OPT_PREFIX --version $version --no-start, then restore.sh again" 2
 
+  missing=$(tenant_files_missing "$ENV_FILE" "$files/env" "$APP_DIR")
+  [ -z "$missing" ] ||
+    die "the tenant worker is on (COMPOSE_PROFILES=tenant) and this server lacks $(names "$missing"): copy the certificate and its password file there from where you keep them (docs/operations/mail-node.md, section 6e), owner 10001, mode 0400, then run restore.sh again" 2
   restore_secrets "$files"
   restore_database "$files"
   restore_redis "$files"
