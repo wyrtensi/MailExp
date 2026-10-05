@@ -235,7 +235,6 @@ async function runRulesSweep(accountIds, imapMgr) {
             hasAttachments: !!row.has_attachments,
             isRead: !!row.is_read,
             is_read: !!row.is_read,
-            parsedHeaders: {},
           };
         });
 
