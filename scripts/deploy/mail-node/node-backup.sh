@@ -158,14 +158,24 @@ dump_mailcow() {
 }
 
 # add_node_files <dump dir>: what a new node needs besides mailcow's dump: mailcow's configuration
-# files and certificates, its compose override, node.env, and meta.json: the mailcow commit and
+# files and certificates, its compose override, its customizations outside data/conf (web settings,
+# CSS, pre-start hooks), node.env, and meta.json: the mailcow commit and
 # the number of mailboxes (node-restore.sh checks the restored database against it).
 add_node_files() {
-  local dir=$1/mailexpert commit describe
+  local dir=$1/mailexpert commit describe file
   mkdir -m 700 "$dir"
   if [ -d "$MAILCOW_DIR/data/conf" ]; then cp -a "$MAILCOW_DIR/data/conf" "$dir/conf"; fi
   if [ -d "$MAILCOW_DIR/data/assets/ssl" ]; then cp -a "$MAILCOW_DIR/data/assets/ssl" "$dir/ssl"; fi
   if [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then cp -p "$MAILCOW_DIR/docker-compose.override.yml" "$dir/"; fi
+  # mailcow's customizations outside data/conf: its web settings and CSS, and the containers'
+  # pre-start hooks.
+  for file in "${MAILCOW_CUSTOM_FILES[@]}"; do
+    if [ -f "$MAILCOW_DIR/data/$file" ]; then
+      mkdir -p "$dir/$(dirname "$file")"
+      cp -p "$MAILCOW_DIR/data/$file" "$dir/$file"
+    fi
+  done
+  if [ -d "$MAILCOW_DIR/data/hooks" ]; then cp -a "$MAILCOW_DIR/data/hooks" "$dir/hooks"; fi
   cp -p "$NODE_CONF" "$dir/node.env"
   commit=$(git -C "$MAILCOW_DIR" rev-parse HEAD 2>/dev/null) || commit=unknown
   describe=$(git -C "$MAILCOW_DIR" describe --tags --always 2>/dev/null) || describe=unknown

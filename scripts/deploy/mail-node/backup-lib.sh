@@ -25,6 +25,9 @@ MAILCOW_BACKUP_IMAGE=ghcr.io/mailcow/backup:latest
 MAILCOW_COMPONENTS=(crypt redis rspamd postfix mysql)
 MAILCOW_ARCHIVES=(backup_crypt.tar.zst backup_redis.tar.zst backup_rspamd.tar.zst backup_postfix.tar.zst
   backup_mariadb.tar.zst)
+# mailcow's customizations outside data/conf, under data/: kept by node-backup.sh as mailexpert/<path>
+# when present, put back by node-restore.sh.
+MAILCOW_CUSTOM_FILES=(web/inc/vars.local.inc.php web/css/build/0081-custom-mailcow.css)
 NODE_BACKUP_TAG=mailcow
 NODE_RESTIC_HOST_PREFIX=mailexpert-node
 # What setup.sh --backup-keys stores in node.env (secrets on stdin, never as arguments).
