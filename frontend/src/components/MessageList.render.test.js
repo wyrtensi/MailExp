@@ -356,6 +356,73 @@ describe('MessageList — bulk star in the multi-select bar (#434)', () => {
   });
 });
 
+describe('MessageList — bulk flags resolve collapsed threads', () => {
+  const head = { ...THREAD, id: 'bulk-head', message_count: 2, unread_count: 2, category: 'primary' };
+  const child = { ...MESSAGE, id: 'bulk-child', uid: 2, message_id: '<bulk-child@example.com>', thread_id: head.thread_id, category: 'primary' };
+  const select = async (id) => {
+    await React.act(async () => {
+      const row = container.querySelector(`[data-msgid="${id}"]`);
+      assert.ok(row);
+      (row.querySelector('[draggable]') || row).dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true, ctrlKey: true }));
+    });
+  };
+  for (const flag of ['read', 'star']) {
+    for (const scenario of ['thread', 'overlap', 'plain', 'resolve failure', 'write failure']) {
+      test(`${flag}: ${scenario}`, async () => {
+        const rows = scenario === 'overlap' ? [head, { ...child, thread_id: 'thr-2', message_count: 2, unread_count: 2 }] : [head];
+        const threadedView = scenario !== 'plain';
+        const cache = [head, child];
+        await mount({ rows, threadedView, state: { selectedMessageId: null, expandedThreadId: null, unreadOnly: false, activeCategory: null, threadMessages: { 'acct-1:thr-1': cache }, categoryCounts: { primary: 5 }, pendingCounts: {} } });
+        await React.act(async () => { useStore.setState({ categoryCounts: { primary: 5 }, pendingCounts: {}, serverUnreadCounts: { total: 5, byAccount: { 'acct-1': 5 }, snapshots: {} } }); });
+        for (const row of rows) await select(row.id);
+        const method = flag === 'read' ? 'bulkRead' : 'bulkStar';
+        const original = api[method], originalThread = api.getThread, originalError = console.error;
+        const calls = [], fetches = [];
+        api.getThread = async (...args) => {
+          fetches.push(args);
+          if (scenario === 'resolve failure') throw new Error('Unavailable');
+          return { messages: [head, child] };
+        };
+        api[method] = async (...args) => {
+          calls.push(args);
+          if (scenario === 'write failure') throw new Error('Unavailable');
+          return {};
+        };
+        console.error = () => {};
+        try {
+          const title = flag === 'read' ? 'messageList.markReadSelected' : 'messageList.starSelected';
+          const button = [...container.querySelectorAll('button')].find(b => b.title === title);
+          assert.ok(button);
+          await React.act(async () => { button.click(); });
+          const state = useStore.getState();
+          if (scenario === 'resolve failure') {
+            assert.equal(calls.length, 0);
+          } else {
+            assert.deepEqual(calls, [[threadedView ? [head.id, child.id] : [head.id], true]]);
+          }
+          const failed = scenario.endsWith('failure');
+          assert.equal(state.messages[0][flag === 'read' ? 'is_read' : 'is_starred'], !failed);
+          if (flag === 'read') {
+            assert.equal(state.messages[0].unread_count, failed ? 2 : 0);
+            assert.equal(state.categoryCounts.primary, failed ? 5 : threadedView ? 3 : 4);
+            assert.equal(state.pendingCounts['acct-1']?.delta || 0, failed ? 0 : threadedView ? -2 : -1);
+          }
+          if (threadedView && !failed) {
+            assert.deepEqual(fetches, rows.map(row => [row.thread_id, 'INBOX', false, 'acct-1']));
+            assert.ok(state.threadMessages['acct-1:thr-1'].every(m => m[flag === 'read' ? 'is_read' : 'is_starred']));
+          } else if (failed) assert.deepEqual(state.threadMessages['acct-1:thr-1'], cache);
+        } finally {
+          api[method] = original;
+          api.getThread = originalThread;
+          console.error = originalError;
+        }
+      });
+    }
+  }
+  after(async () => { if (root) { await React.act(async () => root.unmount()); root = null; } });
+});
+
 // A search issued while standing IN Trash or Junk must stay scoped to that folder even with
 // "search all folders" on — the server excludes both from an ordinary all-folder search (so
 // freshly-deleted mail and spam don't resurface by default), which would otherwise silently

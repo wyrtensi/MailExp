@@ -1890,10 +1890,19 @@ export default function MessageList() {
 
   const handleBulkMarkRead = useCallback(async (ids, msgs) => {
     const markAsRead = msgs.some(m => !m.is_read);
+    let groups;
+    try {
+      groups = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m)));
+    } catch (err) {
+      console.error('Failed to load thread for bulk read:', err.message);
+      return;
+    }
+    const actionMessages = [...new Map(groups.flat().map(m => [m.id, m])).values()];
+    const cachedThreads = new Map(msgs.filter(isThreadListRow).map(m => [threadCacheKey(m), threadMessages[threadCacheKey(m)]]));
     // Compute per-account and per-category unread deltas before mutating state
     const deltaByAccount = {};
     const deltaByCategory = {};
-    msgs.forEach(msg => {
+    actionMessages.forEach(msg => {
       if (!deltaByAccount[msg.account_id]) deltaByAccount[msg.account_id] = 0;
       const catKey = msg.category || 'primary';
       if (!deltaByCategory[catKey]) deltaByCategory[catKey] = 0;
@@ -1901,7 +1910,11 @@ export default function MessageList() {
       if (!markAsRead && msg.is_read) { deltaByAccount[msg.account_id]++; deltaByCategory[catKey]++; }
     });
     // Optimistic update
-    msgs.forEach(msg => updateMessage(msg.id, { is_read: markAsRead, unread_count: markAsRead ? 0 : 1 }));
+    actionMessages.forEach(msg => updateMessage(msg.id, { is_read: markAsRead }));
+    msgs.forEach((msg, i) => {
+      updateMessage(msg.id, { is_read: markAsRead, unread_count: markAsRead ? 0 : groups[i].length });
+      if (isThreadListRow(msg)) setThreadMessages(threadCacheKey(msg), groups[i].map(m => ({ ...m, is_read: markAsRead })));
+    });
     Object.entries(deltaByAccount).forEach(([accountId, delta]) => {
       if (delta > 0) markAsRead ? decrementUnread(accountId, delta) : incrementUnread(accountId, delta);
     });
@@ -1911,10 +1924,12 @@ export default function MessageList() {
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     try {
-      await api.bulkRead(ids, markAsRead);
+      await api.bulkRead([...new Set([...ids, ...actionMessages.map(m => m.id)])], markAsRead);
     } catch (err) {
       console.error('Bulk mark read failed:', err);
+      actionMessages.forEach(msg => updateMessage(msg.id, { is_read: msg.is_read }));
       msgs.forEach(msg => updateMessage(msg.id, { is_read: msg.is_read, unread_count: msg.unread_count }));
+      cachedThreads.forEach((cached, key) => cached ? setThreadMessages(key, cached) : invalidateThreadCache(key));
       Object.entries(deltaByAccount).forEach(([accountId, delta]) => {
         if (delta > 0) markAsRead ? incrementUnread(accountId, delta) : decrementUnread(accountId, delta);
       });
@@ -1922,23 +1937,38 @@ export default function MessageList() {
         if (delta > 0) adjustCategoryCount(cat, markAsRead ? delta : -delta);
       });
     }
-  }, [updateMessage, decrementUnread, incrementUnread, adjustCategoryCount]);
+  }, [updateMessage, decrementUnread, incrementUnread, adjustCategoryCount, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache]);
 
   // Bulk star (#434). Same optimistic shape as bulk mark-read, minus the unread-count
   // bookkeeping: stars never touch counts. Direction mirrors the single-message star and
   // bulk read convention — any unstarred message in the selection means "star them all".
   const handleBulkStar = useCallback(async (ids, msgs) => {
     const markAsStarred = msgs.some(m => !m.is_starred);
-    msgs.forEach(msg => updateMessage(msg.id, { is_starred: markAsStarred }));
+    let groups;
+    try {
+      groups = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m)));
+    } catch (err) {
+      console.error('Failed to load thread for bulk star:', err.message);
+      return;
+    }
+    const actionMessages = [...new Map(groups.flat().map(m => [m.id, m])).values()];
+    const cachedThreads = new Map(msgs.filter(isThreadListRow).map(m => [threadCacheKey(m), threadMessages[threadCacheKey(m)]]));
+    actionMessages.forEach(msg => updateMessage(msg.id, { is_starred: markAsStarred }));
+    msgs.forEach((msg, i) => {
+      updateMessage(msg.id, { is_starred: markAsStarred });
+      if (isThreadListRow(msg)) setThreadMessages(threadCacheKey(msg), groups[i].map(m => ({ ...m, is_starred: markAsStarred })));
+    });
     setSelectedIds(new Set());
     setSelectionModeActive(false);
     try {
-      await api.bulkStar(ids, markAsStarred);
+      await api.bulkStar([...new Set([...ids, ...actionMessages.map(m => m.id)])], markAsStarred);
     } catch (err) {
       console.error('Bulk star failed:', err);
+      actionMessages.forEach(msg => updateMessage(msg.id, { is_starred: msg.is_starred }));
       msgs.forEach(msg => updateMessage(msg.id, { is_starred: msg.is_starred }));
+      cachedThreads.forEach((cached, key) => cached ? setThreadMessages(key, cached) : invalidateThreadCache(key));
     }
-  }, [updateMessage]);
+  }, [updateMessage, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache]);
 
   const autoMarkReadTimerRef = useRef(null);
   useEffect(() => () => clearTimeout(autoMarkReadTimerRef.current), []);
