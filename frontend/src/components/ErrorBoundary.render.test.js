@@ -57,7 +57,8 @@ async function mount(child, props = null) {
   const host = dom.window.document.createElement('div');
   dom.window.document.body.appendChild(host);
   await React.act(async () => {
-    createRoot(host).render(React.createElement(ErrorBoundary, props, child));
+    // English unless a test asks otherwise: the page otherwise follows this machine's locale.
+    createRoot(host).render(React.createElement(ErrorBoundary, { lang: 'en', ...props }, child));
   });
   return host;
 }
@@ -161,29 +162,32 @@ describe('ErrorBoundary (#441)', () => {
       const data = new Map(Object.entries(initial));
       return { getItem: k => (data.has(k) ? data.get(k) : null), setItem: (k, v) => data.set(k, String(v)) };
     }
-    // The probes run back to back here (probeIntervalMs 0); `probe` answers each one in turn.
-    async function mountStale({ serverAnswers = true, probe = async () => serverAnswers, storage = memoryStorage() } = {}) {
+    // The probes run back to back here (probeIntervalMs 0); `probe` answers each one in turn with
+    // the build the server runs (null: no answer). This page runs build "old".
+    async function mountStale({ serverBuild = 'new', probe = async () => serverBuild, storage = memoryStorage(), lang } = {}) {
       const realError = console.error;
       console.error = () => {};
       const reloads = [];
       try {
         const host = await mount(React.createElement(StaleChunk), {
           probeServer: probe,
+          runningBuild: 'old',
           probeAttempts: 3,
           probeIntervalMs: 0,
           storage,
           reloadPage: () => reloads.push('reload'),
+          ...(lang ? { lang } : {}),
         });
         for (let i = 0; i < 10; i++) {
           await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
         }
-        return { host, reloads };
+        return { host, reloads, storage };
       } finally {
         console.error = realError;
       }
     }
 
-    test('reloads into the new version once the server answers', async () => {
+    test('reloads into the new version once the server answers a newer build', async () => {
       const { host, reloads } = await mountStale();
       assert.deepEqual(reloads, ['reload']);
       assert.match(host.textContent, /MailExpert has been updated/);
@@ -191,17 +195,17 @@ describe('ErrorBoundary (#441)', () => {
     });
 
     test('does not reload while the server cannot be reached, and says how to continue', async () => {
-      const { host, reloads } = await mountStale({ serverAnswers: false });
+      const { host, reloads } = await mountStale({ serverBuild: null });
       assert.deepEqual(reloads, []);
       assert.match(host.textContent, /still running the previous version/);
       const labels = [...host.querySelectorAll('button')].map(b => b.textContent);
       assert.ok(labels.includes('Reload'), `expected a Reload button, got ${JSON.stringify(labels)}`);
     });
 
-    // An update applied from the panel restarts the server: the first probes fail while it is
-    // down, and the tab still reloads by itself once it is back.
+    // An update applied from the panel restarts the server: the first probes get no build (down,
+    // or the edge's maintenance page), and the tab still reloads by itself once it is back.
     test('keeps asking while the server restarts, then reloads', async () => {
-      const answers = [false, false, true];
+      const answers = [null, null, 'new'];
       let probes = 0;
       const { reloads } = await mountStale({ probe: async () => answers[probes++] });
       assert.equal(probes, 3);
@@ -214,11 +218,33 @@ describe('ErrorBoundary (#441)', () => {
       assert.match(host.textContent, /still running the previous version/);
     });
 
-    test('reloads at most once a minute, so a file that is really missing cannot loop', async () => {
-      const storage = memoryStorage({ mailexpert_stale_build_reload_at: String(Date.now()) });
-      const { host, reloads } = await mountStale({ storage });
+    // The server runs this very build: the file is missing from it, a reload would bring the same
+    // app back to the same error.
+    test('never reloads when the server runs the build this page runs', async () => {
+      const { host, reloads } = await mountStale({ serverBuild: 'old' });
       assert.deepEqual(reloads, []);
       assert.match(host.textContent, /still running the previous version/);
+    });
+
+    // One reload into a build per tab: should it not bring the new app up (a startup file that is
+    // really missing), the next failure leaves the reload to the user instead of looping.
+    test('reloads into a given build once, then leaves it to the user', async () => {
+      const first = await mountStale();
+      assert.deepEqual(first.reloads, ['reload']);
+      const again = await mountStale({ storage: first.storage });
+      assert.deepEqual(again.reloads, []);
+      assert.match(again.host.textContent, /still running the previous version/);
+      // A later build is a new chance.
+      const newer = await mountStale({ storage: first.storage, serverBuild: 'newer' });
+      assert.deepEqual(newer.reloads, ['reload']);
+    });
+
+    test('speaks Russian when the app was set to Russian', async () => {
+      const { host } = await mountStale({ serverBuild: null, lang: 'ru' });
+      assert.match(host.textContent, /MailExpert обновился/);
+      assert.match(host.textContent, /прежняя версия/);
+      const labels = [...host.querySelectorAll('button')].map(b => b.textContent);
+      assert.ok(labels.includes('Перезагрузить'), `expected the Russian Reload, got ${JSON.stringify(labels)}`);
     });
 
     test('an ordinary error still gets the usual page and no reload', async () => {
@@ -226,7 +252,7 @@ describe('ErrorBoundary (#441)', () => {
       console.error = () => {};
       const reloads = [];
       try {
-        const host = await mount(React.createElement(Boom), { probeServer: async () => true, storage: memoryStorage(), reloadPage: () => reloads.push('reload') });
+        const host = await mount(React.createElement(Boom), { probeServer: async () => 'new', runningBuild: 'old', storage: memoryStorage(), reloadPage: () => reloads.push('reload') });
         await React.act(async () => { await new Promise(r => setTimeout(r, 0)); });
         assert.deepEqual(reloads, []);
         assert.match(host.textContent, /MailExpert hit an error and stopped/);
