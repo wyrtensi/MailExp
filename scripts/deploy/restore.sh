@@ -10,8 +10,9 @@
 #   - so are the tenant worker's settings (COMPOSE_PROFILES, TENANT_*); the snapshot's tenant
 #     profile is appended to a COMPOSE_PROFILES this server already has. Its PFX and password file
 #     come back from the snapshot to the places those settings name, where this server has none
-#     (owner 10001, 0400). A snapshot made before backups held them leaves them to the owner:
-#     with the profile on, restore.sh then stops before any change until they are in place;
+#     (owner 10001, 0400). A snapshot without them (made before backups held them, or while they
+#     were missing on the old server) leaves them to the owner: with the profile on, restore.sh
+#     then stops before any change until they are in place;
 #   - install.conf, the port and the compose project stay as installed here;
 #   - the database is restored and checked (row counts, no pending migration, every credential
 #     decrypts), and Redis from a --with-redis snapshot;
@@ -192,7 +193,7 @@ main() {
   if [ -n "$placed" ]; then log "tenant worker files from the snapshot: $(names "$placed")"; fi
   missing=$(tenant_files_missing "$ENV_FILE" "$files/env" "$APP_DIR")
   [ -z "$missing" ] ||
-    die "the tenant worker is on (COMPOSE_PROFILES=tenant), this server lacks $(names "$missing") and the snapshot does not hold them (made before backups included them): copy the certificate and its password file there from where you keep them (docs/operations/mail-node.md, section 6e), owner $TENANT_WORKER_UID, mode 0400, then run restore.sh again" 2
+    die "the tenant worker is on (COMPOSE_PROFILES=tenant), this server lacks $(names "$missing") and the snapshot does not hold them (made before backups included them, or they were missing when it was made): copy the certificate and its password file there from where you keep them (docs/operations/mail-node.md, section 6e), owner $TENANT_WORKER_UID, mode 0400, then run restore.sh again" 2
   restore_secrets "$files"
   restore_database "$files"
   restore_redis "$files"

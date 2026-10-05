@@ -91,8 +91,8 @@ tenant_files_missing() {
 # tenant/app.pfx and tenant/app.pfx.password where tenant_file_targets points, only where this
 # server has no file yet (the ones set here stay), owned by the worker's uid, 0400, in a directory
 # created 0500 for it when absent. All or nothing: when a missing file is not in the snapshot
-# either (an older snapshot), nothing is placed and tenant_files_missing names the paths. Prints
-# each path written, never contents.
+# either (an older snapshot, or one made while the file was missing), nothing is placed and
+# tenant_files_missing names the paths. Prints each path written, never contents.
 place_tenant_files() {
   local src=$1/tenant i=0 path dir
   local -a targets=() todo=()
@@ -118,10 +118,14 @@ place_tenant_files() {
 
 # stage_tenant_files <staging dir> <env file> <app dir>: with the tenant profile on, copies the PFX
 # and its password file into <staging dir>/tenant (root, 0600) for the snapshot. A file that is
-# absent is skipped with a warning naming its key and path. Never prints contents.
+# absent is skipped with a warning naming its key and path, and listed in TENANT_STAGE_MISSING
+# ("<path> (<key>)", space-separated) for the caller: a move backup fails on it, others report it
+# in their ping. Never prints contents.
+TENANT_STAGE_MISSING=''
 stage_tenant_files() {
   local i=0 path
   local -a targets=() keys=(TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE)
+  TENANT_STAGE_MISSING=''
   mapfile -t targets < <(tenant_file_targets "$3" "$2")
   [ "${#targets[@]}" -gt 0 ] || return 0
   install -d -o 0 -g 0 -m 0700 "$1/tenant"
@@ -131,6 +135,7 @@ stage_tenant_files() {
       log "tenant: ${TENANT_SNAPSHOT_FILES[$i]} added"
     else
       warn "tenant: the profile is on but $path (${keys[$i]}) is missing: the snapshot is made without it"
+      TENANT_STAGE_MISSING+="${TENANT_STAGE_MISSING:+ }$path (${keys[$i]})"
     fi
     i=$((i + 1))
   done

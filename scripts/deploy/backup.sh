@@ -205,7 +205,7 @@ verify_snapshot() {
 
 main() {
   local prefix=/opt/mailexpert tag=nightly verify=0 redis=0 keep='' show_key=0 local_only=0
-  local started seconds bytes counts snapshot weekday checks
+  local started seconds bytes counts snapshot weekday checks ping_note=''
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix | --tag | --keep-dump)
@@ -282,6 +282,14 @@ main() {
   [ "$local_only" = 0 ] || return 0
 
   stage_files "$STAGING" "$redis"
+  if [ -n "$TENANT_STAGE_MISSING" ]; then
+    # The move's snapshot is the one the new server restores: without these files its tenant
+    # worker cannot start. Fail before the upload, so this server stays active.
+    if [ "$tag" = move ]; then
+      die "move: the tenant profile is on and $TENANT_STAGE_MISSING missing here: put the files back (docs/operations/mail-node.md, section 6e) or turn the profile off, then run the move backup again; this server stays active"
+    fi
+    ping_note="; warning: tenant profile on, missing and not in this snapshot: $TENANT_STAGE_MISSING"
+  fi
   load_restic_env
   load_restic_host mailexpert
   release_capture_locks
@@ -302,7 +310,7 @@ main() {
       ;;
   esac
   write_backup_last "$snapshot" "$tag" "$bytes" "$seconds" "$counts" "$VERIFY_SECONDS"
-  send_ping "$PING_URL" success "snapshot ${snapshot:0:8} ($tag): dump $bytes bytes in ${seconds}s${VERIFY_SECONDS:+, verified, restored in ${VERIFY_SECONDS}s}"
+  send_ping "$PING_URL" success "snapshot ${snapshot:0:8} ($tag): dump $bytes bytes in ${seconds}s${VERIFY_SECONDS:+, verified, restored in ${VERIFY_SECONDS}s}$ping_note"
   log "backup done"
   if [ "$tag" = move ]; then mark_moved_away "$snapshot"; fi
 }

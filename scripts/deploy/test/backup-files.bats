@@ -13,7 +13,7 @@ setup() {
   printf '%s\n' VERSION=sha-0123456789ab SIGNIN=direct DIRECT_HOST=panel.example.com LOCAL_AUTH=1 EDGE=0 \
     PROJECT=me-files-test HTTP_PORT=18090 SYSTEM=0 REPO_URL=https://github.com/wyrtensi/MailExpert.git >"$P/install.conf"
   printf '%s\n' RESTIC_REPOSITORY=s3:https://s3.example.com/backups RESTIC_PASSWORD=test-only \
-    AWS_ACCESS_KEY_ID=test-only AWS_SECRET_ACCESS_KEY=test-only >"$P/.env"
+    AWS_ACCESS_KEY_ID=test-only AWS_SECRET_ACCESS_KEY=test-only BACKUP_PING_URL=https://hc.example.com/ping/backup >"$P/.env"
   chmod 600 "$P/.env"
   cat >"$BATS_TEST_TMPDIR/bin/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -34,9 +34,18 @@ case " $* " in
 esac
 exit 0
 STUB
-  printf '#!/usr/bin/env bash\ncat >/dev/null\n' >"$BATS_TEST_TMPDIR/bin/curl"
+  # curl: each ping as one line in PING_LOG, "<url> <body>".
+  cat >"$BATS_TEST_TMPDIR/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+url=''
+while [ $# -gt 0 ]; do
+  if [ "$1" = -K ]; then url=$(sed -n 's/^url = "\(.*\)"$/\1/p' "$2"); shift; fi
+  shift
+done
+printf '%s %s\n' "$url" "$(cat)" >>"$PING_LOG"
+STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/docker" "$BATS_TEST_TMPDIR/bin/curl"
-  export PATH="$BATS_TEST_TMPDIR/bin:$PATH" CAPTURE=$BATS_TEST_TMPDIR/capture
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH" CAPTURE=$BATS_TEST_TMPDIR/capture PING_LOG=$BATS_TEST_TMPDIR/ping.log
   export MAILEXPERT_BACKUP_LOCK_TIMEOUT=0
 }
 
@@ -109,5 +118,36 @@ tenant_on() {
   [ "$status" -eq 0 ]
   [ -f "$P/kept.dump" ]
   [ ! -e "$CAPTURE" ]
-  [ -z "$(find "$P/backups" -name 'app.pfx*')" ]
+  # stage_tenant_files logs every file it copies ("tenant: app.pfx added"): none may appear.
+  [[ $output != *tenant:* ]]
+}
+
+@test "a move backup with a tenant file missing fails: fail ping, the server does not turn standby" {
+  tenant_on "$BATS_TEST_TMPDIR/certs" "$BATS_TEST_TMPDIR/secrets/app.pfx.password"
+  rm -f "$BATS_TEST_TMPDIR/secrets/app.pfx.password"
+  run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag move
+  [ "$status" -eq 1 ]
+  [[ $output == *"$BATS_TEST_TMPDIR/secrets/app.pfx.password (TENANT_PFX_PASSWORD_FILE)"* ]]
+  [ ! -e "$P/state/standby" ]
+  [ ! -e "$CAPTURE" ]
+  grep -q '^https://hc.example.com/ping/backup/fail ' "$PING_LOG"
+  run grep -c '^https://hc.example.com/ping/backup ' "$PING_LOG"
+  [ "$output" = 0 ]
+}
+
+@test "a move backup with both tenant files succeeds and turns the server standby" {
+  tenant_on "$BATS_TEST_TMPDIR/certs" "$BATS_TEST_TMPDIR/secrets/app.pfx.password"
+  run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag move
+  [ "$status" -eq 0 ]
+  [ -f "$CAPTURE/tenant/app.pfx" ] && [ -f "$CAPTURE/tenant/app.pfx.password" ]
+  [ -e "$P/state/standby" ]
+}
+
+@test "another tag with a tenant file missing: the success ping carries the warning" {
+  tenant_on "$BATS_TEST_TMPDIR/certs" "$BATS_TEST_TMPDIR/secrets/app.pfx.password"
+  rm -f "$BATS_TEST_TMPDIR/certs/app.pfx"
+  run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag manual
+  [ "$status" -eq 0 ]
+  grep -q "^https://hc.example.com/ping/backup snapshot 01234567 (manual): .*warning: tenant profile on, missing and not in this snapshot: $BATS_TEST_TMPDIR/certs/app.pfx (TENANT_CERT_DIR)\$" "$PING_LOG"
+  [ ! -e "$CAPTURE/tenant/app.pfx" ]
 }
