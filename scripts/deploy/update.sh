@@ -192,7 +192,9 @@ main() {
     return 0
   fi
   if is_standby; then die "standby server: the panel does not run here; install.sh --version sets its version" 2; fi
-  take_lock "$STATE_DIR/update.lock" 10 "another update.sh or restore.sh"
+  # 10 minutes: a backup holds the lock (shared) while it dumps the database. Another update,
+  # rollback or restore holds it exclusively, and the updater does not start one then.
+  take_lock "$STATE_DIR/update.lock" 600 "another update.sh, rollback.sh or restore.sh, or a backup's database dump," UPDATE_LOCK_FD
   panel_ready || die "the panel is not ready now; fix that before updating" 2
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" rev-parse --verify --quiet "${target#sha-}^{commit}" >/dev/null ||
@@ -218,7 +220,7 @@ main() {
 
   dump=$BACKUP_DIR/pre-update-$old.dump
   log "backup before the update"
-  bash "$SCRIPT_DIR/backup.sh" --prefix "$OPT_PREFIX" --tag pre-update --keep-dump "$dump" ||
+  MAILEXPERT_UPDATE_LOCK_FD=$UPDATE_LOCK_FD bash "$SCRIPT_DIR/backup.sh" --prefix "$OPT_PREFIX" --tag pre-update --keep-dump "$dump" ||
     die "the backup before the update failed; nothing was changed"
   prune_local_dumps
   since=$(date -u +%Y-%m-%dT%H:%M:%SZ)

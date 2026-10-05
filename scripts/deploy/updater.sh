@@ -334,7 +334,10 @@ do_update() {
     "message=$(json_str "$target did not become ready; no migration ran, going back to $from")"
   edge=$(previous_edge_image "$from") || edge=''
   if [ -n "$edge" ]; then env_set "$EDGE_ENV" EDGE_IMAGE "$edge"; fi
-  if run_logged "$id" "$logfile" bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX" --version "$from"; then
+  # A nightly backup that waited for update.sh may be dumping the database now (backup.sh holds
+  # install.lock only for its dump): install.sh waits for it up to an hour, backup.sh's own bound,
+  # instead of its default 10 minutes, so the dump of a large database does not fail the rollback.
+  if run_logged "$id" "$logfile" env MAILEXPERT_LOCK_TIMEOUT=3600 bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX" --version "$from"; then
     record_rolled_back "$STATE_DIR" "$target"
     write_updater_status "$from"
     set_result "$id" "state=\"rolled_back\"" "finishedAt=$(json_str "$(now)")" \

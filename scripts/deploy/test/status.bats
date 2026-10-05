@@ -365,6 +365,40 @@ STUB_EOF
   ! grep -q " pull " "$DOCKER_LOG"
 }
 
+@test "update.sh hands its update lock to the pre-update backup" {
+  stub_install
+  mv "$STUB/docker" "$STUB/docker.stub"
+  # The dump: whether a fresh process could take update.lock (update.sh must still hold it), and
+  # the descriptor backup.sh was handed.
+  cat >"$STUB/docker" <<'STUB_EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case $arg in
+    *:/out)
+      out=${arg%:/out}
+      if bash -c 'exec 7>"$1"; flock -n 7' _ "$P/state/update.lock"; then echo free; else echo held; fi >"$LOCK_LOG"
+      printf 'fd=%s\n' "${MAILEXPERT_UPDATE_LOCK_FD:-}" >>"$LOCK_LOG"
+      printf 'PGDMP' >"$out/db.dump"
+      printf '{"schema_migrations":1}\n' >"$out/counts.json"
+      exit 0
+      ;;
+  esac
+done
+exec "$(dirname "$0")/docker.stub" "$@"
+STUB_EOF
+  chmod +x "$STUB/docker"
+  printf '{"dump_bytes":5}\n' >"$P/state/backup-last.json"
+  # Without the handed descriptor the backup would wait for update.sh itself and give up at once.
+  export P LOCK_LOG=$BATS_TEST_TMPDIR/lock.log MAILEXPERT_BACKUP_LOCK_TIMEOUT=0
+  run bash "$DEPLOY_DIR/update.sh" "sha-${NEW:0:12}" --prefix "$P"
+  [ "$(sed -n 1p "$LOCK_LOG")" = held ]
+  [[ $(sed -n 2p "$LOCK_LOG") =~ ^fd=[0-9]+$ ]]
+  [ "$(cat "$P/backups/pre-update-sha-${OLD:0:12}.dump")" = PGDMP ]
+  [[ $output != *"the backup before the update failed"* ]]
+  # Past the backup: the switch began (this checkout has no installer, so it does not become ready).
+  [ "$status" -eq 1 ]
+}
+
 @test "update.sh: invalid input stays exit 2" {
   run bash "$DEPLOY_DIR/update.sh" sha-nothex
   [ "$status" -eq 2 ]
