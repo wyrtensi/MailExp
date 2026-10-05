@@ -32,7 +32,7 @@ test('a letter given back reopens the composer as it was', () => {
   }, { sendAt: '2026-10-05T08:00:00.000Z' });
   assert.deepEqual(data, {
     isReply: true, threadId: 't1', restored: true, sendAt: '2026-10-05T08:00:00.000Z', accountId: 'a1', aliasId: 'al1',
-    to: ['you@example.com'], cc: [], bcc: ['b@example.com'], subject: 'Hi', body: '<p>Body</p>',
+    to: ['you@example.com'], cc: [], bcc: ['b@example.com'], subject: 'Hi', body: '<p>Body</p>', bodyIsHtml: true,
     quotedBody: '> old', inReplyTo: '<o@x>', references: '<o@x>', priority: 'high',
     forwardedAttachments: [{ messageId: 'm1', part: '2', filename: 'a.pdf', size: 10 }],
     attachments: [{ name: 'n.txt', size: 3, type: 'text/plain', data: 'YWJj' }],
