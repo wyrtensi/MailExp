@@ -20,19 +20,40 @@ merge_restored_keys() {
   done
 }
 
-# tenant_files_missing <local env> <restored env> <app dir>: when the tenant profile is on once
-# the restored keys fill this server's .env, prints each file the tenant worker needs and this
-# server lacks (the PFX in TENANT_CERT_DIR, TENANT_PFX_PASSWORD_FILE; relative paths and compose's
-# defaults resolve against the checkout, compose's project directory). Paths only, never contents.
+# profile_on <env file> <profile>: status 0 when the file's COMPOSE_PROFILES names the profile.
+profile_on() {
+  local list
+  list=$(env_get "$1" COMPOSE_PROFILES) || list=
+  [[ ",${list// /}," == *",$2,"* ]]
+}
+
+# add_restored_profile <dest env> <restored env> <profile>: when the snapshot's COMPOSE_PROFILES
+# names the profile and this server's does not, appends it to this server's list (its other
+# profiles stay). Prints COMPOSE_PROFILES when it changed the file.
+add_restored_profile() {
+  local current
+  profile_on "$2" "$3" || return 0
+  profile_on "$1" "$3" && return 0
+  current=$(env_get "$1" COMPOSE_PROFILES) || current=
+  current=${current// /}
+  env_set "$1" COMPOSE_PROFILES "${current:+$current,}$3"
+  printf '%s\n' COMPOSE_PROFILES
+}
+
+# tenant_files_missing <local env> <restored env> <app dir>: when the tenant profile is on here or
+# in the snapshot (restore.sh adds the snapshot's to this server's profiles), prints each file the
+# tenant worker needs and this server lacks (the PFX in TENANT_CERT_DIR, TENANT_PFX_PASSWORD_FILE;
+# relative paths and compose's defaults resolve against the checkout, compose's project
+# directory). Paths only, never contents.
 tenant_files_missing() {
   local key value
   local -A eff=()
-  for key in COMPOSE_PROFILES TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE; do
+  profile_on "$1" tenant || profile_on "$2" tenant || return 0
+  for key in TENANT_CERT_DIR TENANT_PFX_PASSWORD_FILE; do
     value=$(env_get "$1" "$key") || value=
     if [ -z "$value" ]; then value=$(env_get "$2" "$key") || value=; fi
     eff[$key]=$value
   done
-  [[ ",${eff[COMPOSE_PROFILES]// /}," == *,tenant,* ]] || return 0
   for value in "${eff[TENANT_CERT_DIR]:-./tenant-cert}/app.pfx" \
     "${eff[TENANT_PFX_PASSWORD_FILE]:-./tenant-secrets/app.pfx.password}"; do
     case $value in /*) ;; *) value=$3/${value#./} ;; esac

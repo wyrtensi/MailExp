@@ -7,7 +7,8 @@
 #     to run next to a database volume or containers of the project;
 #   - owner secrets this server does not have (Access, Google sign-in, pings, tunnel and DNS
 #     tokens) are filled in from the snapshot; the ones set here stay;
-#   - so are the tenant worker's settings (COMPOSE_PROFILES, TENANT_*). Its PFX and password file
+#   - so are the tenant worker's settings (COMPOSE_PROFILES, TENANT_*); the snapshot's tenant
+#     profile is appended to a COMPOSE_PROFILES this server already has. Its PFX and password file
 #     are not in the snapshot: with the profile on, restore.sh stops before any change until they
 #     are in the places those settings name;
 #   - install.conf, the port and the compose project stay as installed here;
@@ -77,7 +78,11 @@ restore_secrets() {
   cp -p "$ENV_FILE" "$ENV_FILE.pre-restore"
   generated=$(merge_restored_keys "$ENV_FILE" "$files/env" overwrite "${GENERATED_SECRET_KEYS[@]}")
   owner=$(merge_restored_keys "$ENV_FILE" "$files/env" fill "${APP_OWNER_KEYS[@]}")
-  tenant=$(merge_restored_keys "$ENV_FILE" "$files/env" fill "${TENANT_KEYS[@]}")
+  # COMPOSE_PROFILES first: an empty list here takes the snapshot's, a list without the snapshot's
+  # tenant gets it appended (the TENANT_* keys alone would leave the worker off).
+  tenant=$(merge_restored_keys "$ENV_FILE" "$files/env" fill COMPOSE_PROFILES)
+  if [ -z "$tenant" ]; then tenant=$(add_restored_profile "$ENV_FILE" "$files/env" tenant); fi
+  tenant=$(printf '%s\n' "$tenant" "$(merge_restored_keys "$ENV_FILE" "$files/env" fill "${TENANT_KEYS[@]}")" | grep .) || tenant=
   if [ -f "$files/edge.env" ] && [ -f "$EDGE_ENV" ]; then
     edge=$(merge_restored_keys "$EDGE_ENV" "$files/edge.env" fill "${EDGE_OWNER_KEYS[@]}")
   fi

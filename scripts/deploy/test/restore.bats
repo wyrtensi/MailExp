@@ -107,6 +107,23 @@ tenant_files() {
   [ "$(env_get "$P/.env" TENANT_WORKER_URL)" = http://tenant-worker:8080 ]
 }
 
+@test "other profiles on this server: tenant is added to them, and its files are required" {
+  stub_restore
+  printf '%s\n' COMPOSE_PROFILES=extra >>"$P/.env"
+  cp -p "$P/.env" "$BATS_TEST_TMPDIR/env.before"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 2 ]
+  [[ $output == *"$P/tenant-cert/app.pfx"* ]]
+  cmp -s "$P/.env" "$BATS_TEST_TMPDIR/env.before"
+  tenant_files
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  [ "$(env_get "$P/.env" COMPOSE_PROFILES)" = extra,tenant ]
+  [ "$(env_get "$P/.env" TENANT_WORKER_URL)" = http://tenant-worker:8080 ]
+  [[ $output == *"tenant worker settings from the snapshot: COMPOSE_PROFILES TENANT_WORKER_URL"* ]]
+  [[ $output != *"$TOKEN"* ]]
+}
+
 @test "the tenant profile without its certificate here: exit 2 before anything changes" {
   stub_restore
   cp -p "$P/.env" "$BATS_TEST_TMPDIR/env.before"
@@ -115,7 +132,8 @@ tenant_files() {
   [[ $output == *"$P/tenant-cert/app.pfx"* && $output == *"$P/tenant-secrets/app.pfx.password"* ]]
   [[ $output != *"$TOKEN"* ]]
   cmp -s "$P/.env" "$BATS_TEST_TMPDIR/env.before"
-  ! grep -q "pg_restore" "$DOCKER_LOG"
+  run grep -q pg_restore "$DOCKER_LOG"
+  [ "$status" -eq 1 ]
   # Compose's defaults are relative to the checkout.
   sed -i '/^TENANT_CERT_DIR=/d; /^TENANT_PFX_PASSWORD_FILE=/d' "$SNAPSHOT/env"
   run bash "$SCRIPT" latest --prefix "$P" --no-start

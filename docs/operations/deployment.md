@@ -364,7 +364,8 @@ backend и frontend. Если дамп не восстановился или б
    бэкапа).
 
    Если на A работает исполнитель тенанта (`COMPOSE_PROFILES=tenant`), его настройки
-   (`COMPOSE_PROFILES` и ключи `TENANT_*`) `restore.sh` тоже возьмёт из бэкапа, а вот сертификата
+   (`COMPOSE_PROFILES` и ключи `TENANT_*`) `restore.sh` тоже возьмёт из бэкапа (если на B уже задан
+   свой `COMPOSE_PROFILES`, к нему добавится `tenant`), а вот сертификата
    `app.pfx` и файла его пароля в бэкапе нет. Их нужно заранее положить на B по тем же путям, что в
    `.env` на A (`TENANT_CERT_DIR` и `TENANT_PFX_PASSWORD_FILE`), с владельцем 10001 и режимом 0400,
    как в [mail-node.md, раздел 6е](mail-node.md). Без них `restore.sh` назовёт недостающие пути и
