@@ -48,6 +48,23 @@ describe('POST /api/mail/draft — local row persistence', () => {
     imapManager.upsertDraftMessageRecord.mockResolvedValue(undefined);
   });
 
+  it.each([true, false])('preserves reply headers in appended MIME and local metadata (reply=%s)', async reply => {
+    const inReplyTo = '<parent@example.com>';
+    const references = '<root@example.com> <parent@example.com>';
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: ACCOUNT_ID, body: 'Reply', ...(reply ? { inReplyTo, references } : {}) }),
+    });
+    expect(res.status).toBe(200);
+    const { parseRawHeaders } = await import('../services/messageParser.js');
+    const parsed = parseRawHeaders(imapManager.appendToFolder.mock.calls[0][2].toString().split(/\r?\n\r?\n/)[0]);
+    const meta = imapManager.upsertDraftMessageRecord.mock.calls[0][3];
+    expect(parsed['in-reply-to']).toBe(reply ? inReplyTo : undefined);
+    expect(parsed.references).toBe(reply ? references : undefined);
+    expect(meta.inReplyTo ?? null).toBe(reply ? inReplyTo : null);
+    expect(meta.references ?? null).toBe(reply ? references : null);
+  });
+
   it('persists a Drafts row with parsed recipient, subject and body after append', async () => {
     const res = await fetch(`${base}/api/mail/draft`, {
       method: 'POST',

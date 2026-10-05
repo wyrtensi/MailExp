@@ -486,6 +486,17 @@ describe('Gmail id backfill triggers', () => {
     expect(mgr.startProviderIdBackfill).toHaveBeenCalledWith(gmail);
   });
 
+  it('persists reply draft headers in the existing message columns', async () => {
+    const mgr = newManager();
+    await mgr.upsertDraftMessageRecord(other, 'Drafts', 5, {
+      inReplyTo: '<parent@example.com>', references: '<root@example.com> <parent@example.com>',
+    });
+    const [sql, params] = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO messages'));
+    expect(sql).toContain('thread_references');
+    expect(params).toContain('<parent@example.com>');
+    expect(params).toContain('<root@example.com> <parent@example.com>');
+  });
+
   it('a local draft on another provider starts nothing', async () => {
     vi.useFakeTimers();
     const mgr = newManager();

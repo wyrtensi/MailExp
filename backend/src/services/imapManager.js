@@ -6647,6 +6647,7 @@ export class ImapManager {
     cc = [],
     bcc = [],
     inReplyTo = null,
+    references = null,
     snippet = '',
     bodyHtml = null,
     bodyText = null,
@@ -6655,15 +6656,15 @@ export class ImapManager {
     if (!uid || !folder) return;
     const msgId = sanitizeStr(messageId);
     const { threadId, reason: threadingReason } = msgId
-      ? await computeThreading(account.id, msgId, sanitizeStr(inReplyTo), null, { mode: account.thread_mode })
+      ? await computeThreading(account.id, msgId, sanitizeStr(inReplyTo), sanitizeStr(references), { mode: account.thread_mode })
       : { threadId: null, reason: null };
     await query(`
       INSERT INTO messages (
         account_id, uid, folder, message_id, subject,
         from_name, from_email, to_addresses, cc_addresses,
         in_reply_to, date, snippet, is_read, is_starred, has_attachments,
-        flags, body_html, body_text, thread_id, bcc_addresses, threading_reason
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb,$18)
+        flags, body_html, body_text, thread_id, bcc_addresses, threading_reason, thread_references
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10,$11,$12,true,false,false,$13::jsonb,$14,$15,$16,$17::jsonb,$18,$19)
       ON CONFLICT (account_id, uid, folder) DO UPDATE SET
         message_id = COALESCE(EXCLUDED.message_id, messages.message_id),
         subject = CASE
@@ -6678,6 +6679,7 @@ export class ImapManager {
           WHEN EXCLUDED.cc_addresses::text IS NOT NULL AND EXCLUDED.cc_addresses::text <> '[]'
           THEN EXCLUDED.cc_addresses ELSE messages.cc_addresses END,
         in_reply_to = COALESCE(EXCLUDED.in_reply_to, messages.in_reply_to),
+        thread_references = COALESCE(EXCLUDED.thread_references, messages.thread_references),
         date = EXCLUDED.date,
         snippet = CASE WHEN EXCLUDED.snippet <> '' THEN EXCLUDED.snippet ELSE messages.snippet END,
         flags = EXCLUDED.flags,
@@ -6696,6 +6698,7 @@ export class ImapManager {
       threadId,
       JSON.stringify(Array.isArray(bcc) ? bcc : []),
       threadingReason,
+      sanitizeStr(references),
     ]);
     this._scheduleProviderIdBackfill(account);
   }

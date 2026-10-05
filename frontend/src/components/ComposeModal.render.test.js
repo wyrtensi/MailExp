@@ -389,3 +389,29 @@ test('alias-only sender change saves the resolved identity and stays clean', asy
     assert.equal(saved.length, 1);
   } finally { await close(); useStore.setState({ accounts: useStore.getState().accounts.map(a => ({ ...a, aliases: [] })) }); }
 });
+
+test('reply draft autosave and subsequent send retain the conversation headers', async () => {
+  const inReplyTo = '<parent@example.com>';
+  const references = '<root@example.com> <parent@example.com>';
+  const originalPost = api.post;
+  const sent = [];
+  api.post = async (path, payload) => { sent.push({ path, payload }); return { jobId: 'draft-reply-test', dueInMs: 5000 }; };
+  const { settleSend } = await import('../utils/sendTracker.js');
+  let close = await openDraft({ plaintextEmail: false, body: '<p>Reply</p>', inReplyTo, references });
+  try {
+    await React.act(async () => { document.querySelector('.ProseMirror').editor.commands.insertContent(' Edited.'); });
+    await hideTab();
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].inReplyTo, inReplyTo);
+    assert.equal(saved[0].references, references);
+    const savedDraft = saved[0];
+    await close();
+    close = await openDraft({ plaintextEmail: false, ...savedDraft });
+    const send = [...document.querySelectorAll('button')].find(button => button.textContent.trim() === 'compose.send');
+    assert.ok(send);
+    await React.act(async () => { send.click(); });
+    assert.equal(sent[0].path, '/mail/send');
+    assert.equal(sent[0].payload.inReplyTo, inReplyTo);
+    assert.equal(sent[0].payload.references, references);
+  } finally { settleSend('draft-reply-test', { status: 'cancelled' }); api.post = originalPost; await close(); }
+});

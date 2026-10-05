@@ -40,7 +40,7 @@ function textToHtml(text) {
     .join('');
 }
 
-async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, priority }) {
+async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, priority, inReplyTo, references }) {
   const acctResult = await query(
     'SELECT * FROM email_accounts WHERE id = $1',
     [accountId]
@@ -92,6 +92,8 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
 
   const mailOptions = {
     messageId,
+    inReplyTo: sanitizeHeaderValue(inReplyTo) || undefined,
+    references: sanitizeHeaderValue(references) || undefined,
     from: `${fromName} <${fromEmail}>`,
     to: (Array.isArray(to) ? to : [to]).filter(Boolean).join(', ') || undefined,
     cc: (Array.isArray(cc) ? cc : []).filter(Boolean).join(', ') || undefined,
@@ -119,7 +121,7 @@ async function buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, b
   return {
     rawMessage: Buffer.concat(chunks),
     account,
-    meta: { messageId, fromName, fromEmail, bodyHtml: rawHtml, bodyText: textBody, snippet },
+    meta: { inReplyTo: sanitizeHeaderValue(inReplyTo) || null, references: sanitizeHeaderValue(references) || null, messageId, fromName, fromEmail, bodyHtml: rawHtml, bodyText: textBody, snippet },
   };
 }
 
@@ -176,7 +178,7 @@ async function findReplacedDraft(account, draftsFolder, { existingUid, existingF
 }
 
 router.post('/draft', async (req, res) => {
-  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, priority, existingUid, existingFolder, existingAccountId } = req.body;
+  const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, priority, inReplyTo, references, existingUid, existingFolder, existingAccountId } = req.body;
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
 
   const ownerCheck = await query(
@@ -186,7 +188,7 @@ router.post('/draft', async (req, res) => {
   if (!ownerCheck.rows.length) return res.status(404).json({ error: 'Account not found' });
 
   try {
-    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, priority });
+    const { rawMessage, account, meta } = await buildRawDraft({ accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml, quotedBody, quotedBodyHtml, editedSignature, priority, inReplyTo, references });
 
     const draftsFolder = await resolveDraftsFolder(account);
     if (!draftsFolder) return res.status(422).json({ error: 'No Drafts folder found for this account' });
@@ -205,6 +207,8 @@ router.post('/draft', async (req, res) => {
       try {
         await imapManager.upsertDraftMessageRecord(account, draftsFolder, uid, {
           messageId: meta.messageId,
+          inReplyTo: meta.inReplyTo,
+          references: meta.references,
           subject,
           fromName: meta.fromName,
           fromEmail: meta.fromEmail,
