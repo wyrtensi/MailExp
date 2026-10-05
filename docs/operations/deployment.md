@@ -8,6 +8,11 @@ Google-приложений для ящиков Gmail — отдельно, в [
 Плейсхолдеры: `<APP_HOST>` — публичный адрес панели, это `<CF_HOST>` и/или `<DIRECT_HOST>`;
 `<MAIL_HOST>` — почтовый узел, см. [mail-node.md](mail-node.md).
 
+Сетевые требования всех модулей — [ports.md](ports.md): production frontend доступен на
+`127.0.0.1:8080` (настраивается через `--http-port` / `APP_HTTP_PORT`), снаружи direct-вход
+использует TCP 80/443 и необязательный UDP 443. Cloudflare Tunnel использует исходящий TCP/UDP
+7844; базы и tenant-worker остаются внутри Docker. Там же — исходящие соединения, узел и стенды.
+
 ## 1. Что нужно
 
 - VPS Ubuntu 24.04, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска (`install.sh` проверяет это
