@@ -82,6 +82,23 @@ tenant_on() {
   [ "$(stat -c '%u %a' "$BATS_TEST_TMPDIR/certs/app.pfx")" = '10001 400' ]
 }
 
+@test "the local compose override goes into the snapshot, root 0600; without one nothing is added" {
+  run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag manual
+  [ "$status" -eq 0 ]
+  [ -f "$CAPTURE/env" ] && [ ! -e "$CAPTURE/compose.local.yml" ]
+  [[ $output != *compose.local.yml* ]]
+  rm -rf "$CAPTURE"
+  printf 'services:\n  backend:\n    extra_hosts:\n      - "mail.example.com:192.0.2.10"\n' >"$P/compose.local.yml"
+  chmod 644 "$P/compose.local.yml"
+  run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag manual
+  [ "$status" -eq 0 ]
+  cmp -s "$CAPTURE/compose.local.yml" "$P/compose.local.yml"
+  [ "$(stat -c '%u %g %a' "$CAPTURE/compose.local.yml")" = '0 0 600' ]
+  [[ $output == *"compose.local.yml added"* ]]
+  # The original stays as it was.
+  [ "$(stat -c '%a' "$P/compose.local.yml")" = 644 ]
+}
+
 @test "compose's default paths resolve against the checkout" {
   tenant_on
   run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag manual

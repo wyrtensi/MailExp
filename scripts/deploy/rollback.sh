@@ -173,6 +173,9 @@ main() {
   take_lock "$STATE_DIR/update.lock" 600 "another update.sh, rollback.sh or restore.sh, or a backup's database dump,"
   git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warn "git fetch failed in $APP_DIR"
   full=$(git -C "$APP_DIR" rev-parse --verify --quiet "${to#sha-}^{commit}") || die "commit ${to#sha-} is not in $(redact_url "$CFG_REPO_URL")" 2
+  if git -C "$APP_DIR" show "$full:scripts/deploy/lib/app.sh" 2>/dev/null | local_compose_ignored; then
+    local_compose_warning "$to"
+  fi
   # Old code on a newer schema is what this script undoes, so the target's migrations are not
   # compared with the database here: the dump brings the schema of that version.
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-backend:$to"
