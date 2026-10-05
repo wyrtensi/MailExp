@@ -18,7 +18,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./deliveryReport.js', async (importOriginal) => ({ ...(await importOriginal()), readDeliveryReports: vi.fn(async () => 0) }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -8387,5 +8387,112 @@ describe('secondary work over the pool on a provider that limits logins (upstrea
       vi.clearAllTimers();
       vi.useRealTimers();
     }
+  });
+});
+
+// ── Inline images embedded by fetchMessageBody ───────────────────────────────────────────
+//
+// cid: references become data: URIs built from the sender's MIME type and base64 text.
+// Inserted as a replacement string, a $' or $& in that text was expanded at every reference;
+// a pass per image rewrote cid: text inside the images already inserted; and every reference
+// to one large part got its own full copy. Each let a small message inflate its body to
+// hundreds of MB. These drive the real fetchMessageBody against a scripted client.
+describe('fetchMessageBody inline images', () => {
+  let seq = 900;
+  function arrange(images, parts) {
+    const account = { id: `acct-cid-${++seq}`, user_id: 'u1', imap_host: 'imap.mail.yahoo.com', email_address: 'y@example.test', auth_user: 'y', auth_pass: 'enc' };
+    const structure = {
+      type: 'multipart/related',
+      childNodes: [{ part: '1', type: 'text/html', encoding: '7bit', parameters: { charset: 'utf-8' } }, ...images],
+    };
+    ImapFlow.mockImplementation(function () {
+      const client = new EventEmitter();
+      client.usable = true;
+      client.connect = vi.fn(() => Promise.resolve());
+      client.logout = vi.fn(() => Promise.resolve());
+      client.close = vi.fn();
+      client.noop = vi.fn(() => Promise.resolve());
+      client.getMailboxLock = vi.fn(() => Promise.resolve({ release: vi.fn() }));
+      client.fetch = vi.fn(async function* (_range, q) {
+        const bodyParts = new Map((q.bodyParts || []).filter(p => p in parts).map(p => [p, Buffer.from(parts[p])]));
+        yield { ...(q.bodyStructure ? { bodyStructure: structure } : {}), bodyParts };
+      });
+      return client;
+    });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    return { mgr: new ImapManager({ clients: new Set() }), account };
+  }
+  const image = (part, cid, type = 'image/png') => ({ part, type, encoding: 'base64', id: `<${cid}>` });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('embeds bracketed, upper-case and CSS references to an inline image', async () => {
+    const outlook = 'image001.png@01DA1B2C.3D4E5F60';
+    const symbols = 'logo+v2.$[1]{2}^*?|x@a.b';
+    const { mgr, account } = arrange([image('2', outlook), image('3', symbols)], {
+      1: `<img src="cid:${outlook}"><img src="CID:<${outlook.toUpperCase()}>">`
+        + `<td style="background:url(&quot;cid:${symbols}&quot;)"></td><div style="background:url('cid:${symbols}')"></div><div style="background:url(cid:${symbols}) no-repeat"></div>`,
+      2: 'iVBO\r\nRw==',
+      3: 'QkJC',
+    });
+    const { html } = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    const a = 'data:image/png;base64,iVBORw==';
+    const b = 'data:image/png;base64,QkJC';
+    expect(html).toBe(`<img src="${a}"><img src="${a}">`
+      + `<td style="background:url(&quot;${b}&quot;)"></td><div style="background:url('${b}')"></div><div style="background:url(${b}) no-repeat"></div>`);
+  });
+
+  it('uses the first usable image when parts share a Content-ID', async () => {
+    const { mgr, account } = arrange([image('2', 'd'), image('3', 'D'), image('4', 'd', 'image/gif')], {
+      1: '<img src="cid:d">', 2: '<html><body>not an image</body></html>', 3: 'QUFB', 4: 'QkJC',
+    });
+    const { html } = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(html).toBe('<img src="data:image/png;base64,QUFB">');
+  });
+
+  it("does not expand $ patterns from the sender's MIME type or base64 text", async () => {
+    const { mgr, account } = arrange([image('2', 'a', "image/$'")], { 1: '<img src="cid:a"><p>tail</p>', 2: 'QUFB$&' });
+    const { html } = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(html.match(/<p>tail<\/p>/g)).toHaveLength(1);
+    expect(html).toContain(';base64,QUFB$&"><p>tail</p>');
+  });
+
+  it('leaves cid: text inside an embedded image alone', async () => {
+    const { mgr, account } = arrange([image('2', 'a'), image('3', 'b')], { 1: '<img src="cid:a"><img src="cid:b">', 2: 'cid:b', 3: 'QkJC' });
+    const { html } = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(html).toBe('<img src="data:image/png;base64,cid:b"><img src="data:image/png;base64,QkJC">');
+  });
+
+  it('gives a reference the image its Content-ID names when another Content-ID is a prefix of it', async () => {
+    const { mgr, account } = arrange([image('2', 'x'), image('3', 'xx'), image('4', 'xxx')], {
+      1: '<img src="cid:xxx"><img src="cid:xx"><img src="cid:x">', 2: 'QUFB', 3: 'QkJC', 4: 'Q0ND',
+    });
+    const { html } = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    expect(html).toBe('<img src="data:image/png;base64,Q0ND"><img src="data:image/png;base64,QkJC"><img src="data:image/png;base64,QUFB">');
+  });
+
+  it('embeds each image at its first reference and repeats only within the budget', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const a64 = 'QUFB'.repeat(Math.ceil(INLINE_IMAGE_REPEAT_BUDGET / 16));
+    const b64 = 'QkJC'.repeat(Math.ceil(INLINE_IMAGE_REPEAT_BUDGET / 8));
+    const { mgr, account } = arrange([image('2', 'a'), image('3', 'b')], {
+      1: '<img src="cid:a">'.repeat(10) + '<img src="cid:b">'.repeat(2), 2: a64, 3: b64,
+    });
+    const { html } = await mgr.fetchMessageBody(account, 42, 'INBOX');
+    const count = (s) => html.split(s).length - 1;
+    const a = `data:image/png;base64,${a64}`;
+    const b = `data:image/png;base64,${b64}`;
+    const aEmbedded = 1 + Math.floor(INLINE_IMAGE_REPEAT_BUDGET / a.length);
+    expect(aEmbedded).toBeLessThan(10);
+    expect(count(`<img src="${a}">`)).toBe(aEmbedded);
+    expect(count('<img src="cid:a">')).toBe(10 - aEmbedded);
+    // b no longer fits what is left of the budget, but its first reference is still embedded.
+    expect(b.length).toBeGreaterThan(INLINE_IMAGE_REPEAT_BUDGET - (aEmbedded - 1) * a.length);
+    expect(count(`<img src="${b}">`)).toBe(1);
+    expect(count('<img src="cid:b">')).toBe(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(new RegExp(`left ${10 - aEmbedded + 1} repeated inline image`));
   });
 });
