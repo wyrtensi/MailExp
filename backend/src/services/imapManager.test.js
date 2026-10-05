@@ -532,7 +532,7 @@ describe('permanentDeleteMessage — expectMessageId', () => {
     const { account, client } = arrange(new Map([[7, '<old@example.test>']]));
     expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts', { expectMessageId: '<old@example.test>' })).toBe(true);
     expect(client.getMailboxLock).toHaveBeenCalledWith('Drafts');
-    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true, silent: true });
   });
 
   it('compares Message-IDs without their angle brackets', async () => {
@@ -563,7 +563,7 @@ describe('permanentDeleteMessage — expectMessageId', () => {
     const { account, client } = arrange(new Map([[7, '<old@example.test>']]));
     expect(await ImapManager.prototype.permanentDeleteMessage.call({}, account, 7, 'Drafts')).toBe(true);
     expect(client.fetch).not.toHaveBeenCalled();
-    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true });
+    expect(client.messageDelete).toHaveBeenCalledWith('7', { uid: true, silent: true });
   });
 });
 
@@ -2162,13 +2162,19 @@ describe('syncFolders pruning', () => {
 describe('_deleteAllInFolder — chunked delete', () => {
   const run = (client, opts) =>
     ImapManager.prototype._deleteAllInFolder.call(ImapManager.prototype, client, 'Trash', { retryBackoffMs: 0, ...opts });
+  // A UIDPLUS server whose \Deleted STORE is taken, unless a test says otherwise (expungeUids).
+  const server = (extra) => ({
+    capabilities: new Map([['UIDPLUS', true]]),
+    messageFlagsAdd: vi.fn().mockResolvedValue(true),
+    ...extra,
+  });
 
   it('deletes in UID-addressed chunks of chunkSize and returns the total', async () => {
     const uids = Array.from({ length: 1200 }, (_, i) => i + 1);
-    const client = {
+    const client = server({
       search: vi.fn().mockResolvedValue(uids),
       messageDelete: vi.fn().mockResolvedValue(true),
-    };
+    });
     const deleted = await run(client, { chunkSize: 500 });
 
     expect(deleted).toBe(1200);
@@ -2177,50 +2183,62 @@ describe('_deleteAllInFolder — chunked delete', () => {
     // Every call is UID-addressed, and the chunks together cover exactly all UIDs, in order.
     const seen = [];
     for (const [range, options] of client.messageDelete.mock.calls) {
-      expect(options).toEqual({ uid: true });
+      expect(options).toEqual({ uid: true, silent: true });
       seen.push(...range.split(',').map(Number));
     }
     expect(seen).toEqual(uids);
   });
 
   it('is a no-op when the folder is already empty', async () => {
-    const client = {
+    const client = server({
       search: vi.fn().mockResolvedValue([]),
       messageDelete: vi.fn(),
-    };
+    });
     const deleted = await run(client);
     expect(deleted).toBe(0);
     expect(client.messageDelete).not.toHaveBeenCalled();
   });
 
   it('retries a chunk once after the server declines it, then succeeds', async () => {
-    const client = {
+    const client = server({
       search: vi.fn().mockResolvedValue([1, 2, 3]),
       messageDelete: vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true),
-    };
+    });
     const deleted = await run(client);
     expect(deleted).toBe(3);
     expect(client.messageDelete).toHaveBeenCalledTimes(2); // one decline, one retry
   });
 
   it('throws with progress when a chunk keeps failing after the retry', async () => {
-    const client = {
+    const client = server({
       search: vi.fn().mockResolvedValue([1, 2, 3]),
       messageDelete: vi.fn().mockResolvedValue(false),
-    };
+    });
     await expect(run(client)).rejects.toThrow(/messageDelete could not be confirmed/);
     expect(client.messageDelete).toHaveBeenCalledTimes(2); // initial attempt + one retry
   });
 
   it('surfaces the underlying error if the retry attempt throws', async () => {
-    const client = {
+    const client = server({
       search: vi.fn().mockResolvedValue([1, 2, 3]),
       messageDelete: vi.fn()
         .mockResolvedValueOnce(false)
         .mockRejectedValueOnce(new Error('Socket timeout')),
-    };
+    });
     await expect(run(client)).rejects.toThrow(/Socket timeout/);
     expect(client.messageDelete).toHaveBeenCalledTimes(2);
+  });
+
+  // A refused \Deleted STORE is not a deleted chunk: nothing is expunged and the chunk counts as
+  // unconfirmed (retried once, then the whole operation fails with its progress).
+  it('never counts a chunk whose \Deleted STORE the server refused', async () => {
+    const client = server({
+      search: vi.fn().mockResolvedValue([1, 2, 3]),
+      messageFlagsAdd: vi.fn().mockResolvedValue(false),
+      messageDelete: vi.fn().mockResolvedValue(true),
+    });
+    await expect(run(client)).rejects.toThrow(/could not be confirmed for Trash after 0\/3/);
+    expect(client.messageDelete).not.toHaveBeenCalled();
   });
 });
 

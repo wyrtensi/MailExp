@@ -2288,8 +2288,9 @@ export function classifyMoveBySearch(uids, remainingUids, destArrived) {
 // instead of being reported as a delete that did not happen.
 export async function expungeUids(client, range) {
   const set = [].concat(range).join(',');
-  let others = [];
-  if (!client.capabilities?.has('UIDPLUS')) {
+  const plainExpunge = !client.capabilities?.has('UIDPLUS');
+  let others = '';
+  if (plainExpunge) {
     const ours = await client.search({ uid: set }, { uid: true });
     const flagged = await client.search({ deleted: true }, { uid: true });
     // A non-array result (undefined: no mailbox selected, false: SEARCH failed) means we cannot
@@ -2297,22 +2298,44 @@ export async function expungeUids(client, range) {
     // mailbox-wide EXPUNGE would destroy them.
     if (!Array.isArray(ours) || !Array.isArray(flagged)) return false;
     const mine = new Set(ours.map(Number));
-    others = flagged.filter(uid => !mine.has(Number(uid)));
-    if (others.length && (await client.messageFlagsRemove(others.join(','), ['\\Deleted'], { uid: true })) === false) {
+    // Packed into ranges: a folder another client left with thousands of flagged messages must
+    // not turn into a STORE line longer than the server accepts.
+    others = packUidRange(flagged.map(Number).filter(uid => !mine.has(uid)));
+    if (others && (await client.messageFlagsRemove(others, ['\\Deleted'], { uid: true, silent: true })) === false) {
       return false;
     }
   }
   try {
-    if ((await client.messageFlagsAdd(set, ['\\Deleted'], { uid: true })) === false) return false;
-    return (await client.messageDelete(set, { uid: true })) !== false;
+    // .SILENT only spares the untagged FETCH replies: a refused STORE still answers NO, which
+    // imapflow reports as false (dist commands/store.js), so the check below holds.
+    if ((await client.messageFlagsAdd(set, ['\\Deleted'], { uid: true, silent: true })) === false) return false;
+    if ((await client.messageDelete(set, { uid: true, silent: true })) === false) return false;
+    if (!plainExpunge) return true;
+    // Without UIDPLUS another of our own connections expunging in the same folder may have
+    // unflagged our UIDs as "others" between our STORE and our EXPUNGE: the EXPUNGE then answers
+    // OK and leaves them. Only a UID SEARCH says whether they are really gone.
+    const left = await client.search({ uid: set }, { uid: true });
+    return Array.isArray(left) && left.length === 0;
   } finally {
-    if (others.length) {
-      const restored = await client.messageFlagsAdd(others.join(','), ['\\Deleted'], { uid: true }).catch(() => false);
+    if (others) {
+      const restored = await client.messageFlagsAdd(others, ['\\Deleted'], { uid: true, silent: true }).catch(() => false);
       if (restored === false) {
-        console.warn(`Could not re-flag UID(s) ${others.join(',')} in ${client.mailbox?.path} as \\Deleted after an expunge: they are no longer marked for deletion`);
+        console.warn(`Could not re-flag UID(s) ${others} in ${client.mailbox?.path} as \\Deleted after an expunge: they are no longer marked for deletion`);
       }
     }
   }
+}
+
+// A list of UIDs as a compact IMAP UID set: [1, 2, 3, 5, 7, 8] -> "1:3,5,7:8" (empty for none).
+export function packUidRange(uids) {
+  const sorted = [...new Set(uids.map(Number).filter(Number.isInteger))].sort((a, b) => a - b);
+  const parts = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i];
+    while (i + 1 < sorted.length && sorted[i + 1] === sorted[i] + 1) i++;
+    parts.push(start === sorted[i] ? String(start) : `${start}:${sorted[i]}`);
+  }
+  return parts.join(',');
 }
 
 // client.messageMove without its data loss (upstream maathimself/mailflow@05a8b6e8,
@@ -7792,7 +7815,9 @@ export class ImapManager {
   async _deleteAllInFolder(client, folder, opts = {}) {
     return this._chunkedFolderOp(
       client, folder, { all: true },
-      (c, range) => c.messageDelete(range, { uid: true }),
+      // expungeUids, not a bare messageDelete: it reports a refused \Deleted STORE (and, without
+      // UIDPLUS, an EXPUNGE that left the chunk) as unconfirmed instead of as deleted.
+      (c, range) => expungeUids(c, range),
       { label: 'messageDelete', ...opts },
     );
   }

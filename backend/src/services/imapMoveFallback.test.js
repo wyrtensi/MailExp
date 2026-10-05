@@ -38,7 +38,7 @@ vi.mock('../utils/redact.js', () => ({ redactEmail: vi.fn(() => 'a***@example.co
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPinnedLookup: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
-import { ImapManager, evictPool } from './imapManager.js';
+import { ImapManager, evictPool, packUidRange } from './imapManager.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
@@ -63,6 +63,7 @@ function makeServer({ capabilities = ['IMAP4rev1', 'UIDPLUS'], enabled = [], ref
       Trash: { uids: [7, 8], uidNext: 9, deleted: new Set() },
     },
     commands: [],
+    stores: [], // every flag STORE as sent: [+ or -, range, options]
   };
 }
 
@@ -108,6 +109,7 @@ function connectionTo(server) {
     async messageFlagsAdd(range, flags, options) {
       if (!options?.uid) throw new Error('STORE by sequence number');
       const f = server.folders[this.mailbox.path];
+      server.stores.push(['+', String(range), options]);
       if (flags.includes('\\Deleted') && server.refuseStore) return false;
       uidSet(range, f.uids).forEach(u => f.deleted.add(u));
       return true;
@@ -115,6 +117,7 @@ function connectionTo(server) {
     async messageFlagsRemove(range, flags, options) {
       if (!options?.uid) throw new Error('STORE by sequence number');
       const f = server.folders[this.mailbox.path];
+      server.stores.push(['-', String(range), options]);
       if (server.refuseUnflag) return false;
       uidSet(range, f.uids).forEach(u => f.deleted.delete(u));
       return true;
@@ -141,6 +144,7 @@ function connectionTo(server) {
       if (!options?.uid) throw new Error('EXPUNGE by sequence number');
       const src = server.folders[this.mailbox.path];
       await this.messageFlagsAdd(range, ['\\Deleted'], options);
+      server.beforeExpunge?.(src);
       const scope = this.capabilities.has('UIDPLUS') ? uidSet(range, src.uids) : src.uids;
       const uids = scope.filter(u => src.deleted.has(u));
       server.commands.push(['EXPUNGE', uids]);
@@ -408,5 +412,41 @@ describe('expunging when the server refuses the \\Deleted STORE', () => {
     expect(server.folders.INBOX.uids).toEqual([4, 5, 6]);
     expect(server.folders.Archive.uids).toEqual([1]);
     expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('in both folders'));
+  });
+});
+
+describe('expunging without UIDPLUS: the other flagged messages and our own connections', () => {
+  // The other flagged UIDs go out as ranges, so a folder another client left with thousands of
+  // them does not turn into a STORE line longer than the server accepts.
+  it('unflags and reflags the other flagged messages as a packed UID set, silently', async () => {
+    server = makeServer({ capabilities: ['IMAP4rev1'] });
+    server.folders.INBOX = { uids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], uidNext: 11, deleted: new Set([1, 2, 3, 4, 7, 8]) };
+    await expect(mgr.permanentDeleteMessage(acct, 10, 'INBOX')).resolves.toBe(true);
+    expect(server.folders.INBOX.uids).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect([...server.folders.INBOX.deleted].sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 7, 8]);
+    const others = server.stores.filter(([, range]) => range !== '10');
+    expect(others.map(([op, range]) => [op, range])).toEqual([['-', '1:4,7:8'], ['+', '1:4,7:8']]);
+    // .SILENT on every STORE: only the untagged FETCH replies are spared, a NO still reads false.
+    expect(server.stores.every(([, , options]) => options?.silent === true)).toBe(true);
+  });
+
+  // Another of our connections, expunging in the same folder, unflagged our UID as one of its
+  // "others" between our STORE and our EXPUNGE: the EXPUNGE answers OK and leaves it.
+  it('reports a delete whose UID the EXPUNGE left behind as failed, not done', async () => {
+    server = makeServer({ capabilities: ['IMAP4rev1'] });
+    server.beforeExpunge = (folder) => { folder.deleted.delete(6); };
+    await expect(mgr.permanentDeleteMessage(acct, 6, 'INBOX')).rejects.toThrow();
+    expect(server.folders.INBOX.uids).toEqual([4, 5, 6]);
+    const r = await mgr.bulkPermanentDelete(acct, [5, 6], 'INBOX');
+    expect(r.succeeded).toEqual([5]);
+    expect(r.failed).toEqual([6]);
+  });
+});
+
+describe('packUidRange', () => {
+  it('packs runs into ranges, in order and without duplicates', () => {
+    expect(packUidRange([8, 1, 2, 3, 5, 7, 2])).toBe('1:3,5,7:8');
+    expect(packUidRange([42])).toBe('42');
+    expect(packUidRange([])).toBe('');
   });
 });
