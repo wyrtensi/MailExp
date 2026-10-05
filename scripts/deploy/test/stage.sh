@@ -226,6 +226,21 @@ volumes:
 YAML
 }
 
+# check_version <version>: before anything changes, the build must be one the stand can install:
+# its images published (CI does it for green main) and, when the commit is in this repository,
+# compose.local.yml support in it. install_panel checks the latter again on the checkout.
+check_version() {
+  local version=$1 image
+  for image in backend frontend; do
+    dk manifest inspect "ghcr.io/wyrtensi/mailexpert-$image:$version" >/dev/null 2>&1 ||
+      die "ghcr.io/wyrtensi/mailexpert-$image:$version is not published (or the registry did not answer); CI publishes the images of a commit on main after it is green" 2
+  done
+  if git -C "$REPO_DIR" cat-file -e "${version#sha-}^{commit}" 2>/dev/null &&
+    ! git -C "$REPO_DIR" show "${version#sha-}:scripts/deploy/lib/app.sh" | grep -q compose.local.yml; then
+    die "$version has no compose.local.yml support in scripts/deploy/lib/app.sh; the stand needs a newer build" 2
+  fi
+}
+
 # install_panel <version>: the panel with install.sh, as on a server without systemd. The commit is
 # checked out first and its own install.sh runs, so a build without compose.local.yml support is
 # refused before anything starts (it would come up without stage-edge and the stand CA).
@@ -253,9 +268,14 @@ update_panel() {
   local version=$1
   running || die "$NAME is not running; start it with: $0 up" 2
   installed || die "the panel in $NAME is not an install.sh install (the old layout in $OLD_APP); switch once with: $0 panel-reinstall --yes" 2
+  # The watcher is started again afterwards: its first run rewrites result/updater.json with the
+  # new version, which install.sh does only together with the systemd units.
+  stop_watcher
   log "updating the panel to $version with update.sh"
-  dk exec "$NAME" bash "$PREFIX/app/scripts/deploy/update.sh" "$version" --prefix "$PREFIX" ||
-    die "update.sh failed (exit $?); see its output above"
+  local rc=0
+  dk exec "$NAME" bash "$PREFIX/app/scripts/deploy/update.sh" "$version" --prefix "$PREFIX" || rc=$?
+  start_watcher
+  [ "$rc" = 0 ] || die "update.sh failed (exit $rc); see its output above"
   wait_panel
 }
 
@@ -642,6 +662,7 @@ main() {
   [[ $version =~ ^sha-[0-9a-f]{12}$ ]] || die "--version must be sha-<12 hex characters>" 2
   case $command in
     up)
+      check_version "$version"
       stage_env
       start_server
       start_mailcow
@@ -651,13 +672,15 @@ main() {
       log "open $URL (the browser warns about the stand's own certificate); the password is in $STAGE_ENV"
       ;;
     panel)
+      check_version "$version"
       update_panel "$version"
-      start_watcher
       ;;
     panel-reinstall)
       reinstall_plan
       [ "$yes" = 1 ] || die "this deletes the panel's data; run again with --yes to go ahead" 2
       running || die "$NAME is not running; start it with: $0 up" 2
+      # Nothing is deleted for a build that could not be installed.
+      check_version "$version"
       stage_env
       ensure_tools
       remove_old_panel
