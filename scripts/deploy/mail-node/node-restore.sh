@@ -13,13 +13,14 @@
 # What it does:
 #   1. restores the snapshot's /backup (mailcow's dump and the node's files) into a temporary
 #      directory under /var/backups/mailexpert-node;
-#   2. puts mailcow.conf (with the .env link mailcow expects), data/conf, data/assets/ssl and
-#      docker-compose.override.yml in place, exactly as the snapshot has them: what data/conf and
-#      data/assets/ssl hold here but the snapshot does not (or as another kind: a directory for a
-#      file) is moved, never deleted, into one holding directory of the run,
-#      <mailcow dir>/.pre-restore-<epoch>/ (0700, the same paths under it), each path logged; an
-#      override the snapshot does not have is set aside as docker-compose.override.yml.pre-restore,
-#      or .pre-restore.<epoch> when that name is taken; node.env only when this server has none;
+#   2. puts mailcow.conf (with the .env link mailcow expects), data/conf, data/assets/ssl,
+#      data/hooks and docker-compose.override.yml in place, exactly as the snapshot has them: what
+#      those directories hold here but the snapshot does not (or as another kind: a directory for a
+#      file), and an override the snapshot does not have, is moved, never deleted, into one holding
+#      directory of the run outside mailcow's checkout,
+#      /var/backups/mailexpert-node/pre-restore-<epoch>/ (0700, the same paths under it), each path
+#      logged; mailcow's data/web/inc/vars.local.inc.php and data/web/css/build/0081-custom-mailcow.css
+#      when the snapshot has them; node.env only when this server has none;
 #   3. pulls mailcow's images and starts it, which creates its volumes;
 #   4. restores vmail straight from the repository into the vmail volume, Dovecot stopped: only
 #      files missing or changed are downloaded, and mail no longer in the snapshot is removed;
@@ -140,20 +141,26 @@ entry_kind() {
 }
 
 # set_aside <path relative to MAILCOW_DIR>: moved, never deleted, into this run's holding directory
-# (MAILCOW_DIR/.pre-restore-<epoch>, 0700: certificates' keys may be among it) under the same path.
+# NODE_BACKUP_DIR/pre-restore-<epoch> (0700 inside NODE_BACKUP_DIR's 0700: certificates' keys may be
+# among it) under the same path. Not inside mailcow's checkout: its update.sh commits what is
+# untracked there when a merge conflicts. Copied (owners, modes and times kept), then removed, so
+# NODE_BACKUP_DIR may be on another file system.
 set_aside() {
   local rel=$1 n=1 base
   if [ -z "$HOLD_DIR" ]; then
-    base=$MAILCOW_DIR/.pre-restore-$(date +%s)
+    base=$NODE_BACKUP_DIR/pre-restore-$(date +%s)
     HOLD_DIR=$base
     until mkdir -m 700 "$HOLD_DIR" 2>/dev/null; do
-      [ "$n" -lt 100 ] || die "could not create a holding directory $base-<n> in $MAILCOW_DIR"
+      [ "$n" -lt 100 ] || die "could not create a holding directory $base-<n>"
       n=$((n + 1)) && HOLD_DIR=$base-$n
     done
   fi
   mkdir -p "$HOLD_DIR/$(dirname "$rel")"
-  mv -n "$MAILCOW_DIR/$rel" "$HOLD_DIR/$rel"
-  if [ -e "$MAILCOW_DIR/$rel" ] || [ -L "$MAILCOW_DIR/$rel" ]; then die "could not set $MAILCOW_DIR/$rel aside into $HOLD_DIR"; fi
+  cp -a "$MAILCOW_DIR/$rel" "$HOLD_DIR/$rel" || die "could not copy $MAILCOW_DIR/$rel aside into $HOLD_DIR"
+  rm -rf "${MAILCOW_DIR:?}/$rel"
+  if [ -e "$MAILCOW_DIR/$rel" ] || [ -L "$MAILCOW_DIR/$rel" ]; then
+    die "could not remove $MAILCOW_DIR/$rel (its copy is in $HOLD_DIR)"
+  fi
   log "not in the snapshot, set aside: $rel"
 }
 
@@ -180,28 +187,31 @@ mirror_dir() {
 }
 
 # place_files <dir with the restored backup>: mailcow.conf and the node's files where mailcow and
-# setup.sh read them. data/conf and data/assets/ssl mirror the snapshot (mirror_dir).
+# setup.sh read them. data/conf, data/assets/ssl and data/hooks mirror the snapshot (mirror_dir);
+# mailcow's web settings and CSS (MAILCOW_CUSTOM_FILES) are copied when the snapshot has them.
 place_files() {
-  local src=$1/mailexpert aside
+  local src=$1/mailexpert file
   install -m 600 "$1/mailcow.conf" "$MAILCOW_DIR/mailcow.conf"
   ln -sfn mailcow.conf "$MAILCOW_DIR/.env"
   mkdir -p "$MAILCOW_DIR/data/conf" "$MAILCOW_DIR/data/assets"
   if [ -d "$src/conf" ]; then mirror_dir "$src/conf" data/conf; fi
   if [ -d "$src/ssl" ]; then mirror_dir "$src/ssl" data/assets/ssl; fi
-  if [ -n "$HOLD_DIR" ]; then
-    log "set aside in $HOLD_DIR (the same paths under it): put back by hand what the node still needs"
-  fi
+  if [ -d "$src/hooks" ]; then mirror_dir "$src/hooks" data/hooks; fi
+  for file in "${MAILCOW_CUSTOM_FILES[@]}"; do
+    if [ -f "$src/$file" ]; then
+      mkdir -p "$MAILCOW_DIR/data/$(dirname "$file")"
+      cp -p "$src/$file" "$MAILCOW_DIR/data/$file"
+    fi
+  done
   # The override is the snapshot's or none: one left by a rehearsal of an older snapshot (or put
   # here before the restore) would start mailcow with settings the restored node no longer has.
   if [ -f "$src/docker-compose.override.yml" ]; then
     cp -p "$src/docker-compose.override.yml" "$MAILCOW_DIR/"
   elif [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then
-    # An earlier run's set-aside copy (perhaps the owner's original) is never overwritten.
-    aside=docker-compose.override.yml.pre-restore
-    if [ -e "$MAILCOW_DIR/$aside" ]; then aside=$aside.$(date +%s); fi
-    mv -n "$MAILCOW_DIR/docker-compose.override.yml" "$MAILCOW_DIR/$aside"
-    [ ! -e "$MAILCOW_DIR/docker-compose.override.yml" ] || die "could not set $MAILCOW_DIR/docker-compose.override.yml aside: $aside exists"
-    log "docker-compose.override.yml: the snapshot has none; the one here is set aside as $aside"
+    set_aside docker-compose.override.yml
+  fi
+  if [ -n "$HOLD_DIR" ]; then
+    log "set aside in $HOLD_DIR (the same paths under it): put back by hand what the node still needs"
   fi
   if [ -f "$NODE_CONF" ]; then
     log "$NODE_CONF exists here and stays; the backup's copy is not used"
