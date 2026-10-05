@@ -49,6 +49,21 @@ describe('GET /api/mail/messages/:id/body — EOP category', () => {
     imapManager.fetchMessageBody.mockReset();
   });
 
+  it.each([true, false])('returns cached reply metadata with the body (cached=%s)', async cached => {
+    const inReplyTo = '<parent@example.com>';
+    const references = '<root@example.com> <parent@example.com>';
+    query.mockResolvedValueOnce({ rows: [messageRow({
+      folder: 'Drafts', body_text: cached ? 'Reply' : null,
+      in_reply_to: inReplyTo, thread_references: references,
+    })] }).mockResolvedValueOnce({ rows: [{ id: 'acc-1' }] }).mockResolvedValue({ rows: [] });
+    imapManager.fetchMessageBody.mockResolvedValue({ html: null, text: 'Reply', attachments: [] });
+    const res = await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/body`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.inReplyTo).toBe(inReplyTo);
+    expect(body.references).toBe(references);
+  });
+
   it('answers the stored category with a cached body', async () => {
     query.mockResolvedValue({ rows: [messageRow({ body_text: 'Verify your account', eop_category: 'PHSH' })] });
     const body = await (await fetch(`${base}/api/mail/messages/${MESSAGE_ID}/body`)).json();

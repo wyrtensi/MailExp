@@ -576,7 +576,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(html);
       hasBlockedRemoteImages = true;
     }
-    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null });
+    return res.json({ html: responseHtml, text: message.body_text, attachments, hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null });
   }
 
   // Fetch from IMAP — signal user activity so background jobs back off during this request.
@@ -618,7 +618,7 @@ router.get('/messages/:id/body', async (req, res) => {
       responseHtml = blockRemoteImages(safeHtml);
       hasBlockedRemoteImages = true;
     }
-    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null });
+    res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null });
   } catch (err) {
     const msg = err.message || 'Unknown error';
     console.error('Body fetch error:', msg);
@@ -798,20 +798,21 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     if (bufferMap.size === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
     // Deduplicate filenames: invoice.pdf → invoice (2).pdf
-    const usedNames = new Map();
+    const usedNames = new Set();
     const entries = [];
     for (const att of eligible) {
       const buf = bufferMap.get(att.part);
       if (!buf) continue;
-      let name = safeFilename(att.filename);
-      if (usedNames.has(name)) {
-        const n = usedNames.get(name) + 1;
-        usedNames.set(name, n);
-        const dot = name.lastIndexOf('.');
-        name = dot > 0 ? `${name.slice(0, dot)} (${n})${name.slice(dot)}` : `${name} (${n})`;
-      } else {
-        usedNames.set(name, 1);
+      // Archiver strips leading word/drive prefixes ending in a colon.
+      const originalName = safeFilename(att.filename).replace(/:/g, '_');
+      let name = originalName;
+      const dot = originalName.lastIndexOf('.');
+      let n = 2;
+      while (usedNames.has(name)) {
+        name = dot > 0 ? `${originalName.slice(0, dot)} (${n})${originalName.slice(dot)}` : `${originalName} (${n})`;
+        n++;
       }
+      usedNames.add(name);
       entries.push({ name, buf });
     }
 
@@ -1833,18 +1834,17 @@ router.post('/messages/bulk-delete', async (req, res) => {
         continue;
       }
 
-      if (!trashPath) {
-        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length} messages`);
-        continue;
-      }
-
       // Drafts, and letters the client saw in Trash, are permanently deleted. A letter in Trash
       // the client saw elsewhere is there already. The rest move to Trash.
       const isDraft = m => allDraftsPaths.has(m.folder);
+      const eligible = trashPath ? msgs : msgs.filter(isDraft);
+      if (!trashPath && eligible.length < msgs.length) {
+        console.error(`bulk-delete: no Trash folder found for account ${accountId} — skipping ${msgs.length - eligible.length} messages`);
+      }
       const inTrash = m => !isDraft(m) && allTrashPaths.has(m.folder);
-      const toExpunge = msgs.filter(m => isDraft(m) || (inTrash(m) && wantsForever(intent, m.id, allTrashPaths)));
-      alreadyTrashed.push(...msgs.filter(m => inTrash(m) && !wantsForever(intent, m.id, allTrashPaths)));
-      const toMove    = msgs.filter(m => !isDraft(m) && !inTrash(m));
+      const toExpunge = eligible.filter(m => isDraft(m) || (inTrash(m) && wantsForever(intent, m.id, allTrashPaths)));
+      alreadyTrashed.push(...eligible.filter(m => inTrash(m) && !wantsForever(intent, m.id, allTrashPaths)));
+      const toMove    = eligible.filter(m => !isDraft(m) && !inTrash(m));
 
       // A letter whose move into Trash has not reached the server has no uid there to expunge.
       movePending.push(...toExpunge.filter(m => isPendingUid(m.uid)));

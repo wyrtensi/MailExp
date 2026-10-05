@@ -194,7 +194,9 @@ function parseChips(val) {
 
 export default function ComposeModal() {
   const { t } = useTranslation();
-  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, plaintextEmail, setThreadMessages } = useStore();
+  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, plaintextEmail: plaintextPreference, setThreadMessages } = useStore();
+  const plaintextEmail = composeData?.restored && typeof composeData.bodyIsHtml === 'boolean'
+    ? !composeData.bodyIsHtml : plaintextPreference;
   const isMobile = useMobile();
   const uiScale = useUiScale();
 
@@ -382,6 +384,14 @@ export default function ComposeModal() {
   // Prevents the signature from being reset by a store refresh (same fromValue, accounts updated).
   const signatureInitializedRef = useRef(false);
   const prevFromValueRef = useRef(fromValue);
+  const savedMetadataRef = useRef(null);
+  const getDraftMetadata = () => ({
+    ...resolveFrom(fromValue),
+    priority,
+    quotedBody,
+    quotedBodyHtml: plaintextEmail ? null : (quotedHtmlRef.current?.innerHTML ?? quotedBodyHtml),
+    editedSignature: plaintextEmail ? plainSig : signatureContentRef.current,
+  });
 
   // Edit/save timestamps driving the autosave rule. Refs, not state: they are written from the
   // editor's onUpdate on every keystroke and must never cause a render. Both are seeded at mount
@@ -717,11 +727,15 @@ export default function ComposeModal() {
       if (signatureRef.current) signatureRef.current.innerHTML = sanitized;
       signatureContentRef.current = sanitized;
       setPlainSig(stripHtml(signature));
+      // Late account loading initializes the default signature without a user edit.
+      if (!fromValueChanged && savedMetadataRef.current) {
+        savedMetadataRef.current.editedSignature = plaintextEmail ? stripHtml(signature) : sanitized;
+      }
     } else if (fromValueChanged && fromSignature == null) {
       signatureContentRef.current = '';
       setPlainSig('');
     }
-  }, [fromValue, fromSignature, draftSignature]);
+  }, [fromValue, fromSignature, draftSignature, plaintextEmail]);
 
   // The quote header ("On <date>, <sender> wrote:" / "<дата>, <отправитель> написал(а):") follows
   // the language of the From name (utils/quoteHeader.js): switching between a Russian and a Latin
@@ -976,9 +990,15 @@ export default function ComposeModal() {
     }
   };
 
+  // Capture initialized DOM values, including sanitized HTML, before any user edit.
+  useEffect(() => {
+    savedMetadataRef.current = getDraftMetadata();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- opening baseline only
+
   const isDirty = () => {
     const currentBody = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
     return (
+      JSON.stringify(getDraftMetadata()) !== JSON.stringify(savedMetadataRef.current) ||
       currentBody !== initialBodyRef.current ||
       subject !== initialSubjectRef.current ||
       normalizeTo(toChips) !== initialToRef.current ||
@@ -997,6 +1017,7 @@ export default function ComposeModal() {
     setSavingDraft(true);
     try {
       const bodyToSend = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
+      const submittedMetadata = getDraftMetadata();
       const result = await api.saveDraft({
         accountId,
         priority,
@@ -1005,10 +1026,12 @@ export default function ComposeModal() {
         cc: [...ccChips, ...(ccInput.trim() ? [ccInput.trim()] : [])],
         bcc: [...bccChips, ...(bccInput.trim() ? [bccInput.trim()] : [])],
         subject,
+        inReplyTo: composeData?.inReplyTo,
+        references: composeData?.references || undefined,
         body: bodyToSend,
         bodyIsHtml: !plaintextEmail,
         ...quotePayload({ plaintextEmail, quotedBody, quotedBodyHtml, liveQuoteHtml: liveQuoteHtml() }),
-        ...(signatureContentRef.current || fromSignature != null
+        ...(signatureContentRef.current || fromSignature != null || draftSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
         // The server replaces the previous copy only in the mailbox it lives in.
@@ -1041,6 +1064,7 @@ export default function ComposeModal() {
         // Track the submitted snapshot so edits made during the request stay dirty.
         // bodyToSend already normalizes an empty TipTap editor to ''.
         // Include pending inputs in the To/CC/BCC baselines since they're now saved.
+        savedMetadataRef.current = submittedMetadata;
         initialBodyRef.current = bodyToSend;
         initialSubjectRef.current = subject;
         initialToRef.current = normalizeTo([...toChips, ...(pendingTo ? [pendingTo] : [])]);

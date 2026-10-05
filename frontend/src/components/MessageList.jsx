@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { useStore, selectSelectedMessageIdentity, parseSelectedIdentity } from '../store/index.js';
 import { api } from '../utils/api.js';
 import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
+import { draftSenderAddress } from '../utils/draftSenderAddress.js';
+import { draftReplyHeaders } from '../utils/draftReplyHeaders.js';
 import { priorityFromHeaders } from '../utils/draftPriority.js';
 import { LAYOUTS } from '../layouts.js';
 import { senderColor } from '../themes.js';
@@ -2474,8 +2476,22 @@ export default function MessageList() {
         setSelectedMessage(message.id);
         return;
       }
+      const fromHeader = String(headerData?.headers ?? '').replace(/\r?\n[ \t]+/g, ' ')
+        .match(/^From:[ \t]*(.*)$/mi)?.[1]?.trim();
+      const actualFrom = draftSenderAddress(fromHeader) || message.from_email;
+      const address = (actualFrom || '').trim().toLowerCase();
+      let account = useStore.getState().accounts.find(a => a.id === message.account_id);
+      const needsAlias = address && !account?.mail_node && address !== account?.email_address?.trim().toLowerCase();
+      if (account && needsAlias && !Array.isArray(account.aliases)) {
+        const aliases = await api.getAliases(account.id);
+        if (!Array.isArray(aliases)) throw new Error('Draft sender aliases unavailable');
+        useStore.getState().updateAccount(account.id, { aliases });
+        account = useStore.getState().accounts.find(a => a.id === message.account_id);
+      }
+      const alias = needsAlias ? account?.aliases?.find(a => a.email?.trim().toLowerCase() === address) : null;
       openCompose({
         accountId: message.account_id,
+        ...(alias ? { aliasId: alias.id } : {}),
         draftUid: message.uid,
         draftFolder: message.folder,
         to: formatAddressArray(message.to_addresses),
@@ -2485,6 +2501,7 @@ export default function MessageList() {
         bcc,
         subject: message.subject || '',
         priority: priorityFromHeaders(headerData?.headers),
+        ...draftReplyHeaders(headerData?.headers, message, bodyData),
         // Split the stored signature out of the body so the composer does not add a second
         // copy (#432); draftSignature seeds the composer's signature editor instead.
         ...draftComposeFields(bodyData, { plaintext: useStore.getState().plaintextEmail }),

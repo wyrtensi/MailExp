@@ -20,6 +20,7 @@ vi.mock('../index.js', () => ({
 }));
 
 import express from 'express';
+import { inflateRawSync } from 'node:zlib';
 import mailRoutes from './mail.js';
 import { query } from '../services/db.js';
 import { imapManager } from '../index.js';
@@ -35,6 +36,31 @@ function buildApp() {
 
 const zipFilename = (res) =>
   decodeURIComponent(res.headers.get('content-disposition').match(/filename\*=UTF-8''(.+)$/)[1]);
+
+function readZipEntries(zip) {
+  const end = zip.length - 22;
+  expect(zip.readUInt32LE(end)).toBe(0x06054b50);
+  const count = zip.readUInt16LE(end + 10);
+  let offset = zip.readUInt32LE(end + 16);
+  const entries = [];
+  for (let i = 0; i < count; i++) {
+    expect(zip.readUInt32LE(offset)).toBe(0x02014b50);
+    const method = zip.readUInt16LE(offset + 10);
+    const size = zip.readUInt32LE(offset + 20);
+    const nameLength = zip.readUInt16LE(offset + 28);
+    const local = zip.readUInt32LE(offset + 42);
+    expect(zip.readUInt32LE(local)).toBe(0x04034b50);
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const compressed = zip.subarray(start, start + size);
+    expect([0, 8]).toContain(method);
+    entries.push({
+      name: zip.subarray(offset + 46, offset + 46 + nameLength).toString('utf8'),
+      content: (method === 8 ? inflateRawSync(compressed) : compressed).toString('utf8'),
+    });
+    offset += 46 + nameLength + zip.readUInt16LE(offset + 30) + zip.readUInt16LE(offset + 32);
+  }
+  return entries;
+}
 
 describe('GET /api/mail/messages/:id/attachments.zip', () => {
   let server, base;
@@ -64,6 +90,28 @@ describe('GET /api/mail/messages/:id/attachments.zip', () => {
     expect(res.headers.get('content-type')).toBe('application/zip');
     expect(zipFilename(res)).toBe('Quarterly report-attachments.zip');
     expect(Buffer.from(await res.arrayBuffer()).subarray(0, 2).toString()).toBe('PK');
+  });
+
+  it.each([
+    [['report.pdf', 'report.pdf', 'report (2).pdf'], ['report.pdf', 'report (2).pdf', 'report (2) (2).pdf']],
+    [['report.pdf', 'report (2).pdf', 'report.pdf', 'report.pdf'], ['report.pdf', 'report (2).pdf', 'report (3).pdf', 'report (4).pdf']],
+    [['report (2).pdf', 'report (2).pdf', 'report (2) (2).pdf'], ['report (2).pdf', 'report (2) (2).pdf', 'report (2) (2) (2).pdf']],
+    [['README', 'README (2)', 'README', 'README'], ['README', 'README (2)', 'README (3)', 'README (4)']],
+    [['.env', '.env', '.env (2)'], ['.env', '.env (2)', '.env (2) (2)']],
+    [['../report.pdf', '.._report.pdf', '.._report (2).pdf'], ['.._report.pdf', '.._report (2).pdf', '.._report (2) (2).pdf']],
+    [['report:invoice.pdf', 'invoice.pdf'], ['report_invoice.pdf', 'invoice.pdf']],
+    [['report:invoice.pdf', 'report_invoice.pdf', 'report_invoice (2).pdf'], ['report_invoice.pdf', 'report_invoice (2).pdf', 'report_invoice (2) (2).pdf']],
+  ])('keeps ZIP entries distinct and recoverable for %j', async (filenames, names) => {
+    row.attachments = filenames.map((filename, i) => ({ part: String(i + 2), filename, size: 9, type: 'application/octet-stream' }));
+    imapManager.fetchMultipleAttachments.mockResolvedValue(new Map(
+      row.attachments.map((att, i) => [att.part, Buffer.from(`content-${i}`)]),
+    ));
+    const res = await fetch(`${base}/api/mail/messages/${MSG_ID}/attachments.zip`);
+    expect(res.status).toBe(200);
+    const entries = readZipEntries(Buffer.from(await res.arrayBuffer()));
+    expect(entries.map(entry => entry.name)).toEqual(names);
+    expect(new Set(entries.map(entry => entry.name)).size).toBe(filenames.length);
+    expect(entries.map(entry => entry.content)).toEqual(filenames.map((_, i) => `content-${i}`));
   });
 
   it('drops an emoji split by the 100-char filename cut instead of failing', async () => {
