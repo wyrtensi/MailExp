@@ -112,14 +112,10 @@ export function settleSend(jobId, { status, errorCode = null, error = null, sent
 // Opens the composer with a letter the server gave back. Another composer may be open: then the
 // letter waits and opens once that one closes (ScheduledLetters), so nothing is lost.
 export function restoreCompose(compose, { sendAt = null } = {}) {
-  const { composing, openCompose, setQueuedCompose, addNotification } = useStore.getState();
+  const { composing, enqueueCompose, addNotification } = useStore.getState();
   const data = composeDataFromScheduled(compose, { sendAt });
-  if (!composing) {
-    openCompose(data);
-    return;
-  }
-  setQueuedCompose(data);
-  addNotification({ title: t('scheduled.restoreQueuedTitle'), body: t('scheduled.restoreQueuedBody') });
+  enqueueCompose(data);
+  if (composing) addNotification({ title: t('scheduled.restoreQueuedTitle'), body: t('scheduled.restoreQueuedBody') });
 }
 
 // Undo: cancels the letter while it still waits and reopens it in the composer. Resolves true when

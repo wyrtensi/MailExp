@@ -20,7 +20,7 @@ export default function ScheduledLetters() {
   const { t } = useTranslation();
   const showScheduled = useStore(s => s.showScheduled);
   const composing = useStore(s => s.composing);
-  const queuedCompose = useStore(s => s.queuedCompose);
+  const queuedComposes = useStore(s => s.queuedComposes);
   // The letters not sent while the user was away are announced once per page load.
   const announcedRef = useRef(false);
 
@@ -58,11 +58,9 @@ export default function ScheduledLetters() {
   }, [t]);
 
   useEffect(() => {
-    if (composing || !queuedCompose) return;
-    const { setQueuedCompose, openCompose } = useStore.getState();
-    setQueuedCompose(null);
-    openCompose(queuedCompose);
-  }, [composing, queuedCompose]);
+    if (composing || !queuedComposes.length) return;
+    useStore.getState().openNextQueuedCompose();
+  }, [composing, queuedComposes]);
 
   return showScheduled ? <ScheduledDialog /> : null;
 }
