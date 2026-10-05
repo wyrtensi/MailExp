@@ -15,6 +15,11 @@ Google-приложений для ящиков Gmail — отдельно, в [
 
 ## 1. Что нужно
 
+Всё, что настраивается в Cloudflare (Zero Trust и Google как способ входа, туннель и маршрут
+`<CF_HOST>`, приложение Access и его AUD, токен DNS-01 и A-запись `<DIRECT_HOST>`, токен
+синхронизации пользователей, права каждого токена) — пошагово, в панели и через API, в
+[cloudflare.md](cloudflare.md). Делайте это **до** первого `install.sh`.
+
 - VPS Ubuntu 24.04, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска (`install.sh` проверяет это
   сам и первую установку с нехваткой останавливает).
 - Зона DNS в Cloudflare для `<DIRECT_HOST>` и будущего `<MAIL_HOST>`. Хосты `<APP_HOST>`
@@ -116,6 +121,11 @@ sudo /opt/mailexpert/app/scripts/deploy/backup.sh --show-recovery-key
 | `direct` | Caddy закрывает TLS на `<DIRECT_HOST>` (сертификат через DNS-01), «Войти через Google» | `DNS_API_TOKEN`; `AUTH_GOOGLE_CLIENT_ID`/`AUTH_GOOGLE_CLIENT_SECRET`, если не `--local-auth` | `https://<DIRECT_HOST>/oauth/login/google/callback` |
 | `cf` | `cloudflared` — исходящий туннель к `<CF_HOST>`, вход через Cloudflare Access | `TUNNEL_TOKEN`; `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE`, если не `--local-auth` | не нужен: вход обрабатывает Access, а не клиент MailExpert |
 | `both` | оба хоста разом: `<CF_HOST>` — основной (`APP_URL`), `<DIRECT_HOST>` — дополнительный (`APP_ALT_URLS`) | все перечисленные выше | `https://<DIRECT_HOST>/oauth/login/google/callback` |
+
+Где взять каждый из этих секретов в Cloudflare — [cloudflare.md](cloudflare.md). В режимах `cf` и
+`both` `install.sh` после запуска туннеля проверяет, что `https://<CF_HOST>` закрыт Access команды
+из `CF_ACCESS_ISSUER`; несовпадение — предупреждение со следующим шагом, не остановка установки, а
+`status.sh` повторяет проверку (поле `cf_access`, [cloudflare.md, раздел 7](cloudflare.md)).
 
 **Адрес клиента и лимит входа.** Во всех трёх режимах перед бэкендом два прокси: край (Caddy
 или `cloudflared`) и nginx контейнера `frontend`, и оба дописывают адрес в `X-Forwarded-For`.
@@ -220,6 +230,7 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `tenant` | `status`, `test`, `antispam` |
 | `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
+| `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]` — синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
 
 Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
 (`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`
@@ -266,6 +277,8 @@ sudo $cli mailbox create <LOCAL>@<DOMAIN> --sender-name "<NAME>" --second-sender
 sudo $cli mailbox delete <LOCAL>@<DOMAIN> --reason "<REASON>"          # спросит адрес
 sudo $cli jobs list --status problems --json | jq '.jobs[].id'
 sudo $cli quarantine release --wait --as <ADMIN_EMAIL>
+sudo $cli access token < /root/access-sync-token.txt                     # токен — только stdin
+sudo $cli access sync
 ```
 
 ## 5. Обновление

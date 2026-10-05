@@ -91,6 +91,17 @@ Tell them which secrets they will have to prepare themselves, by name only (this
 
 You never create these, never see their values and never ask for them in chat.
 
+The Cloudflare side comes **before** `install.sh`: point the human to
+`docs/operations/cloudflare.md` (Russian; dashboard steps and the equivalent API calls) and name the
+sections their mode needs: `cf`/`both` - section 1 (Zero Trust, Google login method), 2 (remotely
+managed tunnel, route `<CF_HOST>` -> `http://127.0.0.1:<APP_HTTP_PORT>`, `TUNNEL_TOKEN`), 3 (Access
+application, `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE`); `direct`/`both` - section 4 (`DNS_API_TOKEN`
+with Zone DNS Edit + Zone Read on one zone, grey-cloud A record for `<DIRECT_HOST>`). Section 0 is
+the token hand-off (broad temporary token -> least-privilege tokens -> revoke). Never call the
+Cloudflare API yourself and never take a Cloudflare token into chat. `configure.sh` rejects a
+malformed `CF_ACCESS_AUDIENCE` (not 64 lowercase hex) or `TUNNEL_TOKEN` (not base64 of a JSON with
+`a`, `t`, `s`) without printing the value: relay its message.
+
 ### F2. Discovery (read-only, no confirmation needed)
 
 ```bash
@@ -172,10 +183,18 @@ in their own SSH session and store it in a password manager. Never run it yourse
 
 Phase 4 post-checks (`status.sh`: `ready`, `running` = the version, `problems` empty;
 `healthcheck.sh` exit 0, or exit 1 with only `backup: not configured` when backups were left for
-later; `/api/version`). Then the human signs in at `https://<APP_HOST>` with an admin email. Report
+later; `/api/version`). With `cf`/`both`, `install.sh` logs `edge: ...` after checking that
+`https://<CF_HOST>/api/health` redirects to Cloudflare Access of the team in `CF_ACCESS_ISSUER`;
+`status.sh --json` repeats it as `cf_access` (`state`: `ok`, `dns_missing`, `unreachable`,
+`tunnel_down`, `origin_error`, `access_missing`, `redirect_elsewhere`, `team_mismatch`). Anything but
+`ok` is a warning that names the next step (it never fails the install: DNS can lag); relay it and
+the matching row of `docs/operations/cloudflare.md`, section 9. `ok` does not prove the tunnel route
+reaches the panel (Access answers first): only the human's sign-in does. Then the human signs in at `https://<APP_HOST>` with an admin email. Report
 the version, the commands with exit codes, the warnings `install.sh` printed (`backups are off`,
-ufw), and what is left to the human: recovery key, Google apps for Gmail mailboxes
-(`docs/operations/google-oauth.md`), the mail node.
+ufw, `cloudflare access`), and what is left to the human: recovery key, Google apps for Gmail
+mailboxes (`docs/operations/google-oauth.md`), the mail node, and with `cf`/`both` the optional
+user sync into the Access policy (`docs/operations/cloudflare.md`, section 8: the token goes in
+through `mailexpert-cli.sh access token < file`, stdin only, run by the human).
 
 Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sections 2-6е (as in quickstart.md, section 8). mailcow's
 `generate_config.sh` is interactive: the human runs it. The node's MailExpert scripts are cloned
@@ -195,6 +214,8 @@ JSON at all, the script itself failed: that is not a status, stop and report it.
   rollback in the plan.
 - `target.images.<name>`: `ok`, `missing` (the registry says the tag does not exist) or `unknown`
   (the registry could not be asked: network, credentials, rate limit).
+- `cf_access` (tunnel installs only, else `null`): `{state, team}`; a state other than `ok` is in
+  `warnings` with its next step, never in `problems`.
 
 ## Phase 1 - Discovery (read-only, no confirmation needed)
 

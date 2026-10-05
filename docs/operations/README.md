@@ -22,6 +22,7 @@
 |---|---|
 | [quickstart.md](quickstart.md) | быстрый старт: панель на чистом VPS, почтовый узел по желанию, установка агентом |
 | [deployment.md](deployment.md) | установка панели, режимы входа, CLI, обновление, откат, переезд панели |
+| [cloudflare.md](cloudflare.md) | Cloudflare до установки: Zero Trust, туннель, приложение Access, токены DNS и синхронизации, неполадки |
 | [ports.md](ports.md) | порты всех модулей: входящие, исходящие, Docker/loopback, production и стенды |
 | [cli.md](cli.md) | справочник командной строки панели `mailexpert` |
 | [../user-guide/README.md](../user-guide/README.md) | руководство по экранам панели для пользователей и администраторов |
@@ -58,6 +59,9 @@
 
 Панель — [deployment.md, раздел 1](deployment.md): токены Cloudflare (`DNS_API_TOKEN`,
 `TUNNEL_TOKEN`), клиент Google для входа или приложение Cloudflare Access, адреса администраторов.
+Всё, что делается в Cloudflare (Zero Trust, туннель и маршрут, приложение Access, токены с
+минимальными правами), — по шагам, в панели и через API, в [cloudflare.md](cloudflare.md); это
+делается **до** `install.sh`.
 
 Узел — [mail-node.md, раздел 2](mail-node.md): провайдер с открытым портом 25 и своим PTR,
 статический IPv4, NVMe.
@@ -70,7 +74,9 @@
 
 ## 3. Установить панель
 
-[quickstart.md](quickstart.md) или [deployment.md, разделы 2-3](deployment.md): `git clone --branch
+Сначала Cloudflare — [cloudflare.md](cloudflare.md) (для `cf`/`both` — туннель и Access, для
+`direct`/`both` — токен DNS и A-запись). Затем [quickstart.md](quickstart.md) или
+[deployment.md, разделы 2-3](deployment.md): `git clone --branch
 latest`, `install.sh --version sha-<12> --signin ...` (код 3 и список ключей), секреты через
 `configure.sh`, повторный `install.sh`. Сохранить ключ восстановления restic.
 
@@ -333,6 +339,7 @@ mailexpert-updater.path`. За один запуск исполнитель бе
 | `containers: tenant-worker ...` | `docker compose -p <project> logs tenant-worker` | нет PFX или файла пароля; [mail-node.md, раздел 6е](mail-node.md) |
 | `https://<DIRECT_HOST>` не отвечает | `docker compose -p edge logs caddy` | токен DNS, A-запись, `ufw` |
 | `<CF_HOST>` — ошибка туннеля | `docker compose -p edge logs cloudflared` | `TUNNEL_TOKEN`, public hostname в Zero Trust |
+| `install.sh` / `status.sh`: «cloudflare access: ...» | `status.sh --json`, поле `cf_access` | следующий шаг назван в строке; таблица — [cloudflare.md, раздел 9](cloudflare.md) |
 | ящики узла красные после обновления узла | «Почтовый узел» в панели, `docker compose logs dovecot-mailcow` на узле | Dovecot перезапускался — подождать переподключения; правила файрвола: `setup.sh --dry-run` |
 | пинг EOP-диапазонов `/fail` | тело пинга в Healthchecks | [mail-node.md, раздел 4](mail-node.md) |
 

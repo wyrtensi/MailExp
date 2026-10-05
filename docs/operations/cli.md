@@ -3,15 +3,18 @@
 Командная строка `mailexpert` — те же действия администратора, что и на экранах панели, для случаев,
 когда экран неудобен: массовые действия, скрипты, работа по SSH. CLI не имеет своей бизнес-логики:
 команды вызывают те же сервисы backend, что и HTTP-маршруты, с теми же проверками, кодами отказов и
-записями журнала. Мимо панели (напрямую в mailcow или тенант) CLI ничего не делает, а работу для
-тенанта только ставит в очередь заданий: выполняет её воркер backend.
+записями журнала. Мимо панели (напрямую в mailcow, тенант или Cloudflare) CLI ничего не делает, а
+работу для тенанта и прогон синхронизации с Cloudflare Access только ставит в очередь заданий:
+выполняет её воркер backend.
 
 Это полный справочник. Устройство и причины решений — в [panel-cli.md](../architecture/panel-cli.md);
 краткая сводка для владельца и остальные операции — в
 [deployment.md, «CLI панели»](deployment.md#cli-панели).
 
 Плейсхолдеры: `<PREFIX>` — каталог установки панели (по умолчанию `/opt/mailexpert`), `<DOMAIN>` —
-домен почтового узла, `<LOCAL>@<DOMAIN>` — адрес ящика, `<ADMIN_EMAIL>` — адрес администратора панели.
+домен почтового узла, `<LOCAL>@<DOMAIN>` — адрес ящика, `<ADMIN_EMAIL>` — адрес администратора панели,
+`<ACCOUNT_ID>`, `<APP_ID>`, `<POLICY_ID>` — ID аккаунта, приложения и политики Cloudflare Access
+([cloudflare.md](cloudflare.md)).
 
 ## 1. Как запускать
 
@@ -38,6 +41,8 @@ src/cli/mailexpert.js ...`, передавая все остальные арг�
   `--json`. Иначе `docker compose exec -T`: с терминалом stderr слился бы со stdout и сломал JSON. Значит,
   в конвейере, скрипте и с `--json` CLI не может задать вопрос: действие, которое просит подтверждения,
   требует `--yes` (удаление ящика — `--confirm-address`).
+- stdin обёртки доходит до CLI целиком: `access token < файл` читает токен оттуда. Свои проверки
+  перед запуском CLI обёртка делает без stdin.
 
 Параметры CLI (`--json`, `--yes`, `--as`, `--wait`) идут после команды, а не перед группой: перед ней
 обёртка понимает только `--prefix`, `--` и `--help`.
@@ -141,7 +146,9 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 CLI, имеют исполнителя `cli` (или администратора из `--as`) и `details.via = "cli"`. С `--as` адрес
 берётся из таблицы пользователей, так что `cli` остаётся только в `details.via`. Задания, поставленные CLI,
 несут автора `--as` (или никого) и `via: cli`, поэтому и записи, которые пишет само задание, подписаны так
-же. Новых действий журнала CLI не добавляет.
+же. Действия журнала у CLI те же, что у экранов; для синхронизации с Access экран и CLI пишут
+`access.config_changed` (изменение настроек или токена, без значения токена) и `access.sync_requested`
+(прогон по запросу администратора).
 
 ## 3. Группы и команды
 
@@ -246,6 +253,42 @@ CLI, имеют исполнителя `cli` (или администратор�
 | `jobs show <ID>` | Одно задание: вид, состояние, время создания и обновления, код и текст ошибки. Неизвестный ID — `tenant_job_not_found`. |
 
 Журнал эти команды не пишут (чтение).
+
+### 3.6. `access`: синхронизация пользователей с Cloudflare Access
+
+Та же синхронизация, что раздел «Синхронизация с Access» в настройках администратора: MailExpert
+держит Allow-политику приложения Access в соответствии со своими одобренными пользователями. Как
+создать приложение, политику и токен — [cloudflare.md](cloudflare.md), разделы 3, 5 и 8. Настройки
+CLI сохраняет тем же действием, что и экран (`services/accessSync/actions.js`); сам прогон CLI не
+выполняет, а ставит задание `access_sync`, которое выполняет backend: только он может разлогинить
+отключённых пользователей и не пересечься с ежечасным прогоном.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `access status` | Настройки (включена ли, ID аккаунта, приложения и политики, задан ли токен — сам токен никогда), режим входа `google`, предел отключений за прогон (`ACCESS_SYNC_MAX_DISABLES`), последний прогон: итог, источник, время, сколько добавлено, удалено, отключено. | нет |
+| `access config [--account ID] [--app ID] [--policy ID] [--enable \| --disable]` | Меняет только названные поля, остальные остаются. ID аккаунта — 32 шестнадцатеричных символа, ID приложения и политики — UUID (`invalid_id`); включить можно только с тремя ID и токеном (`incomplete`). Смена аккаунта, приложения или политики забывает, что синхронизация писала в старую. Если синхронизация после сохранения включена, ставится прогон (в ответе — ID задания). Без параметров или с `--enable --disable` — код 2. | `access.config_changed`: изменённые поля, ID, включена ли |
+| `access token` | Читает API-токен Cloudflare **только со stdin** (файл или конвейер; в терминале — вставить и нажать Ctrl-D), не из аргументов, и нигде его не печатает. Пробелы по краям и перевод строки отбрасываются; токен — одна строка из 20-512 символов без пробелов, иначе `token_invalid`. Хранится зашифрованным. Остальные настройки не меняются; если синхронизация включена, ставится прогон. Права токена — «Access: Apps and Policies» Edit на один аккаунт. | `access.config_changed` с `tokenChanged: true` (без значения) |
+| `access sync [--timeout SEC]` | Ставит прогон и ждёт его итога (по умолчанию до 120 секунд). | `access.sync_requested`; сам прогон пишет `user.disabled` и `access.sync_aborted` от «Cloudflare Access», как всегда |
+
+Итог `access sync` и код выхода:
+
+| Итог | Код | Что значит |
+|---|---|---|
+| `updated` | 0 | политика обновлена: добавлено, удалено, отключено — в ответе |
+| `unchanged` | 0 | политика уже совпадала с активными пользователями |
+| `empty` | 0 | в политике не осталось бы ни одного адреса, она не тронута |
+| `not_configured` | 1 | синхронизация выключена или настроена не полностью |
+| `not_google_mode` | 1 | панель работает не в `AUTH_MODE=google` |
+| `aborted` | 1 | прогон отключил бы больше пользователей, чем позволяет `ACCESS_SYNC_MAX_DISABLES`; ничего не изменено, кандидаты — в журнале (`access.sync_aborted`) |
+| `failed` | 3 | код ошибки — код прогона (`policy_not_allow`, `policy_not_attached`, `token_unreadable`, `internal_error`) или `cloudflare_error` с текстом вида `Cloudflare getPolicy failed (403): error 10000` |
+| — | 3 | `wait_timeout`: backend не выполнил задание вовремя (он остановлен?); задание остаётся в очереди |
+
+```bash
+M=<PREFIX>/app/scripts/deploy/mailexpert-cli.sh
+sudo $M access token < /root/access-sync-token.txt      # токен — только stdin
+sudo $M access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID> --enable
+sudo $M access sync --json | jq '.job.result'
+```
 
 ## 4. Коды выхода
 
@@ -352,6 +395,11 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 `jobs show` — `{ "job": {...} }`. `tenant status` — состояние тенанта (`driver`, `configured`, `state`,
 `connectorDrift`, `jobs`) плюс `worker`: `{ "reachable", "at", "code", "source" }`. `quarantine list` —
 `{ "held": {...}, "messages": [...] }` (сводка и сами сообщения), `quarantine pause`/`resume` — `{ "enabled": ..., "changedAt": ... }`.
+`access status` — то же, что `GET /api/admin/access-sync`: `{ "config": { "enabled", "accountId", "appId",
+"policyId", "apiTokenSet" }, "lastRun", "maxDisables", "googleMode" }`; `access config` и `access token` —
+то же плюс `"job": { "id", "status" }` (или `null`, если прогон не ставился); `access sync` —
+`{ "job": { "id", "status", "result", "errorCode", "error" } }`, где `result` — итог прогона
+(`outcome`, `added`, `removed`, `disabled`, `wouldDisable`, `error`, `trigger`, `startedAt`, `finishedAt`).
 
 ## 6. Коды ошибок, которые встретятся
 
@@ -450,6 +498,19 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 Код ошибки задания при `--wait` (`errorCode`) берётся из самого задания и может быть кодом тенанта или
 воркера, например `tenant_not_configured`, `tenant_throttled`.
 
+### Синхронизация с Access (`ACCESS_SYNC_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `invalid_id` | 400 | ID аккаунта — 32 шестнадцатеричных символа, ID приложения и политики — UUID. Текст ответа API: «Invalid Cloudflare Access settings». |
+| `incomplete` | 400 | Чтобы включить синхронизацию, нужны три ID и токен. |
+| `invalid_field` | 400 | Нет флага «включена» (только API). |
+| `token_invalid` | 400 | Токен — одна строка из 20-512 символов без пробелов. |
+| `job_not_found` | 404 | Задание прогона пропало из очереди. |
+
+Итоги прогона (`not_configured`, `aborted`, `policy_not_allow` и другие) и их коды выхода — в
+разделе 3.6.
+
 ## 7. Практические примеры
 
 ```bash
@@ -489,6 +550,12 @@ sudo $cli quarantine pause --yes
 # Что пошло не так в очереди
 sudo $cli jobs list --status problems
 sudo $cli jobs show <ID>
+
+# Синхронизация с Cloudflare Access: токен со stdin, настройка, прогон сейчас
+sudo $cli access token < /root/access-sync-token.txt && shred -u /root/access-sync-token.txt
+sudo $cli access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID> --enable --as <ADMIN_EMAIL>
+sudo $cli access sync
+sudo $cli access status
 
 # Скрипты: JSON и код выхода
 sudo $cli jobs list --status problems --json | jq -r '.jobs[].id'
