@@ -147,6 +147,65 @@ describe('reopening a draft in plain-text mode', () => {
   });
 });
 
+describe('editing while a draft save is pending', () => {
+  for (const trigger of ['manual', 'autosave']) {
+    test(`${trigger} save keeps later editor changes dirty`, async () => {
+      const saveDraft = api.saveDraft;
+      let finishSave;
+      api.saveDraft = async (payload) => {
+        saved.push(payload);
+        if (saved.length === 1) return new Promise(resolve => { finishSave = resolve; });
+        return { uid: 9, folder: 'Drafts' };
+      };
+      const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+      try {
+        const editor = document.querySelector('.ProseMirror').editor;
+        await React.act(async () => { editor.commands.insertContent(' First edit.'); });
+        if (trigger === 'manual') {
+          const saveButton = [...document.querySelectorAll('button')]
+            .find(button => button.textContent.trim() === 'compose.saveDraft');
+          assert.ok(saveButton);
+          await React.act(async () => { saveButton.click(); });
+        } else {
+          await hideTab();
+        }
+        assert.equal(saved.length, 1);
+        const submittedBody = saved[0].body;
+        await React.act(async () => { editor.commands.insertContent(' Later edit.'); });
+        const editedBody = editor.getHTML();
+        assert.notEqual(editedBody, submittedBody);
+        await React.act(async () => { finishSave({ uid: 8, folder: 'Drafts' }); });
+
+        const unload = new window.Event('beforeunload', { cancelable: true });
+        window.dispatchEvent(unload);
+        assert.equal(unload.defaultPrevented, true, 'the later edit still needs refresh protection');
+        await hideTab();
+        assert.equal(saved.length, 2, 'the later edit is autosaved');
+        assert.equal(saved[1].body, editedBody);
+        assert.equal(saved[1].existingUid, 8, 'the second save replaces the first saved copy');
+      } finally {
+        api.saveDraft = saveDraft;
+        await close();
+      }
+    });
+  }
+
+  test('saving an empty rich-text body leaves an unchanged editor clean', async () => {
+    const close = await openDraft({ plaintextEmail: false, body: '<p>Original</p>' });
+    try {
+      const editor = document.querySelector('.ProseMirror').editor;
+      await React.act(async () => { editor.commands.clearContent(); });
+      await hideTab();
+      assert.equal(saved.length, 1);
+      assert.equal(saved[0].body, '');
+      await hideTab();
+      assert.equal(saved.length, 1, 'the empty editor is not saved repeatedly');
+    } finally {
+      await close();
+    }
+  });
+});
+
 // Minimizing used to be local React state inside ComposeModal, invisible to the store — so
 // clicking Compose again while minimized just reset composeData to a blank message; the mounted
 // instance never noticed. `composeMinimized` now lives in the store (see store/compose.test.js
