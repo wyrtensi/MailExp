@@ -1321,6 +1321,17 @@ router.post('/folders/rename', async (req, res) => {
       WHERE account_id = $1
         AND (folder = $2 OR substr(folder, 1, length($3)) = $3)`,
       [accountId, oldPath, childPrefix, newPath]);
+    // Pending snoozes follow both their parked folder and their wakeup destination.
+    await query(`
+      UPDATE snoozed_messages SET
+        original_folder = CASE WHEN original_folder = $2 OR substr(original_folder, 1, length($3)) = $3
+                               THEN $4 || substr(original_folder, length($2) + 1) ELSE original_folder END,
+        snoozed_folder = CASE WHEN snoozed_folder = $2 OR substr(snoozed_folder, 1, length($3)) = $3
+                              THEN $4 || substr(snoozed_folder, length($2) + 1) ELSE snoozed_folder END
+      WHERE account_id = $1
+        AND (original_folder = $2 OR substr(original_folder, 1, length($3)) = $3
+             OR snoozed_folder = $2 OR substr(snoozed_folder, 1, length($3)) = $3)`,
+      [accountId, oldPath, childPrefix, newPath]);
     // Queued moves into or out of the renamed tree follow it; their guards are keyed by path.
     await query(`
       UPDATE message_moves SET
