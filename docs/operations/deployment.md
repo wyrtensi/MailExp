@@ -32,12 +32,16 @@ Google-приложений для ящиков Gmail — отдельно, в [
 
 ## 2. Установка
 
-Репозиторий публичный, образы GHCR публичные — токен реестра не нужен.
+Репозиторий публичный, образы GHCR публичные — токен реестра не нужен. Кратчайший путь с проверками
+после каждого шага — [quickstart.md](quickstart.md). Клонировать от root: `install.sh` работает с
+`/opt/mailexpert/app` от root. `--version` принимает только `sha-<12>`; для боевой версии клонируйте
+тег `latest` и возьмите его коммит.
 
 ```bash
-git clone https://github.com/wyrtensi/MailExpert.git /opt/mailexpert/app
+sudo git clone --branch latest https://github.com/wyrtensi/MailExpert.git /opt/mailexpert/app
+V=sha-$(sudo git -C /opt/mailexpert/app rev-parse HEAD | cut -c1-12)
 sudo /opt/mailexpert/app/scripts/deploy/install.sh \
-  --version sha-<12 символов коммита> \
+  --version "$V" \
   --signin cf|direct|both \
   --cf-host <CF_HOST> --direct-host <DIRECT_HOST> \
   --admin-email <email>[,<email>]
@@ -95,9 +99,10 @@ sudo /opt/mailexpert/app/scripts/deploy/install.sh --version sha-<12 симво�
 sudo /opt/mailexpert/app/scripts/deploy/backup.sh --show-recovery-key
 ```
 
-**Первый вход и администратор.** В режиме `google` учётные записи из `--admin-email` становятся
-администраторами при первом входе на `https://<APP_HOST>`. В режиме `--local-auth` (только для
-тестовых стендов) администратором становится первый зарегистрированный пользователь.
+**Первый вход и администратор.** Без `--local-auth` (вход через Google или Cloudflare Access,
+`AUTH_MODE=google` в `.env`) учётные записи из `--admin-email` становятся администраторами при первом
+входе на `https://<APP_HOST>`. С `--local-auth` (только для тестовых стендов) администратором
+становится первый зарегистрированный пользователь.
 
 ## 3. Режимы входа
 
@@ -169,8 +174,8 @@ MailExpert подключает Gmail-ящики пользователей, н�
 Для случаев, когда экран неудобен (массовые действия, скрипты, работа по SSH), у панели есть
 командная строка `mailexpert`. Это та же панель: команды вызывают те же сервисы backend, что и
 HTTP-маршруты экранов, с теми же проверками, кодами отказов и записями журнала. В обход панели
-(напрямую в mailcow или тенант) CLI ничего не делает. Устройство — в
-[panel-cli.md](../architecture/panel-cli.md).
+(напрямую в mailcow или тенант) CLI ничего не делает. Полный справочник команд, параметров, кодов
+и ответов `--json` — [cli.md](cli.md); устройство — [panel-cli.md](../architecture/panel-cli.md).
 
 Запуск с хоста — обёртка, которая находит установленную панель и выполняет CLI в контейнере
 `backend`:
@@ -203,8 +208,9 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 
 Общие параметры:
 
-- `--json` — ответ в виде JSON, в тех же формах, что отвечает API панели; ошибка —
-  `{ "error": "...", "code": "..." }` на stdout. С `--json` обёртка не даёт контейнеру терминал
+- `--json` — ответ в виде JSON, в тех же формах, что отвечает API панели; отказ —
+  `{ "error": "...", "code": "..." }` на stdout (ошибки самой командной строки, код 2, — текстом в
+  stderr). С `--json` обёртка не даёт контейнеру терминал
   (иначе stderr смешался бы со stdout), поэтому подтверждение тогда — только `--yes`.
 - `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
   `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `quarantine pause`. Без
@@ -212,8 +218,8 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,
   причина (`--reason`) обязательна.
-- `--as <ADMIN_EMAIL>` — записать действие в журнал от имени администратора (он должен быть
-  включённым администратором панели). Без него в журнале исполнитель `cli`; в обоих случаях
+- `--as <ADMIN_EMAIL>` — записать действие в журнал от имени администратора (адрес или имя
+  пользователя ровно одного включённого администратора панели, иначе отказ `admin_not_found`). Без него в журнале исполнитель `cli`; в обоих случаях
   `details.via = "cli"`. Так же подписаны записи заданий, которые CLI поставил (проверка
   соединения, исправление антиспам-политики). `--help` команды говорит, что она пишет в журнал.
 - `--wait [--timeout <SEC>]` у команд, которые ставят задание тенанта (`domain sync`,

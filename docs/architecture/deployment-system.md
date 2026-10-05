@@ -26,6 +26,7 @@ IPv4 панели, `<PREFIX>` — каталог установки (по умо
 | edge: caddy | TLS для `<DIRECT_HOST>` (DNS-01 через Cloudflare) | `ghcr.io/wyrtensi/mailexpert-edge:sha-<12>`, **закреплён по digest** в `<PREFIX>/edge/.env` (`EDGE_IMAGE`) | сертификаты в томе `caddy_data` |
 | edge: cloudflared | исходящий туннель к `<CF_HOST>` | `cloudflare/cloudflared:<версия>` из `deploy/edge/compose.yml` | нет (токен в `edge/.env`) |
 | таймеры панели | `mailexpert-backup.timer` (restic в S3), `mailexpert-health.timer` (Healthchecks) | systemd на хосте панели, скрипты из `<PREFIX>/app/scripts/deploy` | `<PREFIX>/state/` |
+| исполнитель обновлений | `mailexpert-updater.path` следит за спулом запросов, `mailexpert-updater.service` (root) запускает `updater.sh` — обновление кнопкой из панели (раздел 9) | systemd на хосте панели, юниты из `deploy/systemd/`, ставит `install.sh` без `--no-system` | `<PREFIX>/state/update-spool/`, `<PREFIX>/state/updater/` |
 | почтовый узел | mailcow и его скрипты хоста: `setup.sh`, таймер диапазонов EOP и файрвола, ночной бэкап узла | отдельный сервер; mailcow в `/opt/mailcow-dockerized`, копия репозитория MailExpert, копии скриптов в `/opt/mailexpert-node` | почта (vmail), mysql mailcow, `/etc/mailexpert-node/node.env` |
 
 Внешние зависимости: Cloudflare (DNS, туннель, Access), Google (вход и OAuth-приложения для Gmail),
@@ -202,7 +203,7 @@ CI после зелёной сборки (backend, frontend, edge, tenant-worke
 письменный план → подтверждение → скрипты → проверка), с явными точками подтверждения перед
 необратимыми шагами.
 
-## 9. Обновление из панели (PR B)
+## 9. Обновление из панели
 
 Администратор видит в панели, что владелец продвинул новую сборку, и обновляет кнопкой; хост делает
 то же, что `update.sh`, с теми же гарантиями. Контейнер панели при этом **не получает сокет Docker**
@@ -373,7 +374,7 @@ CI после зелёной сборки (backend, frontend, edge, tenant-worke
   так): `update.sh` скачивает его до бэкапа (сбой — код 3, ничего не изменено), сохраняет прежний
   `EDGE_IMAGE` в `state/edge-image.previous`, `install.sh` закрепляет новый по digest; откат его
   возвращает.
-- **Правило цели кнопки** (уточнено при ревью PR B): только ровно продвинутый `latest`, на `main`,
+- **Правило цели кнопки** (уточнено при ревью обновления из панели, #151): только ровно продвинутый `latest`, на `main`,
   потомок текущей версии и не версия, с которой откатились. Любой другой коммит `main` — только
   `update.sh` по SSH; продвинутая сборка старее текущей кнопкой не ставится — это откат, он только по
   SSH.
