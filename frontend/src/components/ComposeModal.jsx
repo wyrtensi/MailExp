@@ -8,6 +8,7 @@ import { api } from '../utils/api.js';
 import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
+import { quotePayload } from '../utils/composeQuote.js';
 import { QUOTE_HEADER_ATTR, identityName, quoteHeaderHtml, quoteHeaderPlain, senderLanguage, switchQuoteText } from '../utils/quoteHeader.js';
 import { useEditor, EditorContent, useEditorState, NodeViewWrapper, ReactNodeViewRenderer } from '@tiptap/react';
 import { Extension } from '@tiptap/core';
@@ -877,10 +878,7 @@ export default function ComposeModal() {
         subject,
         body: bodyToSend,
         bodyIsHtml: !plaintextEmail,
-        ...(quotedBody ? { quotedBody } : {}),
-        ...(!plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
-          ? { quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml }
-          : {}),
+        ...quotePayload({ plaintextEmail, quotedBody, quotedBodyHtml, liveQuoteHtml: quotedHtmlRef.current?.innerHTML ?? null }),
         ...(signatureContentRef.current || fromSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
@@ -998,10 +996,7 @@ export default function ComposeModal() {
         subject,
         body: bodyToSend,
         bodyIsHtml: !plaintextEmail,
-        ...(quotedBody ? { quotedBody } : {}),
-        ...(!plaintextEmail && (quotedBodyHtml != null || quotedHtmlRef.current)
-          ? { quotedBodyHtml: quotedHtmlRef.current ? quotedHtmlRef.current.innerHTML : quotedBodyHtml }
-          : {}),
+        ...quotePayload({ plaintextEmail, quotedBody, quotedBodyHtml, liveQuoteHtml: quotedHtmlRef.current?.innerHTML ?? null }),
         ...(signatureContentRef.current || fromSignature != null
           ? { editedSignature: plaintextEmail ? plainSig : signatureContentRef.current }
           : {}),
