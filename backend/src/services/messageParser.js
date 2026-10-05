@@ -45,6 +45,13 @@ export function decodeNamedEntity(_, name) {
   return v !== undefined ? v : ' ';
 }
 
+function decodeNumericEntity(entity, digits, radix) {
+  const codePoint = parseInt(digits, radix);
+  return Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF
+    ? String.fromCodePoint(codePoint)
+    : entity;
+}
+
 // Detect a text/plain part that is actually a raw HTML document — some senders
 // put the full HTML body in the text/plain alternative. A document-level opener,
 // attribute-bearing tag, or style/script block is definitive; otherwise require
@@ -127,8 +134,8 @@ export function snippetFromBody(text, html) {
       .replace(/(?<![\w@.])www\.[^\s<>()[\]]+/gi, '')
       // Entity decoding must precede the bracket collapse: unknown entities decode
       // to a space, which can hollow out a wrapper (e.g. "(&nbsp;)" -> "( )").
-      .replace(/&#x([0-9A-Fa-f]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-      .replace(/&#([0-9]+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+      .replace(/&#x([0-9A-Fa-f]+);/g, (entity, h) => decodeNumericEntity(entity, h, 16))
+      .replace(/&#([0-9]+);/g, (entity, d) => decodeNumericEntity(entity, d, 10))
       .replace(/&([a-z][a-z0-9]*);/gi, decodeNamedEntity)
       .replace(INVISIBLE_CHARS_RE, '')
       // Collapse wrappers left empty by the URL/link stripping above (and any
