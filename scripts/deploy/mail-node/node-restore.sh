@@ -14,7 +14,8 @@
 #   1. restores the snapshot's /backup (mailcow's dump and the node's files) into a temporary
 #      directory under /var/backups/mailexpert-node;
 #   2. puts mailcow.conf (with the .env link mailcow expects), data/conf, data/assets/ssl and
-#      docker-compose.override.yml in place, and node.env when this server has none;
+#      docker-compose.override.yml in place (an override the snapshot does not have is set aside
+#      as docker-compose.override.yml.pre-restore), and node.env when this server has none;
 #   3. pulls mailcow's images and starts it, which creates its volumes;
 #   4. restores vmail straight from the repository into the vmail volume, Dovecot stopped: only
 #      files missing or changed are downloaded, and mail no longer in the snapshot is removed;
@@ -139,7 +140,14 @@ place_files() {
     mkdir -p "$MAILCOW_DIR/data/assets/ssl"
     cp -a "$src/ssl/." "$MAILCOW_DIR/data/assets/ssl/"
   fi
-  if [ -f "$src/docker-compose.override.yml" ]; then cp -p "$src/docker-compose.override.yml" "$MAILCOW_DIR/"; fi
+  # The override is the snapshot's or none: one left by a rehearsal of an older snapshot (or put
+  # here before the restore) would start mailcow with settings the restored node no longer has.
+  if [ -f "$src/docker-compose.override.yml" ]; then
+    cp -p "$src/docker-compose.override.yml" "$MAILCOW_DIR/"
+  elif [ -f "$MAILCOW_DIR/docker-compose.override.yml" ]; then
+    mv -f "$MAILCOW_DIR/docker-compose.override.yml" "$MAILCOW_DIR/docker-compose.override.yml.pre-restore"
+    log "docker-compose.override.yml: the snapshot has none; the one here is set aside as docker-compose.override.yml.pre-restore"
+  fi
   if [ -f "$NODE_CONF" ]; then
     log "$NODE_CONF exists here and stays; the backup's copy is not used"
   elif [ -f "$src/node.env" ]; then
