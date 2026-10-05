@@ -196,7 +196,7 @@ export const useStore = create((set, get) => ({
         // person to sign in on this tab must not inherit the previous user's mail or draft.
         ...privateMailState(),
         composing: false, composeData: null, messageWindows: [], lastViewedMessageId: null,
-        queuedCompose: null, showScheduled: false, scheduledSummary: { count: 0, failed: 0 },
+        queuedComposes: [], showScheduled: false, scheduledSummary: { count: 0, failed: 0 },
         unreadCounts: { total: 0, byAccount: {}, snapshots: {}, complete: false },
         senderFaviconsLoaded: false,
         senderFavicons: false,
@@ -638,14 +638,20 @@ export const useStore = create((set, get) => ({
   clearAccountSettingsRequest: () => set({ accountSettingsRequested: null }),
 
   // Letters waiting to be sent (undo window, send later, kept after a failure): the Scheduled
-  // dialog, the sidebar's count of them (failed: this user's letters that were not sent), and a
-  // letter given back by an undo or edit while another composer was open, opened once it closes.
+  // dialog, the sidebar's count of them (failed: this user's letters that were not sent), and
+  // letters given back by undo or edit while another composer was open, opened one at a time.
   showScheduled: false,
   setShowScheduled: (v) => set({ showScheduled: v }),
   scheduledSummary: { count: 0, failed: 0 },
   setScheduledSummary: (summary) => set({ scheduledSummary: summary }),
-  queuedCompose: null,
-  setQueuedCompose: (data) => set({ queuedCompose: data }),
+  queuedComposes: [],
+  enqueueCompose: (data) => set(state => ({ queuedComposes: [...state.queuedComposes, data] })),
+  openNextQueuedCompose: () => set(state => {
+    // Take and open together: a stale effect must never replace a composer opened since render.
+    if (state.composing || !state.queuedComposes.length) return state;
+    const [composeData, ...queuedComposes] = state.queuedComposes;
+    return { queuedComposes, composing: true, composeData, composeMinimized: false };
+  }),
 
   // Contacts view
   showContacts: false,
