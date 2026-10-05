@@ -131,6 +131,17 @@ start_server() {
   done
   dk exec "$NAME" docker info >/dev/null 2>&1 || die "the inner docker daemon did not start"
   ensure_tools
+  check_leftover_panel
+}
+
+# check_leftover_panel: after `down` without --purge the inner Docker's volumes survive in
+# $VOLUME, the panel's database among them, but its keys (/opt/mailexpert/.env) were in the
+# container's own file system. install.sh would stop at that volume (guard_existing_database);
+# this says why before mailcow takes ten minutes.
+check_leftover_panel() {
+  if inner "docker volume inspect ${PROJECT}_postgres_data >/dev/null 2>&1" && ! inner "[ -f $PREFIX/.env ]"; then
+    die "$VOLUME holds the database of an earlier panel (volume ${PROJECT}_postgres_data) without its keys, which were in the removed container: start from scratch with: $0 down --purge && $0 up (all stand data is lost); next time stop the stand with docker stop $NAME instead of down" 2
+  fi
 }
 
 start_mailcow() {
@@ -696,6 +707,9 @@ main() {
       dk rm -f "$NAME" >/dev/null 2>&1 || true
       if [ "$purge" = 1 ]; then dk volume rm "$VOLUME" >/dev/null 2>&1 || true; fi
       log "removed $NAME$([ "$purge" = 1 ] && echo " and $VOLUME")"
+      if [ "$purge" = 0 ]; then
+        log "$VOLUME stays with the panel's database, but its keys were in the container: up refuses to start next to it; for a fresh stand: $0 down --purge"
+      fi
       ;;
     *) die "usage: $0 up|panel|panel-reinstall --yes|updater|status|down [--version sha-<12>] [--purge] | eop ... | dns ..." 2 ;;
   esac

@@ -93,7 +93,12 @@ scripts/deploy/test/stage.sh status
 scripts/deploy/test/stage.sh down --purge
 ```
 
-`down` удаляет контейнер стенда, `--purge` вместе с его данными.
+`down` удаляет контейнер стенда, `--purge` вместе с его данными. Без `--purge` том `me-stage-docker`
+с базой панели остаётся, а её ключи (`/opt/mailexpert/.env`) жили в файловой системе контейнера и
+пропадают вместе с ним. Поэтому `up` после такого `down` сразу останавливается с объяснением, ещё до
+mailcow: стенд заново — `down --purge` и `up` (все данные стенда теряются). Чтобы сохранить стенд,
+останавливайте его `docker stop me-stage` (и `docker start me-stage`, затем `stage.sh updater`),
+а не `down`.
 
 ## Имитация EOP (fake-EOP)
 
