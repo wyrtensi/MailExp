@@ -452,15 +452,15 @@ describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
   };
 
   // bccRoute: the [status, body] GET /mail/messages/draft-1/bcc answers with.
-  const openDraft = async (bccRoute) => {
+  const openDraft = async (bccRoute, headers = '', metadata = {}, bodyMetadata = {}) => {
     ROUTES = {
-      '/mail/messages/draft-1/body': [200, { html: '<p>hello</p>', text: 'hello' }],
-      '/mail/messages/draft-1/headers': [200, { headers: '' }],
+      '/mail/messages/draft-1/body': [200, { html: '<p>hello</p>', text: 'hello', ...bodyMetadata }],
+      '/mail/messages/draft-1/headers': headers === null ? [502, { error: 'Headers unavailable' }] : [200, { headers }],
       '/mail/messages/draft-1/bcc': bccRoute,
     };
     const opened = [];
     await mount({
-      rows: [DRAFT], threadedView: false,
+      rows: [{ ...DRAFT, ...metadata }], threadedView: false,
       state: {
         selectedFolder: 'Drafts', folders: { 'acct-1': DRAFTS_FOLDERS },
         openCompose: d => opened.push(d), notifications: [],
@@ -470,6 +470,19 @@ describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
     ROUTES = {};
     return opened;
   };
+
+  for (const source of ['headers', 'body after failed headers']) {
+    test(`restores reply conversation metadata from ${source}`, async () => {
+      const inReplyTo = '<parent@example.com>';
+      const references = '<root@example.com> <parent@example.com>';
+      const headers = source === 'headers' ? 'in-reply-to: <parent@example.com>\r\nReferences: <root@example.com>\r\n <parent@example.com>\r\n' : null;
+      // Real list rows carry in_reply_to, but omit thread_references. The successful body
+      // response supplies the cached references when the independent headers request fails.
+      const opened = await openDraft([200, { bcc: [] }], headers, { in_reply_to: inReplyTo }, headers === null ? { inReplyTo, references } : {});
+      assert.equal(opened[0].inReplyTo, inReplyTo);
+      assert.equal(opened[0].references, references);
+    });
+  }
 
   test('opens the composer with the Bcc, as recipients rather than text to re-split', async () => {
     // { name, email } objects, not formatted strings: compose must quote a display name that
@@ -484,6 +497,8 @@ describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
     const opened = await openDraft([200, { bcc: [] }]);
     assert.equal(opened.length, 1);
     assert.deepEqual(opened[0].bcc, []);
+    assert.equal(opened[0].inReplyTo, undefined);
+    assert.equal(opened[0].references, undefined);
   });
 
   test('opens read-only with an error notification when the Bcc cannot be read, instead of an editable composer', async () => {

@@ -1015,6 +1015,8 @@ export default function ComposeModal() {
         cc: [...ccChips, ...(ccInput.trim() ? [ccInput.trim()] : [])],
         bcc: [...bccChips, ...(bccInput.trim() ? [bccInput.trim()] : [])],
         subject,
+        inReplyTo: composeData?.inReplyTo,
+        references: composeData?.references || undefined,
         body: bodyToSend,
         bodyIsHtml: !plaintextEmail,
         ...(quotedBody ? { quotedBody } : {}),
