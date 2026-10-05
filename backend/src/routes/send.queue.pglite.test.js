@@ -173,6 +173,45 @@ describe('Send with the undo window', () => {
     expect(sendMail).toHaveBeenCalledOnce();
   });
 
+  // The server took the letter but refused one recipient at RCPT (upstream maathimself/mailflow#518).
+  // The composer closed long ago: the job's result, the author's notice and the delivery status say so.
+  it('a recipient the server refused is kept with the job, told to the author and marked failed', async () => {
+    sendMail.mockResolvedValue({
+      accepted: ['you@example.com'], rejected: ['gone@example.com'],
+      rejectedErrors: [Object.assign(new Error('Recipient command failed'), {
+        recipient: 'gone@example.com', responseCode: 550, response: '550 5.1.1 <gone@example.com>: User unknown',
+      })],
+    });
+    const { body } = await send({ to: ['you@example.com', 'gone@example.com'] });
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(await job(body.jobId)).toMatchObject({ status: 'done', payload: expect.objectContaining({ rejected: ['gone@example.com'] }) });
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'send_done', jobId: body.jobId, rejected: ['gone@example.com'] }), ANNA));
+    // The author sees them on the letter; someone else, who may not see its Bcc, does not.
+    expect((await (await call('GET', `/scheduled/${body.jobId}`)).json()).letter.rejected).toEqual(['gone@example.com']);
+    expect((await (await call('GET', `/scheduled/${body.jobId}`, { user: BOB })).json()).letter.rejected).toBeUndefined();
+    const [sent] = await audit('message.sent');
+    const { rows } = await db.query('SELECT recipient, state, source, status_code, diagnostic, submission FROM message_delivery_status WHERE account_id = $1', [ACCOUNT]);
+    expect(rows).toEqual([{
+      recipient: 'gone@example.com', state: 'failed', source: 'submission', status_code: '5.1.1',
+      diagnostic: '550 5.1.1 <gone@example.com>: User unknown',
+      submission: expect.objectContaining({ reply: '550 5.1.1 <gone@example.com>: User unknown', responseCode: 550 }),
+    }]);
+    expect(sent.details.messageId).toBeTruthy();
+  });
+
+  it('a letter every recipient took reports no refusals', async () => {
+    const { body } = await send();
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect((await job(body.jobId)).payload).not.toHaveProperty('rejected');
+    await vi.waitFor(() => expect(imapManager.broadcast).toHaveBeenCalledWith(expect.objectContaining({ type: 'send_done', jobId: body.jobId }), ANNA));
+    const done = imapManager.broadcast.mock.calls.find(([data]) => data.type === 'send_done')[0];
+    expect(done).not.toHaveProperty('rejected');
+    expect((await db.query('SELECT 1 FROM message_delivery_status')).rows).toEqual([]);
+  });
+
   it('still sends a letter queued before a restart', async () => {
     const { body } = await send();
     unregisterJobKind(SEND_JOB_KIND);

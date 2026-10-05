@@ -40,7 +40,7 @@ const { default: routes } = await import('./delivery.js');
 const { MailNodeError } = await import('../services/mailNode/mailcow.js');
 const { clearPostfixLogCache, parsePostfixLog, readPostfixLog } = await import('../services/mailNode/postfixLog.js');
 const { STAND_DELIVERY } = await import('../services/mailNode/postfixLog.fixtures.js');
-const { captureFromLog } = await import('../services/deliveryStatus.js');
+const { captureFromLog, recordOutcomes } = await import('../services/deliveryStatus.js');
 const { recordDeliveryReport, deliveryReportOf } = await import('../services/deliveryReport.js');
 const { NDR_STATUS, NDR_STRUCTURE } = await import('../services/deliveryReport.fixtures.js');
 const { listMessages } = await import('../services/messageService.js');
@@ -185,6 +185,32 @@ describe('GET /api/mail/messages/:id/delivery', () => {
     // A node mailbox on another host than the node settings name: no log either.
     node.cfg = { ...CFG, mailHost: 'other-node.example' };
     expect((await details(ACCEPTED_ROW)).body).toMatchObject({ node: false, log: null });
+  });
+
+  // The mailbox's own outgoing server refused one recipient at RCPT and took the letter for the
+  // rest (services/sendDelivery.js records it with source 'submission', migration 0091).
+  it('shows a recipient the outgoing server refused at sending as failed, with its reply, and the list marks it', async () => {
+    await db.query(
+      `INSERT INTO mailbox_audit_log (account_id, account_email, action, details, occurred_at)
+       VALUES ($1, 'office@example.net', 'message.sent', '{"messageId": "<orig-ndr@example.net>"}', NOW())`,
+      [OTHER_BOX],
+    );
+    await recordOutcomes(OTHER_BOX, '<orig-ndr@example.net>', 'submission', [{
+      recipient: 'Gone@Partner.Example', state: 'failed', at: '2026-10-02T09:59:01.000Z', statusCode: '5.1.1',
+      diagnostic: '550 5.1.1 <gone@partner.example>: Recipient address rejected: User unknown',
+      details: { reply: '550 5.1.1 <gone@partner.example>: Recipient address rejected: User unknown', responseCode: 550 },
+    }]);
+    const { body } = await details(OTHER_ROW);
+    expect(body).toMatchObject({ owned: true, node: false });
+    expect(body.recipients).toHaveLength(1);
+    expect(body.recipients[0]).toMatchObject({
+      recipient: 'gone@partner.example', state: 'failed', source: 'submission', statusCode: '5.1.1',
+      explanation: { key: 'permanent', class: 'permanent', code: '5.1.1' },
+      submission: { reply: '550 5.1.1 <gone@partner.example>: Recipient address rejected: User unknown', responseCode: 550 },
+      log: null, report: null,
+    });
+    const { messages } = await listMessages({ accountId: OTHER_BOX, folder: 'Sent' });
+    expect(messages[0].delivery_state).toBe('failed');
   });
 
   it('gives nothing for a letter the mailbox did not send, whatever aliases a user added to it', async () => {

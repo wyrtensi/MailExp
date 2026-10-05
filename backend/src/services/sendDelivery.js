@@ -25,6 +25,8 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { OAUTH_SEND_FAILURES } from './oauth/constants.js';
 import { smtpFailureIsDefinite, sendFailureIsDefinite, smtpConnectionFailure } from './smtpErrors.js';
 import { JobError } from './jobQueue.js';
+import { addressOf, recordOutcomes, trimDiagnostic } from './deliveryStatus.js';
+import { statusCodeIn } from './mailNode/deliveryCodes.js';
 
 export function sanitizeSmtpError(err) {
   const msg = err.message || '';
@@ -123,6 +125,53 @@ function learnRecipients(allRecipients) {
   });
 }
 
+// The recipients the outgoing server refused at RCPT while it took the letter for the others
+// (upstream maathimself/mailflow#518). Nodemailer resolves such a send with info.rejected (the
+// addresses) and info.rejectedErrors (one error per refusal: .recipient, .response, .responseCode)
+// instead of failing it; refusing every recipient throws (EENVELOPE) and is a failed send.
+// Resolves [{ recipient, statusCode, diagnostic, responseCode }]: recipient lower case,
+// statusCode the enhanced status code of the reply ("5.1.1") or else its basic code ("550"),
+// diagnostic the server's reply. Exported for tests.
+export function refusedRecipients(info) {
+  const rejected = Array.isArray(info?.rejected) ? info.rejected : [];
+  const errors = Array.isArray(info?.rejectedErrors) ? info.rejectedErrors : [];
+  const out = [];
+  const seen = new Set();
+  for (const value of rejected) {
+    const recipient = addressOf(typeof value === 'string' ? value : value?.address);
+    if (!recipient || seen.has(recipient)) continue;
+    seen.add(recipient);
+    const err = errors.find(e => addressOf(e?.recipient) === recipient) ?? null;
+    const reply = trimDiagnostic(err?.response);
+    const responseCode = Number.isInteger(err?.responseCode) ? err.responseCode : null;
+    out.push({
+      recipient,
+      statusCode: statusCodeIn(reply) ?? (responseCode ? String(responseCode) : null),
+      diagnostic: reply,
+      responseCode,
+    });
+  }
+  return out;
+}
+
+// Records the refusals in the letter's delivery status (R-17, services/deliveryStatus.js) as failed
+// for those recipients, with the server's reply. Never rejects: the letter went out to the others.
+async function recordRefusals(accountId, messageId, refused, at) {
+  if (!refused.length || !messageId) return;
+  try {
+    await recordOutcomes(accountId, messageId, 'submission', refused.map(r => ({
+      recipient: r.recipient,
+      state: 'failed',
+      at,
+      statusCode: r.statusCode,
+      diagnostic: r.diagnostic,
+      details: { reply: r.diagnostic, responseCode: r.responseCode },
+    })));
+  } catch (err) {
+    console.error('Recording the refused recipients of a sent letter failed:', err.message);
+  }
+}
+
 // A transport that could not be set up (createAccountSendTransport's { status, error, code }):
 // nothing was sent. An OAuth refresh that failed for a moment is retried; the rest needs someone.
 function setupFailure(result) {
@@ -166,10 +215,12 @@ export function deliveryFailure(err, account) {
 // Sends the letter. mail: { options, meta } as routes/send.js built it (options: nodemailer
 // options with Buffer attachments; meta: normalized to/cc/bcc, subject, fromName, fromEmail,
 // snippet). actorUserId: the author, journaled as the sender. markEffectStarted: called right
-// before the letter goes to the mail server. onDelivered(messageId): called once the server took
-// the letter, before anything else (the job records itself done there); its failure never turns
-// a delivered letter into a failed send. Resolves { messageId, sentFolder, sentCopySaved }; with
-// detachPostSend, resolves { messageId, postSend } as soon as the server took the letter, postSend
+// before the letter goes to the mail server. onDelivered(messageId, { rejected }): called once the
+// server took the letter, before anything else (the job records itself done there); its failure
+// never turns a delivered letter into a failed send. rejected: the addresses the server refused at
+// RCPT while it took the letter for the others (refusedRecipients), [] for none. Resolves
+// { messageId, rejected, sentFolder, sentCopySaved }; with detachPostSend, resolves
+// { messageId, rejected, postSend } as soon as the server took the letter, postSend
 // being the Sent copy work (a promise of { sentFolder, sentCopySaved } that never rejects), so the
 // caller (a queue worker slot) is free before the up to 20 s APPEND.
 export async function deliverOutgoingMessage({
@@ -248,8 +299,15 @@ export async function deliverOutgoingMessage({
   if (sendInfo?.messageId && sendInfo.messageId !== mailOptions.messageId) {
     mailOptions.messageId = sendInfo.messageId;
   }
+  const refused = refusedRecipients(sendInfo);
+  const rejected = refused.map(r => r.recipient);
+  if (refused.length) {
+    // Codes only: the server's reply usually repeats the address unredacted.
+    const codes = refused.map(r => r.statusCode).filter(Boolean);
+    console.warn(`SMTP refused ${refused.length} recipient(s) for ${redactEmail(account.email_address)}: ${rejected.map(redactEmail).join(', ')}${codes.length ? ` (${codes.join(', ')})` : ''}`);
+  }
   try {
-    await onDelivered(mailOptions.messageId);
+    await onDelivered(mailOptions.messageId, { rejected });
   } catch (err) {
     console.error('Recording a delivered send failed:', err.message);
   }
@@ -261,11 +319,14 @@ export async function deliverOutgoingMessage({
     details: { messageId: mailOptions.messageId, to: meta.to, cc: meta.cc, bcc: meta.bcc },
   });
 
-  learnRecipients([...meta.to, ...meta.cc, ...meta.bcc]);
+  // A refused address is not learned as one the author writes to.
+  const refusedSet = new Set(rejected);
+  learnRecipients([...meta.to, ...meta.cc, ...meta.bcc].filter(addr => !refusedSet.has(addressOf(addr))));
+  await recordRefusals(account.id, mailOptions.messageId, refused, new Date().toISOString());
 
   const postSend = saveSentCopy({ account, mailOptions, meta, rawMessage, serverAutoSaves, imapManager });
-  if (detachPostSend) return { messageId: mailOptions.messageId, postSend };
-  return { messageId: mailOptions.messageId, ...(await postSend) };
+  if (detachPostSend) return { messageId: mailOptions.messageId, rejected, postSend };
+  return { messageId: mailOptions.messageId, rejected, ...(await postSend) };
 }
 
 // The Sent copy after a delivered send: APPEND it (a server that does not save it itself) or seed

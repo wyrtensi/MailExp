@@ -255,7 +255,7 @@ describe('createAccountSendTransport', () => {
       createAccountSmtpTransport.mockResolvedValue({ account: gmailAccount, transport: { sendMail: smtpSendMail } });
       const { transport } = await createAccountSendTransport(gmailAccount);
       const info = await transport.sendMail(mailOptions, {});
-      expect(info).toEqual({ via: 'smtp', messageId: mailOptions.messageId });
+      expect(info).toEqual({ via: 'smtp', messageId: mailOptions.messageId, rejected: [], rejectedErrors: [] });
       expect(markGmailApiDisabled).toHaveBeenCalledWith('app-1');
       expect(smtpSendMail).toHaveBeenCalledWith(mailOptions);
     });
@@ -276,6 +276,19 @@ describe('createAccountSendTransport', () => {
       createAccountSmtpTransport.mockResolvedValue({ account: gmailAccount, transport: { sendMail: smtpSendMail } });
       const { transport } = await createAccountSendTransport(gmailAccount);
       await expect(transport.sendMail(mailOptions, {})).resolves.toMatchObject({ via: 'smtp' });
+    });
+
+    it('hands on the recipients the fallback SMTP server refused at RCPT', async () => {
+      postGmailApiSend.mockRejectedValue(fallbackErr('http_503'));
+      const refusal = Object.assign(new Error('Recipient command failed'), {
+        recipient: 'gone@example.com', responseCode: 550, response: '550 5.1.1 User unknown',
+      });
+      const smtpSendMail = vi.fn().mockResolvedValue({ accepted: ['ok@example.com'], rejected: ['gone@example.com'], rejectedErrors: [refusal] });
+      createAccountSmtpTransport.mockResolvedValue({ account: gmailAccount, transport: { sendMail: smtpSendMail } });
+      const { transport } = await createAccountSendTransport(gmailAccount);
+      const info = await transport.sendMail(mailOptions, {});
+      expect(info.rejected).toEqual(['gone@example.com']);
+      expect(info.rejectedErrors).toEqual([refusal]);
     });
 
     it('reports a MIME build failure as definite (nothing was ever sent) with a clean user-facing message', async () => {

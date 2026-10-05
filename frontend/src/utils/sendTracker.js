@@ -67,9 +67,26 @@ export function notifySendFailed({ subject, code, error }) {
   });
 }
 
+// The letter went out, but the mail server refused some recipients at RCPT (rejected: their
+// addresses) and took it for the others. The composer closed long ago, so this stays up until
+// dismissed: a notice that times out is too easy to miss for mail that never reached someone.
+// subject: null when this tab did not follow the letter (the server no longer has it).
+export function notifySendRefused({ subject = null, rejected }) {
+  if (!Array.isArray(rejected) || !rejected.length) return;
+  const { addNotification } = useStore.getState();
+  const text = t('compose.sent.someRejected', { addresses: rejected.join(', ') });
+  addNotification({
+    type: 'error',
+    title: t('compose.sent.someRejectedTitle'),
+    body: subject ? `${subject}: ${text}` : text,
+    allowWrap: true,
+    persistent: true,
+  });
+}
+
 // Settles a followed letter from a status (a polled letter, or a socket event). Returns whether
 // this tab was following it.
-export function settleSend(jobId, { status, errorCode = null, error = null, sentFolder = null, sentCopySaved = null } = {}) {
+export function settleSend(jobId, { status, errorCode = null, error = null, sentFolder = null, sentCopySaved = null, rejected = null } = {}) {
   const id = String(jobId);
   if (!tracked.has(id)) return false;
   const outcome = sendOutcome(status);
@@ -84,6 +101,7 @@ export function settleSend(jobId, { status, errorCode = null, error = null, sent
       body: entry.subject || t('common.noSubject'),
       ...(noCopy ? {} : { onAction: () => setSelectedAccount(entry.accountId, folder), actionLabel: t('compose.sent.action') }),
     });
+    notifySendRefused({ subject: entry.subject || t('common.noSubject'), rejected });
     entry.onSent?.();
   } else if (outcome === 'failed') {
     notifySendFailed({ subject: entry.subject, code: errorCode, error });

@@ -9,7 +9,7 @@ import { accountAffectsUnifiedInbox } from '../utils/unifiedInbox.js';
 import { accountEventPatch } from '../utils/accountHealth.js';
 import { dispatchPluginWsMessage, dispatchPluginReconnect } from '../plugins/events.js';
 import { recordDiagEvent } from '../utils/diagEvents.js';
-import { notifySendFailed, settleSend } from '../utils/sendTracker.js';
+import { notifySendFailed, notifySendRefused, settleSend } from '../utils/sendTracker.js';
 
 function _applyServerCounts(counts) {
   useStore.getState().setUnreadCounts(counts);
@@ -297,7 +297,11 @@ export function useWebSocket(enabled = true) {
         break;
       }
       case 'send_done': {
-        settleSend(data.jobId, { status: 'done', sentFolder: data.sentFolder, sentCopySaved: data.sentCopySaved });
+        // Refused recipients of a letter this tab is not following (sent later, from another tab)
+        // are told here; the tab following it tells them itself.
+        if (!settleSend(data.jobId, { status: 'done', sentFolder: data.sentFolder, sentCopySaved: data.sentCopySaved, rejected: data.rejected })) {
+          notifySendRefused({ rejected: data.rejected });
+        }
         break;
       }
       case 'send_failed': {

@@ -193,6 +193,28 @@ describe('mergeOutcome', () => {
     expect(mergeOutcome(first, dsn('failed', null)).row.state).toBe('failed');
   });
 
+  // The outgoing server refused the recipient at RCPT while it took the letter for the others
+  // (sendDelivery.js): the letter never left for them, so that refusal is the row's outcome
+  // whatever else arrives, and every source keeps its own details.
+  it('keeps a refusal at submission as the outcome, beside the other sources', () => {
+    const submission = {
+      source: 'submission', state: 'failed', at: '2026-10-02T10:00:00.000Z', statusCode: '5.1.1',
+      diagnostic: '550 5.1.1 User unknown', details: { reply: '550 5.1.1 User unknown', responseCode: 550 },
+    };
+    const first = mergeOutcome(null, submission).row;
+    expect(first).toMatchObject({ state: 'failed', source: 'submission', statusCode: '5.1.1', diagnostic: '550 5.1.1 User unknown' });
+    expect(first.submission).toMatchObject({ reply: '550 5.1.1 User unknown', responseCode: 550 });
+    expect(mergeOutcome(first, submission)).toEqual({ row: first, changed: false });
+    const withLog = mergeOutcome(first, log('sent', '2026-10-02T10:10:00.000Z')).row;
+    expect(withLog).toMatchObject({ state: 'failed', source: 'submission' });
+    expect(withLog.log).toMatchObject({ state: 'sent' });
+    const withReport = mergeOutcome(withLog, dsn('delayed', '2026-10-02T11:00:00.000Z')).row;
+    expect(withReport).toMatchObject({ state: 'failed', source: 'submission' });
+    expect(withReport.report).toMatchObject({ state: 'delayed' });
+    // A row of only the other sources carries no submission field at all.
+    expect(mergeOutcome(null, log('sent', '2026-10-02T10:00:00.000Z')).row).not.toHaveProperty('submission');
+  });
+
   it('moves deferred to sent, ignores an older line, and keeps the node\'s bounce over a report\'s delay', () => {
     const deferred = mergeOutcome(null, log('deferred', '2026-10-02T10:00:00.000Z')).row;
     const sent = mergeOutcome(deferred, log('sent', '2026-10-02T10:10:00.000Z')).row;
