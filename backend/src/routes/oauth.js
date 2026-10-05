@@ -118,6 +118,10 @@ router.get('/microsoft', async (req, res) => {
 });
 
 // Step 2: Microsoft redirects back here with auth code
+// Not refused for a locked session, by design: the provider sends the browser back in another
+// tab while the panel tab's auto-lock keeps counting, so a flow started unlocked must still
+// finish. A locked session cannot start one (the start legs refuse it), so this only completes
+// a flow begun before the lock, for the user who began it.
 router.get('/microsoft/callback', async (req, res) => {
   const { code, state, error } = req.query;
 

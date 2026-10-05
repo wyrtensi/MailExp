@@ -107,6 +107,10 @@ router.get('/launch', async (req, res) => {
 });
 
 // Step 2: Google redirects back with a code (or an error) and the state.
+// Not refused for a locked session, by design: the provider sends the browser back in another
+// tab while the panel tab's auto-lock keeps counting, so a flow started unlocked must still
+// finish. A locked session cannot start one (the start legs refuse it), so this only completes
+// a flow begun before the lock, for the user who began it.
 router.get('/callback', async (req, res) => {
   const { code, state, error } = req.query;
   let issued = null;
