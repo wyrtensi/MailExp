@@ -193,7 +193,9 @@ function parseChips(val) {
 
 export default function ComposeModal() {
   const { t } = useTranslation();
-  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, plaintextEmail, setThreadMessages } = useStore();
+  const { closeCompose, composeData, composeMinimized, setComposeMinimized, accounts, addNotification, plaintextEmail: plaintextPreference, setThreadMessages } = useStore();
+  const plaintextEmail = composeData?.restored && typeof composeData.bodyIsHtml === 'boolean'
+    ? !composeData.bodyIsHtml : plaintextPreference;
   const isMobile = useMobile();
   const uiScale = useUiScale();
 

@@ -60,6 +60,7 @@ const { createRoot } = await import('react-dom/client');
 const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
 const ComposeModal = (await import('./ComposeModal.jsx')).default;
+const { composeDataFromScheduled } = await import('../utils/scheduledSend.js');
 
 // A draft as Gmail saves it. TipTap loads this as <p> paragraphs, so its getHTML() never
 // matches the stored string even when nobody has touched it.
@@ -146,6 +147,40 @@ describe('reopening a draft in plain-text mode', () => {
     await hideTab();
     assert.equal(saved.length, 0, 'an untouched draft must not be rewritten');
   });
+});
+
+describe('restoring a scheduled letter preserves its original format', () => {
+  for (const plaintextEmail of [true, false]) {
+    for (const bodyIsHtml of [true, false]) {
+      test(`restores and autosaves ${bodyIsHtml ? 'HTML' : 'plain text'} with plaintext preference ${plaintextEmail}`, async () => {
+        saved.length = 0;
+        const body = bodyIsHtml ? '<p>Hello <strong>team</strong></p>' : 'Keep <strong>literal</strong> and <address@example.com>\nSecond line';
+        useStore.setState({ plaintextEmail });
+        useStore.getState().openCompose(composeDataFromScheduled({
+          accountId: 'acct', to: ['recipient@example.com'], subject: 'Scheduled', body, bodyIsHtml,
+        }));
+        const root = createRoot(document.getElementById('root'));
+        try {
+          await React.act(async () => { root.render(React.createElement(ComposeModal)); });
+          assert.equal(useStore.getState().plaintextEmail, plaintextEmail, 'the global preference is unchanged');
+          const textarea = document.querySelector('textarea[placeholder="compose.bodyPh"]');
+          if (bodyIsHtml) {
+            assert.ok(!textarea, 'HTML is reopened in the rich-text editor');
+            assert.match(document.querySelector('.ProseMirror').editor.getHTML(), /<strong>team<\/strong>/);
+          } else {
+            assert.ok(textarea, 'plain text is reopened in a textarea');
+            assert.equal(textarea.value, body, 'angle brackets remain literal text');
+          }
+          await hideTab();
+          assert.equal(saved.length, 1);
+          assert.equal(saved[0].bodyIsHtml, bodyIsHtml);
+          assert.equal(saved[0].body, body);
+        } finally {
+          await React.act(async () => { root.unmount(); });
+        }
+      });
+    }
+  }
 });
 
 describe('editing while a draft save is pending', () => {

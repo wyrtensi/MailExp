@@ -50,6 +50,7 @@ export function composeDataFromScheduled(compose, { sendAt = null } = {}) {
     bcc: compose.bcc || [],
     subject: compose.subject || '',
     body: compose.body || '',
+    ...(typeof compose.bodyIsHtml === 'boolean' ? { bodyIsHtml: compose.bodyIsHtml } : {}),
     ...(compose.quotedBody ? { quotedBody: compose.quotedBody } : {}),
     ...(compose.quotedBodyHtml ? { quotedBodyHtml: compose.quotedBodyHtml } : {}),
     ...(compose.inReplyTo ? { inReplyTo: compose.inReplyTo } : {}),
