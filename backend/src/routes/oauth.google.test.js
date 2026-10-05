@@ -92,6 +92,7 @@ function buildApp() {
   app.use((req, _res, next) => {
     const userId = req.get('x-test-user');
     req.session = userId ? { userId } : {};
+    if (userId && req.get('x-test-locked')) req.session.locked = true;
     next();
   });
   app.use('/oauth', oauthRoutes);
@@ -132,8 +133,11 @@ function installDb({ existing = null } = {}) {
 }
 const sqlCall = (re) => dbState.calls.find(([sql]) => re.test(sql));
 
-const get = (path, { user = USER_ID } = {}) =>
-  fetch(`${base}${path}`, { redirect: 'manual', headers: user ? { 'x-test-user': user } : {} });
+const get = (path, { user = USER_ID, locked = false } = {}) =>
+  fetch(`${base}${path}`, {
+    redirect: 'manual',
+    headers: { ...(user ? { 'x-test-user': user } : {}), ...(locked ? { 'x-test-locked': '1' } : {}) },
+  });
 
 async function startFlow(query = '') {
   const res = await get(`/oauth/google${query}`);
@@ -245,6 +249,15 @@ describe('GET /oauth/google', () => {
     expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
+  // The screen-lock gate in index.js covers only /api; /oauth is mounted outside it.
+  it('refuses to start from a locked session', async () => {
+    query.mockResolvedValue({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google' }] });
+    const res = await get(`/oauth/google?account=${ACCOUNT_ID}`, { locked: true });
+    expect(res.headers.get('location')).toBe('/?oauth_error=locked&oauth_provider=google');
+    expect(selectGoogleApp).not.toHaveBeenCalled();
+    expect(redisStore.size).toBe(0);
+  });
+
   it('redirects with not_configured when the chosen app is gone', async () => {
     googleApps.byId = {};
     query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google', oauth_app_id: APP_ID }] });
@@ -264,6 +277,12 @@ describe('GET /oauth/google/launch', () => {
     const res = await get(`/oauth/google/launch?flow=${'F'.repeat(43)}`);
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe(launch.url);
+  });
+
+  it('refuses a launch path minted before the session locked', async () => {
+    launch.url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${CLIENT_ID}`;
+    const res = await get(`/oauth/google/launch?flow=${'F'.repeat(43)}`, { locked: true });
+    expect(res.headers.get('location')).toBe('/?oauth_error=locked&oauth_provider=google');
   });
 
   it('sends an unknown, used or foreign flow back with invalid_state', async () => {

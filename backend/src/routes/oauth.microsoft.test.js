@@ -191,6 +191,14 @@ describe('starting a Microsoft flow', () => {
     expect(session.oauthNonce).toBeUndefined();
   });
 
+  // The screen-lock gate in index.js covers only /api; /oauth is mounted outside it.
+  it('refuses to start from a locked session', async () => {
+    session = { locked: true };
+    const res = await start(`?account=${ACCOUNT_ID}`);
+    expect(res.headers.get('location')).toBe('/?oauth_error=locked&oauth_provider=microsoft');
+    expect(session.oauthNonce).toBeUndefined();
+  });
+
   it('answers not_configured without a client id', async () => {
     delete process.env.MS_CLIENT_ID;
     expect((await start()).headers.get('location')).toBe('/?oauth_error=not_configured&oauth_provider=microsoft');
@@ -404,6 +412,24 @@ describe('Microsoft device-code flow', () => {
     const res = await startDevice({ account: ACCOUNT_ID });
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe('invalid_state');
+  });
+
+  it('refuses to start or finish from a locked session, and finishes once unlocked', async () => {
+    stubMicrosoft((href) => (href.endsWith('/devicecode') ? startOk() : json(true, TOKENS)));
+    session = { locked: true };
+    const refused = await startDevice({ account: ACCOUNT_ID });
+    expect(refused.status).toBe(423);
+    expect(await refused.json()).toEqual({ error: 'Locked', locked: true });
+    expect(globalThis.fetch.mock.calls.some(([url]) => String(url).endsWith('/devicecode'))).toBe(false);
+
+    // A flow started before the lock: its poll is refused and kept.
+    session = {};
+    expect((await startDevice({ account: ACCOUNT_ID })).status).toBe(200);
+    session.locked = true;
+    expect((await poll()).status).toBe(423);
+    expect(wroteAccount()).toBe(false);
+    session.locked = false;
+    expect(await (await poll()).json()).toEqual({ status: 'success' });
   });
 
   it('answers an unverified address with a stable code', async () => {

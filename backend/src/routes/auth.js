@@ -23,6 +23,8 @@ import { generateTotpSecret, totpKeyUri, verifyTotp } from '../services/totp.js'
 import { consume as rlConsume, peek as rlPeek, reset as rlReset } from '../services/rateLimiter.js';
 import { getAuthSettings } from '../services/auth/authSettings.js';
 import { CF_ACCESS_HEADER } from '../services/auth/cloudflareAccess.js';
+import { closeUserSockets } from '../services/websocket.js';
+import { imapManager } from '../index.js';
 
 const router = Router();
 
@@ -51,7 +53,9 @@ function getTrustDurationMs(setting) {
 
 // Delete every server-side session belonging to a user (Redis-backed store, keys
 // prefixed "sess:"). Used after a password reset so a pre-existing session can't
-// outlive a credential change. Best-effort — never throws to the caller.
+// outlive a credential change. Best-effort — never throws to the caller. It does not
+// touch the WebSockets those sessions opened: every caller closes them with
+// closeUserSockets once this returns.
 export async function destroyUserSessions(userId) {
   try {
     // The redis client (v5+) takes and returns the SCAN cursor as a string; '0' ends the scan.
@@ -619,6 +623,7 @@ router.post('/2fa/enrollment/enable', twoFactorLimiter, async (req, res) => {
 
 router.post('/logout', async (req, res) => {
   const userId = req.session.userId;
+  const sessionId = req.sessionID;
   const oidcProviderId = req.session.oidcProviderId;
   const oidcIdToken = req.session.oidcIdToken;
   const rawCookies = req.headers.cookie || '';
@@ -644,6 +649,9 @@ router.post('/logout', async (req, res) => {
 
   req.session.destroy((err) => {
     if (err) console.error('Session destroy error:', err.message);
+    // Sockets this session opened would keep receiving the user's live mail events.
+    // The user's other sessions keep theirs.
+    closeUserSockets(imapManager.wss, userId, { sessionId });
     const cookieOpts = { path: '/', sameSite: 'lax', secure: req.secure };
     res.clearCookie('connect.sid', cookieOpts);
     res.clearCookie('mf_td', { ...cookieOpts, httpOnly: true });
@@ -668,9 +676,13 @@ const LOCK_PIN_RE = /^\d{4,6}$/;
 const MAX_UNLOCK_FAILS = 5;
 const LOCK_FAIL_WINDOW_MS = 15 * 60 * 1000;
 
-router.post('/lock', (req, res) => {
+router.post('/lock', async (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not authenticated' });
   req.session.locked = true;
+  // Saved before the sockets close, so one that reconnects straight away is refused as locked.
+  await new Promise((resolve, reject) => req.session.save(err => err ? reject(err) : resolve()));
+  // Every tab on this session stops receiving live mail now, not at its next API call.
+  closeUserSockets(imapManager.wss, req.session.userId, { sessionId: req.sessionID, reason: 'Locked' });
   res.json({ ok: true });
 });
 
@@ -694,7 +706,12 @@ router.post('/unlock', async (req, res) => {
     if (limited) {
       await rlReset(failKey);
       // Sign out entirely so re-entry requires full re-auth (password / SSO).
-      return req.session.destroy(() => res.status(401).json({ error: 'Too many attempts', signedOut: true }));
+      const { userId } = req.session;
+      const sessionId = req.sessionID;
+      return req.session.destroy(() => {
+        closeUserSockets(imapManager.wss, userId, { sessionId });
+        res.status(401).json({ error: 'Too many attempts', signedOut: true });
+      });
     }
     return res.status(401).json({ error: 'Incorrect PIN' });
   }
@@ -1193,6 +1210,8 @@ router.post('/reset-password', resetLimiter, async (req, res) => {
     // Revoke all existing sessions and trusted devices so a pre-existing (possibly
     // attacker) session/device can't survive a compromise-driven password reset.
     await destroyUserSessions(userId);
+    // A socket an ended session opened stays connected and keeps receiving new mail.
+    closeUserSockets(imapManager.wss, userId);
     await query('DELETE FROM trusted_devices WHERE user_id = $1', [userId]);
 
     res.locals.resetRateLimit?.();
