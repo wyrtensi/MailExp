@@ -35,6 +35,20 @@ load_install() {
 }
 
 app_compose() { "${APP_COMPOSE[@]}" "$@"; }
+
+# local_compose_ignored: reads another version's scripts/deploy/lib/app.sh on stdin; status 0 when
+# this server has <prefix>/compose.local.yml and that version's scripts do not know it (they predate
+# the override): after a switch to it the panel would run without the operator's additions. Empty
+# input (the file could not be read) claims nothing.
+local_compose_ignored() {
+  local text
+  text=$(cat)
+  [ -f "$LOCAL_COMPOSE" ] && [ -n "$text" ] && ! grep -q compose.local.yml <<<"$text"
+}
+
+local_compose_warning() {
+  warn "$1 does not know $LOCAL_COMPOSE: after the switch the panel runs without it, until a version that knows it is installed again (docs/operations/deployment.md, section 4)"
+}
 edge_compose() { "${EDGE_COMPOSE[@]}" "$@"; }
 
 # panel_ready: status 0 when /api/health/ready answers 200 on the loopback port.

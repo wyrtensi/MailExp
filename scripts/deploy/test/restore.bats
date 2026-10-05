@@ -151,6 +151,40 @@ tenant_files() {
   [ "$(env_get "$P/.env" ENCRYPTION_KEY)" = old-key ]
 }
 
+@test "the snapshot's compose.local.yml is placed when this server has none, root 0600, and used" {
+  stub_restore
+  sed -i '/^COMPOSE_PROFILES=/d; /^TENANT_/d' "$SNAPSHOT/env"
+  printf 'services:\n  backend:\n    extra_hosts:\n      - "mail.example.com:192.0.2.10"\n' >"$SNAPSHOT/compose.local.yml"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  cmp -s "$P/compose.local.yml" "$SNAPSHOT/compose.local.yml"
+  [ "$(stat -c '%u %g %a' "$P/compose.local.yml")" = '0 0 600' ]
+  [[ $output == *"local compose override from the snapshot: $P/compose.local.yml"* ]]
+  [[ $output != *"mail.example.com"* ]]
+  # The database is restored with the override in the compose command.
+  grep 'pg_restore' "$DOCKER_LOG" | grep -q -- "-f $P/compose.local.yml"
+}
+
+@test "a compose.local.yml this server has stays" {
+  stub_restore
+  sed -i '/^COMPOSE_PROFILES=/d; /^TENANT_/d' "$SNAPSHOT/env"
+  printf 'services: {}\n' >"$SNAPSHOT/compose.local.yml"
+  printf '# set here\n' >"$P/compose.local.yml"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  [ "$(cat "$P/compose.local.yml")" = '# set here' ]
+  [[ $output == *"$P/compose.local.yml stays as it is"* ]]
+}
+
+@test "a snapshot without compose.local.yml places none" {
+  stub_restore
+  sed -i '/^COMPOSE_PROFILES=/d; /^TENANT_/d' "$SNAPSHOT/env"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  [ ! -e "$P/compose.local.yml" ]
+  [[ $output != *compose.local.yml* ]]
+}
+
 PFX_CONTENT=synthetic-pfx-bytes
 PASSWORD_CONTENT=synthetic-pfx-password
 

@@ -13,6 +13,8 @@
 #     (owner 10001, 0400). A snapshot without them (made before backups held them, or while they
 #     were missing on the old server) leaves them to the owner: with the profile on, restore.sh
 #     then stops before any change until they are in place;
+#   - the snapshot's compose.local.yml (the operator's compose additions) is placed where this
+#     server has none (root 0600) and used from then on; one set here stays;
 #   - install.conf, the port and the compose project stay as installed here;
 #   - the database is restored and checked (row counts, no pending migration, every credential
 #     decrypts), and Redis from a --with-redis snapshot;
@@ -70,6 +72,22 @@ cleanup() {
 # names <lines>: the lines joined with spaces, "none" when there are none.
 names() {
   if [ -z "$1" ]; then echo none; else paste -sd' ' - <<<"$1"; fi
+}
+
+# place_local_compose <dir>: the snapshot's compose.local.yml, only where this server has none.
+# The compose commands are derived again, so the database is restored with it as well. Not in a
+# subshell: it sets APP_COMPOSE.
+place_local_compose() {
+  [ -f "$1/compose.local.yml" ] || return 0
+  if [ -e "$LOCAL_COMPOSE" ]; then
+    log "$LOCAL_COMPOSE stays as it is (the snapshot holds one too)"
+    return 0
+  fi
+  (umask 077 && cp "$1/compose.local.yml" "$LOCAL_COMPOSE")
+  chown 0:0 "$LOCAL_COMPOSE"
+  chmod 600 "$LOCAL_COMPOSE"
+  set_install_paths
+  log "local compose override from the snapshot: $LOCAL_COMPOSE"
 }
 
 # restore_secrets <dir>: generated keys from the snapshot replace this server's; owner secrets
@@ -194,6 +212,7 @@ main() {
   missing=$(tenant_files_missing "$ENV_FILE" "$files/env" "$APP_DIR")
   [ -z "$missing" ] ||
     die "the tenant worker is on (COMPOSE_PROFILES=tenant), this server lacks $(names "$missing") and the snapshot does not hold them (made before backups included them, or they were missing when it was made): copy the certificate and its password file there from where you keep them (docs/operations/mail-node.md, section 6e), owner $TENANT_WORKER_UID, mode 0400, then run restore.sh again" 2
+  place_local_compose "$files"
   restore_secrets "$files"
   restore_database "$files"
   restore_redis "$files"

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Backs up the panel into the restic repository named in .env (any S3-compatible storage): a
 # pg_dump with the row counts taken in the same database snapshot, plus .env, edge/.env and
-# install.conf, which hold the keys that make the dump usable, and, with the tenant profile on,
-# the tenant worker's PFX and its password file: everything restore.sh needs on a fresh server.
+# install.conf, which hold the keys that make the dump usable, the operator's compose.local.yml
+# when there is one, and, with the tenant profile on, the tenant worker's PFX and its password
+# file: everything restore.sh needs on a fresh server.
 # restic encrypts the repository with RESTIC_PASSWORD, kept on the server and by the owner (the
 # recovery key).
 #
@@ -136,6 +137,13 @@ stage_files() {
   cp -p "$ENV_FILE" "$dir/env"
   if [ -f "$EDGE_ENV" ]; then cp -p "$EDGE_ENV" "$dir/edge.env"; fi
   cp -p "$OPT_PREFIX/install.conf" "$dir/install.conf"
+  # The operator's compose additions (lib/app.sh), root 0600 in the snapshot: they may name hosts
+  # or files the panel needs, and restore.sh puts them back on a server that has none.
+  if [ -f "$LOCAL_COMPOSE" ]; then
+    (umask 077 && cp "$LOCAL_COMPOSE" "$dir/compose.local.yml")
+    chmod 600 "$dir/compose.local.yml"
+    log "compose.local.yml added"
+  fi
   stage_tenant_files "$dir" "$ENV_FILE" "$APP_DIR"
   if [ "$2" = 1 ]; then
     app_compose exec -T redis redis-cli SAVE >/dev/null

@@ -34,8 +34,9 @@ IPv4 панели, `<PREFIX>` — каталог установки (по умо
 Healthchecks.io или совместимый сервис (пинги, оповещения в Telegram).
 
 Модули панели (frontend, backend, postgres, redis, tenant-worker) — один compose-проект
-(`docker-compose.yml` + `deploy/compose.prod.yml`); край — отдельный compose-проект `edge`, он
-переживает обновления панели.
+(`docker-compose.yml` + `deploy/compose.prod.yml`, плюс необязательный `<PREFIX>/compose.local.yml`
+с локальными дополнениями оператора — [deployment.md, раздел 4](../operations/deployment.md)); край —
+отдельный compose-проект `edge`, он переживает обновления панели.
 
 ## 2. Связи и порты
 

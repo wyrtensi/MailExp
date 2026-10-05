@@ -63,7 +63,8 @@ Usage: install.sh --version sha-<commit> --signin cf|direct|both
 Values are stored in <prefix>/install.conf: a rerun without flags repeats the last install.
 <prefix>/compose.local.yml, if it exists, is added after the production overlay to every compose
 command of the panel (install, update, backup, restore, rollback, status, the CLI): the operator's
-own additions, kept across updates.
+own additions, kept across updates and in backups. A version older than this feature (an install,
+update or rollback to it) runs without the file; install.sh, update.sh and rollback.sh warn then.
 Secrets are never flags: add them with configure.sh (stdin).
 Exit codes: 0 done, 1 failure, 2 invalid input, 3 waiting for secrets from configure.sh.
 EOF
@@ -138,6 +139,7 @@ maybe_reexec() {
   local target=$APP_DIR/scripts/deploy target_hash
   [ -f "$target/install.sh" ] || die "commit $CFG_VERSION has no scripts/deploy/install.sh"
   [ -z "${MAILEXPERT_INSTALL_REEXEC:-}" ] || return 0
+  if local_compose_ignored <"$target/lib/app.sh"; then local_compose_warning "$CFG_VERSION"; fi
   target_hash=$(cat "$target/install.sh" "$target"/lib/*.sh | sha256sum)
   [ "$target_hash" != "$LOADED_HASH" ] || return 0
   log "continuing with the installer of $CFG_VERSION"
@@ -232,7 +234,9 @@ require_generated_secrets() {
 app_up() {
   log "starting the panel (compose project $CFG_PROJECT)"
   if [ -f "$LOCAL_COMPOSE" ]; then log "with the local compose override $LOCAL_COMPOSE"; fi
-  timeout "$READY_TIMEOUT" "${APP_COMPOSE[@]}" up -d --quiet-pull ||
+  # --remove-orphans: a service dropped from the compose files or compose.local.yml stops. Only
+  # containers of this compose project (-p) count; the edge and other projects are never touched.
+  timeout "$READY_TIMEOUT" "${APP_COMPOSE[@]}" up -d --quiet-pull --remove-orphans ||
     die "the panel did not start within ${READY_TIMEOUT}s; see: docker compose -p $CFG_PROJECT logs backend"
   clear_standby
 }

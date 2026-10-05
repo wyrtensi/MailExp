@@ -199,6 +199,9 @@ main() {
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" rev-parse --verify --quiet "${target#sha-}^{commit}" >/dev/null ||
     die "commit ${target#sha-} is not in $(redact_url "$CFG_REPO_URL")" 2
+  if git -C "$APP_DIR" show "${target#sha-}:scripts/deploy/lib/app.sh" 2>/dev/null | local_compose_ignored; then
+    local_compose_warning "$target"
+  fi
   check_data_images HEAD "${target#sha-}"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-backend:$target"
   ensure_image "$CFG_IMAGE_PREFIX/mailexpert-frontend:$target"
