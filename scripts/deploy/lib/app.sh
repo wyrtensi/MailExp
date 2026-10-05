@@ -65,12 +65,14 @@ is_standby() { [ -f "$STATE_DIR/standby" ]; }
 set_standby() { : >"$STATE_DIR/standby"; }
 clear_standby() { rm -f "$STATE_DIR/standby"; }
 
-# lock_held <file>: status 0 when another process holds the flock on <file>.
+# lock_held <file>: status 0 when another process holds the flock on <file> exclusively. A shared
+# hold does not count: backup.sh holds update.lock shared while it dumps the database, which is
+# not an update, a rollback or a restore.
 lock_held() {
   local fd
   [ -e "$1" ] || return 1
   exec {fd}<"$1"
-  if flock -n "$fd"; then
+  if flock -n -s "$fd"; then
     exec {fd}<&-
     return 1
   fi

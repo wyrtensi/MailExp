@@ -169,7 +169,8 @@ main() {
     if [ -z "$dump" ]; then dump=$BACKUP_DIR/pre-update-$to.dump; fi
     [ -s "$dump" ] || die "no dump at $dump (update.sh keeps the last 3 as backups/pre-update-<version>.dump; an older one: restore.sh from restic)" 2
   fi
-  take_lock "$STATE_DIR/update.lock" 10 "another update.sh, rollback.sh or restore.sh"
+  # 10 minutes: a backup holds the lock (shared) while it dumps the database.
+  take_lock "$STATE_DIR/update.lock" 600 "another update.sh, rollback.sh or restore.sh, or a backup's database dump,"
   git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warn "git fetch failed in $APP_DIR"
   full=$(git -C "$APP_DIR" rev-parse --verify --quiet "${to#sha-}^{commit}") || die "commit ${to#sha-} is not in $(redact_url "$CFG_REPO_URL")" 2
   # Old code on a newer schema is what this script undoes, so the target's migrations are not

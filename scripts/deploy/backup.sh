@@ -27,10 +27,12 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/backup.sh"
 exit_on_unexpected_failure
 
-# How long to wait for another backup.sh: update.sh's pre-update backup may meet a nightly one.
+# How long to wait for the locks (take_backup_locks): another backup.sh (update.sh's pre-update
+# backup may meet a nightly one), an update, a rollback, a restore, install.sh or configure.sh.
 LOCK_TIMEOUT=${MAILEXPERT_BACKUP_LOCK_TIMEOUT:-3600}
 SCRATCH_IMAGE=postgres:16-alpine
 PING_URL='' STARTED=0 STAGING='' VERIFY_DIR='' VERIFY_CONTAINER='' VERIFY_SECONDS=''
+BACKUP_FD='' UPDATE_FD='' INSTALL_FD='' UPDATE_INHERITED=0
 
 usage() {
   cat <<'EOF'
@@ -61,6 +63,67 @@ finish() {
     send_ping "$PING_URL" fail "backup.sh failed with exit $status; see journalctl -u mailexpert-backup"
   fi
   exit "$status"
+}
+
+# Locks. backup.lock: one backup.sh at a time, held to the end (the staging directory and the
+# restic repository are shared). update.lock and install.lock: held only for the capture, while
+# the database is dumped and .env, edge/.env and install.conf are copied next to the dump, so the
+# snapshot never mixes a schema or keys that update.sh, rollback.sh, restore.sh, install.sh or
+# configure.sh are changing. They are released before the upload, the retention and the checks,
+# which can take hours: an installer (the updater's automatic rollback among them) then waits
+# only for a dump. update.lock is held shared, so lock_held, which the health check, the updater
+# and status.sh ask, does not mistake a backup for an update.
+#
+# take_backup_locks: all three or none, polled once a second for up to LOCK_TIMEOUT. A backup
+# never holds one of them while it waits for another: update.sh holds update.lock while its
+# pre-update backup waits for backup.lock, so a nightly backup that sat on backup.lock waiting
+# for update.lock would block that update. The pre-update backup does not open update.lock again
+# (it would wait for its own parent): it uses the descriptor update.sh hands over in
+# MAILEXPERT_UPDATE_LOCK_FD, checked to be this installation's update.lock, and never unlocks it.
+# Status 1 when the wait ran out.
+take_backup_locks() {
+  local waited=0 fd=${MAILEXPERT_UPDATE_LOCK_FD:-}
+  command -v flock >/dev/null || die "flock is required"
+  if [ -n "$fd" ]; then
+    [[ $fd =~ ^[0-9]+$ ]] || die "invalid inherited update lock descriptor" 2
+    [ "$STATE_DIR/update.lock" -ef "/proc/self/fd/$fd" ] ||
+      die "inherited update lock descriptor does not match this installation" 2
+    # Exclusive on the parent's own open file description: a no-op while the parent holds it.
+    flock -n "$fd" || die "inherited update lock is unavailable"
+    UPDATE_FD=$fd UPDATE_INHERITED=1
+  else
+    exec {UPDATE_FD}>"$STATE_DIR/update.lock"
+  fi
+  exec {BACKUP_FD}>"$STATE_DIR/backup.lock"
+  exec {INSTALL_FD}>"$STATE_DIR/install.lock"
+  until try_backup_locks; do
+    if [ "$waited" -eq 0 ]; then log "waiting for another backup, an update, a rollback, a restore, install.sh or configure.sh to finish"; fi
+    [ "$waited" -lt "$LOCK_TIMEOUT" ] || return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# try_backup_locks: one attempt at all three locks; on failure the ones it got are released.
+try_backup_locks() {
+  flock -n "$BACKUP_FD" || return 1
+  if [ "$UPDATE_INHERITED" = 1 ] || flock -n -s "$UPDATE_FD"; then
+    if flock -n -s "$INSTALL_FD"; then return 0; fi
+    if [ "$UPDATE_INHERITED" = 0 ]; then flock -u "$UPDATE_FD"; fi
+  fi
+  flock -u "$BACKUP_FD"
+  return 1
+}
+
+# release_capture_locks: update.lock and install.lock go once the capture is staged; closed too,
+# so the restic containers do not inherit them. An inherited update.lock stays with update.sh.
+release_capture_locks() {
+  flock -u "$INSTALL_FD"
+  exec {INSTALL_FD}>&-
+  if [ "$UPDATE_INHERITED" = 0 ]; then
+    flock -u "$UPDATE_FD"
+    exec {UPDATE_FD}>&-
+  fi
 }
 
 # stage_files <dir> <with redis 0|1>: what goes into the snapshot next to the dump.
@@ -171,19 +234,15 @@ main() {
     log "standby server (install.sh --no-start or restore.sh): backup skipped"
     return 0
   fi
-  # Update's pre-backup inherits its parent's open file description. Reopening update.lock
-  # would wait for that parent forever; verify the descriptor before acquiring/reusing it.
-  if [ -n "${MAILEXPERT_UPDATE_LOCK_FD:-}" ]; then
-    [[ $MAILEXPERT_UPDATE_LOCK_FD =~ ^[0-9]+$ ]] || die "invalid inherited update lock descriptor" 2
-    [ "$STATE_DIR/update.lock" -ef "/proc/self/fd/$MAILEXPERT_UPDATE_LOCK_FD" ] ||
-      die "inherited update lock descriptor does not match this installation" 2
-    flock -n "$MAILEXPERT_UPDATE_LOCK_FD" || die "inherited update lock is unavailable"
-  else
-    take_lock "$STATE_DIR/update.lock" "$LOCK_TIMEOUT" "an update, rollback or restore"
+  if ! take_backup_locks; then
+    # A skipped backup is a failed one for the monitoring (unless it was only a local dump).
+    if backup_configured "$ENV_FILE" || [ -z "$keep" ]; then
+      send_ping "$(backup_ping_url)" fail "backup.sh gave up after ${LOCK_TIMEOUT}s waiting for another backup, an update, a rollback, a restore, install.sh or configure.sh"
+    fi
+    die "gave up after ${LOCK_TIMEOUT}s waiting for another backup, an update, a rollback, a restore, install.sh or configure.sh"
   fi
-  take_install_lock "$STATE_DIR" "$LOCK_TIMEOUT" backup.sh
-  take_lock "$STATE_DIR/backup.lock" "$LOCK_TIMEOUT" "another backup.sh"
-  # Installation may have changed the version and images while the backup waited.
+  # The capture: an installation may have changed the version, the images and .env while the
+  # backup waited. Nothing below may change until release_capture_locks.
   load_install "$prefix"
   if is_standby; then
     log "standby server: backup skipped"
@@ -220,6 +279,8 @@ main() {
   stage_files "$STAGING" "$redis"
   load_restic_env
   load_restic_host mailexpert
+  release_capture_locks
+  log "database and files captured; updates and installations may run again"
   ensure_image "$RESTIC_IMAGE"
   snapshot=$(restic_run -v "$STAGING:/backup:ro" -- backup --json --host "$RESTIC_HOST" --tag "$tag" /backup |
     jq -r 'select(.message_type == "summary") | .snapshot_id')

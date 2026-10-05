@@ -8,3 +8,8 @@ Type=oneshot
 ExecStart=@PREFIX@/app/scripts/deploy/backup.sh --prefix @PREFIX@
 Nice=10
 IOSchedulingClass=idle
+# Without a bound a restic run that hangs would keep this unit active for good: no later nightly
+# backup would start, and only the backup age in the health check would notice. 6 hours: up to an
+# hour of waiting for the locks, then the dump, the upload and the Sunday restore check of a large
+# database (about an hour each).
+TimeoutStartSec=6h

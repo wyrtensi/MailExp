@@ -30,7 +30,10 @@ exit_on_unexpected_failure
 # update.sh raises it: long backfill migrations run before the backend listens.
 READY_TIMEOUT=${MAILEXPERT_READY_TIMEOUT:-180}
 EDGE_TIMEOUT=180
-LOCK_TIMEOUT=60
+# How long to wait for install.lock: another install.sh or configure.sh, or a backup while it
+# dumps the database (minutes on a large one). The updater's automatic rollback raises it.
+LOCK_TIMEOUT=${MAILEXPERT_LOCK_TIMEOUT:-600}
+[[ $LOCK_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_LOCK_TIMEOUT must be a number of seconds" 2
 # 1 when the panel already answered before this run changed anything (an update, a rollback, a
 # rerun): setup_backups then only warns about the repository.
 PANEL_WAS_RUNNING=0
