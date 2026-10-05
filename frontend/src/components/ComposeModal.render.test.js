@@ -450,3 +450,18 @@ test('reply draft autosave and subsequent send retain the conversation headers',
     assert.equal(sent[0].payload.references, references);
   } finally { settleSend('draft-reply-test', { status: 'cancelled' }); api.post = originalPost; await close(); }
 });
+
+test('reopened alias draft keeps its From selection and autosave identity', async () => {
+  const prior = useStore.getState().accounts;
+  useStore.setState({ accounts: [{ ...prior[0], aliases: [{ id: 'alias-1', account_id: 'acct', email: 'alias@example.com', name: 'Alias' }] }] });
+  const close = await openDraft({ plaintextEmail: false, body: '<p>Hello</p>', aliasId: 'alias-1' });
+  try {
+    assert.equal(document.querySelector('select').value, 'alias:alias-1:acct');
+    await hideTab();
+    assert.equal(saved.length, 0, 'restoring identity leaves the draft untouched');
+    await React.act(async () => document.querySelector('.ProseMirror').editor.commands.insertContent(' Edited'));
+    await hideTab();
+    assert.equal(saved[0].aliasId, 'alias-1');
+    assert.equal(saved[0].accountId, 'acct');
+  } finally { await close(); useStore.setState({ accounts: prior }); }
+});

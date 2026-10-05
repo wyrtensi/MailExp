@@ -452,15 +452,16 @@ describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
   };
 
   // bccRoute: the [status, body] GET /mail/messages/draft-1/bcc answers with.
-  const openDraft = async (bccRoute, headers = '', metadata = {}, bodyMetadata = {}) => {
+  const openDraft = async (bccRoute, headers = '', metadata = {}, bodyMetadata = {}, accounts = [ACCOUNT], aliasRoute = [200, []]) => {
     ROUTES = {
+      '/accounts/acct-1/aliases': aliasRoute,
       '/mail/messages/draft-1/body': [200, { html: '<p>hello</p>', text: 'hello', ...bodyMetadata }],
       '/mail/messages/draft-1/headers': headers === null ? [502, { error: 'Headers unavailable' }] : [200, { headers }],
       '/mail/messages/draft-1/bcc': bccRoute,
     };
     const opened = [];
     await mount({
-      rows: [{ ...DRAFT, ...metadata }], threadedView: false,
+      rows: [{ ...DRAFT, ...metadata }], threadedView: false, accounts,
       state: {
         selectedFolder: 'Drafts', folders: { 'acct-1': DRAFTS_FOLDERS },
         openCompose: d => opened.push(d), notifications: [],
@@ -470,6 +471,35 @@ describe('MessageList — reopening a saved draft keeps its Bcc (#499)', () => {
     ROUTES = {};
     return opened;
   };
+
+  const alias = { id: 'alias-1', account_id: 'acct-1', name: 'Alias', email: 'alias@example.com' };
+  for (const source of ['header', 'cache', 'unloaded']) {
+    test(`restores the draft alias from ${source}`, async () => {
+      const account = { ...ACCOUNT, ...(source === 'unloaded' ? {} : { aliases: [alias] }) };
+      const opened = await openDraft([200, { bcc: [] }], source === 'cache' ? null : 'From: Alias <ALIAS@example.com>\r\n',
+        { from_email: source === 'cache' ? 'ALIAS@example.com' : ACCOUNT.email_address }, {}, [account], [200, [alias]]);
+      assert.equal(opened[0].aliasId, alias.id);
+      if (source === 'unloaded') assert.deepEqual(useStore.getState().accounts[0].aliases, [alias]);
+    });
+  }
+  for (const from of ['"Alias <Sales>" <alias@example.com>', '"Alias <Sales>" <alias@example.com> (legacy <primary@example.com>)', '(legacy <primary@example.com>) "Alias \\"<Sales>\\"" <alias@example.com>']) {
+    test(`restores alias from quoted display names and comments: ${from}`, async () => {
+      const opened = await openDraft([200, { bcc: [] }], `From: ${from}\r\n`, { from_email: ACCOUNT.email_address }, {}, [{ ...ACCOUNT, aliases: [alias] }]);
+      assert.equal(opened[0].aliasId, alias.id);
+    });
+  }
+  for (const address of [ACCOUNT.email_address, 'removed@example.com']) {
+    test(`keeps primary fallback for ${address}`, async () => {
+      const opened = await openDraft([200, { bcc: [] }], `From: <${address}>\r\n`, {}, {}, [{ ...ACCOUNT, aliases: [alias] }]);
+      assert.equal(opened[0].aliasId, undefined);
+      assert.equal(opened[0].accountId, ACCOUNT.id);
+    });
+  }
+  test('opens read-only when unloaded aliases cannot be fetched', async () => {
+    const opened = await openDraft([200, { bcc: [] }], 'From: <alias@example.com>\r\n', {}, {}, [ACCOUNT], [502, { error: 'Unavailable' }]);
+    assert.equal(opened.length, 0);
+    assert.equal(useStore.getState().selectedMessageId, 'draft-1');
+  });
 
   for (const source of ['headers', 'body after failed headers']) {
     test(`restores reply conversation metadata from ${source}`, async () => {
