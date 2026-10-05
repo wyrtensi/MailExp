@@ -80,6 +80,18 @@ describe('buildSnippetFromHtml', () => {
 });
 
 describe('snippetFromBody', () => {
+  it.each(['&#1114112;', '&#x110000;', '&#' + '9'.repeat(400) + ';', '&#x' + 'F'.repeat(400) + ';'])(
+    'preserves invalid numeric entity %s without throwing', (entity) => {
+      const text = 'Readable ' + entity + ' ending';
+      expect(snippetFromBody(text)).toBe(text.slice(0, 200));
+    }
+  );
+
+  it('decodes valid decimal and hexadecimal entities through the upper code point', () => {
+    expect(snippetFromBody('&#65; &#x41; &#128512; &#x1F600; &#1114111; &#x10FFFF;'))
+      .toBe('A A 😀 😀 ' + String.fromCodePoint(0x10FFFF) + ' ' + String.fromCodePoint(0x10FFFF));
+  });
+
   it('keeps a plain-text digest with divider rule lines clean', () => {
     const text = '***************\r\nWeekly Digest\r\n***************\r\n\r\n-----\r\nPosts\r\n-----\r\n\r\nWhat it takes to launch a new product this year\r\n\r\nWe were just about...';
     expect(snippetFromBody(text)).toBe("Weekly Digest Posts What it takes to launch a new product this year We were just about...");
@@ -190,6 +202,18 @@ describe('snippetFromBody', () => {
 });
 
 describe('parseMessage', () => {
+  it.each(['&#1114112;', '&#x110000;', '&#' + '9'.repeat(400) + ';'])(
+    'keeps an ingestion snippet for a plain-text body with %s', async (entity) => {
+      const text = 'Readable ' + entity + ' ending';
+      const parsed = await parseMessage({
+        uid: 1,
+        envelope: { subject: 'Numeric entity' },
+        bodyParts: new Map([['1', Buffer.from(text)]]),
+      });
+      expect(parsed.snippet).toBe(text.slice(0, 200));
+    }
+  );
+
   it('prefers the HTML sibling when a text/plain part is degenerate', async () => {
     const text = ' ()\r\n\r\nRelink to \r\n\r\nWe stopped importing transactions from  because we lost connection! To fix this we need you to go through the process of relinking to ?</b> Simply reply...\r\n\r\n<!-- Action -->\r\nGo to my accounts';
     const html = '<html><body><h1>Relink to Examplebank (Canada)</h1><p>Reconnect your account.</p></body></html>';
