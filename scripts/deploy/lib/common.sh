@@ -42,13 +42,14 @@ take_install_lock() {
   done
 }
 
-# take_lock <file> <seconds> <what>: an exclusive flock on <file>, held until the process exits,
+# take_lock <file> <seconds> <what> [descriptor variable]: an exclusive flock on <file>, held until the process exits,
 # waiting up to <seconds> for <what> to let go. Children inherit the descriptor, so a script must
 # not run a child that takes the same lock (it would wait for its own parent).
 take_lock() {
   local file=$1 timeout=$2 what=$3 fd waited=0
   command -v flock >/dev/null || die "flock is required"
   exec {fd}>"$file"
+  if [ $# -ge 4 ]; then printf -v "$4" '%s' "$fd"; fi
   until flock -n "$fd"; do
     if [ "$waited" -eq 0 ]; then log "waiting for $what to finish"; fi
     [ "$waited" -lt "$timeout" ] || die "$what has held $file for ${timeout}s; try again when it finishes"

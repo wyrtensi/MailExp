@@ -171,7 +171,24 @@ main() {
     log "standby server (install.sh --no-start or restore.sh): backup skipped"
     return 0
   fi
+  # Update's pre-backup inherits its parent's open file description. Reopening update.lock
+  # would wait for that parent forever; verify the descriptor before acquiring/reusing it.
+  if [ -n "${MAILEXPERT_UPDATE_LOCK_FD:-}" ]; then
+    [[ $MAILEXPERT_UPDATE_LOCK_FD =~ ^[0-9]+$ ]] || die "invalid inherited update lock descriptor" 2
+    [ "$STATE_DIR/update.lock" -ef "/proc/self/fd/$MAILEXPERT_UPDATE_LOCK_FD" ] ||
+      die "inherited update lock descriptor does not match this installation" 2
+    flock -n "$MAILEXPERT_UPDATE_LOCK_FD" || die "inherited update lock is unavailable"
+  else
+    take_lock "$STATE_DIR/update.lock" "$LOCK_TIMEOUT" "an update, rollback or restore"
+  fi
+  take_install_lock "$STATE_DIR" "$LOCK_TIMEOUT" backup.sh
   take_lock "$STATE_DIR/backup.lock" "$LOCK_TIMEOUT" "another backup.sh"
+  # Installation may have changed the version and images while the backup waited.
+  load_install "$prefix"
+  if is_standby; then
+    log "standby server: backup skipped"
+    return 0
+  fi
   trap finish EXIT
   PING_URL=$(backup_ping_url)
   if ! backup_configured "$ENV_FILE" && [ -n "$keep" ]; then
