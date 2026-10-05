@@ -881,7 +881,7 @@ export function AccountsTab() {
         </div>
         <AddAccountTabs
           options={addOptions}
-          active={addKind ?? (googleStatus && domainStatus ? defaultAddKind(addOptions) : null)}
+          active={addKind ?? defaultAddKind(addOptions)}
           onSelect={setAddKind}
           renderForm={(kind) => ADD_FORMS[kind]()}
         />

@@ -1174,9 +1174,9 @@
       "addAccount": "Добавить аккаунт",
       "saving": "Сохранение…",
       "add": {
-        "gmailTitle": "Gmail",
-        "gmailDescription": "Вход через Google. MailExpert не видит пароль.",
-        "manualTitle": "Другой сервер",
+        "gmailTitle": "Личный Gmail",
+        "gmailDescription": "Свой ящик @gmail.com: вход через Google, пароль MailExpert не видит.",
+        "manualTitle": "Другой сервер (IMAP и SMTP вручную)",
         "manualDescription": "Настройки IMAP и SMTP вводятся вручную.",
         "emailLabel": "Адрес Gmail",
         "emailPh": "name@gmail.com",
