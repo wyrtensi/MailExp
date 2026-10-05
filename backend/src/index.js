@@ -65,6 +65,7 @@ import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
 import { authSettingsError, getAuthSettings } from './services/auth/authSettings.js';
 import { startAccessSync } from './services/accessSync/index.js';
+import { registerAccessSyncJobKind } from './services/accessSync/actions.js';
 import { identityGate } from './middleware/identityGate.js';
 import { providerThreadIndexState } from './services/threading/providerThreadIndex.js';
 
@@ -292,6 +293,9 @@ registerTenantJobKinds();
 // Stage 7b: the domains' tenant steps and the DBEB mirror, and the recipient removed before a node
 // mailbox is deleted (R-29 with R-33).
 registerTenantDomainJobKind({ beforeNodeDelete: BEFORE_NODE_DELETE });
+// A Cloudflare Access sync the panel CLI asked for: run here, where the sync signs disabled users
+// out and is serialised with its other runs (services/accessSync/actions.js).
+registerAccessSyncJobKind();
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.

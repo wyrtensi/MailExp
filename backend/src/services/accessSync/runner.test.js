@@ -4,13 +4,13 @@ vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
 vi.mock('../auth/userStatus.js', () => ({ disableUsersByEmail: vi.fn() }));
 vi.mock('./settings.js', () => ({
-  loadRunConfig: vi.fn(), loadState: vi.fn(), saveState: vi.fn(), accessSyncMaxDisables: vi.fn(),
+  loadRunConfig: vi.fn(), loadState: vi.fn(), loadStoredConfig: vi.fn(), saveState: vi.fn(), accessSyncMaxDisables: vi.fn(),
 }));
 
 import { query, withTransaction } from '../db.js';
 import { recordAudit } from '../auditLog.js';
 import { disableUsersByEmail } from '../auth/userStatus.js';
-import { accessSyncMaxDisables, loadRunConfig, loadState, saveState } from './settings.js';
+import { accessSyncMaxDisables, loadRunConfig, loadState, loadStoredConfig, saveState } from './settings.js';
 import { CloudflareAccessError } from './cloudflareAccessClient.js';
 import { runAccessSync } from './runner.js';
 
@@ -40,6 +40,7 @@ const lastRun = (fields) => ({
 beforeEach(() => {
   vi.clearAllMocks();
   loadRunConfig.mockResolvedValue(CONFIG);
+  loadStoredConfig.mockResolvedValue({ enabled: true, ...CONFIG, apiToken: 'enc:tok' });
   state([]);
   saveState.mockResolvedValue(undefined);
   accessSyncMaxDisables.mockReturnValue(10);
@@ -67,6 +68,19 @@ describe('runAccessSync', () => {
     expect(result).toEqual(lastRun({ outcome: 'updated', added: 2 }));
     expect(saved()).toEqual({ baseline: ['a@example.com', 'b@example.com'], abortedCandidates: null, lastRun: result });
     expect(query.mock.calls[0][0]).toBe('SELECT email FROM users WHERE disabled_at IS NULL AND email IS NOT NULL');
+  });
+
+  it('keeps the state of a policy the settings moved to while it ran (the CLI saves from another process)', async () => {
+    cloudflare(policyWith([email('a@example.com')]));
+    activeUsers('a@example.com', 'b@example.com');
+    // The run starts with no baseline; meanwhile the CLI points the sync at another policy and
+    // saveConfig resets the state for it.
+    const reset = { baseline: [], abortedCandidates: null, lastRun: null };
+    loadState.mockResolvedValueOnce({ baseline: ['old@example.com'], abortedCandidates: null, lastRun: null }).mockResolvedValue(reset);
+    loadStoredConfig.mockResolvedValue({ enabled: true, ...CONFIG, policyId: 'other-pol' });
+    const result = await run();
+    expect(result.outcome).toBe('updated');
+    expect(saved()).toEqual({ ...reset, lastRun: result });
   });
 
   it('writes nothing when the policy is already in line', async () => {

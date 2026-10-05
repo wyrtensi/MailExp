@@ -4,7 +4,7 @@ import { getAuthSettings } from '../auth/authSettings.js';
 import { disableUsersByEmail } from '../auth/userStatus.js';
 import { CloudflareAccessError, createCloudflareAccessClient } from './cloudflareAccessClient.js';
 import { buildInclude, exceedsDisableLimit, removedInCloudflare } from './reconcile.js';
-import { accessSyncMaxDisables, loadRunConfig, loadState, saveState } from './settings.js';
+import { accessSyncMaxDisables, loadRunConfig, loadState, loadStoredConfig, saveState } from './settings.js';
 
 // The name the audit log shows for changes the sync makes on its own.
 export const ACCESS_SYNC_ACTOR = 'Cloudflare Access';
@@ -32,6 +32,14 @@ export async function runAccessSync({
       trigger, startedAt, finishedAt: now().toISOString(),
       added: 0, removed: 0, disabled: 0, wouldDisable: 0, error: null, ...result,
     };
+    // The panel CLI saves the settings from its own process, outside this process's lock. When the
+    // account, application or policy changed while this run worked, its baseline belongs to the old
+    // policy: saveConfig has reset the state for the new one, and only lastRun is added to it.
+    const current = await loadStoredConfig();
+    if (current.accountId !== config.accountId || current.appId !== config.appId || current.policyId !== config.policyId) {
+      await saveState({ ...(await loadState()), lastRun });
+      return lastRun;
+    }
     await saveState({ ...state, ...statePatch, lastRun });
     return lastRun;
   };
