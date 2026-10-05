@@ -41,6 +41,7 @@ const MAX_LOG_LINE = 300;
 
 const STATUS = {
   unauthorized: 401, unknown_op: 404, invalid_args: 400, invalid_tenant: 400, invalid_json: 400, body_too_large: 413,
+  exo_throttled: 429, exo_exists: 409, quarantine_not_allowed: 403,
   certificate_mismatch: 409, tenant_not_allowed: 403, exo_not_found: 422, busy: 503, exo_timeout: 504, exo_connect_failed: 502, exo_failed: 502,
   runner_failed: 502, runner_exited: 502, not_found: 404,
 };
