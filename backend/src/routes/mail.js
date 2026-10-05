@@ -798,20 +798,21 @@ router.get('/messages/:id/attachments.zip', async (req, res) => {
     if (bufferMap.size === 0) return res.status(404).json({ error: 'Could not fetch attachments' });
 
     // Deduplicate filenames: invoice.pdf → invoice (2).pdf
-    const usedNames = new Map();
+    const usedNames = new Set();
     const entries = [];
     for (const att of eligible) {
       const buf = bufferMap.get(att.part);
       if (!buf) continue;
-      let name = safeFilename(att.filename);
-      if (usedNames.has(name)) {
-        const n = usedNames.get(name) + 1;
-        usedNames.set(name, n);
-        const dot = name.lastIndexOf('.');
-        name = dot > 0 ? `${name.slice(0, dot)} (${n})${name.slice(dot)}` : `${name} (${n})`;
-      } else {
-        usedNames.set(name, 1);
+      // Archiver strips leading word/drive prefixes ending in a colon.
+      const originalName = safeFilename(att.filename).replace(/:/g, '_');
+      let name = originalName;
+      const dot = originalName.lastIndexOf('.');
+      let n = 2;
+      while (usedNames.has(name)) {
+        name = dot > 0 ? `${originalName.slice(0, dot)} (${n})${originalName.slice(dot)}` : `${originalName} (${n})`;
+        n++;
       }
+      usedNames.add(name);
       entries.push({ name, buf });
     }
 
