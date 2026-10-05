@@ -1,110 +1,91 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../services/db.js', () => ({ query: vi.fn() }));
+const client = vi.hoisted(() => ({ query: vi.fn() }));
+vi.mock('../services/db.js', () => ({
+  query: vi.fn(),
+  withTransaction: vi.fn(async (fn) => fn(client)),
+}));
 import { query } from '../services/db.js';
 import {
-  getActivatedPlugins, isPluginActivated, isPluginActivatedForAccount, setPluginActivated, invalidateActivationCache,
+  ENABLED_PLUGINS_KEY, getEnabledPlugins, isPluginEnabled, setPluginEnabled, invalidateEnabledPluginsCache,
+  parseEnabledPlugins,
 } from './activation.js';
 
-describe('plugin activation', () => {
+// The locked read inside setPluginEnabled answers with `stored`; the INSERT/UPDATE answer empty.
+function storedValue(stored) {
+  client.query.mockImplementation(async (sql) => (/SELECT value/.test(sql) ? { rows: stored == null ? [] : [{ value: stored }] } : { rows: [] }));
+}
+
+describe('panel-wide plugin switch', () => {
   beforeEach(() => {
     query.mockReset();
-    ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'].forEach(invalidateActivationCache);
+    client.query.mockReset();
+    invalidateEnabledPluginsCache();
   });
 
-  it('reads the activated set from preferences.enabledPlugins', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: ['gtd', 'other'] }] });
-    const set = await getActivatedPlugins('u1');
-    expect(set).toEqual(new Set(['gtd', 'other']));
-    expect(query.mock.calls[0][0]).toMatch(/preferences->'enabledPlugins'/);
-    expect(query.mock.calls[0][1]).toEqual(['u1']);
+  it('reads the enabled set from the system_settings row', async () => {
+    query.mockResolvedValueOnce({ rows: [{ value: '["gtd","other"]' }] });
+    expect(await getEnabledPlugins()).toEqual(new Set(['gtd', 'other']));
+    expect(query.mock.calls[0][0]).toMatch(/FROM system_settings WHERE key = \$1/);
+    expect(query.mock.calls[0][1]).toEqual([ENABLED_PLUGINS_KEY]);
   });
 
-  it('treats a missing/absent value as nothing activated', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: null }] });
-    expect(await getActivatedPlugins('u2')).toEqual(new Set());
+  it('treats a missing row as nothing enabled', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    expect(await getEnabledPlugins()).toEqual(new Set());
   });
 
-  it('treats a malformed (non-array) value as nothing activated', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: { gtd: true } }] });
-    expect(await getActivatedPlugins('u3')).toEqual(new Set());
+  it('treats malformed text, a non-array and non-string ids as nothing enabled', () => {
+    expect(parseEnabledPlugins('not json')).toEqual([]);
+    expect(parseEnabledPlugins('{"gtd":true}')).toEqual([]);
+    expect(parseEnabledPlugins('["gtd",7,null,"gtd"]')).toEqual(['gtd']);
+    expect(parseEnabledPlugins(undefined)).toEqual([]);
   });
 
-  it('returns empty (no query) for a falsy userId', async () => {
-    expect(await getActivatedPlugins(undefined)).toEqual(new Set());
-    expect(query).not.toHaveBeenCalled();
-  });
-
-  it('degrades to empty on a prefs read failure', async () => {
+  it('degrades to empty on a read failure', async () => {
     query.mockRejectedValueOnce(new Error('db boom'));
-    expect(await getActivatedPlugins('u4')).toEqual(new Set());
+    expect(await getEnabledPlugins()).toEqual(new Set());
   });
 
-  it('caches per user until invalidated', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: ['gtd'] }] });
-    await getActivatedPlugins('u5');
-    await getActivatedPlugins('u5');
-    expect(query).toHaveBeenCalledTimes(1); // second read served from cache
-    invalidateActivationCache('u5');
-    query.mockResolvedValueOnce({ rows: [{ list: [] }] });
-    expect(await getActivatedPlugins('u5')).toEqual(new Set());
+  it('caches until invalidated, and isPluginEnabled answers from the same read', async () => {
+    query.mockResolvedValueOnce({ rows: [{ value: '["gtd"]' }] });
+    expect(await isPluginEnabled('gtd')).toBe(true);
+    expect(await isPluginEnabled('nope')).toBe(false);
+    expect(query).toHaveBeenCalledTimes(1);
+    invalidateEnabledPluginsCache();
+    query.mockResolvedValueOnce({ rows: [{ value: '[]' }] });
+    expect(await isPluginEnabled('gtd')).toBe(false);
     expect(query).toHaveBeenCalledTimes(2);
   });
 
-  it('isPluginActivated reflects membership', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: ['gtd'] }] });
-    expect(await isPluginActivated('u1', 'gtd')).toBe(true);
-    expect(await isPluginActivated('u1', 'nope')).toBe(false); // served from same cached read
-    expect(query).toHaveBeenCalledTimes(1);
+  it('setPluginEnabled locks the row, writes the sorted list and drops the cache', async () => {
+    query.mockResolvedValueOnce({ rows: [{ value: '[]' }] });
+    await getEnabledPlugins(); // warm the cache with "nothing enabled"
+
+    storedValue('["zeta"]');
+    const result = await setPluginEnabled('gtd', true);
+    expect(result).toEqual({ enabled: new Set(['zeta', 'gtd']), changed: true });
+    const sqls = client.query.mock.calls.map(([sql]) => sql);
+    expect(sqls[0]).toMatch(/INSERT INTO system_settings .* ON CONFLICT \(key\) DO NOTHING/s);
+    expect(sqls[1]).toMatch(/FOR UPDATE/);
+    const update = client.query.mock.calls.find(([sql]) => /UPDATE system_settings/.test(sql));
+    expect(update[1]).toEqual([ENABLED_PLUGINS_KEY, '["gtd","zeta"]']);
+
+    query.mockResolvedValueOnce({ rows: [{ value: '["gtd","zeta"]' }] });
+    expect(await isPluginEnabled('gtd')).toBe(true); // re-read, not the stale cache
   });
 
-  it('setPluginActivated adds/removes the id, persists via jsonb_set, and invalidates the cache', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: [] }] }); // current read
-    query.mockResolvedValueOnce({ rows: [] });             // the UPDATE
-    const set = await setPluginActivated('u6', 'gtd', true);
-    expect(set).toEqual(new Set(['gtd']));
-    const updateCall = query.mock.calls.find(([sql]) => /UPDATE users/.test(sql));
-    expect(updateCall[0]).toMatch(/jsonb_set\(COALESCE\(preferences/);
-    expect(updateCall[1]).toEqual(['u6', JSON.stringify(['gtd'])]);
-
-    // next read hits the DB again (cache was invalidated) — returns the freshly written value
-    query.mockResolvedValueOnce({ rows: [{ list: ['gtd'] }] });
-    expect(await isPluginActivated('u6', 'gtd')).toBe(true);
+  it('setPluginEnabled removes an id when disabling', async () => {
+    storedValue('["gtd","other"]');
+    const result = await setPluginEnabled('gtd', false);
+    expect(result).toEqual({ enabled: new Set(['other']), changed: true });
+    const update = client.query.mock.calls.find(([sql]) => /UPDATE system_settings/.test(sql));
+    expect(update[1]).toEqual([ENABLED_PLUGINS_KEY, '["other"]']);
   });
 
-  it('setPluginActivated removes an id when deactivating', async () => {
-    query.mockResolvedValueOnce({ rows: [{ list: ['gtd', 'other'] }] });
-    query.mockResolvedValueOnce({ rows: [] });
-    const set = await setPluginActivated('u6', 'gtd', false);
-    expect(set).toEqual(new Set(['other']));
-    const updateCall = query.mock.calls.find(([sql]) => /UPDATE users/.test(sql));
-    expect(updateCall[1]).toEqual(['u6', JSON.stringify(['other'])]);
-  });
-});
-
-describe('plugin activation for a mailbox', () => {
-  beforeEach(() => {
-    query.mockReset();
-    invalidateActivationCache('u1');
-  });
-
-  it('is on when any active user turned the plugin on, cached per plugin', async () => {
-    query.mockResolvedValueOnce({ rows: [{ activated: true }] });
-    expect(await isPluginActivatedForAccount('gtd-any', 'acct-1')).toBe(true);
-    expect(await isPluginActivatedForAccount('gtd-any', 'acct-2')).toBe(true);
-    expect(query).toHaveBeenCalledTimes(1);
-    const [sql, params] = query.mock.calls[0];
-    expect(sql).toMatch(/disabled_at IS NULL/);
-    expect(sql).toMatch(/preferences->'enabledPlugins' \? \$1/);
-    expect(params).toEqual(['gtd-any']);
-  });
-
-  it('forgets the answer when someone toggles the plugin', async () => {
-    query.mockResolvedValueOnce({ rows: [{ activated: false }] });
-    expect(await isPluginActivatedForAccount('gtd-toggle', 'acct-1')).toBe(false);
-    query.mockResolvedValueOnce({ rows: [{ list: [] }] }).mockResolvedValueOnce({ rows: [] });
-    await setPluginActivated('u1', 'gtd-toggle', true);
-    query.mockResolvedValueOnce({ rows: [{ activated: true }] });
-    expect(await isPluginActivatedForAccount('gtd-toggle', 'acct-1')).toBe(true);
+  it('setPluginEnabled reports no change and writes nothing when the state is already that', async () => {
+    storedValue('["gtd"]');
+    expect((await setPluginEnabled('gtd', true)).changed).toBe(false);
+    expect(client.query.mock.calls.some(([sql]) => /UPDATE system_settings/.test(sql))).toBe(false);
   });
 });

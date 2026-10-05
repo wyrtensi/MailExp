@@ -11,7 +11,7 @@ vi.mock('../../services/db.js', () => ({ query: vi.fn() }));
 // activation. Drive the config directly and keep GTD activated; the tick's own enable/folder-set
 // logic (gtdTickFolders) runs for real, which is what these tests exercise.
 vi.mock('../accountConfig.js', () => ({ getAccountConfig: vi.fn() }));
-vi.mock('../activation.js', () => ({ isPluginActivatedForAccount: vi.fn().mockResolvedValue(true) }));
+vi.mock('../activation.js', () => ({ isPluginEnabled: vi.fn().mockResolvedValue(true) }));
 vi.mock('./gtdTransitions.js', () => ({
   runGtdTransitions: vi.fn(),
   threadKeysForMessageIds: vi.fn(),

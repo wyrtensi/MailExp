@@ -16,7 +16,7 @@ import { accountAffectsUnifiedInbox } from '../../utils/unifiedInbox.js';
 import { useStore } from '../../store/index.js';
 
 // Right-sidebar panel: GTD's triage rail. Live when GTD is on for the current account scope
-// (per-user activation is already checked by the slot registry, so pass `true` here).
+// (the panel-wide plugin switch is already checked by the slot registry, so pass `true` here).
 // ctx: { accounts, selectedAccountId, onCollapse, toggleHint }.
 // Where GTD's own settings live, so the Plugins tab can point the user there once GTD is activated.
 // Replaces core's former hardcoded PLUGIN_SETTINGS_LOCATION map (a nav fact core shouldn't own).

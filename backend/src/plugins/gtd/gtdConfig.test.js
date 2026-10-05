@@ -4,10 +4,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // activation; default activation on so the config/folder assertions exercise the enabled path. A
 // dedicated test flips it off.
 vi.mock('../accountConfig.js', () => ({ getAccountConfig: vi.fn() }));
-vi.mock('../activation.js', () => ({ isPluginActivatedForAccount: vi.fn() }));
+vi.mock('../activation.js', () => ({ isPluginEnabled: vi.fn() }));
 
 import { getAccountConfig } from '../accountConfig.js';
-import { isPluginActivatedForAccount } from '../activation.js';
+import { isPluginEnabled } from '../activation.js';
 import {
   DEFAULT_GTD_FOLDERS,
   GTD_STATES,
@@ -32,8 +32,8 @@ const mockAccount = (enabled, folders) =>
 
 beforeEach(() => {
   getAccountConfig.mockReset();
-  isPluginActivatedForAccount.mockReset();
-  isPluginActivatedForAccount.mockResolvedValue(true); // GTD plugin activated for the user unless a test says otherwise
+  isPluginEnabled.mockReset();
+  isPluginEnabled.mockResolvedValue(true); // GTD switched on for the panel unless a test says otherwise
 });
 
 describe('DEFAULT_GTD_FOLDERS', () => {
@@ -256,13 +256,13 @@ describe('getGtdConfig', () => {
     expect(cfg.enabled).toBe(false);
   });
 
-  it('reports enabled=false when the user has the GTD plugin deactivated (even if enabled for the account)', async () => {
+  it('reports enabled=false when the GTD plugin is switched off for the panel (even if enabled for the account)', async () => {
     const id = freshId();
     mockAccount(true, {});
-    isPluginActivatedForAccount.mockResolvedValueOnce(false); // plugin off for this user
+    isPluginEnabled.mockResolvedValueOnce(false); // plugin switched off for the panel
     const cfg = await getGtdConfig(id);
     expect(cfg.enabled).toBe(false);
-    expect(isPluginActivatedForAccount).toHaveBeenCalledWith('gtd', id);
+    expect(isPluginEnabled).toHaveBeenCalledWith('gtd');
     // folders are still resolved (config preserved), only the effective gate is off
     expect(cfg.folders).toEqual(DEFAULT_GTD_FOLDERS);
   });

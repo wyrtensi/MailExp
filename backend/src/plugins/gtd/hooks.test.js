@@ -5,7 +5,7 @@ vi.mock('./gtdConfig.js', () => ({
   getGtdFolderSet: vi.fn(), getGtdConfig: vi.fn(),
   sanitizeGtdFoldersDetailed: vi.fn(), findGtdFolderCollisions: vi.fn(),
   DEFAULT_GTD_FOLDERS: { todo: 'Todo', watch: 'Watch', delegated: 'Delegated', someday: 'Someday', reference: 'Reference' },
-  invalidateGtdConfigCache: vi.fn(),
+  invalidateGtdConfigCache: vi.fn(), clearGtdConfigCache: vi.fn(),
 }));
 vi.mock('./gtdTransitions.js', () => ({ runGtdTransitions: vi.fn(), threadKeysForMessageIds: vi.fn(), threadKeysInFolders: vi.fn(), runTransitionsForSentMessage: vi.fn(), invalidateOwnerAddressesCache: vi.fn() }));
 vi.mock('./gtdSections.js', () => ({ emitGtdIfRelevant: vi.fn() }));
@@ -15,7 +15,7 @@ vi.mock('./gtdPet.js', () => ({ deleteUserPet: vi.fn() }));
 // these fns too.
 vi.mock('../accountConfig.js', () => ({ getAccountConfig: vi.fn(), setAccountConfig: vi.fn() }));
 import { query } from '../../services/db.js';
-import { getGtdFolderSet, getGtdConfig, sanitizeGtdFoldersDetailed, findGtdFolderCollisions, invalidateGtdConfigCache } from './gtdConfig.js';
+import { getGtdFolderSet, getGtdConfig, sanitizeGtdFoldersDetailed, findGtdFolderCollisions, invalidateGtdConfigCache, clearGtdConfigCache } from './gtdConfig.js';
 import { getAccountConfig, setAccountConfig } from '../accountConfig.js';
 import { runGtdTransitions, threadKeysForMessageIds, runTransitionsForSentMessage, invalidateOwnerAddressesCache } from './gtdTransitions.js';
 import { emitGtdIfRelevant } from './gtdSections.js';
@@ -330,21 +330,16 @@ describe('gtd hooks — account settings (enrichAccount / validateAccountSetting
 });
 
 describe('gtd hooks — onPluginActivationChanged', () => {
-  beforeEach(() => { query.mockReset(); invalidateGtdConfigCache.mockReset(); });
+  beforeEach(() => { query.mockReset(); clearGtdConfigCache.mockReset(); });
 
-  it('invalidates GTD config cache for every mailbox when gtd is toggled', async () => {
-    // onPluginActivationChanged lists the mailboxes via the listUserAccounts capability and
-    // invalidates GTD's config cache for each.
-    query.mockResolvedValueOnce({ rows: [{ id: 'a1' }, { id: 'a2' }] });
-    await onPluginActivationChanged({ userId: 'u1', pluginId: 'gtd', activated: false });
-    expect(query.mock.calls[0][1]).toBeUndefined();
-    expect(invalidateGtdConfigCache).toHaveBeenCalledWith('a1');
-    expect(invalidateGtdConfigCache).toHaveBeenCalledWith('a2');
+  it('drops the GTD config cache of every mailbox when gtd is switched for the panel', async () => {
+    await onPluginActivationChanged({ pluginId: 'gtd', enabled: false });
+    expect(clearGtdConfigCache).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
   });
 
-  it('ignores a non-gtd plugin (no query, no invalidation)', async () => {
-    await onPluginActivationChanged({ userId: 'u1', pluginId: 'other', activated: true });
-    expect(query).not.toHaveBeenCalled();
-    expect(invalidateGtdConfigCache).not.toHaveBeenCalled();
+  it('ignores a non-gtd plugin', async () => {
+    await onPluginActivationChanged({ pluginId: 'other', enabled: true });
+    expect(clearGtdConfigCache).not.toHaveBeenCalled();
   });
 });

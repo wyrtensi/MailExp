@@ -231,6 +231,7 @@ test('as a plain user the admin routes answer 403, the user routes still answer'
       ['POST', '/categories/sources', {}],
       ['POST', '/accounts', { name: 'x' }],
       ['POST', '/accounts/demo-gmail/threading/preview', {}],
+      ['PATCH', '/plugins/gtd', { enabled: false }],
     ];
     for (const [method, requestPath, body] of denied) {
       await assert.rejects(() => demoRequest(method, requestPath, body), (err) => {
@@ -244,7 +245,7 @@ test('as a plain user the admin routes answer 403, the user routes still answer'
     assert.equal((await demoRequest('GET', '/mail-node/tenant/phish-release')).enabled, true);
     globalThis.localStorage = { getItem: () => 'user', setItem: () => {} };
 
-    for (const requestPath of ['/mail-node/domains', '/mail-node/outage-letters', '/integrations/status', '/categories/sources', '/accounts']) {
+    for (const requestPath of ['/mail-node/domains', '/mail-node/outage-letters', '/integrations/status', '/categories/sources', '/accounts', '/plugins']) {
       await demoRequest('GET', requestPath);
     }
   } finally {
@@ -505,9 +506,12 @@ test('GTD classify/done/folders answer; pet import rejects', async () => {
   await reject('/gtd/pet/import', 'POST', '/gtd/pet/import', {}, /demo mode/);
 });
 
-test('plugin activation answers; Todoist connect/tasks reject', async () => {
-  const plugin = await answer('/plugins/:param', 'PATCH', '/plugins/gtd', { activated: false });
-  assert.equal(plugin.activated, false);
+test('the panel-wide plugin switch answers; Todoist connect/tasks reject', async () => {
+  const plugin = await answer('/plugins/:param', 'PATCH', '/plugins/gtd', { enabled: false });
+  assert.equal(plugin.enabled, false);
+  const list = await answer('/plugins', 'GET', '/plugins');
+  assert.equal(list.find(p => p.id === 'gtd').enabled, false);
+  await answer('/plugins/:param', 'PATCH', '/plugins/gtd', { enabled: true });
   await reject('/todoist/connect', 'POST', '/todoist/connect', { token: 'x' }, /demo mode/);
   await answer('/todoist/disconnect', 'DELETE', '/todoist/disconnect');
   await reject('/todoist/tasks', 'POST', '/todoist/tasks', {}, /demo mode/);

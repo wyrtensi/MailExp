@@ -2042,9 +2042,9 @@
     },
     "plugins": {
       "title": "Plugins",
-      "description": "Turn optional features on or off for your account. Enabling a plugin adds its own settings and interface.",
-      "activated": "Activated",
-      "deactivated": "Not activated",
+      "description": "Turn optional features on or off for all users of this panel. An enabled plugin adds its own settings and interface for everyone; only administrators can change this.",
+      "enabled": "Enabled for all users",
+      "disabled": "Off for all users",
       "empty": "No plugins are available in this build.",
       "error": "Couldn't update the plugin. Please try again.",
       "configureIn": "Configure options in {{location}}"
@@ -2323,6 +2323,8 @@
       "actionPanelUpdateStarted": "Panel update started",
       "actionPanelUpdateFinished": "Panel updated",
       "actionPanelUpdateFailed": "Panel update failed",
+      "actionPluginEnabled": "Plugin enabled for all users",
+      "actionPluginDisabled": "Plugin disabled for all users",
       "detailPanelUpdate": "From {{from}} to {{target}}",
       "detailPanelUpdateTarget": "To {{target}}",
       "detailTenantAliasContactsApproved": "{{domain}}: {{addresses}}",

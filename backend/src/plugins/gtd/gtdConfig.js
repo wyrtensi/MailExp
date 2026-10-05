@@ -1,4 +1,4 @@
-import { isPluginActivatedForAccount, getAccountConfig } from '../api.js';
+import { isPluginEnabled, getAccountConfig } from '../api.js';
 
 // Default GTD state → folder-path map. An account's gtd_folders JSONB overrides
 // individual entries; any state it omits falls back to the value here. An empty
@@ -158,26 +158,30 @@ export function invalidateGtdConfigCache(accountId) {
   gtdConfigCache.delete(accountId);
 }
 
+// Drops every account's cached config: the panel-wide plugin switch folds into each one.
+export function clearGtdConfigCache() {
+  gtdConfigCache.clear();
+}
+
 // Returns { enabled, folders } for an account. `folders` is the full five-state
 // map with the account's stored gtd_folders merged over DEFAULT_GTD_FOLDERS.
 // Cached with a short TTL; a missing account row reads as disabled + defaults.
 //
-// `enabled` is the EFFECTIVE gate: the account's own gtd_enabled AND the owning user having the
-// GTD plugin activated (users.preferences.enabledPlugins). getGtdConfig is the single point every
-// GTD path funnels through (tick body, transitions, classify/done routes, sections, broadcasts,
-// relocate-exemption), so composing activation here makes deactivating the plugin fully inert
-// backend-side while leaving the per-account gtd_enabled/folders config untouched (reactivation
-// restores everything). The cached value folds activation in, so a toggle must invalidate this
-// cache for the user's accounts — GTD's onPluginActivationChanged hook does that.
+// `enabled` is the EFFECTIVE gate: the account's own gtd_enabled AND an administrator having the
+// GTD plugin enabled for the panel (system_settings.enabled_plugins). getGtdConfig is the single
+// point every GTD path funnels through (tick body, transitions, classify/done routes, sections,
+// broadcasts, relocate-exemption), so composing the switch here makes disabling the plugin fully
+// inert backend-side while leaving the per-account gtd_enabled/folders config untouched (enabling
+// it again restores everything). The cached value folds the switch in, so a toggle must clear this
+// cache for every account — GTD's onPluginActivationChanged hook does that.
 export async function getGtdConfig(accountId) {
   const cached = gtdConfigCache.get(accountId);
   if (cached && cached.expiry > Date.now()) return cached.value;
 
   // Per-account config now lives in the generic per-account plugin config store (not on
-  // email_accounts). `enabled` is EFFECTIVE = this account's own flag AND the owning user having
-  // the GTD plugin activated.
+  // email_accounts). `enabled` is EFFECTIVE = this account's own flag AND the panel-wide switch.
   const cfg = await getAccountConfig('gtd', accountId);
-  const enabled = cfg?.enabled === true && await isPluginActivatedForAccount('gtd', accountId);
+  const enabled = cfg?.enabled === true && await isPluginEnabled('gtd');
   // folders is JSONB; the pg driver parses it into an object already.
   const stored = cfg?.folders && typeof cfg.folders === 'object' ? cfg.folders : {};
   // Legacy hardening: a mapping saved before the reserved-folder denylist existed

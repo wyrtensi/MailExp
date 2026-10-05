@@ -530,7 +530,9 @@ let aiConfig = null;
 let demoRules = [];
 let demoBlockList = [];
 let categorySources = [];
-let pluginsState = [{ id: 'gtd', name: 'Getting Things Done', version: '1.0.0', tier: 1, activated: true }];
+// The panel-wide plugin switch (backend system_settings.enabled_plugins): one per plugin for every
+// user, read by everyone, changed only by an administrator.
+let pluginsState = [{ id: 'gtd', name: 'Getting Things Done', version: '1.0.0', tier: 1, enabled: true }];
 // accountId -> extra FOLDER_FIXTURES-shaped rows created via POST /mail/folders.
 let extraFolders = {};
 let recoveryEmailValue = null;
@@ -1974,6 +1976,8 @@ export function demoAdminOnly(verb, pathname, body = {}) {
   if (/^\/categories\/recategorize\/[^/]+$/.test(pathname)) return verb === 'POST';
   if (pathname === '/accounts') return verb === 'POST' && body?.kind !== 'domain';
   if (/^\/accounts\/[^/]+\/(oauth-subject\/reset|threading\/(preview|mode))$/.test(pathname)) return verb === 'POST';
+  // Switching a plugin on or off is the administrator's; everyone reads the list.
+  if (/^\/plugins\/[^/]+$/.test(pathname)) return verb === 'PATCH';
   return false;
 }
 
@@ -2981,8 +2985,9 @@ export async function demoRequest(method, path, body = {}) {
     const id = decodeURIComponent(pluginMatch[1]);
     const plugin = pluginsState.find(item => item.id === id);
     if (!plugin) throw demoError('Plugin not found');
-    plugin.activated = !!body?.activated;
-    return { id: plugin.id, activated: plugin.activated };
+    if (typeof body?.enabled !== 'boolean') throw demoError('enabled (boolean) is required');
+    plugin.enabled = body.enabled;
+    return { id: plugin.id, enabled: plugin.enabled };
   }
 
   // ── Admin settings screens ────────────────────────────────────────────────

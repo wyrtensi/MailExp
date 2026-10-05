@@ -4732,13 +4732,14 @@ function CategoriesSection({ initialSubTab }) {
 }
 
 // ─── Plugins Section ──────────────────────────────────────────────────────────
-// Plugins settings tab — lists the plugins registered in this build and lets the user activate/
-// deactivate each for themselves. Activation is per-user (persisted server-side) and independent of
-// a plugin's own per-account config; deactivating hides that plugin's UI and makes it inert.
+// Plugins settings tab (administrators only) — lists the plugins registered in this build and lets
+// an administrator switch each on or off for every user of the panel. The switch is panel-wide
+// (persisted server-side, audited) and independent of a plugin's own per-account config; switching
+// a plugin off hides its UI for everyone and makes it inert.
 function PluginsSection({ onNavigate }) {
   const { t } = useTranslation();
   const enabledPlugins = useStore(s => s.enabledPlugins);
-  const setPluginActivated = useStore(s => s.setPluginActivated);
+  const setPluginEnabled = useStore(s => s.setPluginEnabled);
   const [manifests, setManifests] = useState(null); // null = loading
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState(false);
@@ -4754,7 +4755,7 @@ function PluginsSection({ onNavigate }) {
   const toggle = async (id, next) => {
     setBusyId(id);
     setError(false);
-    try { await setPluginActivated(id, next); }
+    try { await setPluginEnabled(id, next); }
     catch { setError(true); }
     finally { setBusyId(null); }
   };
@@ -4801,8 +4802,8 @@ function PluginsSection({ onNavigate }) {
               </div>
               {(() => {
                 const loc = getPluginMeta(p.id)?.settingsLocation;
-                // Activated + has a settings home → a clickable pointer to it. Activated with no
-                // settings, or not activated → a plain status line.
+                // Enabled + has a settings home → a clickable pointer to it. Enabled with no
+                // settings, or switched off → a plain status line.
                 if (on && loc && onNavigate) {
                   return (
                     <button
@@ -4816,7 +4817,7 @@ function PluginsSection({ onNavigate }) {
                 }
                 return (
                   <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                    {on ? t('admin.plugins.activated') : t('admin.plugins.deactivated')}
+                    {on ? t('admin.plugins.enabled') : t('admin.plugins.disabled')}
                   </div>
                 );
               })()}
@@ -8541,7 +8542,7 @@ export function makeSearchIndex(t) {
     { label: t('admin.integrations.google.title'), keywords: ['google', 'gmail', 'oauth', 'client id', 'workspace'], tab: 'integrations', breadcrumb: tabLabel('integrations') },
     { label: t('admin.integrations.googleApps.title'), keywords: ['google', 'gmail', 'oauth', 'client id', 'google cloud', 'project', 'callback', 'limit'], tab: 'integrations', adminOnly: true, breadcrumb: tabLabel('integrations') },
     { label: t('admin.ai.title'), keywords: ['ai', 'artificial intelligence', 'chatgpt', 'ollama', 'llm', 'language model', 'summarize', 'draft', 'compose assistant', 'openai', 'local ai', 'inference', 'gpt'], tab: 'ai', adminOnly: true, breadcrumb: tabLabel('ai') },
-    { label: t('admin.plugins.title'), keywords: ['plugin', 'plugins', 'extension', 'extensions', 'add-on', 'addon', 'gtd', 'activate', 'enable feature', 'modules'], tab: 'plugins', breadcrumb: tabLabel('plugins') },
+    { label: t('admin.plugins.title'), keywords: ['plugin', 'plugins', 'extension', 'extensions', 'add-on', 'addon', 'gtd', 'activate', 'enable feature', 'modules'], tab: 'plugins', adminOnly: true, breadcrumb: tabLabel('plugins') },
     { label: t('admin.categories.title'), keywords: ['categories', 'categorize', 'newsletter', 'promotion', 'social', 'automated', 'inbox tabs', 'sort emails', 'classify'], tab: 'categories', breadcrumb: tabLabel('categories') },
     { label: t('admin.categories.gtdReveal'), keywords: ['gtd', 'todo', 'getting things done', 'watch', 'delegated', 'someday', 'reference', 'next action', 'waiting', 'inbox zero', 'pet'], tab: 'categories', subtab: 'gtd', breadcrumb: `${tabLabel('categories')} › ${t('admin.categories.gtdReveal')}` },
     // Security

@@ -2,8 +2,8 @@
 //
 // Slots (registry.js / PluginSlot.jsx) cover UI a plugin RENDERS. This covers BEHAVIOUR a plugin
 // runs outside React's render cycle — WebSocket message handlers and reconnect hooks — so core's
-// useWebSocket carries no plugin-specific code. Handlers run only while the plugin is activated for
-// the user (store.enabledPlugins); they receive plain data and read state via useStore.getState()
+// useWebSocket carries no plugin-specific code. Handlers run only while the plugin is switched on for
+// the panel (store.enabledPlugins); they receive plain data and read state via useStore.getState()
 // themselves (they are NOT React hooks). A throwing handler is isolated so it can't break the socket.
 import { useStore } from '../store/index.js';
 

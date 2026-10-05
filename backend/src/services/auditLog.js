@@ -14,7 +14,8 @@ import { query } from './db.js';
 // and where it forwards to), since a rule can forward a mailbox's mail outside; mail sync and the
 // rules running write only rule.run, when someone starts a run by hand. An administrator asking
 // for a panel update from the admin UI is recorded, and so are its start and end as the host's
-// updater reports them (services/panelUpdate/reconcile.js), under that administrator.
+// updater reports them (services/panelUpdate/reconcile.js), under that administrator. So is an
+// administrator switching a plugin on or off for the whole panel (routes/plugins.js).
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
@@ -38,6 +39,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'tenant.antispam_enforced', 'tenant.alias_contacts_removal_approved',
   'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
   'panel.update_requested', 'panel.update_started', 'panel.update_finished', 'panel.update_failed',
+  'plugin.enabled', 'plugin.disabled',
 ]);
 const KNOWN_ACTIONS = new Set(AUDIT_ACTIONS);
 

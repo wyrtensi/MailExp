@@ -61,7 +61,7 @@ Everything a plugin may do, grouped:
 - **Per-plugin storage:** `storage.*` (the `plugin_data` table — KV + blobs, owner-scoped, cascade-cleaned)
 - **Per-account plugin config:** `getAccountConfig`, `setAccountConfig` (the `plugin_account_config` table)
 - **Per-message annotations:** `getMessageAnnotations`, `setMessageAnnotation` (namespaced `messages.plugin_annotations`)
-- **Activation:** `isPluginActivated`, `isPluginActivatedForAccount`
+- **Panel-wide switch:** `isPluginEnabled`
 - **Logging:** `logger` · **Auth middleware:** `requireAuth` · **Folder resolution:** `resolveAllDraftsPaths`
 - **Ownership-scoped mail/account reads:** `loadOwnedMessage`, `getOwnedAccount`, `listUserAccounts`, `getAccountAddresses`, `getMessagesByThreadKeys`, `getMessageCopyFolders`, `getMessageFields`, the thread-key resolvers, …
 
@@ -86,7 +86,7 @@ namespaced by plugin id). All cascade-clean with their owner.
 ## Frontend
 
 Core carries no plugin-specific UI code. A plugin registers into a small in-process registry
-(imported once at startup via `frontend/src/plugins/index.js`), activation-gated on
+(imported once at startup via `frontend/src/plugins/index.js`), gated on the panel-wide switch in
 `store.enabledPlugins`:
 
 - `registerSlot(name, { pluginId, isActive?, render })` — render UI at a core seam (`right-sidebar`,
@@ -112,4 +112,6 @@ one user's own browser (never the server or other users), so it's reviewed light
 
 - Work inside `plugins/<name>/`. Keep `npm run lint:plugins` at 0 violations.
 - Need a new capability? Open an issue/PR describing it — core adds it to `api.js`.
-- GTD is per-user opt-in (Settings → Plugins), off by default.
+- Plugins are switched on or off for the whole panel by an administrator (Settings → Plugins,
+  `PATCH /api/plugins/:id`, audited as `plugin.enabled` / `plugin.disabled`); off by default.
+  Every user gets an enabled plugin. Personal plugin settings (GTD's pet) stay per user.

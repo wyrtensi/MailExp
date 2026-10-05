@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./redis.js', () => ({ redisClient: { ping: vi.fn().mockResolvedValue('PONG') } }));
 vi.mock('./aiProvider.js', () => ({ loadAiConfig: vi.fn().mockResolvedValue({ enabled: true, provider: 'api-key' }) }));
-vi.mock('../plugins/activation.js', () => ({ getActivatedPlugins: vi.fn().mockResolvedValue(new Set(['gtd'])) }));
+vi.mock('../plugins/activation.js', () => ({ getEnabledPlugins: vi.fn().mockResolvedValue(new Set(['gtd'])) }));
 vi.mock('./diagnosticsRing.js', () => ({
   getWarningsRaw: vi.fn(() => [
     { code: 'imap_error', accountId: 'acct-1', count: 3, lastT: Date.now() - 5000 },
