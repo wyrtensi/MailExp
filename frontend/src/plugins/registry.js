@@ -7,7 +7,7 @@
 // module load (see plugins/index.js), mirroring the backend's in-process registry.
 //
 // A contribution: { pluginId, order?, isActive?(ctx), render(ctx) }.
-//  - pluginId — gated by per-user activation (store.enabledPlugins) at render time, so a
+//  - pluginId — gated by the panel-wide plugin switch (store.enabledPlugins) at render time, so a
 //    deactivated plugin contributes nothing.
 //  - order    — ascending sort within a slot (default 0) for deterministic placement.
 //  - isActive — a finer, context-scoped gate beyond activation (e.g. "GTD is on for this account");

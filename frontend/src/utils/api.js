@@ -720,11 +720,12 @@ export const api = {
   getGtdPetMeta: (slug) => request('GET', `/gtd/pet/${encodeURIComponent(slug)}/meta`),
   gtdPetSheetUrl: (slug) => directApi.gtdPetSheetUrl(slug),
 
-  // Plugins — registered plugins for this build plus the user's per-user activation. Activation is
-  // independent of a plugin's own per-account config (e.g. GTD's gtd_enabled).
+  // Plugins — registered plugins for this build plus the panel-wide switch an administrator sets
+  // for every user (PATCH is admin-only). Independent of a plugin's own per-account config (e.g.
+  // GTD's gtd_enabled).
   plugins: {
     list: () => request('GET', '/plugins'),
-    setActivated: (id, activated) => request('PATCH', `/plugins/${encodeURIComponent(id)}`, { activated }),
+    setEnabled: (id, enabled) => request('PATCH', `/plugins/${encodeURIComponent(id)}`, { enabled }),
   },
 
   // Todoist integration

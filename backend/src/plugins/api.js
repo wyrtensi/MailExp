@@ -69,9 +69,9 @@ export { logger } from '../services/logger.js';
 export { requireAuth } from '../middleware/auth.js';
 
 // ── Activation ────────────────────────────────────────────────────────────────
-// Whether a plugin is activated for a user (per-user, from preferences). A plugin composes this
-// with its own config to decide whether it is effectively on for an account.
-export { isPluginActivated, isPluginActivatedForAccount } from './activation.js';
+// Whether an administrator enabled a plugin for the whole panel (one switch for every user). A
+// plugin composes this with its own config to decide whether it is effectively on for an account.
+export { isPluginEnabled } from './activation.js';
 
 // ── Per-account plugin config ───────────────────────────────────────────────────
 // A plugin's own configuration for one account (opaque blob), cascade-cleaned with the account.

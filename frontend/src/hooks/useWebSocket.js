@@ -96,7 +96,9 @@ export function useWebSocket(enabled = true) {
         }).catch(() => {});
         // A plugin's rail/derived data can drift during the outage — events fired while the socket
         // was down are lost, not buffered. Let each activated plugin resync (GTD refetches its
-        // sections). Core stays plugin-agnostic.
+        // sections). Core stays plugin-agnostic. A plugins_changed missed meanwhile is caught up by
+        // reading the panel-wide plugin switch again.
+        useStore.getState().loadEnabledPlugins();
         dispatchPluginReconnect();
       }
     };
@@ -434,6 +436,13 @@ export function useWebSocket(enabled = true) {
             api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
           }, 400);
         }
+        break;
+      }
+
+      // An administrator switched a plugin on or off for the whole panel (backend routes/plugins.js):
+      // read the list again so its features appear or go away without a reload.
+      case 'plugins_changed': {
+        useStore.getState().loadEnabledPlugins();
         break;
       }
 

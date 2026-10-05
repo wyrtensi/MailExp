@@ -13,7 +13,7 @@ import { readFileSync } from 'fs';
 import { query } from './db.js';
 import { redisClient } from './redis.js';
 import { loadAiConfig } from './aiProvider.js';
-import { getActivatedPlugins } from '../plugins/activation.js';
+import { getEnabledPlugins } from '../plugins/activation.js';
 import { getWarningsRaw, getConnectionStats, getSyncSignalsRaw } from './diagnosticsRing.js';
 import { getPerformanceSnapshot } from './performanceMetrics.js';
 import { getImapSnapshot } from './imapMetrics.js';
@@ -178,7 +178,7 @@ export async function buildServerReport(userId, salt) {
 
   let plugins = {};
   try {
-    const activated = await getActivatedPlugins(userId);
+    const activated = await getEnabledPlugins();
     plugins = Object.fromEntries([...activated].map(p => [p, 'enabled']));
   } catch { /* leave empty */ }
 

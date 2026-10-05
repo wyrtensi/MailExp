@@ -10,6 +10,7 @@ import {
 } from '../services/oauth/microsoftOAuth.js';
 import { redactEmail } from '../utils/redact.js';
 import { isUuid } from '../utils/uuid.js';
+import { isAdminRequest } from '../middleware/auth.js';
 import googleOAuthRoutes from './oauthGoogle.js';
 
 // Cache JWKS fetchers per tenant — createRemoteJWKSet handles caching internally.
@@ -68,12 +69,17 @@ async function resolveFlow(accountParam) {
   return { mode: 'reconnect', accountId: row.id, email: row.email_address };
 }
 
+// Mailboxes connect on their own; adding a Microsoft mailbox or renewing its sign-in by hand is an
+// administrator's job (the panel offers both only to administrators). Both start legs refuse anyone
+// else, so the callback and the device-code poll only ever finish a flow an administrator began.
+
 // Step 1: redirect user to Microsoft login
 router.get('/microsoft', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
   // The screen-lock gate in index.js (#235) covers only /api. Only the start legs are refused:
   // the provider's callback lands in another tab while this one's auto-lock keeps counting.
   if (req.session.locked) return res.redirect(errorRedirect('locked'));
+  if (!(await isAdminRequest(req))) return res.redirect(errorRedirect('admin_required'));
 
   const { clientId, tenantId, redirectUri } = getMsConfig();
   if (!clientId || !tenantId) return res.redirect(errorRedirect('not_configured'));
@@ -333,6 +339,7 @@ router.post('/microsoft/device', async (req, res) => {
   if (!req.session?.userId) return res.status(401).json({ error: 'Not authenticated' });
   // Same answer as the /api lock gate in index.js, which does not cover /oauth.
   if (req.session.locked) return res.status(423).json({ error: 'Locked', locked: true });
+  if (!(await isAdminRequest(req))) return res.status(403).json({ error: 'Admin access required', code: 'admin_required' });
   const { clientId, tenantId } = getMsConfig();
   if (!clientId || !tenantId) {
     return res.status(400).json({ error: 'Microsoft integration not configured. Set Client ID and Tenant ID in the Integrations tab.' });

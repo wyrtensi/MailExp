@@ -25,6 +25,7 @@ describe('AUDIT_ACTIONS', () => {
       'tenant.alias_contacts_removal_approved',
       'rule.created', 'rule.updated', 'rule.deleted', 'rule.run',
       'panel.update_requested', 'panel.update_started', 'panel.update_finished', 'panel.update_failed',
+      'plugin.enabled', 'plugin.disabled',
     ]);
     // Section 5.14: the type in words, as EOP wrote it for one the panel does not name.
     assert.deepEqual(auditDetail({ action: 'tenant.quarantine_released', details: { type: 'Spam', sender: 's@x.test', recipients: ['a@example.com'], messageId: '<m@x>' } }), {
@@ -175,6 +176,14 @@ describe('auditDetail', () => {
     );
     assert.deepEqual(auditDetail({ action: 'user.disabled', details: { userId: 'u', email: 'u@example.com', isAdmin: false } }), { text: 'u@example.com' });
     assert.equal(auditDetail({ action: 'user.deleted', details: { userId: 'u', email: null, isAdmin: false } }), null);
+  });
+
+  it('names the plugin an administrator switched for the panel', () => {
+    assert.equal(auditActionLabelKey('plugin.enabled'), 'admin.audit.actionPluginEnabled');
+    assert.equal(auditActionLabelKey('plugin.disabled'), 'admin.audit.actionPluginDisabled');
+    assert.deepEqual(auditDetail({ action: 'plugin.enabled', details: { pluginId: 'gtd', name: 'Getting Things Done' } }), { text: 'Getting Things Done' });
+    assert.deepEqual(auditDetail({ action: 'plugin.disabled', details: { pluginId: 'gtd' } }), { text: 'gtd' });
+    assert.equal(auditDetail({ action: 'plugin.disabled', details: {} }), null);
   });
 
   it('lists the users a stopped Access sync would have disabled', () => {

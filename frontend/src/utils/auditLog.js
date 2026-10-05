@@ -69,6 +69,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'panel.update_started': 'admin.audit.actionPanelUpdateStarted',
   'panel.update_finished': 'admin.audit.actionPanelUpdateFinished',
   'panel.update_failed': 'admin.audit.actionPanelUpdateFailed',
+  'plugin.enabled': 'admin.audit.actionPluginEnabled',
+  'plugin.disabled': 'admin.audit.actionPluginDisabled',
 });
 
 export const AUDIT_ACTIONS = Object.freeze(Object.keys(AUDIT_ACTION_LABEL_KEYS));
@@ -473,6 +475,12 @@ export function auditDetail(entry) {
     case 'user.enabled':
     case 'user.disabled':
       return details.email ? { text: details.email } : null;
+    // An administrator switched a plugin for the whole panel (backend routes/plugins.js).
+    case 'plugin.enabled':
+    case 'plugin.disabled': {
+      const name = details.name || details.pluginId;
+      return typeof name === 'string' && name ? { text: name } : null;
+    }
     case 'access.sync_aborted': {
       const candidates = Array.isArray(details.candidates) ? details.candidates : [];
       return {

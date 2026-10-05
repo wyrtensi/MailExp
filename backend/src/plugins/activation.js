@@ -1,88 +1,92 @@
-// Per-user plugin activation (v3.0 plugin platform).
+// Panel-wide plugin switch (v3.0 plugin platform).
 //
-// Registration (loadBundledPlugins) says a plugin EXISTS in this build; activation says a given
-// USER turned it on. They are independent layers — like an app installed system-wide but enabled
-// per account. A plugin's own per-account config (e.g. GTD's gtd_enabled / gtd_folders) is a third,
-// deeper layer the plugin owns; the effective "is this plugin doing anything for this account" is
-// activation AND the plugin's config (GTD composes this inside getGtdConfig).
+// Registration (loadBundledPlugins) says a plugin EXISTS in this build; the switch says an
+// administrator turned it ON for the whole panel. Every user gets an enabled plugin, nobody gets a
+// disabled one: mailboxes are shared, so a per-user switch could never mean anything for the
+// server-side half of a plugin. A plugin's own per-account config (e.g. GTD's gtd_enabled /
+// gtd_folders) is a deeper layer the plugin owns; the effective "is this plugin doing anything for
+// this mailbox" is the switch AND the plugin's config (GTD composes this inside getGtdConfig).
+// Genuinely personal plugin settings (GTD's pet, collapsed sections) stay in users.preferences.
 //
-// State lives in `users.preferences.enabledPlugins` (a JSONB array of plugin ids). Absent = none
-// activated (default OFF). A short-TTL per-user cache keeps the hot paths (getGtdConfig et al.)
-// from hitting the DB on every call; `invalidateActivationCache` is called on every toggle.
-// Per-mailbox gates ask whether any active user activated the plugin, because mailboxes are shared.
-import { query } from '../services/db.js';
+// State lives in system_settings under ENABLED_PLUGINS_KEY: a JSON array of plugin ids, stored as
+// text like every other panel-wide setting. Absent or malformed = nothing enabled (default OFF).
+// Migration 0092 carried the former per-user users.preferences.enabledPlugins over into it.
+// A short-TTL cache keeps the hot paths (getGtdConfig et al.) from hitting the DB on every call;
+// setPluginEnabled drops it, so the change takes effect at once in this process.
+import { query, withTransaction } from '../services/db.js';
 
-const activationCache = new Map(); // userId -> { value: Set<pluginId>, expiry }
+export const ENABLED_PLUGINS_KEY = 'enabled_plugins';
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// After a failed read the "nothing enabled" answer is kept only this long, so a database blip
+// switches plugins off for seconds, not for the whole TTL.
+export const ERROR_CACHE_TTL_MS = 5 * 1000;
+let cache = null; // { value: Set<pluginId>, expiry }
 
-export function invalidateActivationCache(userId) {
-  activationCache.delete(userId);
+export function invalidateEnabledPluginsCache() {
+  cache = null;
 }
 
-// The set of plugin ids this user has activated. Reads preferences.enabledPlugins; a missing/
-// malformed value reads as the empty set (default off). Cached per user with a short TTL.
-export async function getActivatedPlugins(userId) {
-  if (!userId) return new Set();
-  const cached = activationCache.get(userId);
-  if (cached && cached.expiry > Date.now()) return cached.value;
-
-  let value = new Set();
+// The stored text as a list of plugin ids; anything that is not a JSON array of strings reads as
+// nothing enabled.
+export function parseEnabledPlugins(text) {
+  if (typeof text !== 'string') return [];
   try {
-    const { rows } = await query('SELECT preferences->\'enabledPlugins\' AS list FROM users WHERE id = $1', [userId]);
-    const list = rows[0]?.list;
-    if (Array.isArray(list)) value = new Set(list.filter((id) => typeof id === 'string'));
+    const list = JSON.parse(text);
+    return Array.isArray(list) ? [...new Set(list.filter((id) => typeof id === 'string'))] : [];
   } catch {
-    // A prefs read blip degrades to "nothing activated" rather than throwing on a hot path.
-    value = new Set();
+    return [];
   }
-  activationCache.set(userId, { value, expiry: Date.now() + CACHE_TTL_MS });
-  return value;
 }
 
-// Whether a specific plugin is activated for a user. The cheap gate plugins compose with their
-// own config.
-export async function isPluginActivated(userId, pluginId) {
-  return (await getActivatedPlugins(userId)).has(pluginId);
-}
-
-const activatedByAnyoneCache = new Map(); // pluginId -> { value: boolean, expiry }
-
-// Whether a plugin is on for a mailbox. Mailboxes are shared by every user, so it is on when any
-// active user has activated it. Plugins keep passing the account id; the answer does not depend on it.
-export async function isPluginActivatedForAccount(pluginId) {
-  const cached = activatedByAnyoneCache.get(pluginId);
-  if (cached && cached.expiry > Date.now()) return cached.value;
+// The set of plugin ids enabled for the panel. Cached with a short TTL.
+export async function getEnabledPlugins() {
+  if (cache && cache.expiry > Date.now()) return cache.value;
   let value;
+  let ttl = CACHE_TTL_MS;
   try {
-    const { rows } = await query(
-      `SELECT EXISTS (
-         SELECT 1 FROM users
-          WHERE disabled_at IS NULL AND preferences->'enabledPlugins' ? $1
-       ) AS activated`,
-      [pluginId]
-    );
-    value = rows[0]?.activated === true;
+    const { rows } = await query('SELECT value FROM system_settings WHERE key = $1', [ENABLED_PLUGINS_KEY]);
+    value = new Set(parseEnabledPlugins(rows[0]?.value));
   } catch {
-    // A prefs read blip degrades to "not activated" rather than throwing on a hot path.
-    value = false;
+    // A settings read blip degrades to "nothing enabled" rather than throwing on a hot path, and
+    // is retried soon: briefly cached so a hot path does not hammer a struggling database.
+    value = new Set();
+    ttl = ERROR_CACHE_TTL_MS;
   }
-  activatedByAnyoneCache.set(pluginId, { value, expiry: Date.now() + CACHE_TTL_MS });
+  cache = { value, expiry: Date.now() + ttl };
   return value;
 }
 
-// Turn a plugin on/off for a user (persisted to preferences.enabledPlugins) and drop the cache so
-// the change takes effect immediately. Returns the new activated set. Read-modify-write is fine
-// here: activation toggles are rare and single-user, never a hot concurrent path.
-export async function setPluginActivated(userId, pluginId, activated) {
-  const set = new Set(await getActivatedPlugins(userId));
-  if (activated) set.add(pluginId); else set.delete(pluginId);
-  await query(
-    `UPDATE users
-        SET preferences = jsonb_set(COALESCE(preferences, '{}'::jsonb), '{enabledPlugins}', $2::jsonb)
-      WHERE id = $1`,
-    [userId, JSON.stringify([...set])]
-  );
-  invalidateActivationCache(userId);
-  activatedByAnyoneCache.delete(pluginId);
-  return set;
+// Whether a plugin is enabled for the panel: the gate plugins compose with their own config.
+export async function isPluginEnabled(pluginId) {
+  return (await getEnabledPlugins()).has(pluginId);
+}
+
+// Turn a plugin on or off for everyone. The row is locked for the read-modify-write, so two
+// administrators switching different plugins at once never lose each other's change. Returns
+// { enabled: Set, changed } — changed is false when the plugin was already in that state.
+export async function setPluginEnabled(pluginId, enabled) {
+  const result = await withTransaction(async (client) => {
+    await client.query(
+      `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, '[]', NOW())
+       ON CONFLICT (key) DO NOTHING`,
+      [ENABLED_PLUGINS_KEY],
+    );
+    const { rows } = await client.query(
+      'SELECT value FROM system_settings WHERE key = $1 FOR UPDATE',
+      [ENABLED_PLUGINS_KEY],
+    );
+    const set = new Set(parseEnabledPlugins(rows[0]?.value));
+    const changed = set.has(pluginId) !== enabled;
+    if (enabled) set.add(pluginId); else set.delete(pluginId);
+    if (changed) {
+      await client.query(
+        'UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1',
+        [ENABLED_PLUGINS_KEY, JSON.stringify([...set].sort())],
+      );
+    }
+    return { enabled: set, changed };
+  });
+  invalidateEnabledPluginsCache();
+  return result;
 }

@@ -97,10 +97,13 @@ const insertCall = () => dbCalls.find(([sql]) => /^\s*INSERT INTO email_accounts
 const wroteAccount = () => !!(updateCall() || insertCall());
 
 // The mailbox a reconnect names, as GET /oauth/microsoft?account= and the device start read it.
+// `signedInAdmin` is what isAdminRequest reads for the signed-in user.
 let target;
+let signedInAdmin;
 function installQuery() {
   query.mockReset().mockImplementation(async (sql) => {
     if (sql.startsWith('SELECT id, email_address, oauth_provider, mail_node FROM email_accounts')) return { rows: target ? [target] : [] };
+    if (sql.startsWith('SELECT is_admin, disabled_at FROM users')) return { rows: [{ is_admin: signedInAdmin, disabled_at: null }] };
     return { rows: [] };
   });
 }
@@ -136,6 +139,7 @@ beforeEach(() => {
   jwtVerify.mockReset().mockImplementation(async () => ({ payload: claims }));
   row = { ...MS_ROW };
   target = { id: ACCOUNT_ID, email_address: 'user@contoso.com', oauth_provider: 'microsoft', mail_node: false };
+  signedInAdmin = true;
   installDb();
   installQuery();
   startReconnect();
@@ -207,6 +211,16 @@ describe('starting a Microsoft flow', () => {
   it('refuses a malformed account id', async () => {
     session = {};
     expect((await start('?account=nope')).headers.get('location')).toBe('/?oauth_error=invalid_state&oauth_provider=microsoft');
+  });
+
+  // A manual Microsoft connect is an administrator's path: neither a reconnect nor an add starts
+  // for anyone else, and nothing is stored for the callback to finish.
+  it.each([['a reconnect', `?account=${ACCOUNT_ID}`], ['an add', '']])('refuses %s to a user who is not an administrator', async (_label, qs) => {
+    signedInAdmin = false;
+    session = {};
+    const res = await start(qs);
+    expect(res.headers.get('location')).toBe('/?oauth_error=admin_required&oauth_provider=microsoft');
+    expect(session.oauthNonce).toBeUndefined();
   });
 });
 
@@ -404,6 +418,17 @@ describe('Microsoft device-code flow', () => {
     expect((await startDevice()).status).toBe(200);
     expect(await (await poll()).json()).toEqual({ status: 'error', error: 'Microsoft sign-in refused', code: 'already_connected' });
     expect(wroteAccount()).toBe(false);
+  });
+
+  it.each([['a reconnect', { account: ACCOUNT_ID }], ['an add', undefined]])('refuses to start %s for a user who is not an administrator', async (_label, body) => {
+    signedInAdmin = false;
+    stubMicrosoft(() => startOk());
+    const res = await startDevice(body);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: 'Admin access required', code: 'admin_required' });
+    // Microsoft was never asked for a device code, and there is no flow for the poll to finish.
+    expect(globalThis.fetch.mock.calls.some(([url]) => String(url).endsWith('/devicecode'))).toBe(false);
+    expect(await (await poll()).json()).toMatchObject({ status: 'error' });
   });
 
   it('refuses to start a reconnect of a mailbox that is not a Microsoft one', async () => {

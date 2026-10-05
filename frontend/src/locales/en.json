@@ -724,6 +724,7 @@
       "failed": "Sync failed",
       "failedDetail": "Sync failed: {{detail}}",
       "reconnectRequired": "Sign-in expired, reconnect required",
+      "reconnectAskAdmin": "Sign-in expired, ask an administrator to reconnect it",
       "reconnectAccount": "Reconnect {{email}}",
       "disabled": "Mailbox disabled"
     },
@@ -1878,6 +1879,7 @@
         "savedNote": "Configuration saved. Click \"Connect account\" to authorize.",
         "connectedNote": "Microsoft 365 account connected successfully! Check the Accounts tab.",
         "errorAccessDenied": "Microsoft sign-in was cancelled. The mailbox was not connected.",
+        "errorAdminRequired": "Only an administrator can connect or reconnect a Microsoft mailbox. Ask an administrator.",
         "errorInvalidState": "The sign-in link expired or does not name a Microsoft mailbox. Please try again.",
         "errorNotConfigured": "Microsoft sign-in is not configured by an administrator.",
         "errorEmailNotVerified": "Microsoft did not confirm this account's email address (the app registration needs the email + xms_edov or upn optional claims). The mailbox was not connected.",
@@ -2046,9 +2048,9 @@
     },
     "plugins": {
       "title": "Plugins",
-      "description": "Turn optional features on or off for your account. Enabling a plugin adds its own settings and interface.",
-      "activated": "Activated",
-      "deactivated": "Not activated",
+      "description": "Turn optional features on or off for all users of this panel. An enabled plugin adds its own settings and interface for everyone; only administrators can change this.",
+      "enabled": "Enabled for all users",
+      "disabled": "Off for all users",
       "empty": "No plugins are available in this build.",
       "error": "Couldn't update the plugin. Please try again.",
       "configureIn": "Configure options in {{location}}"
@@ -2327,6 +2329,8 @@
       "actionPanelUpdateStarted": "Panel update started",
       "actionPanelUpdateFinished": "Panel updated",
       "actionPanelUpdateFailed": "Panel update failed",
+      "actionPluginEnabled": "Plugin enabled for all users",
+      "actionPluginDisabled": "Plugin disabled for all users",
       "detailPanelUpdate": "From {{from}} to {{target}}",
       "detailPanelUpdateTarget": "To {{target}}",
       "detailTenantAliasContactsApproved": "{{domain}}: {{addresses}}",

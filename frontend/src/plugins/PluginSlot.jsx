@@ -3,7 +3,7 @@ import { useStore } from '../store/index.js';
 import { getSlotContributions, getRuntimes, getCollectors } from './registry.js';
 
 // The contributions registered for slot `name` that are live for this `ctx`: their plugin is
-// activated (store.enabledPlugins) AND their own isActive(ctx) passes. Exposed as a hook so a caller
+// switched on for the panel (store.enabledPlugins) AND their own isActive(ctx) passes. Exposed as a hook so a caller
 // can branch on whether ANY content exists before laying out around it — e.g. the right sidebar only
 // "applies" (reserves width, binds its collapse shortcut) when a provider actually supplies content.
 export function usePluginSlot(name, ctx) {

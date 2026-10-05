@@ -8,11 +8,11 @@
 // Registered on the GTD manifest's `hooks` map (see ./index.js). Handlers must never throw
 // into core — the registry swallows per-plugin errors — but they still guard internally so a
 // transient DB blip degrades to "nothing contributed" rather than a noisy rejection.
-import { getGtdFolderSet, getGtdConfig, gtdTickFolders, sanitizeGtdFoldersDetailed, findGtdFolderCollisions, DEFAULT_GTD_FOLDERS, invalidateGtdConfigCache } from './gtdConfig.js';
+import { getGtdFolderSet, getGtdConfig, gtdTickFolders, sanitizeGtdFoldersDetailed, findGtdFolderCollisions, DEFAULT_GTD_FOLDERS, invalidateGtdConfigCache, clearGtdConfigCache } from './gtdConfig.js';
 import { runGtdTransitions, threadKeysForMessageIds, threadKeysInFolders, runTransitionsForSentMessage, invalidateOwnerAddressesCache } from './gtdTransitions.js';
 import { emitGtdIfRelevant } from './gtdSections.js';
 import { deleteUserPet } from './gtdPet.js';
-import { logger, getThreadKeyForUid, listUserAccounts, getAccountConfig, setAccountConfig } from '../api.js';
+import { logger, getThreadKeyForUid, getAccountConfig, setAccountConfig } from '../api.js';
 
 // Choose the INBOX message ids to run GTD transitions over after a sync batch completes.
 //   newInboxIds — the id of every row the sync newly inserted into INBOX, collected REGARDLESS
@@ -286,13 +286,12 @@ export async function onAccountIdentityChanged({ accountId }) {
   invalidateOwnerAddressesCache(accountId);
 }
 
-// runHook('onPluginActivationChanged'): the user activated/deactivated a plugin. When it's GTD,
-// drop the cached { enabled, folders } for ALL this user's accounts — getGtdConfig folds activation
-// into its `enabled`, so the live tick, hooks, and classify/done routes must re-read to see the
-// flip immediately. The per-account gtd_enabled/folders config in the DB is untouched, so
-// reactivating restores everything.
-export async function onPluginActivationChanged({ userId, pluginId }) {
-  if (pluginId !== 'gtd' || !userId) return;
-  const accounts = await listUserAccounts(userId);
-  for (const a of accounts) invalidateGtdConfigCache(a.id);
+// runHook('onPluginActivationChanged'): an administrator enabled or disabled a plugin for the whole
+// panel. When it's GTD, drop the cached { enabled, folders } for EVERY account — getGtdConfig folds
+// the switch into its `enabled`, so the live tick, hooks, and classify/done routes must re-read to
+// see the flip immediately. The per-account gtd_enabled/folders config in the DB is untouched, so
+// enabling it again restores everything.
+export async function onPluginActivationChanged({ pluginId }) {
+  if (pluginId !== 'gtd') return;
+  clearGtdConfigCache();
 }

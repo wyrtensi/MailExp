@@ -76,9 +76,20 @@ export function reconnectUrlFor(account) {
   return null;
 }
 
+// Whether this user may re-run the provider consent for a mailbox themselves. Mailboxes connect
+// on their own; renewing a Microsoft mailbox by hand is an administrator's job, so an ordinary user
+// only sees the state and is told to ask an administrator. A Google reconnect is unchanged.
+export function canReconnectOAuth(account, { isAdmin = false } = {}) {
+  if (account?.oauth_provider === 'microsoft') return isAdmin === true;
+  return true;
+}
+
 // What the account context menu's "Reconnect" item does. An IMAP reconnect cannot
-// fix a revoked grant, so reconnect-required OAuth accounts re-run consent instead.
-export function reconnectMenuAction(account) {
+// fix a revoked grant, so reconnect-required OAuth accounts re-run consent instead —
+// or, for a Microsoft mailbox and a user who is not an administrator, nothing
+// ('admin_required': the menu leaves the item out and the row says to ask an administrator).
+export function reconnectMenuAction(account, { isAdmin = false } = {}) {
   const url = account?.health === 'oauth_reconnect_required' ? reconnectUrlFor(account) : null;
-  return url ? { kind: 'oauth', url } : { kind: 'imap' };
+  if (!url) return { kind: 'imap' };
+  return canReconnectOAuth(account, { isAdmin }) ? { kind: 'oauth', url } : { kind: 'admin_required' };
 }

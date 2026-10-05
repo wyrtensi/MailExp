@@ -206,16 +206,27 @@ export const useStore = create((set, get) => ({
   },
   updateUser: (updates) => set(state => ({ user: state.user ? { ...state.user, ...updates } : state.user })),
 
-  // Plugin activation — the per-user set of activated plugin ids (users.preferences.enabledPlugins).
-  // Hydrated in loadPreferences and mutated only via setPluginActivated (the Plugins settings
-  // section). Independent of a plugin's own per-account config; a plugin's UI gates on membership
-  // here (e.g. GTD's gtdActiveForContext requires 'gtd' to be present).
+  // Plugins an administrator switched on for the whole panel (GET /api/plugins, backed by
+  // system_settings.enabled_plugins). Loaded with the preferences after sign-in; only an
+  // administrator changes it, via setPluginEnabled (the Plugins settings tab). Independent of a
+  // plugin's own per-account config; a plugin's UI gates on membership here (e.g. GTD's
+  // gtdActiveForContext requires 'gtd' to be present).
   enabledPlugins: [],
-  setPluginActivated: async (id, activated) => {
-    await api.plugins.setActivated(id, activated);
+  loadEnabledPlugins: async () => {
+    const userId = get().user?.id;
+    try {
+      const list = await api.plugins.list();
+      if (get().user?.id !== userId) return;
+      set({ enabledPlugins: Array.isArray(list) ? list.filter(p => p?.enabled === true).map(p => p.id) : [] });
+    } catch {
+      // Leave the current set: a failed read never switches a plugin's UI off mid-session.
+    }
+  },
+  setPluginEnabled: async (id, enabled) => {
+    await api.plugins.setEnabled(id, enabled);
     set(state => {
       const next = new Set(state.enabledPlugins);
-      if (activated) next.add(id); else next.delete(id);
+      if (enabled) next.add(id); else next.delete(id);
       return { enabledPlugins: [...next] };
     });
   },
@@ -1233,12 +1244,11 @@ export const useStore = create((set, get) => ({
   loadPreferences: async () => {
     const userId = get().user?.id;
     const faviconEpoch = get().senderFaviconsEpoch;
+    // The panel-wide plugin switches load alongside the personal preferences.
+    const pluginsLoaded = get().loadEnabledPlugins();
     try {
       const prefs = await api.getPreferences();
       if (get().user?.id !== userId) return;
-      // Per-user plugin activation. Absent = nothing activated (new users start with GTD off);
-      // existing GTD users were grandfathered into ['gtd'] by migration 0042.
-      set({ enabledPlugins: Array.isArray(prefs.enabledPlugins) ? prefs.enabledPlugins : [] });
       if (prefs.theme) {
         localStorage.setItem('mailexpert_theme', prefs.theme);
         set({ theme: prefs.theme });
@@ -1440,6 +1450,7 @@ export const useStore = create((set, get) => ({
         applyCustomCss(prefs.customCss);
       }
     } catch { /* intentional */ }
+    await pluginsLoaded;
   },
 }));
 
