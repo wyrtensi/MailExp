@@ -2231,7 +2231,7 @@ describe('_deleteAllInFolder — chunked delete', () => {
 
   // A refused \Deleted STORE is not a deleted chunk: nothing is expunged and the chunk counts as
   // unconfirmed (retried once, then the whole operation fails with its progress).
-  it('never counts a chunk whose \Deleted STORE the server refused', async () => {
+  it('never counts a chunk whose \\Deleted STORE the server refused', async () => {
     const client = server({
       search: vi.fn().mockResolvedValue([1, 2, 3]),
       messageFlagsAdd: vi.fn().mockResolvedValue(false),
