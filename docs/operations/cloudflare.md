@@ -304,7 +304,9 @@ Access: редирект на `https://<TEAM>.cloudflareaccess.com/...` (или,
 OAuth, `401` с заголовком `WWW-Authenticate` с адресом команды). Команду он сравнивает с
 `CF_ACCESS_ISSUER`. Результат — строка `edge: ...`; несовпадение и отсутствие Access —
 предупреждение с точным следующим шагом, **установку оно не останавливает** (DNS может
-обновляться минуты). Ту же проверку в любой момент повторяет `status.sh`:
+обновляться минуты). Ждёт он не дольше `MAILEXPERT_CF_CHECK_TIMEOUT` секунд (по умолчанию 60) и
+только то, что может пройти само (DNS, коннектор). `update.sh` запускает `install.sh`, поэтому проверка
+идёт и при каждом обновлении. Ту же проверку в любой момент повторяет `status.sh`:
 
 ```bash
 /opt/mailexpert/app/scripts/deploy/status.sh            # cf_access  ok | warning: cloudflare access: ...
@@ -357,6 +359,7 @@ $M access status
 | Cloudflare `Error 1033`, HTTP 530 (`tunnel_down`) | ни один коннектор этого туннеля не подключён, или `<CF_HOST>` — маршрут другого туннеля | `docker compose -p edge logs cloudflared`; на сервере тот ли `TUNNEL_TOKEN`; туннель в Zero Trust должен быть Healthy; исходящие 7844 TCP/UDP открыты ([ports.md](ports.md)) |
 | HTTP 502 / 504 (`origin_error`) | туннель подключён, но не достучался до панели | маршрут на `http://127.0.0.1:<APP_HTTP_PORT>` (порт — `APP_HTTP_PORT` в `<prefix>/.env`); панель запущена: `status.sh` |
 | `<CF_HOST>` открывается без входа, `status.sh`: `access_missing` | приложения Access нет или оно на другом имени/пути | шаг 3: приложение ровно на `<CF_HOST>` |
+| `access_missing` с кодом 403, а в браузере вход через Access работает | раньше Access ответило правило безопасности Cloudflare (WAF, Bot Fight Mode) на запрос `curl` с сервера | проверка ошиблась, не установка; сверьте события Security → Events зоны, при желании разрешите адрес сервера |
 | `dns_missing` | у `<CF_HOST>` нет записи DNS или она ещё не разошлась | маршрут туннеля создаёт CNAME сам; через API — шаг 2; подождите несколько минут и повторите `status.sh` |
 | `redirect_elsewhere` | имя перенаправляет не на Access (правило Redirect, другой сервис) | уберите перенаправление, создайте приложение Access |
 | Caddy не получает сертификат `<DIRECT_HOST>` | у `DNS_API_TOKEN` нет DNS Edit или Zone Read на эту зону, или токен на другую зону | шаг 4; `docker compose -p edge logs caddy` |

@@ -83,7 +83,7 @@ Tell them which secrets they will have to prepare themselves, by name only (this
 
 | Mode | Keys |
 |---|---|
-| `direct` | `DNS_API_TOKEN` (Cloudflare, DNS edit on the zone; not with `--edge-tls internal`), `AUTH_GOOGLE_CLIENT_ID`, `AUTH_GOOGLE_CLIENT_SECRET` (a Google OAuth "Web application" client with redirect URI `https://<DIRECT_HOST>/oauth/login/google/callback`) |
+| `direct` | `DNS_API_TOKEN` (Cloudflare, Zone DNS Edit + Zone Read on the one zone; not with `--edge-tls internal`), `AUTH_GOOGLE_CLIENT_ID`, `AUTH_GOOGLE_CLIENT_SECRET` (a Google OAuth "Web application" client with redirect URI `https://<DIRECT_HOST>/oauth/login/google/callback`) |
 | `cf` | `TUNNEL_TOKEN`, `CF_ACCESS_ISSUER` (`https://<TEAM>.cloudflareaccess.com`), `CF_ACCESS_AUDIENCE` |
 | `both` | all of the above |
 | `--local-auth` | no sign-in keys; only the edge keys of the mode |

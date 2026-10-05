@@ -138,7 +138,7 @@ cf_access_verdict() {
         printf 'redirect_elsewhere\t-\thttps://%s redirects to %s, not to Cloudflare Access: create the self-hosted Access application for %s (docs/operations/cloudflare.md)\n' "$host" "$(cut -d/ -f1-3 <<<"$location")" "$host"
         ;;
       *)
-        printf 'access_missing\t-\thttps://%s/api/health answers %s without Cloudflare Access: create the self-hosted Access application for %s with an Allow policy (docs/operations/cloudflare.md); until then nothing checks who signs in there\n' "$host" "$code" "$host"
+        printf 'access_missing\t-\thttps://%s/api/health answers %s without Cloudflare Access: create the self-hosted Access application for %s with an Allow policy (docs/operations/cloudflare.md); until then nothing checks who signs in there (a 403 can also be a Cloudflare security rule answering first)\n' "$host" "$code" "$host"
         ;;
     esac
     return 0

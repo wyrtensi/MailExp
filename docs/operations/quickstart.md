@@ -43,7 +43,7 @@ Access — пошагово в [cloudflare.md](cloudflare.md). Сделайте 
 | VPS **Ubuntu 24.04**, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска; почтовый узел — всегда отдельный сервер, 4 vCPU / 8 ГБ (раздел 8) | `install.sh` ставит Docker, файрвол, swap и таймеры только на Ubuntu 24.04 и проверяет ресурсы; другая ОС — только с `--no-system`, а Docker Engine с Compose 2.24.4+ тогда ставите вы |
 | SSH-доступ root по ключу | все команды ниже — от root |
 | Зона DNS `example.com` в Cloudflare, A-запись `<DIRECT_HOST>` → IP сервера (TTL 300) | сертификат выпускается через DNS-01 Cloudflare |
-| Токен Cloudflare API только на правку DNS этой зоны (`DNS_API_TOKEN`) | для сертификата |
+| Токен Cloudflare API только на эту зону: DNS Edit и Zone Read (`DNS_API_TOKEN`, [cloudflare.md, раздел 4](cloudflare.md)) | для сертификата |
 | Клиент Google OAuth «Web application» для **входа в панель** с redirect URI `https://<DIRECT_HOST>/oauth/login/google/callback` (`AUTH_GOOGLE_CLIENT_ID`, `AUTH_GOOGLE_CLIENT_SECRET`) | «Войти через Google»; это не те Google-приложения, через которые подключаются Gmail-ящики ([google-oauth.md](google-oauth.md)) |
 | Необязательно: S3-бакет у другого провайдера (`RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RESTIC_PASSWORD` не короче 16 символов) | ночные зашифрованные бэкапы; без них панель работает, но `install.sh` предупреждает «backups are off» |
 | Необязательно: проверка в Healthchecks.io (`HEALTHCHECK_PING_URL`) | оповещения о сбоях |

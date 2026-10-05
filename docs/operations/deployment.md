@@ -25,8 +25,8 @@ Google-приложений для ящиков Gmail — отдельно, в [
 - Зона DNS в Cloudflare для `<DIRECT_HOST>` и будущего `<MAIL_HOST>`. Хосты `<APP_HOST>`
   (`<CF_HOST>` и/или `<DIRECT_HOST>`) и `<MAIL_HOST>` — с TTL 300 у записей, которые меняются при
   переезде (см. раздел 6 и «Переезд узла»).
-- Токен Cloudflare API для DNS-01 (`DNS_API_TOKEN`) — только на правку DNS одной зоны, нужен
-  Caddy для выпуска сертификата `<DIRECT_HOST>`.
+- Токен Cloudflare API для DNS-01 (`DNS_API_TOKEN`) — только на одну зону: Zone · DNS · Edit и
+  Zone · Zone · Read, нужен Caddy для выпуска сертификата `<DIRECT_HOST>`.
 - Токен туннеля (`TUNNEL_TOKEN`), если используется режим входа через Cloudflare (`cf` или
   `both`).
 - OAuth-клиент входа в Google (`AUTH_GOOGLE_CLIENT_ID`/`AUTH_GOOGLE_CLIENT_SECRET`) — для режимов

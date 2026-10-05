@@ -413,7 +413,7 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 | `confirmation_required` | 2 | Действие просит подтверждения, а терминала нет: добавьте `--yes` (для удаления ящика `--confirm-address`). |
 | `cancelled` | 1 | На вопрос ответили не «y»: ничего не изменено. |
 | `admin_not_found` | 1 | `--as`: нет включённого администратора с таким адресом. |
-| `wait_timeout` | 3 | `--wait` ждал дольше `--timeout`; задание идёт, следите командой `jobs show <ID>`. |
+| `wait_timeout` | 3 | `--wait` ждал дольше `--timeout`; задание идёт, следите командой `jobs show <ID>` (для `access sync` — `access status`: `jobs` показывает только задания тенанта). |
 | `internal_error` | 3 | Непредвиденный сбой панели; причина в строке выше на stderr. |
 | `job_failed`, `job_cancelled`, `job_needs_attention` | 3 | `--wait`: задание закончилось не `done`, а своего кода у него нет (иначе печатается `errorCode` задания). |
 
