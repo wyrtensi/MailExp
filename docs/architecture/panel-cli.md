@@ -13,7 +13,8 @@
 | `backend/src/cli/args.js` | разбор параметров без зависимостей, `EXIT` |
 | `backend/src/cli/common.js` | `CliError`, отказ по каталогу кодов, сбой узла, подтверждение, `--wait` |
 | `backend/src/cli/output.js` | таблицы и пары «ключ: значение» |
-| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs` |
+| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access` |
+| `backend/src/services/accessSync/actions.js` | синхронизация с Cloudflare Access: снимок настроек, сохранение настроек и токена с журналом, постановка и чтение задания `access_sync`, его обработчик |
 | `backend/src/services/actor.js` | кто действует: пользователь маршрута или CLI (`--as`) |
 | `backend/src/services/mailNode/mailboxActions.js` | список, создание, имена, запрос и отмена удаления ящика узла |
 | `backend/src/services/mailNode/domainActions.js` | список доменов администратора, перезапуск онбординга |
@@ -60,13 +61,42 @@
 `name_required`. ID ящика не с узла — `not_mail_node`, как у маршрута удаления. Имена журнал панели
 не ведёт, CLI тоже.
 
+## Синхронизация с Cloudflare Access из CLI
+
+Группа `access` (`cli/commands/access.js`) работает через `services/accessSync/actions.js`, которым
+теперь пользуется и маршрут `routes/accessSync.js`. Прогон синхронизации зависит от процесса
+backend: планировщик (`services/accessSync/index.js`) один на процесс, держит очередь прогонов и
+сохранений настроек, а отключённого пользователя прогон разлогинивает (`destroyUserSessions` и
+`closeUserSockets` из `index.js`, которые CLI загрузить не может). Поэтому `access sync` ставит
+задание `access_sync` (`max_attempts` 1: прогон не бросает исключений, его неудача — итог) и ждёт его;
+обработчик, зарегистрированный backend, вызывает `runAccessSyncNow()` и кладёт итог в `payload.result`
+задания. `access config` и `access token` сохраняют настройки сами (`saveAccessSyncConfig`) и, если
+синхронизация включена, ставят такое же задание — как экран просит прогон у планировщика.
+
+Сохранение из CLI идёт в другом процессе, мимо блокировки планировщика (`withAccessSyncLock` — только
+внутри процесса). Поэтому всё, что читает настройки или состояние и пишет обратно, идёт в одной
+транзакции с advisory-блокировкой PostgreSQL (`pg_advisory_xact_lock`, общий ключ;
+`withAccessSyncTransaction` в `settings.js`): сохранение настроек экраном и CLI (`updateConfig`: чтение,
+слияние частичной правки CLI, сброс состояния, запись) и запись итога прогона в `runner.js` (чтение
+настроек, сравнение с теми, с которыми прогон начинал, запись). Прогон, начатый со старой политикой,
+видит новую и не пишет её базовый список поверх сброса (иначе следующий прогон отключил бы
+пользователей по чужому списку), а две частичные правки из разных процессов не теряют друг друга.
+Проверено `services/accessSync/settings.race.pglite.test.js`: второй писатель запускается между
+чтением и записью первого.
+
+Токен CLI читает только со stdin (`io.readStdin`), поэтому обёртка выполняет свою проверку `test -f`
+с `</dev/null`: `docker compose exec` пересылает stdin, и проверка съела бы токен.
+
 ## Кто в журнале
 
 `actor = { userId, via }` (`services/actor.js`). Маршрут передаёт `{ userId }` — записи журнала те же,
 что раньше. CLI передаёт `{ userId: null, via: 'cli' }` или, с `--as`, id администратора (включённого,
 `disabled_at IS NULL`). `auditOf` добавляет `details.via = 'cli'`, а без пользователя ставит
 исполнителя `cli` (`actor_email`). С `--as` журнал берёт адрес администратора из `users`, поэтому
-`cli` остаётся только в `details.via`. Новых действий журнала нет.
+`cli` остаётся только в `details.via`. Новых действий журнала CLI не вводил, кроме двух для
+синхронизации с Access: раньше маршрут настроек писал только строку в лог сервера, теперь и экран,
+и CLI пишут `access.config_changed` (изменённые поля, ID, `tokenChanged`, никогда сам токен) и
+`access.sync_requested` (прогон по запросу администратора).
 
 Задания, поставленные CLI, несут `created_by` = id администратора `--as` или `NULL` и `via: 'cli'` в
 `payload`. Свои записи журнала задание пишет через `jobAudit` (`services/tenant/tenantJobs.js`): от
@@ -104,5 +134,10 @@ CLI проходят как есть.
   группы против PGlite со всеми миграциями, mailcow в памяти (`services/testing/fakeMailcow.js`) и
   фейкового драйвера тенанта (`TENANT_DRIVER=fake`, режим стенда и демо): записи в базу и журнал,
   отказы с кодами API, пароль ящика не печатается, задания выполняет воркер теста.
+- `cli/mailexpert.access.pglite.test.js` — группа `access` на PGlite: токен со stdin хранится
+  зашифрованным и нигде не печатается, частичные правки настроек, задание `access_sync` выполняет
+  воркер теста против поддельного API Cloudflare (`fetch`), коды выхода итогов, журнал от `cli` и
+  `--as`.
 - `scripts/deploy/test/mailexpert-cli.bats` — разбор параметров обёртки, а с `id` и `docker`,
-  подменёнными в `PATH`, — вызов контейнера: `-T`, параметры без изменений, коды CLI, сбои docker.
+  подменёнными в `PATH`, — вызов контейнера: `-T`, параметры без изменений, stdin целиком до CLI, коды
+  CLI, сбои docker.

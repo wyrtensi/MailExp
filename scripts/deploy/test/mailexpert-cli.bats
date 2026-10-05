@@ -15,7 +15,7 @@ setup() {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
   [[ $output == *"Usage: mailexpert-cli.sh"* ]]
-  [[ $output == *"mailbox, domain"* ]]
+  [[ $output == *"mailbox, domain"* && $output == *"jobs, access"* ]]
 }
 
 @test "no group is an error" {
@@ -69,8 +69,9 @@ stub_root() {
 printf '%s\n' "$*" >>"$DOCKER_LOG"
 case " $* " in
   *" ps "*) printf '%s\n' "${STUB_SERVICES-backend}"; exit "${STUB_PS_STATUS:-0}" ;;
-  *" test -f "*) exit "${STUB_TEST_STATUS:-0}" ;;
-  *" node "*) echo "cli says hi"; echo "cli warns" >&2; exit "${STUB_CLI_STATUS:-0}" ;;
+  # docker compose exec forwards stdin: a call that reads it would take what the CLI should get.
+  *" test -f "*) if [ -n "${STUB_READ_STDIN:-}" ]; then cat >/dev/null; fi; exit "${STUB_TEST_STATUS:-0}" ;;
+  *" node "*) echo "cli says hi"; if [ -n "${STUB_READ_STDIN:-}" ]; then echo "cli read: $(cat)"; fi; echo "cli warns" >&2; exit "${STUB_CLI_STATUS:-0}" ;;
 esac
 exit 0
 STUB_EOF
@@ -89,6 +90,14 @@ STUB_EOF
   [[ $output == *"cli says hi"* ]]
   grep -q -- "exec -T backend node src/cli/mailexpert.js mailbox show a b@example.com --json" "$DOCKER_LOG"
   grep -q -- "-p me-test" "$DOCKER_LOG"
+}
+
+@test "stdin reaches the CLI whole: the checks before it do not read it" {
+  stub_root
+  STUB_READ_STDIN=1 run bash "$SCRIPT" --prefix "$P" access token <<<"token-from-stdin"
+  [ "$status" -eq 0 ]
+  [[ $output == *"cli read: token-from-stdin"* ]]
+  [[ $(grep -c "token-from-stdin" "$DOCKER_LOG") = 0 ]]
 }
 
 @test "the CLI's exit codes 1, 2 and 3 pass through unchanged" {

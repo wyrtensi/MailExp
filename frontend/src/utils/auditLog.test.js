@@ -11,7 +11,7 @@ describe('AUDIT_ACTIONS', () => {
       'message.sent', 'message.deleted',
       'message.move_reverted', 'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
-      'access.sync_aborted',
+      'access.sync_aborted', 'access.config_changed', 'access.sync_requested',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
       'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',
@@ -195,6 +195,15 @@ describe('auditDetail', () => {
       auditDetail({ action: 'access.sync_aborted', details: {} }),
       { key: 'admin.audit.detailAccessSyncAborted', values: { wouldDisable: 0, emails: '' } },
     );
+  });
+
+  it('names the Access sync settings that changed, the token only as replaced', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'access.config_changed', details: { changed: ['enabled', 'policyId'], tokenChanged: true, enabled: true } }),
+      { key: 'admin.audit.detailAccessConfigChanged', values: { fields: 'enabled, policyId, apiToken' } },
+    );
+    assert.equal(auditDetail({ action: 'access.config_changed', details: { changed: [], tokenChanged: false } }), null);
+    assert.equal(auditActionLabelKey('access.sync_requested'), 'admin.audit.actionAccessSyncRequested');
   });
 
   it('describes mail node settings changes by the names of the fields', () => {

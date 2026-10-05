@@ -2,7 +2,8 @@
 // The panel CLI: the panel's administrator actions from the command line, for when the screens are
 // inconvenient. It runs inside the backend container, next to the panel, and calls the same
 // services as the HTTP routes (services/mailNode/mailboxActions.js, domainActions.js,
-// services/tenant/tenantActions.js): the same checks, the same refusal codes, the same journal.
+// services/tenant/tenantActions.js, services/accessSync/actions.js): the same checks, the same
+// refusal codes, the same journal.
 // Whoever reaches the container is an administrator; the journal names the actor "cli", or the
 // administrator given with --as. Work for the tenant is queued for the backend's job worker; the
 // CLI never runs it itself.
@@ -27,8 +28,9 @@ import domain from './commands/domain.js';
 import tenant from './commands/tenant.js';
 import quarantine from './commands/quarantine.js';
 import jobs from './commands/jobs.js';
+import access from './commands/access.js';
 
-export const GROUPS = Object.freeze([mailbox, domain, tenant, quarantine, jobs]);
+export const GROUPS = Object.freeze([mailbox, domain, tenant, quarantine, jobs, access]);
 
 const GLOBAL_HELP = [
   'Global options:',
@@ -103,6 +105,13 @@ function defaultIo() {
         rl.close();
       }
     },
+    // A secret a command takes (access token) comes from stdin only, never from the command line.
+    stdinIsTerminal: !!process.stdin.isTTY,
+    async readStdin() {
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      return Buffer.concat(chunks).toString('utf8');
+    },
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     pollMs: 1000,
@@ -173,6 +182,8 @@ export async function run(argv, overrides = {}) {
       // A prompt needs a terminal; --json is for scripts, which never get one.
       interactive: io.interactive && !json,
       ask: io.ask,
+      readStdin: io.readStdin,
+      stdinIsTerminal: io.stdinIsTerminal,
       note: (line) => writeLines(io.stderr, [line]),
       sleep: io.sleep,
       now: io.now,

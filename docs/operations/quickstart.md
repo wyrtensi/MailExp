@@ -27,18 +27,23 @@ IPv4 панели, `<ADMIN_EMAIL>` — адрес Google первого адми
 - нужны ли бэкапы сразу (S3-хранилище у другого провайдера) и проверка в Healthchecks.
 
 Чего агент делать не будет: создавать клиент Google, токены Cloudflare и ключи хранилища, видеть
-секреты или печатать их в чат. Он назовёт, **какие** ключи нужны, а вы внесёте их сами через
+секреты или печатать их в чат. Cloudflare (туннель, приложение Access, токены) вы настраиваете до
+установки по [cloudflare.md](cloudflare.md); агент сошлётся на нужные разделы для выбранного режима,
+а после установки покажет, что `install.sh` и `status.sh` сказали о проверке Access на `<CF_HOST>`. Он назовёт, **какие** ключи нужны, а вы внесёте их сами через
 `configure.sh` (шаг 4 ниже). Перед каждым шагом, который меняет сервер, агент показывает план и ждёт
 вашего «да»; ключ восстановления бэкапов вы получаете сами командой из шага 6.
 
 ## 1. Что подготовить
+
+Шаги в Cloudflare — запись DNS, токен с минимальными правами, для `cf`/`both` туннель и приложение
+Access — пошагово в [cloudflare.md](cloudflare.md). Сделайте их сейчас, до `install.sh`.
 
 | Что | Зачем |
 |---|---|
 | VPS **Ubuntu 24.04**, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска; почтовый узел — всегда отдельный сервер, 4 vCPU / 8 ГБ (раздел 8) | `install.sh` ставит Docker, файрвол, swap и таймеры только на Ubuntu 24.04 и проверяет ресурсы; другая ОС — только с `--no-system`, а Docker Engine с Compose 2.24.4+ тогда ставите вы |
 | SSH-доступ root по ключу | все команды ниже — от root |
 | Зона DNS `example.com` в Cloudflare, A-запись `<DIRECT_HOST>` → IP сервера (TTL 300) | сертификат выпускается через DNS-01 Cloudflare |
-| Токен Cloudflare API только на правку DNS этой зоны (`DNS_API_TOKEN`) | для сертификата |
+| Токен Cloudflare API только на эту зону: DNS Edit и Zone Read (`DNS_API_TOKEN`, [cloudflare.md, раздел 4](cloudflare.md)) | для сертификата |
 | Клиент Google OAuth «Web application» для **входа в панель** с redirect URI `https://<DIRECT_HOST>/oauth/login/google/callback` (`AUTH_GOOGLE_CLIENT_ID`, `AUTH_GOOGLE_CLIENT_SECRET`) | «Войти через Google»; это не те Google-приложения, через которые подключаются Gmail-ящики ([google-oauth.md](google-oauth.md)) |
 | Необязательно: S3-бакет у другого провайдера (`RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RESTIC_PASSWORD` не короче 16 символов) | ночные зашифрованные бэкапы; без них панель работает, но `install.sh` предупреждает «backups are off» |
 | Необязательно: проверка в Healthchecks.io (`HEALTHCHECK_PING_URL`) | оповещения о сбоях |
@@ -48,7 +53,7 @@ IPv4 панели, `<ADMIN_EMAIL>` — адрес Google первого адми
 
 Другие режимы входа: `cf` — через Cloudflare Tunnel и Access (нужны `TUNNEL_TOKEN`,
 `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE`, входящие порты не нужны), `both` — оба адреса сразу;
-таблица — [deployment.md, раздел 3](deployment.md). Вход по логину и паролю (`--local-auth`, первый
+таблица — [deployment.md, раздел 3](deployment.md), где взять ключи — [cloudflare.md](cloudflare.md). Вход по логину и паролю (`--local-auth`, первый
 зарегистрированный становится администратором) предназначен для тестовых стендов.
 
 ## 2. Скачать код боевой версии
@@ -177,6 +182,7 @@ $D/backup.sh --show-recovery-key
 
 - [README.md](README.md) — карта эксплуатации: бэкапы, мониторинг, обновление, откат, переезд, неполадки.
 - [deployment.md](deployment.md) — все флаги `install.sh`, режимы входа, CLI, переезд панели.
+- [cloudflare.md](cloudflare.md) — туннель, Access, токены Cloudflare, синхронизация пользователей, неполадки.
 - [cli.md](cli.md) — командная строка панели `mailexpert`.
 - [../architecture/deployment-system.md](../architecture/deployment-system.md) — из чего состоит
   система и что можно разносить по серверам.

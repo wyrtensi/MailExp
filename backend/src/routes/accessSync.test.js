@@ -7,13 +7,14 @@ vi.mock('../services/accessSync/index.js', () => ({
 }));
 vi.mock('../services/accessSync/settings.js', async (importOriginal) => ({
   ...(await importOriginal()),
-  loadStoredConfig: vi.fn(), loadState: vi.fn(), saveConfig: vi.fn(),
+  loadStoredConfig: vi.fn(), loadState: vi.fn(), saveConfig: vi.fn(), updateConfig: vi.fn(),
 }));
 
 import express from 'express';
 import accessSyncRoutes from './accessSync.js';
 import { requestAccessSync, runAccessSyncNow, withAccessSyncLock } from '../services/accessSync/index.js';
-import { AccessSyncConfigError, loadState, loadStoredConfig, saveConfig } from '../services/accessSync/settings.js';
+import { AccessSyncConfigError, loadState, loadStoredConfig, saveConfig, updateConfig } from '../services/accessSync/settings.js';
+import { query } from '../services/db.js';
 
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';
@@ -45,6 +46,12 @@ beforeEach(() => {
   vi.stubEnv('AUTH_MODE', 'google');
   vi.stubEnv('ACCESS_SYNC_MAX_DISABLES', '5');
   loadStoredConfig.mockResolvedValue(STORED);
+  // The real updateConfig reads, builds and saves in one locked transaction; here it is built on
+  // the two mocks so the tests can still say what was read and what was saved.
+  updateConfig.mockImplementation(async (build) => {
+    const before = await loadStoredConfig();
+    return { before, saved: await saveConfig(build(before)) };
+  });
   loadState.mockResolvedValue({ baseline: ['person@example.com'], abortedCandidates: null, lastRun: LAST_RUN });
 });
 afterEach(() => { vi.unstubAllEnvs(); });
@@ -56,6 +63,11 @@ const send = async (method, path, body) => {
   const text = await res.text();
   return { status: res.status, text, body: JSON.parse(text) };
 };
+
+// The journal rows recordAudit inserted through the mocked query.
+const journaled = () => query.mock.calls
+  .filter(([sql]) => sql.includes('INSERT INTO mailbox_audit_log'))
+  .flatMap(([, params]) => JSON.parse(params[0]));
 
 const SNAPSHOT = {
   config: { enabled: true, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiTokenSet: true },
@@ -100,5 +112,23 @@ describe('Access sync admin API', () => {
     const { status, body } = await send('POST', '/run');
     expect(status).toBe(200);
     expect(body).toEqual({ result: { outcome: 'not_configured' }, ...SNAPSHOT });
+    expect(journaled()).toEqual([expect.objectContaining({ actor_user_id: 'admin-id', action: 'access.sync_requested' })]);
+  });
+
+  it('journals the changed settings under the administrator, the token only as replaced', async () => {
+    saveConfig.mockResolvedValue({ ...STORED, enabled: false, apiToken: 'enc:tok-other' });
+    await send('PUT', '', { enabled: false, apiToken: 'tok-other' });
+    const [entry] = journaled();
+    expect(entry).toMatchObject({
+      actor_user_id: 'admin-id', action: 'access.config_changed',
+      details: { changed: ['enabled'], tokenChanged: true, enabled: false },
+    });
+    expect(JSON.stringify(entry)).not.toContain('tok-other');
+  });
+
+  it('journals nothing when nothing changed', async () => {
+    saveConfig.mockResolvedValue(STORED);
+    await send('PUT', '', { enabled: true });
+    expect(journaled()).toEqual([]);
   });
 });

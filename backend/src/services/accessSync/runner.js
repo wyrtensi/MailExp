@@ -4,7 +4,9 @@ import { getAuthSettings } from '../auth/authSettings.js';
 import { disableUsersByEmail } from '../auth/userStatus.js';
 import { CloudflareAccessError, createCloudflareAccessClient } from './cloudflareAccessClient.js';
 import { buildInclude, exceedsDisableLimit, removedInCloudflare } from './reconcile.js';
-import { accessSyncMaxDisables, loadRunConfig, loadState, saveState } from './settings.js';
+import {
+  accessSyncMaxDisables, loadRunConfig, loadState, loadStoredConfig, saveState, withAccessSyncTransaction,
+} from './settings.js';
 
 // The name the audit log shows for changes the sync makes on its own.
 export const ACCESS_SYNC_ACTOR = 'Cloudflare Access';
@@ -20,6 +22,8 @@ export async function runAccessSync({
   settings = getAuthSettings(),
   env = process.env,
   now = () => new Date(),
+  // Test hook: runs inside the state write's transaction, between reading the settings and writing.
+  beforeStateWrite = null,
 }) {
   if (settings.mode !== 'google') return { outcome: 'not_google_mode' };
   const config = await loadRunConfig();
@@ -32,7 +36,18 @@ export async function runAccessSync({
       trigger, startedAt, finishedAt: now().toISOString(),
       added: 0, removed: 0, disabled: 0, wouldDisable: 0, error: null, ...result,
     };
-    await saveState({ ...state, ...statePatch, lastRun });
+    // The panel CLI saves the settings from its own process, outside this process's lock, so the
+    // check and the write run in one transaction under the sync's advisory lock (settings.js), as
+    // every settings save does. When the account, application or policy changed while this run
+    // worked, its baseline belongs to the old policy: the save has reset the state for the new
+    // one, and only lastRun is added to it.
+    await withAccessSyncTransaction(async (db) => {
+      const current = await loadStoredConfig(db);
+      if (beforeStateWrite) await beforeStateWrite();
+      const fresh = await loadState(db);
+      const moved = current.accountId !== config.accountId || current.appId !== config.appId || current.policyId !== config.policyId;
+      await saveState(moved ? { ...fresh, lastRun } : { ...fresh, ...statePatch, lastRun }, db);
+    });
     return lastRun;
   };
 

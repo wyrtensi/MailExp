@@ -32,6 +32,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'user.disabled': 'admin.audit.actionUserDisabled',
   'user.admin_changed': 'admin.audit.actionUserAdminChanged',
   'access.sync_aborted': 'admin.audit.actionAccessSyncAborted',
+  'access.config_changed': 'admin.audit.actionAccessConfigChanged',
+  'access.sync_requested': 'admin.audit.actionAccessSyncRequested',
   'mail_node.config_changed': 'admin.audit.actionMailNodeConfigChanged',
   'mail_node.domain_added': 'admin.audit.actionMailNodeDomainAdded',
   'mail_node.domain_adopted': 'admin.audit.actionMailNodeDomainAdopted',
@@ -487,6 +489,12 @@ export function auditDetail(entry) {
         key: 'admin.audit.detailAccessSyncAborted',
         values: { wouldDisable: candidates.length, emails: candidates.join(', ') },
       };
+    }
+    // An administrator changed the sync's settings (the screen or the panel CLI): the fields that
+    // changed by their API names, and "apiToken" when the token was replaced (never its value).
+    case 'access.config_changed': {
+      const fields = [...(Array.isArray(details.changed) ? details.changed : []), ...(details.tokenChanged ? ['apiToken'] : [])];
+      return fields.length ? { key: 'admin.audit.detailAccessConfigChanged', values: { fields: fields.join(', ') } } : null;
     }
     case 'mail_node.config_changed':
       return Array.isArray(details.fields) && details.fields.length

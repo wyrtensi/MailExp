@@ -24,7 +24,7 @@ describe('recordAudit', () => {
       'message.sent', 'message.deleted', 'message.move_reverted',
       'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
-      'access.sync_aborted',
+      'access.sync_aborted', 'access.config_changed', 'access.sync_requested',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
       'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',

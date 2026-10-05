@@ -9,8 +9,10 @@
 #
 # It changes nothing on the server, with one exception: with --target, a commit that is not in the
 # checkout yet is fetched (git fetch, as update.sh does; never while an update holds its lock). Of
-# the env files it prints only non-secret values (EDGE_IMAGE, the image pinned by digest); secrets
-# never.
+# the env files it prints only non-secret values (EDGE_IMAGE, the image pinned by digest, and the
+# Cloudflare Access team domain it compares with CF_ACCESS_ISSUER); secrets never. With the tunnel
+# (cf, both) it asks https://<CF_HOST>/api/health once, without cookies, whether Cloudflare Access
+# answers for it (lib/edge.sh cf_access_check); what it finds is a warning, never a problem.
 #
 #   status.sh [--prefix /opt/mailexpert] [--target sha-<12>] [--json]
 #
@@ -30,6 +32,8 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/env.sh"
 # shellcheck source=lib/config.sh
 . "$LIB_DIR/config.sh"
+# shellcheck source=lib/edge.sh
+. "$LIB_DIR/edge.sh"
 # shellcheck source=lib/app.sh
 . "$LIB_DIR/app.sh"
 # shellcheck source=lib/backup.sh
@@ -50,7 +54,8 @@ usage() {
 Usage: status.sh [--prefix /opt/mailexpert] [--target sha-<12>] [--json]
 
 Read-only preflight: versions, readiness, containers, tenant worker, edge image, free space,
-backups, migrations, the mail node's spam rule. --target checks a version to update to (the
+backups, migrations, the mail node's spam rule, Cloudflare Access in front of <CF_HOST> (cf,
+both). --target checks a version to update to (the
 commit, its images, pending migrations, steps outside update.sh); a commit missing from the
 checkout is fetched. --json prints one JSON object on stdout (with "error" when the script
 failed). Secrets are never printed.
@@ -144,6 +149,19 @@ collect_containers() {
       problem "containers: docker compose ps failed for $CFG_EDGE_PROJECT"
     fi
   fi
+}
+
+# collect_cf_access: with the tunnel, whether https://<CF_HOST> is behind Cloudflare Access of the
+# team in CF_ACCESS_ISSUER. Skipped on a standby server (its tunnel is not running).
+collect_cf_access() {
+  local issuer state team message
+  grep -qx cloudflared <<<"$(edge_services)" || return 0
+  is_standby && return 0
+  issuer=$(env_get "$ENV_FILE" CF_ACCESS_ISSUER 2>/dev/null) || issuer=''
+  IFS=$'\t' read -r state team message < <(cf_access_check "$CFG_CF_HOST" "$CFG_HTTP_PORT" "$issuer")
+  FACT[cf_access]=$state
+  FACT[cf_access_team]=${team#-}
+  if [ "$state" != ok ]; then warning "cloudflare access: $message"; fi
 }
 
 collect_disk_and_backups() {
@@ -313,7 +331,7 @@ resolve_target_channel() {
 report_text() {
   local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
-  for key in version checkout running ready tenant_worker edge_services edge_image backup_configured \
+  for key in version checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team backup_configured \
     last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_commit; do
     [ -n "${FACT[$key]+set}" ] || continue
     printf '  %-20s %s\n' "$key" "${FACT[$key]:--}"
@@ -355,6 +373,8 @@ report_json() {
       ready: ($f.ready | flag), standby: ($f.standby | flag), tenant_worker: ($f.tenant_worker | flag),
       edge_services: (($f.edge_services // "") | split(",") | map(select(. != ""))),
       edge_image: (if ($f.edge_image // "") == "" then null else $f.edge_image end),
+      cf_access: (if $f.cf_access == null then null else
+        {state: $f.cf_access, team: (if ($f.cf_access_team // "") == "" then null else $f.cf_access_team end)} end),
       backup: {configured: ($f.backup_configured | flag),
                last_finished_at: (if ($f.last_backup_at // "") == "" then null else $f.last_backup_at end),
                last_dump_bytes: ($f.last_dump_bytes | num), pre_update_dumps: $dumps},
@@ -395,6 +415,7 @@ main() {
   if lock_held "$STATE_DIR/update.lock"; then info "an update, rollback or restore is running now: results may be in flux"; fi
   collect_versions
   collect_containers
+  collect_cf_access
   collect_disk_and_backups
   collect_database
   if [ "$target" = latest ]; then

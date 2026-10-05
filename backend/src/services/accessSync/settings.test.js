@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('../db.js', () => ({ query: vi.fn() }));
+vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../encryption.js', () => ({
   encrypt: vi.fn((value) => `enc:${value}`),
   decrypt: vi.fn((value) => (value.startsWith('enc:') ? value.slice(4) : null)),
 }));
 
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 import {
   ACCESS_SYNC_CONFIG_KEY, ACCESS_SYNC_STATE_KEY, accessSyncMaxDisables, isAccessSyncEnabled, loadRunConfig, loadState,
   loadStoredConfig, publicConfig, saveConfig, saveState,
@@ -23,7 +23,10 @@ let store;
 beforeEach(() => {
   store = new Map();
   query.mockReset();
+  // A transaction here is the same store; the lock statement is the only extra SQL it sees.
+  withTransaction.mockImplementation(async (fn) => fn({ query: (...args) => query(...args) }));
   query.mockImplementation(async (sql, params) => {
+    if (sql === "SELECT pg_advisory_xact_lock(hashtext('mailexpert:access_sync'))") return { rows: [] };
     if (/^SELECT value FROM system_settings WHERE key = \$1$/.test(sql)) {
       return { rows: store.has(params[0]) ? [{ value: store.get(params[0]) }] : [] };
     }
@@ -94,6 +97,7 @@ describe('settings', () => {
     await saveConfig(full);
     const insertedKeys = [];
     query.mockImplementation(async (sql, params) => {
+      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
       if (/^SELECT value FROM system_settings WHERE key = \$1$/.test(sql)) {
         return { rows: store.has(params[0]) ? [{ value: store.get(params[0]) }] : [] };
       }
@@ -112,6 +116,7 @@ describe('settings', () => {
     await saveConfig(full);
     await saveState({ baseline: ['a@example.com'], abortedCandidates: ['b@example.com'], lastRun: { outcome: 'updated' } });
     query.mockImplementation(async (sql, params) => {
+      if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
       if (/^SELECT value FROM system_settings WHERE key = \$1$/.test(sql)) {
         return { rows: store.has(params[0]) ? [{ value: store.get(params[0]) }] : [] };
       }
