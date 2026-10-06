@@ -1055,7 +1055,7 @@
       "opEndsWith": "ends with",
       "opRegex": "matches regex",
       "headerNamePlaceholder": "Header name (e.g. X-Spam-Status)",
-      "bodyConditionNote": "Body rules only run if the message body is already downloaded. If the body has not been fetched yet when a message arrives, the rule is skipped and the message stays in your inbox — body rules do not apply retroactively.",
+      "bodyConditionNote": "Body conditions are checked only if the message body is already downloaded. If the body has not been fetched yet when a message arrives, a body condition decides nothing, and the other conditions decide when they can on their own: with OR, another matching condition fires the rule; with AND, another condition that does not match rules it out. Otherwise the rule is skipped and the message stays in your inbox — body rules do not apply retroactively.",
       "subTabRules": "Rules",
       "subTabBlockList": "Block List",
       "actionsLabel": "Actions",
