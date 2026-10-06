@@ -532,13 +532,14 @@ function ComposeHost() {
   return composing ? React.createElement(ComposeModal) : null;
 }
 
-async function openNewCompose() {
+async function openNewCompose(draft = {}) {
   saved.length = 0;
-  useStore.setState({ plaintextEmail: true, composeMinimized: false });
+  useStore.setState({ plaintextEmail: true, composeMinimized: false, notifications: [] });
   useStore.getState().openCompose({
     accountId: 'acct', to: ['recipient@example.invalid'], subject: 'Documents', body: 'Please review.', bodyIsHtml: false,
+    ...draft,
   });
-  assert.equal(useStore.getState().composeData.draftUid, undefined, 'a new letter, not a draft left open by an earlier test');
+  assert.equal(useStore.getState().composeData.draftUid, draft.draftUid, 'the letter asked for, not one left open by an earlier test');
   const root = createRoot(document.getElementById('root'));
   await React.act(async () => { root.render(React.createElement(ComposeHost)); });
   await React.act(async () => {});
@@ -608,7 +609,7 @@ describe('attachments with the same file name', () => {
   });
 });
 
-describe('sending while a draft save is in flight', () => {
+describe('sending or discarding while a draft save is in flight', () => {
   async function withDraftApis(run) {
     const originals = { saveDraft: api.saveDraft, deleteDraft: api.deleteDraft, post: api.post };
     const calls = { deleted: [], sent: [] };
@@ -663,6 +664,73 @@ describe('sending while a draft save is in flight', () => {
         assert.equal(calls.sent.length, 1);
         await React.act(async () => save.reject(new Error('mailbox busy')));
         assert.deepEqual(calls.deleted, [['acct', 7, 'Drafts']]);
+      } finally { await close(); }
+    });
+  });
+
+  const OPENED_DRAFT = { draftUid: 7, draftFolder: 'Drafts' };
+
+  test('Send while a save replaces the opened draft deletes the new copy, not the replaced one', async () => {
+    await withDraftApis(async ({ calls, save }) => {
+      const close = await openNewCompose(OPENED_DRAFT);
+      try {
+        await React.act(async () => { buttonByText('compose.saveDraft').click(); });
+        assert.equal(saved[0].existingUid, 7, 'the save replaces the opened draft');
+        await React.act(async () => { buttonByText('compose.send').click(); });
+        assert.equal(calls.sent.length, 1);
+        assert.deepEqual(calls.deleted, [], 'nothing is deleted before the save answers');
+        await React.act(async () => save.resolve({ uid: 9, folder: 'Drafts' }));
+        assert.deepEqual(calls.deleted, [['acct', 9, 'Drafts']]);
+      } finally { await close(); }
+    });
+  });
+
+  test('a save answering after Send does not announce a saved draft', async () => {
+    await withDraftApis(async ({ save }) => {
+      const close = await openNewCompose();
+      try {
+        await React.act(async () => { buttonByText('compose.saveDraft').click(); });
+        await React.act(async () => { buttonByText('compose.send').click(); });
+        await React.act(async () => save.resolve({ uid: 9, folder: 'Drafts' }));
+        const titles = useStore.getState().notifications.map(n => n.title);
+        assert.ok(!titles.includes('compose.draftSaved'), `unexpected notifications: ${JSON.stringify(titles)}`);
+      } finally { await close(); }
+    });
+  });
+
+  async function discard() {
+    await React.act(async () => document.querySelector('button[title="compose.toolbar.close"]').click());
+    const button = buttonByText('compose.closeDraft.discard') || buttonByText('compose.discardDraft.discard');
+    assert.ok(button, 'the close dialog offers Discard');
+    await React.act(async () => { button.click(); });
+    assert.equal(useStore.getState().composing, false, 'the composer closed');
+  }
+
+  test('Discard while a manual save is in flight deletes the copy that save stores', async () => {
+    await withDraftApis(async ({ calls, save }) => {
+      const close = await openNewCompose(OPENED_DRAFT);
+      try {
+        await React.act(async () => { buttonByText('compose.saveDraft').click(); });
+        assert.equal(saved.length, 1, 'the save request is in flight');
+        await discard();
+        await React.act(async () => save.resolve({ uid: 9, folder: 'Drafts' }));
+        assert.deepEqual(calls.deleted, [['acct', 9, 'Drafts']]);
+        const titles = useStore.getState().notifications.map(n => n.title);
+        assert.ok(!titles.includes('compose.draftSaved'), `unexpected notifications: ${JSON.stringify(titles)}`);
+      } finally { await close(); }
+    });
+  });
+
+  test('Discard while an autosave is in flight deletes the copy that autosave stores', async () => {
+    await withDraftApis(async ({ calls, save }) => {
+      const close = await openNewCompose(OPENED_DRAFT);
+      try {
+        await changeValue(document.querySelector('textarea[placeholder="compose.bodyPh"]'), 'Please review. Edited.');
+        await hideTab();
+        assert.equal(saved.length, 1, 'the autosave request is in flight');
+        await discard();
+        await React.act(async () => save.resolve({ uid: 9, folder: 'Drafts' }));
+        assert.deepEqual(calls.deleted, [['acct', 9, 'Drafts']]);
       } finally { await close(); }
     });
   });

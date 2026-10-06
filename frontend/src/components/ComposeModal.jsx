@@ -231,6 +231,9 @@ export default function ComposeModal() {
   // or null when it stored nothing). Send can be pressed before that answer arrives; the copy it
   // stores still has to be removed once the letter is sent, after this composer has closed.
   const pendingDraftSaveRef = useRef(null);
+  // Set once the letter is sent or discarded: a save answering after that only reports where its
+  // copy went, so it can be deleted; it no longer notifies or closes anything.
+  const closedRef = useRef(false);
   // A letter given back by an undo or an edit (utils/sendTracker.js) brings its attachments along.
   const [attachments, setAttachments] = useState(() => composeData?.attachments || []);
   const [fwdAttachments, setFwdAttachments] = useState(() => composeData?.forwardedAttachments || []);
@@ -861,6 +864,21 @@ export default function ComposeModal() {
     toInput.trim(), ccInput.trim(), bccInput.trim(),
   ].some(Boolean);
 
+  // Closes the composer for good (sent or discarded) and deletes its saved copy. A save still in
+  // flight replaces the known copy with a new one, so wait for it and delete the copy it reports;
+  // if it stored nothing, the known copy is still there.
+  const closeAndDeleteDraft = () => {
+    const pendingDraftSave = pendingDraftSaveRef.current;
+    const knownDraft = draftUid != null && draftFolder != null && draftAccountId
+      ? { uid: draftUid, folder: draftFolder, accountId: draftAccountId } : null;
+    closedRef.current = true;
+    closeCompose();
+    Promise.resolve(pendingDraftSave).then(stored => {
+      const draft = stored || knownDraft;
+      if (draft) api.deleteDraft(draft.accountId, draft.uid, draft.folder).catch(() => {});
+    });
+  };
+
   // sendAt: a Date for send later; absent for Send (the five-second undo window). A confirmation
   // re-calls this with only its skip flag, so the time asked for first is kept.
   const handleSend = async ({ skipSubjectWarn = false, skipAttachWarn = false, sendAt } = {}) => {
@@ -934,17 +952,8 @@ export default function ComposeModal() {
       idempotencyKeyRef.current = null;
       const replyThreadId = isReply ? composeData?.threadId : null;
       const replyAccountId = composeData?.accountId ?? null;
-      const pendingDraftSave = pendingDraftSaveRef.current;
-      closeCompose();
-      // The letter is on the server now (an undo or an edit gives it back from there). A save
-      // still in flight replaces the known copy with a new one, so wait for it and delete the
-      // copy it reports; if it stored nothing, the known copy is still there.
-      const knownDraft = draftUid != null && draftFolder != null && draftAccountId
-        ? { uid: draftUid, folder: draftFolder, accountId: draftAccountId } : null;
-      Promise.resolve(pendingDraftSave).then(stored => {
-        const draft = stored || knownDraft;
-        if (draft) api.deleteDraft(draft.accountId, draft.uid, draft.folder).catch(() => {});
-      });
+      // The letter is on the server now (an undo or an edit gives it back from there).
+      closeAndDeleteDraft();
       const shownSubject = subject || t('common.noSubject');
       if (sendResult.scheduled) {
         addNotification({
@@ -1060,6 +1069,9 @@ export default function ComposeModal() {
       if (draftUid != null && draftFolder != null && draftAccountId && draftAccountId !== accountId) {
         api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
       }
+      // Sent or discarded meanwhile: closeAndDeleteDraft() deletes this copy, so it is not
+      // "saved" any more and there is nothing left to close.
+      if (closedRef.current) return;
       if (result.uid != null) {
         setDraftUid(result.uid);
         setDraftFolder(result.folder);
@@ -1094,7 +1106,7 @@ export default function ComposeModal() {
       console.error('Save draft failed:', err.message);
       // A save the user asked for says when the mailbox is busy or its password was rejected;
       // autosave stays quiet and retries on its next interval.
-      if (!silent && isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+      if (!silent && !closedRef.current && isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
     } finally {
       reportStored(null); // no-op once the answer was reported
       setSavingDraft(false);
@@ -1759,10 +1771,7 @@ export default function ComposeModal() {
             <button
               onClick={() => {
                 setShowDiscardSheet(false);
-                if (draftUid != null && draftFolder != null && draftAccountId) {
-                  api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
-                }
-                closeCompose();
+                closeAndDeleteDraft();
               }}
               style={{ width: '100%', padding: '16px 20px', textAlign: 'left', background: 'none', border: 'none', color: 'var(--red)', fontSize: 16, fontWeight: 500, cursor: 'pointer', borderBottom: '1px solid var(--border-subtle)', WebkitTapHighlightColor: 'transparent' }}
             >
@@ -2536,10 +2545,7 @@ export default function ComposeModal() {
             <button
               onClick={() => {
                 setShowCloseDialog(false);
-                if (draftUid != null && draftFolder != null && draftAccountId) {
-                  api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
-                }
-                closeCompose();
+                closeAndDeleteDraft();
               }}
               style={{ padding: '8px 16px', background: 'none', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--red)', fontSize: 13, cursor: 'pointer', textAlign: 'center' }}
             >
