@@ -46,7 +46,9 @@
 #   systemd, output to /var/log/mailexpert-node-agent.log). --agent-token-file reads the token from
 #   a file, never from the command line: one line with the token, or KEY=VALUE lines with
 #   AGENT_TOKEN and the two CF_ACCESS_ keys. The agent restarts only when its files changed. The
-#   commit of the checkout setup.sh runs from goes to scripts-commit, for the agent's status report.
+#   commit of the checkout setup.sh runs from goes to scripts-commit, for the agent's status report,
+#   and the checkout's directory to scripts-src, for the agent's update job (node-update.sh, also
+#   installed here), which runs this script again after it checked out the panel's commit.
 #
 # Usage: setup.sh --panel-ip <PANEL_IP> [--panel-ip ...] [--eop-host <EOP_HOST>]
 #                 [--mailcow-dir /opt/mailcow-dockerized] [--ping-url <Healthchecks URL>]
@@ -179,6 +181,13 @@ scripts_commit() {
   git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown
 }
 
+# scripts_src: the top directory of that checkout; status 1 outside a checkout.
+scripts_src() {
+  local top
+  top=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ -n "$top" ] && [ -d "$top" ] && printf '%s\n' "$top"
+}
+
 # read_agent_token_file <file> <out>: the token file as KEY=VALUE lines in <out> (AGENT_TOKEN and
 # the optional CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET); a file of one bare line is the
 # token. Never prints a value.
@@ -231,11 +240,17 @@ install_scripts() {
   install -m 644 "$SCRIPT_DIR/backup-lib.sh" "$NODE_DIR/backup-lib.sh"
   install -m 644 "$LIB_DIR/backup.sh" "$NODE_DIR/backup.sh"
   install -m 755 "$SCRIPT_DIR/node-agent.sh" "$NODE_DIR/node-agent.sh"
+  install -m 755 "$SCRIPT_DIR/node-update.sh" "$NODE_DIR/node-update.sh"
   scripts_commit >"$NODE_DIR/scripts-commit.tmp"
   if changed "$NODE_DIR/scripts-commit" "$NODE_DIR/scripts-commit.tmp"; then
     install -m 644 "$NODE_DIR/scripts-commit.tmp" "$NODE_DIR/scripts-commit"
   fi
   rm -f "$NODE_DIR/scripts-commit.tmp"
+  # The checkout the agent's update job fetches into and checks out (node-update.sh).
+  if scripts_src >"$NODE_DIR/scripts-src.tmp" && changed "$NODE_DIR/scripts-src" "$NODE_DIR/scripts-src.tmp"; then
+    install -m 644 "$NODE_DIR/scripts-src.tmp" "$NODE_DIR/scripts-src"
+  fi
+  rm -f "$NODE_DIR/scripts-src.tmp"
   if [ "$(agent_files_sum)" != "$before" ]; then AGENT_RESTART=1; fi
 }
 

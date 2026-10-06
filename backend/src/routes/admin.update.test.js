@@ -27,6 +27,9 @@ vi.mock('../services/panelUpdate/spool.js', async (importOriginal) => {
   return { ...actual, getSpool: vi.fn(actual.getSpool) };
 });
 vi.mock('../services/panelUpdate/reconcile.js', () => ({ reconcileUpdateAudit: vi.fn(async () => {}) }));
+vi.mock('../services/mailNode/nodeAgent.js', async (importOriginal) => ({
+  ...(await importOriginal()), getNodeUpdateState: vi.fn(),
+}));
 
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -37,6 +40,7 @@ import { query } from '../services/db.js';
 import { recordAudit } from '../services/auditLog.js';
 import { getLatestStatus } from '../services/panelUpdate/latest.js';
 import { reconcileUpdateAudit } from '../services/panelUpdate/reconcile.js';
+import { getNodeUpdateState } from '../services/mailNode/nodeAgent.js';
 import { SpoolError, getSpool } from '../services/panelUpdate/spool.js';
 
 const ADMIN_ID = '22222222-2222-4222-8222-222222222222';
@@ -45,6 +49,10 @@ const CUR = 'a'.repeat(40);
 const LATEST = '0123456789abcdef0123456789abcdef01234567';
 const TARGET = 'sha-0123456789ab';
 const realGetSpool = getSpool.getMockImplementation();
+const NODE = {
+  configured: true, connected: true, scriptsCommit: CUR, panelCommit: CUR,
+  job: { id: '7', kind: 'update', state: 'running', step: 'setup.sh' },
+};
 
 const status = (over = {}) => ({
   current: { sha: CUR, version: 'sha-aaaaaaaaaaaa' },
@@ -88,7 +96,9 @@ beforeEach(async () => {
   reconcileUpdateAudit.mockClear();
   getLatestStatus.mockReset();
   getLatestStatus.mockResolvedValue(status());
-  dir = await mkdtemp(join(tmpdir(), 'admin-update-'));
+  getNodeUpdateState.mockReset();
+  getNodeUpdateState.mockResolvedValue(NODE);
+  dir =await mkdtemp(join(tmpdir(), 'admin-update-'));
   await mkdir(join(dir, 'request'));
   await mkdir(join(dir, 'result'));
   await writeFile(join(dir, 'result', 'updater.json'), JSON.stringify({ installed: true, version: 'sha-bbbbbbbbbbbb', updatedAt: '2026-10-05T10:00:00Z', rolledBack: null }));
@@ -138,6 +148,7 @@ describe('/api/admin/update', () => {
         pending: null,
         check: expect.objectContaining({ id: checkId, action: 'check', state: 'ready', target: TARGET }),
         run: result(),
+        node: NODE,
         links: {
           runbook: 'https://github.com/wyrtensi/MailExpert/blob/main/docs/operations/deployment.md#откат-обновления',
           rollback: 'https://github.com/wyrtensi/MailExpert/blob/main/docs/operations/README.md#10-откат',

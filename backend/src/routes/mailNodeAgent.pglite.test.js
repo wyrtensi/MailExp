@@ -29,10 +29,17 @@ const { createRealSchemaDb } = await import('../services/testing/realSchema.js')
 const { default: express } = await import('express');
 const { default: adminRoutes, agentRouter } = await import('./mailNodeAgent.js');
 const { recordAudit } = await import('../services/auditLog.js');
-const { hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle } = await import('../services/mailNode/nodeAgent.js');
+const {
+  hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle, queueNodeUpdateIfBehind, getNodeUpdateState,
+} = await import('../services/mailNode/nodeAgent.js');
+const { updateNodeAfterPanel } = await import('../services/panelUpdate/reconcile.js');
 const { AGENT_AUTH_FAILURES } = await import('./mailNodeAgent.js');
 
 const ADMIN = '60000000-0000-4000-8000-000000000001';
+// The commit the panel runs (BUILD_SHA) and an older one the node reports.
+const PANEL_SHA = 'feedfacefeedfacefeedfacefeedfacefeedface';
+const NODE_SHA = '0123456789abcdef0123456789abcdef01234567';
+const PANEL_ENV = { BUILD_SHA: PANEL_SHA };
 
 let db;
 let server;
@@ -237,7 +244,7 @@ describe('jobs', () => {
     expect(none.status).toBe(409);
     expect(none.body.code).toBe('agent_not_set_up');
     await issue();
-    expect((await admin('POST', '/agent/jobs', { kind: 'update' })).status).toBe(400);
+    expect((await admin('POST', '/agent/jobs', { kind: 'reboot' })).status).toBe(400);
     expect((await admin('POST', '/agent/jobs', {})).status).toBe(400);
   });
 });
@@ -343,12 +350,145 @@ describe('the administrators routes', () => {
     auth.admin = false;
     for (const [method, path, body] of [
       ['GET', '/agent'], ['GET', '/agent/jobs'], ['POST', '/agent/token'], ['DELETE', '/agent/token'],
-      ['POST', '/agent/jobs', { kind: 'backup' }],
+      ['POST', '/agent/jobs', { kind: 'backup' }], ['POST', '/agent/jobs', { kind: 'update' }],
     ]) {
       expect((await admin(method, path, body)).status).toBe(403);
     }
     expect(recordAudit).not.toHaveBeenCalled();
     const { rows } = await db.query('SELECT * FROM node_agent');
     expect(rows).toHaveLength(0);
+  });
+});
+
+describe('the node update', () => {
+  const previousSha = process.env.BUILD_SHA;
+  beforeEach(() => { process.env.BUILD_SHA = PANEL_SHA; });
+  afterAll(() => {
+    if (previousSha === undefined) delete process.env.BUILD_SHA;
+    else process.env.BUILD_SHA = previousSha;
+  });
+
+  // A connected agent whose last status report names the given scripts commit.
+  async function connectedAgent(scriptsCommit = NODE_SHA) {
+    const token = await issue();
+    expect((await agent(token, 'POST', '/status', { scriptsCommit })).status).toBe(200);
+    return token;
+  }
+  const updateJobs = async () => (await db.query("SELECT * FROM node_agent_jobs WHERE kind = 'update' ORDER BY id")).rows;
+
+  it('is queued after a panel update when the node runs another commit, once per commit', async () => {
+    await connectedAgent();
+    const results = [{ action: 'update', state: 'succeeded', target: 'sha-feedfacefeed' }];
+    const job = await updateNodeAfterPanel(results, { version: 'sha-feedfacefeed', queue: () => queueNodeUpdateIfBehind({ env: PANEL_ENV }), recordAudit });
+    expect(job).toMatchObject({ kind: 'update', state: 'queued', params: { sha: PANEL_SHA, automatic: true } });
+    expect(recordAudit).toHaveBeenCalledWith([expect.objectContaining({
+      action: 'mail_node.agent_job_requested', actorUserId: null,
+      details: { kind: 'update', jobId: job.id, sha: PANEL_SHA, automatic: true },
+    })]);
+    // The pass every 30 s asks again: no second job, whether the first is waiting or failed.
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toBeNull();
+    await db.query("UPDATE node_agent_jobs SET state = 'failed', error = 'rolled_back' WHERE id = $1", [job.id]);
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toBeNull();
+    expect(await updateJobs()).toHaveLength(1);
+  });
+
+  it('is not queued when the panel update did not succeed to this version, or nothing differs', async () => {
+    await connectedAgent();
+    const queue = () => queueNodeUpdateIfBehind({ env: PANEL_ENV });
+    expect(await updateNodeAfterPanel([{ state: 'rolled_back', target: 'sha-feedfacefeed' }], { version: 'sha-feedfacefeed', queue, recordAudit })).toBeNull();
+    expect(await updateNodeAfterPanel([{ state: 'succeeded', target: 'sha-111111111111' }], { version: 'sha-feedfacefeed', queue, recordAudit })).toBeNull();
+    expect(await updateNodeAfterPanel([{ state: 'succeeded', target: 'sha-feedfacefeed' }], { version: null, queue, recordAudit })).toBeNull();
+    expect(await queueNodeUpdateIfBehind({ env: {} })).toBeNull();
+    expect(await updateJobs()).toHaveLength(0);
+    expect(recordAudit).not.toHaveBeenCalledWith([expect.objectContaining({ action: 'mail_node.agent_job_requested' })]);
+  });
+
+  it('is not queued when the node already runs the commit, reports none, or the agent is away', async () => {
+    const token = await connectedAgent(PANEL_SHA);
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toBeNull();
+    await agent(token, 'POST', '/status', { scriptsCommit: 'unknown' });
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toBeNull();
+    await agent(token, 'POST', '/status', { scriptsCommit: NODE_SHA });
+    await db.query("UPDATE node_agent SET last_seen_at = now() - interval '10 minutes'");
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toBeNull();
+    expect(await updateJobs()).toHaveLength(0);
+  });
+
+  it('waits while a backup runs and is queued by a later pass', async () => {
+    const token = await connectedAgent();
+    const { body: { job: backup } } = await admin('POST', '/agent/jobs', { kind: 'backup' });
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toBeNull();
+    await agent(token, 'GET', '/next?wait=0');
+    await agent(token, 'POST', `/jobs/${backup.id}`, { state: 'succeeded' });
+    expect(await queueNodeUpdateIfBehind({ env: PANEL_ENV })).toMatchObject({ kind: 'update' });
+  });
+
+  it('"Update node now" queues the panel own commit, journaled; refused while a backup or an update is active', async () => {
+    const token = await connectedAgent();
+    const res = await admin('POST', '/agent/jobs', { kind: 'update', params: { sha: NODE_SHA } });
+    expect(res.status).toBe(202);
+    expect(res.body.job).toMatchObject({ kind: 'update', state: 'queued', params: { sha: PANEL_SHA } });
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({
+      actorUserId: ADMIN, action: 'mail_node.agent_job_requested', details: { kind: 'update', jobId: res.body.job.id, sha: PANEL_SHA },
+    }));
+    for (const kind of ['update', 'backup']) {
+      const busy = await admin('POST', '/agent/jobs', { kind });
+      expect(busy.status).toBe(409);
+      expect(busy.body.code).toBe('job_active');
+    }
+    const claimed = await agent(token, 'GET', '/next?wait=0');
+    expect(claimed.body).toEqual({ id: res.body.job.id, kind: 'update', params: { sha: PANEL_SHA } });
+    await agent(token, 'POST', `/jobs/${res.body.job.id}`, { state: 'failed', error: 'rolled_back' });
+    // A failed update is tried again by the button only.
+    expect((await admin('POST', '/agent/jobs', { kind: 'update' })).status).toBe(202);
+  });
+
+  it('an update is refused while a backup is active', async () => {
+    await connectedAgent();
+    await admin('POST', '/agent/jobs', { kind: 'backup' });
+    const busy = await admin('POST', '/agent/jobs', { kind: 'update' });
+    expect(busy.status).toBe(409);
+    expect(busy.body.code).toBe('job_active');
+  });
+
+  it('"Update node now" is refused on a build that does not know its commit', async () => {
+    await connectedAgent();
+    process.env.BUILD_SHA = 'dev';
+    const res = await admin('POST', '/agent/jobs', { kind: 'update' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('panel_version_unknown');
+    expect(await updateJobs()).toHaveLength(0);
+  });
+
+  it('a running update that reports survives the agent poll after its restart; a silent one fails', async () => {
+    const token = await connectedAgent();
+    const { body: { job } } = await admin('POST', '/agent/jobs', { kind: 'update' });
+    await agent(token, 'GET', '/next?wait=0');
+    await agent(token, 'POST', `/jobs/${job.id}`, { state: 'running', step: 'setup.sh' });
+    expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(204);
+    expect((await updateJobs())[0]).toMatchObject({ state: 'running', step: 'setup.sh' });
+    await db.query("UPDATE node_agent_jobs SET updated_at = now() - interval '6 minutes' WHERE id = $1", [job.id]);
+    await agent(token, 'GET', '/next?wait=0');
+    expect((await updateJobs())[0]).toMatchObject({ state: 'failed', error: 'agent_restarted' });
+  });
+
+  it('an update running past two hours fails', async () => {
+    const token = await connectedAgent();
+    const { body: { job } } = await admin('POST', '/agent/jobs', { kind: 'update' });
+    await agent(token, 'GET', '/next?wait=0');
+    await db.query("UPDATE node_agent_jobs SET started_at = now() - interval '121 minutes' WHERE id = $1", [job.id]);
+    resetExpiryThrottle();
+    await admin('GET', '/agent/jobs');
+    expect((await updateJobs())[0]).toMatchObject({ state: 'failed', error: 'timed_out' });
+  });
+
+  it('the panel update screen gets the node part', async () => {
+    await connectedAgent();
+    expect(await getNodeUpdateState({ env: PANEL_ENV })).toEqual({
+      configured: true, connected: true, scriptsCommit: NODE_SHA, panelCommit: PANEL_SHA, job: null,
+    });
+    await admin('POST', '/agent/jobs', { kind: 'update' });
+    const state = await getNodeUpdateState({ env: PANEL_ENV });
+    expect(state.job).toMatchObject({ kind: 'update', state: 'queued', params: { sha: PANEL_SHA } });
   });
 });

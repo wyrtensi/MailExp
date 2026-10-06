@@ -1,15 +1,21 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { query, withTransaction } from '../db.js';
+import { currentOf } from '../panelUpdate/latest.js';
 
 // The mail node's agent (scripts/deploy/mail-node/node-agent.sh): a service on the node host that
 // long-polls the panel for jobs over HTTPS (it opens no port on the node), runs the ones it knows
-// (a status report, a backup of the node) and reports their progress. It authenticates with its own
+// (a status report, a backup of the node, an update of the node's scripts to the panel's commit)
+// and reports their progress. It authenticates with its own
 // token: the panel keeps only the token's sha256, shows the token once, and a rotation or a
 // revocation ends the old one at once. Tables: node_agent (one row) and node_agent_jobs (migration
 // 0093). The routes are routes/mailNodeAgent.js.
 
-export const AGENT_JOB_KINDS = Object.freeze(['status', 'backup']);
+export const AGENT_JOB_KINDS = Object.freeze(['status', 'backup', 'update']);
+// Kinds that change the node: one of them at a time (a backup during an update, or an update
+// during a backup, is refused).
+const EXCLUSIVE_KINDS = Object.freeze(['backup', 'update']);
+const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const JOB_STATES = new Set(['queued', 'running', 'succeeded', 'failed']);
 const FINAL_STATES = new Set(['succeeded', 'failed']);
 
@@ -22,7 +28,16 @@ const POLL_RECHECK_MS = 5000;
 // A job queued this long was never picked up (the agent is offline); one running past its kind's
 // bound has lost its agent. Both are failed so the screen never waits for ever.
 export const QUEUED_TIMEOUT_MS = 30 * 60 * 1000;
-export const RUNNING_TIMEOUT_MS = Object.freeze({ status: 15 * 60 * 1000, backup: 6 * 60 * 60 * 1000 });
+export const RUNNING_TIMEOUT_MS = Object.freeze({
+  status: 15 * 60 * 1000,
+  backup: 6 * 60 * 60 * 1000,
+  // The pre-update backup, setup.sh, and setup.sh again on a rollback.
+  update: 2 * 60 * 60 * 1000,
+});
+// An update runs detached from the agent (node-update.sh), which may restart meanwhile (setup.sh
+// restarts it when its files change) and poll again. The update reports at least every 15 seconds;
+// one reported within this bound is still alive and is not failed as an orphan by that poll.
+export const UPDATE_HEARTBEAT_MS = 5 * 60 * 1000;
 
 // What the server keeps of the agent's reports.
 export const MAX_LOG_TAIL = 8000;
@@ -237,34 +252,106 @@ export async function listJobs(limit = 20) {
   return rows.map(presentJob);
 }
 
-// Queues a job for the agent. Refused without an agent token (nothing would pick it up) and while a
-// job of the same kind is queued or running.
+// Queues a job for the agent. Refused without an agent token (nothing would pick it up), while a
+// job of the same kind is queued or running, and for a backup or an update while either is.
+// The agent's row is locked meanwhile, so two requests cannot both pass the check.
 export async function enqueueJob({ kind, params = {}, createdBy = null }) {
   if (!AGENT_JOB_KINDS.includes(kind)) throw new NodeAgentError('job_kind_invalid');
-  const { rows: agent } = await query('SELECT token_hash FROM node_agent WHERE id = 1');
-  if (!agent[0]?.token_hash) throw new NodeAgentError('agent_not_set_up');
   await expireStaleJobs();
+  let job;
   try {
-    const { rows } = await query(
-      'INSERT INTO node_agent_jobs (kind, params, created_by) VALUES ($1, $2::jsonb, $3) RETURNING *',
-      [kind, JSON.stringify(params), createdBy]
-    );
-    wakeups.emit('job');
-    return presentJob(rows[0]);
+    job = await withTransaction(async (client) => {
+      const { rows: agent } = await client.query('SELECT token_hash FROM node_agent WHERE id = 1 FOR UPDATE');
+      if (!agent[0]?.token_hash) throw new NodeAgentError('agent_not_set_up');
+      const kinds = EXCLUSIVE_KINDS.includes(kind) ? EXCLUSIVE_KINDS : [kind];
+      const { rows: active } = await client.query(
+        "SELECT 1 FROM node_agent_jobs WHERE kind = ANY($1::text[]) AND state IN ('queued', 'running') LIMIT 1",
+        [kinds]
+      );
+      if (active.length) throw new NodeAgentError('job_active');
+      const { rows } = await client.query(
+        'INSERT INTO node_agent_jobs (kind, params, created_by) VALUES ($1, $2::jsonb, $3) RETURNING *',
+        [kind, JSON.stringify(params), createdBy]
+      );
+      return presentJob(rows[0]);
+    });
   } catch (err) {
     if (err?.code === '23505') throw new NodeAgentError('job_active');
     throw err;
   }
+  wakeups.emit('job');
+  return job;
+}
+
+// --- The node update --------------------------------------------------------------------------
+
+// The commit the panel runs (BUILD_SHA), which the node's scripts are brought to; null on a build
+// without one (a stand, a development build).
+export function panelCommit(env = process.env) {
+  return currentOf(env).sha;
+}
+
+// "Update node now": an update job to the panel's commit. The commit comes from the panel's own
+// build, never from the request.
+export async function enqueueNodeUpdate({ createdBy = null, env = process.env } = {}) {
+  const sha = panelCommit(env);
+  if (!sha) throw new NodeAgentError('panel_version_unknown');
+  return enqueueJob({ kind: 'update', params: { sha }, createdBy });
+}
+
+// After a panel update: the node's update to the panel's commit, queued by the panel itself when
+// the agent is connected, its last status report names another commit, nothing is backing up or
+// updating the node, and no update job to this commit was ever queued (a failed one is tried again
+// only by an administrator's "Update node now"). Returns the job, or null with nothing done.
+export async function queueNodeUpdateIfBehind({ env = process.env } = {}) {
+  const sha = panelCommit(env);
+  if (!sha) return null;
+  const state = await getAgentState();
+  if (!state.configured || !state.connected) return null;
+  const nodeCommit = state.status?.scriptsCommit;
+  if (typeof nodeCommit !== 'string' || !SHA_PATTERN.test(nodeCommit) || nodeCommit === sha) return null;
+  const { rows } = await query(
+    "SELECT 1 FROM node_agent_jobs WHERE kind = 'update' AND params->>'sha' = $1 LIMIT 1",
+    [sha]
+  );
+  if (rows.length) return null;
+  try {
+    return await enqueueJob({ kind: 'update', params: { sha, automatic: true } });
+  } catch (err) {
+    // Busy (a backup or an update runs) or the token went away: the next pass looks again.
+    if (err instanceof NodeAgentError) return null;
+    throw err;
+  }
+}
+
+// The node's part of an update, for the panel update screen: whether the agent is connected, the
+// commit it reported last, and the last update job.
+export async function getNodeUpdateState({ env = process.env } = {}) {
+  const state = await getAgentState();
+  const { rows } = await query(
+    "SELECT * FROM node_agent_jobs WHERE kind = 'update' ORDER BY created_at DESC, id DESC LIMIT 1"
+  );
+  return {
+    configured: state.configured,
+    connected: state.connected,
+    scriptsCommit: state.status?.scriptsCommit ?? null,
+    panelCommit: panelCommit(env),
+    job: presentJob(rows[0]),
+  };
 }
 
 // A poll comes only from an idle agent (it runs one job at a time, then polls): a job still running
 // then was lost when the agent restarted (a reboot, an update of its files), and fails now instead
-// of blocking the next one until its bound.
+// of blocking the next one until its bound. An update is the exception while it reports: it runs
+// detached from the agent (node-update.sh) and outlives the restart setup.sh gives the agent. The
+// agent does not poll while it knows an update runs; this guards an agent that does not know (one
+// rolled back to an older version). An update silent past UPDATE_HEARTBEAT_MS fails here too.
 export async function failOrphanedJobs(tokenHash) {
   await query(
     `UPDATE node_agent_jobs SET state = 'failed', error = 'agent_restarted', finished_at = now(), updated_at = now()
-      WHERE state = 'running' AND ${TOKEN_CURRENT}`,
-    [tokenHash]
+      WHERE state = 'running' AND ${TOKEN_CURRENT}
+        AND NOT (kind = 'update' AND updated_at > now() - ($2::double precision * interval '1 millisecond'))`,
+    [tokenHash, UPDATE_HEARTBEAT_MS]
   );
 }
 
