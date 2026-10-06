@@ -825,8 +825,12 @@ keys() {
   [ "$status" -eq 0 ]
   SNAP=$MOCK_DIR/repo/$(latest_id)/backup/mailexpert
   [ -d "$SNAP/hooks" ] && [ -z "$(ls -A "$SNAP/hooks")" ]
-  # The rehearsal restores a snapshot with a hook.
+  # The rehearsal restores a snapshot with a hook, beside the files mailcow's checkout tracks there.
+  export MOCK_GIT_HEAD=0123456789abcdef0123456789abcdef01234567
+  export MOCK_GIT_TRACKED=$'data/hooks/README.md\ndata/hooks/postfix/.gitkeep\ndata/web/index.php'
   mkdir -p "$MC/data/hooks/postfix"
+  printf 'hooks\n' >"$MC/data/hooks/README.md"
+  : >"$MC/data/hooks/postfix/.gitkeep"
   printf '#!/bin/sh\necho postfix\n' >"$MC/data/hooks/postfix/pre_start.sh"
   chmod 755 "$MC/data/hooks/postfix/pre_start.sh"
   run bash "$BACKUP" --tag manual
@@ -840,20 +844,28 @@ keys() {
   # then records data/hooks empty.
   repo_copy "$FIRST" 0000000b "$(cat "$MOCK_DIR/repo/$FIRST.host")" mailcow move
   SNAP=$MOCK_DIR/repo/0000000b$(printf 'c%.0s' $(seq 56))/backup/mailexpert
-  rm -r "$SNAP/hooks/postfix"
+  rm -r "$SNAP/hooks" && mkdir "$SNAP/hooks"
   run bash "$RESTORE" 0000000b --mailcow-dir "$MC" --update
   [ "$status" -eq 0 ]
-  [ -d "$MC/data/hooks" ] && [ -z "$(ls -A "$MC/data/hooks")" ]
+  # mailcow's tracked files stay in its checkout; only the hook is set aside.
+  [ -f "$MC/data/hooks/README.md" ] && [ -f "$MC/data/hooks/postfix/.gitkeep" ]
+  [ ! -e "$MC/data/hooks/postfix/pre_start.sh" ]
   set -- "$MAILEXPERT_NODE_BACKUP_DIR"/pre-restore-*
   [ "$#" -eq 1 ] && [ -x "$1/data/hooks/postfix/pre_start.sh" ]
-  [[ $output == *"not in the snapshot, set aside: data/hooks/postfix"* ]]
+  [ ! -e "$1/data/hooks/README.md" ] && [ ! -e "$1/data/hooks/postfix/.gitkeep" ]
+  [[ $output == *"not in the snapshot, set aside: data/hooks/postfix/pre_start.sh"* ]]
+  [[ $output != *"set aside: data/hooks/README.md"* && $output != *.gitkeep* ]]
   [[ $output != *"does not record data/hooks"* ]]
 }
 
 @test "a snapshot made before data/hooks was always recorded keeps the node's hooks and names them" {
   configured
-  mkdir -p "$MC/data/hooks/dovecot"
+  # Not a git checkout: mailcow's placeholders README.md and .gitkeep are its own, not hooks.
+  mkdir -p "$MC/data/hooks/dovecot" "$MC/data/hooks/my hooks"
+  printf 'hooks\n' >"$MC/data/hooks/README.md"
+  : >"$MC/data/hooks/dovecot/.gitkeep"
   printf '#!/bin/sh\necho dovecot\n' >"$MC/data/hooks/dovecot/pre_start.sh"
+  printf '#!/bin/sh\necho mine\n' >"$MC/data/hooks/my hooks/pre_start.sh"
   chmod 755 "$MC/data/hooks/dovecot/pre_start.sh"
   run bash "$BACKUP" --tag manual
   [ "$status" -eq 0 ]
@@ -870,7 +882,8 @@ keys() {
   [ -x "$MC/data/hooks/dovecot/pre_start.sh" ]
   set -- "$MAILEXPERT_NODE_BACKUP_DIR"/pre-restore-*/data/hooks
   [ ! -e "$1" ]
-  [[ $output == *"warning: the snapshot does not record data/hooks"*"data/hooks/dovecot/pre_start.sh"* ]]
+  [[ $output == *"warning: the snapshot does not record data/hooks"*"stay: data/hooks/dovecot/pre_start.sh, data/hooks/my hooks/pre_start.sh; move"* ]]
+  [[ $output != *"data/hooks/README.md"* && $output != *".gitkeep"* ]]
 }
 
 @test "a restore that stopped half way is run again" {
