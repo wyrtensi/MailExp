@@ -1,0 +1,125 @@
+import { Router } from 'express';
+import { requireAuth, requireAdmin } from '../middleware/auth.js';
+import { recordAudit } from '../services/auditLog.js';
+import {
+  MAX_POLL_WAIT_MS,
+  NodeAgentError,
+  authenticateAgent,
+  bearerToken,
+  enqueueJob,
+  getAgentState,
+  issueToken,
+  listJobs,
+  recordStatus,
+  reportJob,
+  revokeToken,
+  waitForJob,
+} from '../services/mailNode/nodeAgent.js';
+
+// The mail node's agent (services/mailNode/nodeAgent.js), two routers:
+// - the default export, mounted at /api/mail-node next to routes/mailNode.js, for administrators:
+//   the agent's state and last status report, its token (issued or rotated, shown once; revoked),
+//   its recent jobs and "Back up mail now". Every change is journaled.
+// - agentRouter, mounted at /api/node-agent before the session, the identity gate and the CSRF
+//   check (index.js): the agent on the node, authenticated only by its bearer token. It long-polls
+//   for the next job, reports a job's progress and result, and sends its status report.
+const ERRORS = {
+  agent_not_set_up: [409, 'The node agent is not connected: issue its token first'],
+  job_active: [409, 'A job of this kind is already waiting or running'],
+  job_kind_invalid: [400, 'Unknown job kind'],
+  job_state_invalid: [400, 'Invalid job state'],
+  job_not_found: [404, 'No such job'],
+  job_not_running: [409, 'The job is not running'],
+};
+
+function refuse(res, code) {
+  const [status, error] = ERRORS[code] ?? [500, 'Node agent error'];
+  return res.status(status).json({ error, code });
+}
+
+function handle(fn) {
+  return async (req, res, next) => {
+    try {
+      await fn(req, res);
+    } catch (err) {
+      if (err instanceof NodeAgentError) return refuse(res, err.code);
+      return next(err);
+    }
+  };
+}
+
+const router = Router();
+router.use(requireAuth);
+
+router.get('/agent', requireAdmin, handle(async (_req, res) => {
+  const [state, jobs] = await Promise.all([getAgentState(), listJobs(10)]);
+  res.json({ ...state, jobs });
+}));
+
+router.get('/agent/jobs', requireAdmin, handle(async (req, res) => {
+  res.json({ jobs: await listJobs(req.query.limit) });
+}));
+
+// The token is in this answer only; the database keeps its hash.
+router.post('/agent/token', requireAdmin, handle(async (req, res) => {
+  const { token, createdAt, rotated } = await issueToken(req.session.userId);
+  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.agent_token_issued', details: { rotated } });
+  res.set('Cache-Control', 'no-store');
+  res.status(201).json({ token, createdAt, rotated });
+}));
+
+router.delete('/agent/token', requireAdmin, handle(async (req, res) => {
+  const revoked = await revokeToken();
+  if (revoked) recordAudit({ actorUserId: req.session.userId, action: 'mail_node.agent_token_revoked', details: {} });
+  res.json({ revoked });
+}));
+
+router.post('/agent/jobs', requireAdmin, handle(async (req, res) => {
+  const kind = req.body?.kind;
+  const params = kind === 'backup' ? { tag: 'manual' } : {};
+  const job = await enqueueJob({ kind, params, createdBy: req.session.userId });
+  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.agent_job_requested', details: { kind, jobId: job.id } });
+  res.status(202).json({ job });
+}));
+
+export default router;
+
+// --- The agent's side ---------------------------------------------------------------------------
+
+export const agentRouter = Router();
+
+// Only the bearer token counts here: no session, no cookie. A refusal says nothing about why.
+agentRouter.use(async (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    if (await authenticateAgent(bearerToken(req.get('authorization')))) return next();
+    return res.status(401).json({ error: 'Unauthorized', code: 'agent_unauthorized' });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// The long poll: one queued job (now running), or 204 after up to 50 seconds (?wait=<seconds>).
+agentRouter.get('/next', handle(async (req, res) => {
+  const seconds = Number.parseInt(req.query.wait, 10);
+  const waitMs = Number.isFinite(seconds) ? Math.min(Math.max(seconds, 0) * 1000, MAX_POLL_WAIT_MS) : MAX_POLL_WAIT_MS;
+  const controller = new AbortController();
+  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+  const job = await waitForJob({ waitMs, signal: controller.signal });
+  if (controller.signal.aborted) return undefined;
+  if (!job) return res.status(204).end();
+  return res.json({ id: job.id, kind: job.kind, params: job.params });
+}));
+
+agentRouter.post('/jobs/:id', handle(async (req, res) => {
+  const job = await reportJob(req.params.id, req.body);
+  res.json({ id: job.id, state: job.state });
+}));
+
+agentRouter.post('/status', handle(async (req, res) => {
+  await recordStatus(req.body);
+  res.json({ ok: true });
+}));
+
+// Anything else under /api/node-agent: nothing to find, and not passed on to the user routes.
+agentRouter.use((_req, res) => res.status(404).json({ error: 'Not found' }));
