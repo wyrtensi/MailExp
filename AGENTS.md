@@ -77,6 +77,13 @@ A per-file map: `docs/architecture/codebase-file-map.md`.
   errors. Keep TLS verification on. More in `CONTRIBUTING.md` (branches, Conventional Commits, test
   first, no weakened tests, no new dependencies without need).
 - Do not touch a test stand you were not pointed at, or containers of other compose projects.
+- Updating an external module (mailcow and its pinned version, Caddy, cloudflared, PostgreSQL,
+  Redis, the restic image, npm dependencies) is a security change. Read the module's release notes
+  and security advisories between the two versions, check that what MailExpert relies on still
+  holds (the node's firewall and published ports, IPv4-only binding, the mailcow API allow-list,
+  TLS, the settings `setup.sh` writes), and fix whatever the new version broke or exposed in the
+  same PR. Say in the PR what was checked. Never change mailcow's own code; adapt our scripts and
+  configuration instead.
 
 ## How to verify a change
 
