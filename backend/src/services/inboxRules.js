@@ -159,27 +159,36 @@ export async function applyInboxRules(messages, account, imapManager) {
 
   // If any rule matches on body, batch-fetch body_text from DB (it's not on the
   // parsed message object — it was stored to DB during processMsg).
-  const needsBody = rules.some(r =>
+  const bodyRules = new Set(rules.filter(r =>
     Array.isArray(r.conditions) && r.conditions.some(c => c?.field === 'body')
-  );
+  ));
+  // IDs of messages whose body is not fetched yet (lazy body fetch) or could not be read.
+  // An unknown body must not be treated as empty: a not_contains condition would then
+  // match and move or delete a message whose text nobody has seen. Rules that depend on
+  // the body are skipped for these messages, so they stay where they are.
+  const bodyUnknownIds = new Set();
 
-  if (needsBody) {
+  if (bodyRules.size) {
     const ids = messages.map(m => m.id);
     try {
       const res = await query(
-        'SELECT id, body_text FROM messages WHERE id = ANY($1::uuid[])',
+        'SELECT id, body_text, body_html FROM messages WHERE id = ANY($1::uuid[])',
         [ids]
       );
       const byId = {};
       for (const row of res.rows) byId[row.id] = row;
       for (const msg of messages) {
-        msg._bodyText = byId[msg.id]?.body_text || '';
-        if (!msg._bodyText) {
-          console.warn(`inboxRules: body_text not yet available for message ${msg.id} — body rules will not match (account uses lazy body fetch)`);
+        const row = byId[msg.id];
+        if (!row || (row.body_text == null && row.body_html == null)) {
+          bodyUnknownIds.add(msg.id);
+          console.warn(`inboxRules: body not yet available for message ${msg.id}; skipping body-dependent rules (account uses lazy body fetch)`);
+        } else {
+          msg._bodyText = row.body_text || '';
         }
       }
     } catch (err) {
-      console.error('inboxRules: failed to fetch body_text for rules:', err.message);
+      for (const msg of messages) bodyUnknownIds.add(msg.id);
+      console.error('inboxRules: failed to fetch body_text for rules; skipping body-dependent rules:', err.message);
     }
   }
 
@@ -263,7 +272,9 @@ export async function applyInboxRules(messages, account, imapManager) {
       const rule = rules[ruleIndex];
       let matches;
       try {
-        matches = !(headersUnavailable && headerRules.has(rule)) && evaluateRule(rule, msg);
+        matches = !(headersUnavailable && headerRules.has(rule)) &&
+          !(bodyUnknownIds.has(msg.id) && bodyRules.has(rule)) &&
+          evaluateRule(rule, msg);
       } catch (err) {
         console.error(`inboxRules: rule ${rule.id} evaluation error for msg ${msg.id}:`, err.message);
         if (!forwardBarrierPassed && ruleIndex === lastForwardRuleIndex) {
