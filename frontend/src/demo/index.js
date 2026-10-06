@@ -1,6 +1,7 @@
 import { demoNodeTime, demoTime } from './clock.js';
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoOutageRequest, demoOutageWaiting } from './outages.js';
+import { demoNodeAgentRequest } from './nodeAgent.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
 import { demoRole } from '../utils/demoRole.js';
 import {
@@ -2782,6 +2783,8 @@ export async function demoRequest(method, path, body = {}) {
   if (quarantineAnswer !== undefined) return quarantineAnswer;
   const outageAnswer = demoOutageRequest(verb, pathname, body);
   if (outageAnswer !== undefined) return outageAnswer;
+  const agentAnswer = demoNodeAgentRequest(verb, pathname, body);
+  if (agentAnswer !== undefined) return agentAnswer;
   if (verb === 'GET' && pathname === '/update') return { updateAvailable: false };
   // Panel update (admins only): the demo has no host behind it, so it reports an up-to-date panel
   // without an update mechanism and refuses to start anything.

@@ -79,6 +79,7 @@ const CONCRETE_PATH = {
   '/mail-node/tenant': '/mail-node/tenant',
   '/mail-node/tenant/jobs/:param': '/mail-node/tenant/jobs/9001',
   '/mail-node/tenant/phish-release': '/mail-node/tenant/phish-release',
+  '/mail-node/agent': '/mail-node/agent',
   '/mail-node/quarantine': '/mail-node/quarantine',
   '/mail-node/quarantine/:param': '/mail-node/quarantine/41',
   '/mail-node/quarantine/settings': '/mail-node/quarantine/settings',
@@ -660,6 +661,25 @@ test('the Microsoft tenant answers: test, poll and the anti-spam policy finish a
   await reject('/mail-node/tenant/phish-release/run', 'POST', '/mail-node/tenant/phish-release/run', {}, /paused/);
   await answer('/mail-node/tenant/phish-release', 'PUT', '/mail-node/tenant/phish-release', { enabled: true });
   await reject('/mail/messages/:param/eop-trace', 'POST', '/mail/messages/demo-001/eop-trace', {}, /this mailbox sent/);
+});
+
+test('the node agent: a token shown once, a backup job that finishes, a revocation', async () => {
+  const before = await demoRequest('GET', '/mail-node/agent');
+  assert.equal(before.connected, true);
+  assert.equal(before.status.backup.ok, true);
+  const issued = await answer('/mail-node/agent/token', 'POST', '/mail-node/agent/token');
+  assert.match(issued.token, /^mxna_/);
+  assert.equal(issued.rotated, true);
+  const queued = await answer('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'backup' });
+  assert.equal(queued.job.kind, 'backup');
+  await reject('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'backup' }, /already waiting or running/);
+  const revoked = await answer('/mail-node/agent/token', 'DELETE', '/mail-node/agent/token');
+  assert.equal(revoked.revoked, true);
+  const after = await demoRequest('GET', '/mail-node/agent');
+  assert.equal(after.configured, false);
+  assert.equal(after.jobs[0].error, 'agent_revoked');
+  await reject('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'backup' }, /not connected/);
+  await answer('/mail-node/agent/token', 'POST', '/mail-node/agent/token');
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {
