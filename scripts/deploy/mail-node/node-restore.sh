@@ -186,8 +186,21 @@ mirror_dir() {
   cp -a "$src/." "$dst/"
 }
 
+# warn_unrecorded_hooks: a snapshot made before node-backup.sh always recorded data/hooks has no
+# hooks directory when the node had none, the same as one that never recorded it. The hooks here
+# stay as they are (a guess must not remove them), named so the owner sets aside by hand the ones
+# the old node no longer had.
+warn_unrecorded_hooks() {
+  local -a hooks
+  [ -d "$MAILCOW_DIR/data/hooks" ] || return 0
+  mapfile -d '' -t hooks < <(cd "$MAILCOW_DIR" && find data/hooks -mindepth 1 ! -type d -print0 | sort -z)
+  [ "${#hooks[@]}" -gt 0 ] || return 0
+  warn "the snapshot does not record data/hooks (made by an older node-backup.sh), so the hooks here stay: ${hooks[*]}; move the ones the old node no longer had out of $MAILCOW_DIR/data/hooks by hand"
+}
+
 # place_files <dir with the restored backup>: mailcow.conf and the node's files where mailcow and
-# setup.sh read them. data/conf, data/assets/ssl and data/hooks mirror the snapshot (mirror_dir);
+# setup.sh read them. data/conf, data/assets/ssl and data/hooks mirror the snapshot (mirror_dir;
+# data/hooks only when the snapshot records it, see warn_unrecorded_hooks);
 # mailcow's web settings and CSS (MAILCOW_CUSTOM_FILES) are copied when the snapshot has them.
 place_files() {
   local src=$1/mailexpert file
@@ -196,7 +209,7 @@ place_files() {
   mkdir -p "$MAILCOW_DIR/data/conf" "$MAILCOW_DIR/data/assets"
   if [ -d "$src/conf" ]; then mirror_dir "$src/conf" data/conf; fi
   if [ -d "$src/ssl" ]; then mirror_dir "$src/ssl" data/assets/ssl; fi
-  if [ -d "$src/hooks" ]; then mirror_dir "$src/hooks" data/hooks; fi
+  if [ -d "$src/hooks" ]; then mirror_dir "$src/hooks" data/hooks; else warn_unrecorded_hooks; fi
   for file in "${MAILCOW_CUSTOM_FILES[@]}"; do
     if [ -f "$src/$file" ]; then
       mkdir -p "$MAILCOW_DIR/data/$(dirname "$file")"

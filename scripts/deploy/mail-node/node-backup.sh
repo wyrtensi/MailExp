@@ -175,7 +175,13 @@ add_node_files() {
       cp -p "$MAILCOW_DIR/data/$file" "$dir/$file"
     fi
   done
-  if [ -d "$MAILCOW_DIR/data/hooks" ]; then cp -a "$MAILCOW_DIR/data/hooks" "$dir/hooks"; fi
+  # data/hooks is always recorded, empty when the node has none: node-restore.sh then mirrors it
+  # and sets aside hooks an earlier restore left. An older snapshot has no hooks directory at all.
+  if [ -d "$MAILCOW_DIR/data/hooks" ]; then
+    cp -a "$MAILCOW_DIR/data/hooks" "$dir/hooks"
+  else
+    mkdir -m 755 "$dir/hooks"
+  fi
   cp -p "$NODE_CONF" "$dir/node.env"
   commit=$(git -C "$MAILCOW_DIR" rev-parse HEAD 2>/dev/null) || commit=unknown
   describe=$(git -C "$MAILCOW_DIR" describe --tags --always 2>/dev/null) || describe=unknown
