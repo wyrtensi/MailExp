@@ -208,7 +208,9 @@ mailcow_tracked() {
       if [[ $path == "$rel"/* ]]; then printf '%s\0' "${path#"$rel"/}"; fi
     done < <(git -C "$MAILCOW_DIR" ls-files -z -- "$rel")
   elif [ -d "$MAILCOW_DIR/$rel" ]; then
-    (cd "$MAILCOW_DIR/$rel" && find . -mindepth 1 ! -type d \( -name README.md -o -name .gitkeep \) -printf '%P\0')
+    while IFS= read -r -d '' path; do
+      printf '%s\0' "${path#./}"
+    done < <(cd "$MAILCOW_DIR/$rel" && find . -mindepth 1 ! -type d \( -name README.md -o -name .gitkeep \) -print0)
   fi
 }
 
@@ -229,8 +231,9 @@ warn_unrecorded_hooks() {
   local -A tracked=()
   [ -d "$MAILCOW_DIR/data/hooks" ] || return 0
   while IFS= read -r -d '' path; do tracked[$path]=1; done < <(mailcow_tracked data/hooks)
-  mapfile -d '' -t hooks < <(cd "$MAILCOW_DIR/data/hooks" && find . -mindepth 1 ! -type d -printf '%P\0' | sort -z)
+  mapfile -d '' -t hooks < <(cd "$MAILCOW_DIR/data/hooks" && find . -mindepth 1 ! -type d -print0 | sort -z)
   for path in "${hooks[@]}"; do
+    path=${path#./}
     [ -z "${tracked[$path]:-}" ] || continue
     list+="${list:+, }data/hooks/$path"
   done
