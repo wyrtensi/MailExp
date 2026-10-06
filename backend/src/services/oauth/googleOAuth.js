@@ -148,7 +148,8 @@ export async function verifyGoogleIdToken({ idToken, clientId }) {
 
 // Refresh a Google access token through the app that issued it and persist the result. The
 // stored refresh token is kept when Google does not return a new one. Returns the account
-// with the plaintext access token, matching refreshMicrosoftToken.
+// with the plaintext access token, matching refreshMicrosoftToken, or the stored row (encrypted
+// tokens) when a reconnect replaced the credentials during the provider call.
 export async function refreshGoogleToken(account) {
   const app = await getGoogleAppById(account.oauth_app_id);
   // A refresh token only works with its issuing client: without that app the mailbox has

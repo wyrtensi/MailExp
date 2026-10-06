@@ -175,6 +175,7 @@ async function doRefreshMicrosoftToken(account) {
     return rows[0];
   }
 
-  // Return plaintext tokens so callers can use them immediately without decrypting
+  // Return plaintext tokens so callers can use them immediately without decrypting (the stored
+  // row returned above after a lost race carries encrypted ones; decrypt() handles both)
   return { ...account, oauth_access_token: access_token, oauth_token_expiry: expiry, oauth_public_client: isPublic };
 }
