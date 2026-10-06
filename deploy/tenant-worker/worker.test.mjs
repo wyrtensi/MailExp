@@ -10,6 +10,7 @@ import { createPublicKey, verify } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -19,6 +20,7 @@ import {
   COMMAND_NAMES, OPS, checkOp, checkTenant, parseAddress, parseDomain, parseGuid, parsePage, parseQuarantineId,
 } from './ops.mjs';
 import { MARKER, certificateFrom, certificateInfo, createHandler, createRunner, runnerEnv, signAssertion, startProblem } from './server.mjs';
+import * as worker from './server.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tenant-worker-'));
@@ -658,4 +660,51 @@ test('a dead runner: EPIPE on its stdin does not crash, a replaced one does not 
   await assert.rejects(replaced.call({ op: 'whoami', tenant: {}, args: {} }), { code: 'exo_timeout' });
   const answer = await replaced.call({ op: 'whoami', tenant: {}, args: {} });
   assert.equal(answer.ok, true);
+});
+
+// One raw request (a request target fetch would not send), answered with its status code.
+function rawRequest(base, line) {
+  const { hostname, port } = new URL(base);
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), hostname);
+    let data = '';
+    socket.on('data', (chunk) => { data += chunk; });
+    socket.on('error', reject);
+    socket.on('close', () => resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(data)?.[1] ?? 0)));
+    socket.on('connect', () => socket.write(`${line}\r\nHost: worker\r\nConnection: close\r\n\r\n`));
+  });
+}
+
+test('a request target the URL parser refuses gets 400, and the worker keeps serving', async () => {
+  const { base, close } = await serve(createHandler({ token: TOKEN, certificate, runner: {} }));
+  try {
+    assert.equal(await rawRequest(base, 'GET //[ HTTP/1.1'), 400);
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    assert.equal((await fetch(`${base}/certificate`)).status, 401);
+  } finally {
+    await close();
+  }
+});
+
+test('the server callback answers 500 when the handler rejects, and keeps serving', async () => {
+  assert.equal(typeof worker.requestListener, 'function', 'server.mjs exports requestListener');
+  const lines = [];
+  let calls = 0;
+  const listener = worker.requestListener(async (req, res) => {
+    calls += 1;
+    if (calls === 1) throw new Error('handler bug');
+    res.end('ok');
+  }, (l) => lines.push(l));
+  const server = http.createServer(listener);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const first = await fetch(`${base}/x`);
+    assert.equal(first.status, 500);
+    assert.equal((await first.json()).error.code, 'internal_error');
+    assert.equal(await (await fetch(`${base}/x`)).text(), 'ok');
+    assert.ok(lines.some((l) => l.includes('handler bug')));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
