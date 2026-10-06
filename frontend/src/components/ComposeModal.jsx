@@ -227,6 +227,10 @@ export default function ComposeModal() {
   const [draftFolder, setDraftFolder] = useState(() => composeData?.draftFolder ?? null);
   const [draftAccountId, setDraftAccountId] = useState(() => composeData?.accountId ?? null);
   const [savingDraft, setSavingDraft] = useState(false);
+  // The latest draft save, as a promise of where it stored the copy ({ uid, folder, accountId },
+  // or null when it stored nothing). Send can be pressed before that answer arrives; the copy it
+  // stores still has to be removed once the letter is sent, after this composer has closed.
+  const pendingDraftSaveRef = useRef(null);
   // A letter given back by an undo or an edit (utils/sendTracker.js) brings its attachments along.
   const [attachments, setAttachments] = useState(() => composeData?.attachments || []);
   const [fwdAttachments, setFwdAttachments] = useState(() => composeData?.forwardedAttachments || []);
@@ -777,8 +781,10 @@ export default function ComposeModal() {
       const reader = new FileReader();
       reader.onload = (ev) => {
         const base64 = ev.target.result.split(',')[1];
+        // Two files may share a name (report.txt from two folders); both are attached. Only the
+        // same file picked again, with identical content, is skipped.
         setAttachments(prev => {
-          if (prev.some(a => a.name === file.name)) return prev;
+          if (prev.some(a => a.name === file.name && a.type === file.type && a.data === base64)) return prev;
           return [...prev, { name: file.name, size: file.size, type: file.type, data: base64 }];
         });
       };
@@ -928,11 +934,17 @@ export default function ComposeModal() {
       idempotencyKeyRef.current = null;
       const replyThreadId = isReply ? composeData?.threadId : null;
       const replyAccountId = composeData?.accountId ?? null;
+      const pendingDraftSave = pendingDraftSaveRef.current;
       closeCompose();
-      // The letter is on the server now (an undo or an edit gives it back from there).
-      if (draftUid != null && draftFolder != null && draftAccountId) {
-        api.deleteDraft(draftAccountId, draftUid, draftFolder).catch(() => {});
-      }
+      // The letter is on the server now (an undo or an edit gives it back from there). A save
+      // still in flight replaces the known copy with a new one, so wait for it and delete the
+      // copy it reports; if it stored nothing, the known copy is still there.
+      const knownDraft = draftUid != null && draftFolder != null && draftAccountId
+        ? { uid: draftUid, folder: draftFolder, accountId: draftAccountId } : null;
+      Promise.resolve(pendingDraftSave).then(stored => {
+        const draft = stored || knownDraft;
+        if (draft) api.deleteDraft(draft.accountId, draft.uid, draft.folder).catch(() => {});
+      });
       const shownSubject = subject || t('common.noSubject');
       if (sendResult.scheduled) {
         addNotification({
@@ -1015,6 +1027,9 @@ export default function ComposeModal() {
     const { accountId, aliasId } = resolveFrom(fromValue);
     if (!accountId) return;
     setSavingDraft(true);
+    let reportStored;
+    const stored = new Promise(resolve => { reportStored = resolve; });
+    pendingDraftSaveRef.current = stored;
     try {
       const bodyToSend = plaintextEmail ? body : (htmlMode ? htmlSource : (editor?.isEmpty ? '' : (editor?.getHTML() ?? '')));
       const submittedMetadata = getDraftMetadata();
@@ -1039,6 +1054,7 @@ export default function ComposeModal() {
           ? { existingUid: draftUid, existingFolder: draftFolder, existingAccountId: draftAccountId }
           : {}),
       });
+      reportStored(result.uid != null ? { uid: result.uid, folder: result.folder, accountId } : null);
       // From switched to another mailbox: the draft now lives there, so remove the old copy
       // from the mailbox it was saved in.
       if (draftUid != null && draftFolder != null && draftAccountId && draftAccountId !== accountId) {
@@ -1080,6 +1096,7 @@ export default function ComposeModal() {
       // autosave stays quiet and retries on its next interval.
       if (!silent && isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
     } finally {
+      reportStored(null); // no-op once the answer was reported
       setSavingDraft(false);
     }
   };

@@ -45,6 +45,7 @@ Object.assign(globalThis, {
   Node: dom.window.Node, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement,
   getComputedStyle: dom.window.getComputedStyle, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
+  File: dom.window.File, FileReader: dom.window.FileReader,
   IS_REACT_ACT_ENVIRONMENT: true,
 });
 dom.window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
@@ -522,4 +523,146 @@ test('reopened alias draft keeps its From selection and autosave identity', asyn
     assert.equal(saved[0].aliasId, 'alias-1');
     assert.equal(saved[0].accountId, 'acct');
   } finally { await close(); useStore.setState({ accounts: prior }); }
+});
+
+// MailApp mounts the composer as `composing && <ComposeModal />`, so closeCompose() after a send
+// really unmounts it. Rendering ComposeModal directly would keep it alive and hide late updates.
+function ComposeHost() {
+  const composing = useStore(s => s.composing);
+  return composing ? React.createElement(ComposeModal) : null;
+}
+
+async function openNewCompose() {
+  saved.length = 0;
+  useStore.setState({ plaintextEmail: true, composeMinimized: false });
+  useStore.getState().openCompose({
+    accountId: 'acct', to: ['recipient@example.invalid'], subject: 'Documents', body: 'Please review.', bodyIsHtml: false,
+  });
+  const root = createRoot(document.getElementById('root'));
+  await React.act(async () => { root.render(React.createElement(ComposeHost)); });
+  await React.act(async () => {});
+  return () => React.act(async () => root.unmount());
+}
+
+const buttonByText = (text) => [...document.querySelectorAll('button')].find(button => button.textContent.trim() === text);
+
+describe('attachments with the same file name', () => {
+  async function attach(name, content) {
+    const input = document.querySelector('input[type="file"]');
+    assert.ok(input, 'the file input is mounted');
+    const file = new File([content], name, { type: 'text/plain' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    await React.act(async () => {
+      input.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 30)); // FileReader is asynchronous
+    });
+  }
+
+  async function sendAndCapture() {
+    const originalPost = api.post;
+    const sent = [];
+    api.post = async (path, payload) => { sent.push({ path, payload }); return { jobId: 'same-name-test', dueInMs: 5000 }; };
+    const { settleSend } = await import('../utils/sendTracker.js');
+    try {
+      await React.act(async () => { buttonByText('compose.send').click(); });
+      assert.equal(sent.length, 1);
+      return sent[0].payload.attachments || [];
+    } finally { settleSend('same-name-test', { status: 'cancelled' }); api.post = originalPost; }
+  }
+
+  const decode = (attachment) => window.atob(attachment.content);
+
+  test('a second, different file with the same name is kept and sent', async () => {
+    const close = await openNewCompose();
+    try {
+      await attach('report.txt', 'first version');
+      await attach('report.txt', 'second version');
+      const attachments = await sendAndCapture();
+      assert.deepEqual(attachments.map(a => a.filename), ['report.txt', 'report.txt']);
+      assert.deepEqual(attachments.map(decode), ['first version', 'second version']);
+    } finally { await close(); }
+  });
+
+  test('removing one of two same-named files keeps the other', async () => {
+    const close = await openNewCompose();
+    try {
+      await attach('report.txt', 'first version');
+      await attach('report.txt', 'second version');
+      const names = [...document.querySelectorAll('span')].filter(el => el.textContent === 'report.txt');
+      assert.equal(names.length, 2, 'both files are shown');
+      await React.act(async () => { names[0].parentElement.querySelector('button').click(); });
+      const attachments = await sendAndCapture();
+      assert.deepEqual(attachments.map(decode), ['second version']);
+    } finally { await close(); }
+  });
+
+  test('selecting the very same file again does not attach it twice', async () => {
+    const close = await openNewCompose();
+    try {
+      await attach('report.txt', 'same content');
+      await attach('report.txt', 'same content');
+      const attachments = await sendAndCapture();
+      assert.deepEqual(attachments.map(decode), ['same content']);
+    } finally { await close(); }
+  });
+});
+
+describe('sending while a draft save is in flight', () => {
+  async function withDraftApis(run) {
+    const originals = { saveDraft: api.saveDraft, deleteDraft: api.deleteDraft, post: api.post };
+    const calls = { deleted: [], sent: [] };
+    const save = {};
+    api.saveDraft = (payload) => { saved.push(payload); return new Promise((resolve, reject) => { save.resolve = resolve; save.reject = reject; }); };
+    api.deleteDraft = async (accountId, uid, folder) => { calls.deleted.push([accountId, uid, folder]); return {}; };
+    api.post = async (path, payload) => { calls.sent.push({ path, payload }); return { jobId: 'pending-save-test', dueInMs: 5000 }; };
+    const { settleSend } = await import('../utils/sendTracker.js');
+    try {
+      await run({ calls, save });
+    } finally {
+      settleSend('pending-save-test', { status: 'cancelled' });
+      Object.assign(api, originals);
+    }
+  }
+
+  test('control: Save then Send deletes the saved draft', async () => {
+    await withDraftApis(async ({ calls, save }) => {
+      const close = await openNewCompose();
+      try {
+        await React.act(async () => { buttonByText('compose.saveDraft').click(); });
+        await React.act(async () => save.resolve({ uid: 9, folder: 'Drafts' }));
+        await React.act(async () => { buttonByText('compose.send').click(); });
+        assert.equal(calls.sent.length, 1);
+        assert.deepEqual(calls.deleted, [['acct', 9, 'Drafts']]);
+      } finally { await close(); }
+    });
+  });
+
+  test('Send before the save answers still deletes the draft the save created', async () => {
+    await withDraftApis(async ({ calls, save }) => {
+      const close = await openNewCompose();
+      try {
+        await React.act(async () => { buttonByText('compose.saveDraft').click(); });
+        assert.equal(saved.length, 1, 'the save request is in flight');
+        await React.act(async () => { buttonByText('compose.send').click(); });
+        assert.equal(calls.sent.length, 1, 'the letter was accepted for sending');
+        assert.equal(useStore.getState().composing, false, 'the composer closed');
+        await React.act(async () => save.resolve({ uid: 9, folder: 'Drafts' }));
+        assert.deepEqual(calls.deleted, [['acct', 9, 'Drafts']]);
+      } finally { await close(); }
+    });
+  });
+
+  test('a failed in-flight save leaves the draft the composer was opened with to be deleted', async () => {
+    await withDraftApis(async ({ calls, save }) => {
+      const close = await openDraft({ plaintextEmail: true, body: 'Original' });
+      try {
+        await React.act(async () => { buttonByText('compose.saveDraft').click(); });
+        assert.equal(saved.length, 1, 'the save request is in flight');
+        await React.act(async () => { buttonByText('compose.send').click(); });
+        assert.equal(calls.sent.length, 1);
+        await React.act(async () => save.reject(new Error('mailbox busy')));
+        assert.deepEqual(calls.deleted, [['acct', 7, 'Drafts']]);
+      } finally { await close(); }
+    });
+  });
 });
