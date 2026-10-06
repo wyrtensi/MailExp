@@ -29,6 +29,7 @@ import mailNodeRoutes from './routes/mailNode.js';
 import mailNodeQuarantineRoutes from './routes/mailNodeQuarantine.js';
 import mailNodeOutageRoutes from './routes/mailNodeOutages.js';
 import mailNodeTenantRoutes from './routes/mailNodeTenant.js';
+import mailNodeAgentRoutes, { agentRouter as nodeAgentRoutes } from './routes/mailNodeAgent.js';
 import deliveryRoutes from './routes/delivery.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
 import { startDnsCheckJob } from './services/mailNode/dnsCheckJob.js';
@@ -167,6 +168,10 @@ app.use((err, req, res, next) => {
   }
   next(err);
 });
+// The mail node's agent (routes/mailNodeAgent.js) authenticates with its bearer token only: it is
+// mounted before the session, the identity gate, the CSRF check and the screen lock, which are
+// about signed-in users. Its router answers every path under the prefix itself.
+app.use('/api/node-agent', nodeAgentRoutes);
 app.use(sessionMiddleware);
 
 // Google sign-in mode: every request to these surfaces needs an approved, active user (a
@@ -218,6 +223,7 @@ app.use('/api/mail-node', mailNodeRoutes);
 app.use('/api/mail-node', mailNodeQuarantineRoutes);
 app.use('/api/mail-node', mailNodeOutageRoutes);
 app.use('/api/mail-node', mailNodeTenantRoutes);
+app.use('/api/mail-node', mailNodeAgentRoutes);
 app.use('/api/mail', mailRoutes);
 app.use('/api/mail', deliveryRoutes);
 app.use('/api/mail', sendRoutes);

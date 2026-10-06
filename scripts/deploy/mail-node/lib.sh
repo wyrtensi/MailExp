@@ -85,6 +85,16 @@ is_guid() {
   [[ $1 =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]
 }
 
+# is_panel_url <url>: the panel's address as the node agent calls it: https://<host>[:port], no path.
+is_panel_url() {
+  [[ $1 =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(:[0-9]{1,5})?$ ]]
+}
+
+# is_agent_token <token>: the node agent's token as the panel issues it (routes/mailNodeAgent.js).
+is_agent_token() {
+  [[ $1 =~ ^[A-Za-z0-9_-]{20,200}$ ]]
+}
+
 # new_guid: a random version 4 GUID, for the installation's ClientRequestId.
 new_guid() {
   local hex

@@ -15,7 +15,8 @@ import { query } from './db.js';
 // rules running write only rule.run, when someone starts a run by hand. An administrator asking
 // for a panel update from the admin UI is recorded, and so are its start and end as the host's
 // updater reports them (services/panelUpdate/reconcile.js), under that administrator. So is an
-// administrator switching a plugin on or off for the whole panel (routes/plugins.js).
+// administrator switching a plugin on or off for the whole panel (routes/plugins.js), and an administrator
+// issuing, rotating or revoking the mail node agent's token or asking it for a job (routes/mailNodeAgent.js).
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
@@ -32,6 +33,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'mail_node.quarantine_settings_applied',
   'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
   'mail_node.outage_deleted',
+  'mail_node.agent_token_issued', 'mail_node.agent_token_revoked', 'mail_node.agent_job_requested',
   'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
   'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
   'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',

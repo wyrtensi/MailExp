@@ -1,0 +1,17 @@
+[Unit]
+Description=MailExpert: mail node agent (status and backup jobs from the panel)
+# The agent calls the panel over HTTPS; it runs mailcow's backup through Docker.
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+ExecStart=@DIR@/node-agent.sh
+Restart=always
+RestartSec=10
+# A backup it runs is node-backup.sh, which removes what a killed run left on its next start.
+KillMode=control-group
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

@@ -39,10 +39,19 @@
 # - The old node of a move stays standby (mail ports closed, backup skipped) until --end-standby:
 #   the move was called off; the restart policies of postfix, dovecot and the watchdog go back to
 #   always and mailcow is started (docker compose up -d) before the firewall opens again.
+# - The node agent (section 7a), once the panel's token is given: node-agent.sh installed next to the
+#   other scripts, /etc/mailexpert-node/agent.env (0600: PANEL_URL, AGENT_TOKEN and the optional
+#   CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET of a Cloudflare Access service token) and the
+#   systemd service mailexpert-node-agent (Restart=always; cron every minute under flock without
+#   systemd, output to /var/log/mailexpert-node-agent.log). --agent-token-file reads the token from
+#   a file, never from the command line: one line with the token, or KEY=VALUE lines with
+#   AGENT_TOKEN and the two CF_ACCESS_ keys. The agent restarts only when its files changed. The
+#   commit of the checkout setup.sh runs from goes to scripts-commit, for the agent's status report.
 #
 # Usage: setup.sh --panel-ip <PANEL_IP> [--panel-ip ...] [--eop-host <EOP_HOST>]
 #                 [--mailcow-dir /opt/mailcow-dockerized] [--ping-url <Healthchecks URL>]
 #                 [--client-request-id <GUID>] [--backup-keys < file] [--end-standby] [--dry-run]
+#                 [--panel-url https://<PANEL_HOST> --agent-token-file <file>]
 #
 # Options given once are kept in node.env: a later run without them uses the same values. Run it
 # again after every mailcow update. --dry-run prints the changes (diffs; for mailcow.conf only the
@@ -70,8 +79,19 @@ CRON_FILE=${MAILEXPERT_CRON_FILE:-/etc/cron.d/mailexpert-node}
 BACKUP_CRON_FILE=${MAILEXPERT_BACKUP_CRON_FILE:-/etc/cron.d/mailexpert-node-backup}
 BACKUP_LOG=${MAILEXPERT_NODE_BACKUP_LOG:-/var/log/mailexpert-node-backup.log}
 LOGROTATE_FILE=${MAILEXPERT_LOGROTATE_FILE:-/etc/logrotate.d/mailexpert-node-backup}
+AGENT_CONF=${MAILEXPERT_NODE_AGENT_CONF:-$(dirname "$NODE_CONF")/agent.env}
+AGENT_CRON_FILE=${MAILEXPERT_AGENT_CRON_FILE:-/etc/cron.d/mailexpert-node-agent}
+AGENT_LOG=${MAILEXPERT_NODE_AGENT_LOG:-/var/log/mailexpert-node-agent.log}
+AGENT_LOGROTATE_FILE=${MAILEXPERT_AGENT_LOGROTATE_FILE:-/etc/logrotate.d/mailexpert-node-agent}
 UNITS=(mailexpert-eop-ranges.service mailexpert-eop-ranges.timer mailexpert-node-firewall.service)
 BACKUP_UNITS=(mailexpert-node-backup.service mailexpert-node-backup.timer)
+AGENT_UNIT=mailexpert-node-agent.service
+# The files the agent runs from: a change restarts it.
+AGENT_FILES=(node-agent.sh lib.sh common.sh env.sh)
+# AGENT_ON: 1 once agent.env holds the panel's URL and token. AGENT_RESTART: 1 when the agent's
+# files, unit or agent.env changed in this run.
+AGENT_ON=0
+AGENT_RESTART=0
 # Set by setup_node_backups: 1 once the restic keys are in node.env and the repository opens; the
 # problem when a first setup of backups could not open or create it.
 BACKUPS_ON=0
@@ -146,7 +166,61 @@ ensure_tools() {
   apt-get install -y -qq curl jq ipset iptables util-linux diffutils iproute2 >/dev/null || die "apt-get install failed"
 }
 
+# agent_files_sum: a checksum of the installed files the agent runs from.
+agent_files_sum() {
+  local file
+  for file in "${AGENT_FILES[@]}"; do
+    if [ -f "$NODE_DIR/$file" ]; then cat "$NODE_DIR/$file"; fi
+  done | cksum
+}
+
+# scripts_commit: the commit of the checkout setup.sh runs from, or unknown.
+scripts_commit() {
+  git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown
+}
+
+# read_agent_token_file <file> <out>: the token file as KEY=VALUE lines in <out> (AGENT_TOKEN and
+# the optional CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET); a file of one bare line is the
+# token. Never prints a value.
+read_agent_token_file() {
+  local file=$1 out=$2 line key value count=0
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then die "--agent-token-file: $file is not a readable file" 2; fi
+  : >"$out"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [ -n "$line" ] || continue
+    case $line in \#*) continue ;; esac
+    count=$((count + 1))
+    if [[ $line != *=* ]]; then
+      printf 'AGENT_TOKEN=%s\n' "$line" >>"$out"
+      continue
+    fi
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+      AGENT_TOKEN | CF_ACCESS_CLIENT_ID | CF_ACCESS_CLIENT_SECRET) ;;
+      *) die "--agent-token-file: unknown key $key (AGENT_TOKEN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)" 2 ;;
+    esac
+    if [ -z "$value" ] || ! env_value_ok "$value"; then
+      die "--agent-token-file: $key must be one token without spaces, quotes, \$, # or backslash" 2
+    fi
+    printf '%s=%s\n' "$key" "$value" >>"$out"
+  done <"$file"
+  [ "$count" -gt 0 ] || die "--agent-token-file: $file is empty" 2
+  value=$(env_get "$out" AGENT_TOKEN) || die "--agent-token-file: no AGENT_TOKEN in $file" 2
+  is_agent_token "$value" || die "--agent-token-file: the token in $file is not a node agent token (copy it again from the panel)" 2
+  if env_get "$out" CF_ACCESS_CLIENT_ID >/dev/null; then
+    env_get "$out" CF_ACCESS_CLIENT_SECRET >/dev/null || die "--agent-token-file: CF_ACCESS_CLIENT_ID needs CF_ACCESS_CLIENT_SECRET" 2
+  elif env_get "$out" CF_ACCESS_CLIENT_SECRET >/dev/null; then
+    die "--agent-token-file: CF_ACCESS_CLIENT_SECRET needs CF_ACCESS_CLIENT_ID" 2
+  fi
+}
+
 install_scripts() {
+  local before
+  before=$(agent_files_sum)
   install -d -m 755 "$NODE_DIR"
   install -m 755 "$SCRIPT_DIR/eop-ranges.sh" "$NODE_DIR/eop-ranges.sh"
   install -m 644 "$SCRIPT_DIR/lib.sh" "$NODE_DIR/lib.sh"
@@ -156,6 +230,13 @@ install_scripts() {
   install -m 755 "$SCRIPT_DIR/node-restore.sh" "$NODE_DIR/node-restore.sh"
   install -m 644 "$SCRIPT_DIR/backup-lib.sh" "$NODE_DIR/backup-lib.sh"
   install -m 644 "$LIB_DIR/backup.sh" "$NODE_DIR/backup.sh"
+  install -m 755 "$SCRIPT_DIR/node-agent.sh" "$NODE_DIR/node-agent.sh"
+  scripts_commit >"$NODE_DIR/scripts-commit.tmp"
+  if changed "$NODE_DIR/scripts-commit" "$NODE_DIR/scripts-commit.tmp"; then
+    install -m 644 "$NODE_DIR/scripts-commit.tmp" "$NODE_DIR/scripts-commit"
+  fi
+  rm -f "$NODE_DIR/scripts-commit.tmp"
+  if [ "$(agent_files_sum)" != "$before" ]; then AGENT_RESTART=1; fi
 }
 
 # setup_node_backups: with the restic keys in node.env the repository is opened (created when it
@@ -219,6 +300,7 @@ install_schedule() {
   if [ "$(init_system)" = systemd ]; then
     units=("${UNITS[@]}")
     if [ "$BACKUPS_ON" = 1 ]; then units+=("${BACKUP_UNITS[@]}"); fi
+    if [ "$AGENT_ON" = 1 ]; then units+=("$AGENT_UNIT"); fi
     tmp=$(mktemp)
     for unit in "${units[@]}"; do
       target=$SYSTEMD_DIR/$unit
@@ -231,6 +313,7 @@ install_schedule() {
         log "systemd: $unit written"
         [ "$unit" != mailexpert-eop-ranges.timer ] || timer_changed=1
         [ "$unit" != mailexpert-node-backup.timer ] || backup_timer_changed=1
+        [ "$unit" != "$AGENT_UNIT" ] || AGENT_RESTART=1
       fi
     done
     rm -f "$tmp"
@@ -244,6 +327,12 @@ install_schedule() {
       systemctl_do enable --now mailexpert-node-backup.timer
       if [ "$backup_timer_changed" = 1 ]; then systemctl_do restart mailexpert-node-backup.timer; fi
       log "systemd: mailexpert-node-backup.timer (nightly, 02:30) enabled"
+    fi
+    if [ "$AGENT_ON" = 1 ]; then
+      systemctl_do enable --now "$AGENT_UNIT"
+      # A running agent keeps its old code and token until restarted.
+      if [ "$AGENT_RESTART" = 1 ]; then systemctl_do restart "$AGENT_UNIT"; fi
+      log "systemd: $AGENT_UNIT enabled"
     fi
   else
     tmp=$(mktemp)
@@ -263,6 +352,23 @@ install_schedule() {
       if changed "$LOGROTATE_FILE" "$tmp"; then
         install -D -m 644 "$tmp" "$LOGROTATE_FILE"
         log "logrotate: $LOGROTATE_FILE written ($BACKUP_LOG weekly)"
+      fi
+    fi
+    if [ "$AGENT_ON" = 1 ]; then
+      render_template "$SCRIPT_DIR/cron/mailexpert-node-agent" "$NODE_DIR" | sed "s|@LOG@|$AGENT_LOG|g" >"$tmp"
+      if changed "$AGENT_CRON_FILE" "$tmp"; then
+        install -m 644 "$tmp" "$AGENT_CRON_FILE"
+        log "cron: $AGENT_CRON_FILE written (the node agent, started again within a minute when it stops)"
+      fi
+      if [ ! -e "$AGENT_LOG" ]; then install -m 600 /dev/null "$AGENT_LOG"; fi
+      sed "s|@LOG@|$AGENT_LOG|g" "$SCRIPT_DIR/logrotate/mailexpert-node-agent" >"$tmp"
+      if changed "$AGENT_LOGROTATE_FILE" "$tmp"; then
+        install -D -m 644 "$tmp" "$AGENT_LOGROTATE_FILE"
+        log "logrotate: $AGENT_LOGROTATE_FILE written ($AGENT_LOG weekly)"
+      fi
+      # cron starts the new code within a minute once the running agent stops.
+      if [ "$AGENT_RESTART" = 1 ] && pkill -f "$NODE_DIR/node-agent.sh" 2>/dev/null; then
+        log "node agent: stopped, cron starts it again within a minute"
       fi
     fi
     rm -f "$tmp"
@@ -287,11 +393,12 @@ main() {
   local conflicts rc=0 restart_note='' family rules service listeners
   local -a panel_ips=() given_ips=() parts=() settings=() keys=()
   local stored_conf=0 backup_keys=0 end_standby=0 line
+  local panel_url='' agent_token_file=''
   DRY_RUN=0
   MAILCOW_DIR=''
   while [ $# -gt 0 ]; do
     case $1 in
-      --mailcow-dir | --eop-host | --panel-ip | --ping-url | --client-request-id)
+      --mailcow-dir | --eop-host | --panel-ip | --ping-url | --client-request-id | --panel-url | --agent-token-file)
         if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value" 2; fi
         case $1 in
           --mailcow-dir) MAILCOW_DIR=${2%/} ;;
@@ -299,6 +406,8 @@ main() {
           --panel-ip) IFS=',' read -r -a parts <<<"$2" && given_ips+=("${parts[@]}") ;;
           --ping-url) ping_url=$2 ;;
           --client-request-id) client_id=$2 ;;
+          --panel-url) panel_url=${2%/} ;;
+          --agent-token-file) agent_token_file=$2 ;;
         esac
         shift 2
         ;;
@@ -341,6 +450,11 @@ main() {
   else
     client_id=$(new_guid)
   fi
+  [ -n "$panel_url" ] || panel_url=$(env_get "$AGENT_CONF" PANEL_URL 2>/dev/null) || panel_url=''
+  if [ -n "$panel_url" ]; then
+    panel_url=${panel_url,,}
+    is_panel_url "$panel_url" || die "--panel-url must be https://<host>[:port], without a path" 2
+  fi
   if docker_nftables; then
     die "Docker runs its nftables firewall backend ($DOCKER_DAEMON_JSON): there is no DOCKER-USER chain for these rules; switch Docker back to iptables or firewall the node by hand" 1
   fi
@@ -382,6 +496,22 @@ $conflicts" 2
     done <"$tmp/backup-keys"
     rm -f "$tmp/backup-keys"
   fi
+  # agent.env: the stored values, with what this run was given.
+  if [ -f "$AGENT_CONF" ]; then cat "$AGENT_CONF" >"$tmp/agent.env"; fi
+  if [ -n "$panel_url" ]; then env_set "$tmp/agent.env" PANEL_URL "$panel_url"; fi
+  if [ -n "$agent_token_file" ]; then
+    read_agent_token_file "$agent_token_file" "$tmp/agent-token"
+    while IFS= read -r line; do
+      env_set "$tmp/agent.env" "${line%%=*}" "${line#*=}"
+    done <"$tmp/agent-token"
+    rm -f "$tmp/agent-token"
+  fi
+  if env_get "$tmp/agent.env" AGENT_TOKEN >/dev/null 2>&1; then
+    [ -n "$panel_url" ] || die "--agent-token-file needs --panel-url https://<PANEL_HOST> the first time" 2
+    AGENT_ON=1
+  elif [ -n "$panel_url" ] && [ ! -f "$AGENT_CONF" ]; then
+    die "--panel-url needs --agent-token-file <file> with the token the panel showed" 2
+  fi
 
   if [ "$DRY_RUN" = 1 ]; then
     log "dry run: nothing is changed"
@@ -406,6 +536,13 @@ $conflicts" 2
       log "backups: the restic repository would be opened or created, and node-backup.sh run nightly at 02:30"
     else
       log "backups: off (no restic keys; give them with --backup-keys on stdin)"
+    fi
+    if [ "$AGENT_ON" = 1 ]; then
+      # agent.env holds the token: keys only.
+      if changed "$AGENT_CONF" "$tmp/agent.env"; then log "$AGENT_CONF: would be written (keys: $(cut -d= -f1 "$tmp/agent.env" | paste -sd' ' -))"; fi
+      log "node agent: $(init_system), calling $panel_url, from $NODE_DIR"
+    else
+      log "node agent: off (connect it in the panel, then --panel-url and --agent-token-file)"
     fi
     return 0
   fi
@@ -451,7 +588,13 @@ $conflicts" 2
     install -m 600 "$tmp/node.env" "$NODE_CONF"
     log "$NODE_CONF: written"
   fi
+  if [ "$AGENT_ON" = 1 ] && changed "$AGENT_CONF" "$tmp/agent.env"; then
+    install -m 600 "$tmp/agent.env" "$AGENT_CONF"
+    AGENT_RESTART=1
+    log "$AGENT_CONF: written"
+  fi
   install -d -m 755 "$NODE_STATE"
+  # install_scripts may set AGENT_RESTART, which agent.env above may have set already.
   install_scripts
 
   # The EOP ranges first, the firewall with them: eop-ranges.sh fills the sets, then puts the

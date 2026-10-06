@@ -468,6 +468,13 @@ export const api = {
     updateOutage: (id, data) => request('PUT', `/mail-node/outages/${encodeURIComponent(id)}`, data),
     closeOutage: (id, data) => request('POST', `/mail-node/outages/${encodeURIComponent(id)}/close`, data),
     deleteOutage: (id, reason) => request('DELETE', `/mail-node/outages/${encodeURIComponent(id)}`, { confirm: true, reason }),
+    // The node agent (scripts/deploy/mail-node/node-agent.sh): its state with the last status report
+    // and recent jobs; its token, issued or rotated (the answer is the only time it is shown) and
+    // revoked; and a job for it ({ kind: 'backup' }: "Back up mail now").
+    getAgent: () => request('GET', '/mail-node/agent'),
+    issueAgentToken: () => request('POST', '/mail-node/agent/token'),
+    revokeAgentToken: () => request('DELETE', '/mail-node/agent/token'),
+    requestAgentJob: (kind) => request('POST', '/mail-node/agent/jobs', { kind }),
     traceOutages: () => request('POST', '/mail-node/outages/trace'),
     saveOutageSettings: (data) => request('PUT', '/mail-node/outage-settings', data),
   },

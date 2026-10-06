@@ -1,0 +1,11 @@
+# MailExpert mail node agent (scripts/deploy/mail-node/setup.sh, hosts without systemd): the output
+# of node-agent.sh started by cron. It holds no secrets, but stays readable by root only. The agent
+# runs for days with the file open: copytruncate keeps it writing to the same file.
+@LOG@ {
+  weekly
+  rotate 4
+  compress
+  missingok
+  notifempty
+  copytruncate
+}

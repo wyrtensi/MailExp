@@ -39,6 +39,7 @@ import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
 import MailNodeOpsSection from './MailNodeOpsSection.jsx';
+import MailNodeAgentSection from './MailNodeAgentSection.jsx';
 import MailNodeOutagesSection from './MailNodeOutagesSection.jsx';
 import PanelUpdateSection from './PanelUpdateSection.jsx';
 import MailNodeQuarantine from './MailNodeQuarantine.jsx';
@@ -2576,8 +2577,8 @@ function openForeignAliases() {
 
 // ─── Mail node Tab ───────────────────────────────────────────────────────────
 // Administration -> "Mail node" (admins only): the mailcow node and its domains, the aliases with
-// another address, EOP with the Microsoft tenant, the node's operations, its outages and its
-// quarantine. Google apps and Microsoft 365 stay in Integrations.
+// another address, EOP with the Microsoft tenant, the node's operations, its agent (status and
+// backup), its outages and its quarantine. Google apps and Microsoft 365 stay in Integrations.
 function MailNodeTab() {
   // Goes up when the mail node or EOP section changes a domain, so the other one reloads its list.
   const [mailNodeRevision, setMailNodeRevision] = useState(0);
@@ -2589,6 +2590,7 @@ function MailNodeTab() {
       <MailNodeForeignAliases />
       <EopSection revision={mailNodeRevision} onDomainsChanged={mailNodeDomainsChanged} />
       <MailNodeOpsSection />
+      <MailNodeAgentSection />
       <MailNodeOutagesSection />
       <MailNodeQuarantine admin />
     </div>

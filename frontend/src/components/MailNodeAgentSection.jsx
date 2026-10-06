@@ -1,0 +1,241 @@
+import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { formatDateTime } from '../utils/formatDate.js';
+import { api } from '../utils/api.js';
+import { sizeParts } from '../utils/mailNode.js';
+import {
+  AGENT_CONNECTION_KEYS,
+  BACKUP_STATE_KEYS,
+  JOB_ERROR_KEYS,
+  JOB_STATE_KEYS,
+  activeJob,
+  agentConnection,
+  agentSetupCommands,
+  backupSummary,
+  latestJob,
+  shortCommit,
+} from '../utils/nodeAgent.js';
+
+const buttonStyle = {
+  padding: '5px 10px', borderRadius: 7, fontSize: 12, fontWeight: 500, border: '1px solid var(--border)',
+  background: 'transparent', color: 'var(--text-primary)', cursor: 'pointer',
+};
+const primaryButtonStyle = { ...buttonStyle, background: 'var(--accent)', border: 'none', color: 'var(--accent-text)' };
+const dangerButtonStyle = { ...buttonStyle, background: '#dc2626', border: 'none', color: 'white' };
+const subTitleStyle = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', margin: '16px 0 6px' };
+const rowStyle = { display: 'flex', gap: 8, fontSize: 12, color: 'var(--text-secondary)', marginTop: 4, flexWrap: 'wrap' };
+const termStyle = { color: 'var(--text-tertiary)', minWidth: 160 };
+const noteStyle = { fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5, marginTop: 6 };
+const codeStyle = {
+  display: 'block', fontFamily: 'JetBrains Mono, monospace', fontSize: 11, padding: '8px 10px', marginTop: 6,
+  background: 'var(--bg-tertiary)', border: '1px solid var(--border)', borderRadius: 7, whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all', color: 'var(--text-primary)',
+};
+const STATE_COLORS = { connected: 'var(--green)', waiting: 'var(--amber)', not_set_up: 'var(--text-tertiary)' };
+const BACKUP_COLORS = { ok: 'var(--green)', old: 'var(--red)', none: 'var(--amber)', off: 'var(--text-tertiary)' };
+// While a job runs the section follows it every few seconds.
+const FOLLOW_MS = 4000;
+
+const when = (at) => (at ? formatDateTime(at, { seconds: true }) : null);
+
+// Settings -> Mail node -> "Node agent" (admins only): the service on the node host that takes jobs
+// from the panel (scripts/deploy/mail-node/node-agent.sh). Its state and last report (scripts
+// commit, mailcow version, containers, the node's last backup); connecting it (a token shown once,
+// with the setup.sh commands), rotating and revoking the token; and "Back up mail now" with the
+// job's progress. The server journals every change.
+export default function MailNodeAgentSection() {
+  const { t } = useTranslation();
+  const [agent, setAgent] = useState(null);
+  const [issued, setIssued] = useState(null);
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setAgent(await api.mailNode.getAgent());
+    } catch (err) {
+      setError(err?.message || t('admin.nodeAgent.errorLoad'));
+    }
+  }, [t]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const jobs = agent?.jobs ?? [];
+  const running = activeJob(jobs, 'backup');
+  const runningId = running?.id ?? null;
+  useEffect(() => {
+    if (!runningId) return undefined;
+    const timer = setInterval(load, FOLLOW_MS);
+    return () => clearInterval(timer);
+  }, [runningId, load]);
+
+  const run = async (action) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+      await load();
+    } catch (err) {
+      setError(err?.message || t('admin.nodeAgent.errorLoad'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const issue = () => run(async () => {
+    const result = await api.mailNode.issueAgentToken();
+    setIssued(result);
+    setConfirmRevoke(false);
+  });
+  const revoke = () => run(async () => {
+    await api.mailNode.revokeAgentToken();
+    setIssued(null);
+    setConfirmRevoke(false);
+  });
+  const backupNow = () => run(() => api.mailNode.requestAgentJob('backup'));
+
+  const connection = agentConnection(agent);
+  const status = agent?.status ?? null;
+  const backup = backupSummary(status);
+  const lastBackupJob = latestJob(jobs, 'backup');
+  const size = (bytes) => {
+    const p = sizeParts(bytes);
+    return `${p.value} ${t(p.unitKey)}`;
+  };
+  const containers = status?.containers;
+
+  return (
+    <div data-section="node-agent" style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, padding: 16, marginBottom: 12 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{t('admin.nodeAgent.title')}</div>
+      <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 2, marginBottom: 8 }}>{t('admin.nodeAgent.description')}</div>
+      {error && <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--red)' }}>{error}</div>}
+
+      {agent && (
+        <>
+          <div style={rowStyle}>
+            <span style={termStyle}>{t('admin.nodeAgent.stateLabel')}</span>
+            <span data-agent-state={connection} style={{ color: STATE_COLORS[connection], fontWeight: 600 }}>{t(AGENT_CONNECTION_KEYS[connection])}</span>
+          </div>
+          {agent.configured && (
+            <div style={rowStyle}>
+              <span style={termStyle}>{t('admin.nodeAgent.lastSeenLabel')}</span>
+              <span>{when(agent.lastSeenAt) ?? t('admin.nodeAgent.never')}</span>
+            </div>
+          )}
+          {status && (
+            <>
+              <div style={rowStyle}>
+                <span style={termStyle}>{t('admin.nodeAgent.scriptsLabel')}</span>
+                <code>{shortCommit(status.scriptsCommit) ?? t('admin.nodeAgent.unknown')}</code>
+              </div>
+              <div style={rowStyle}>
+                <span style={termStyle}>{t('admin.nodeAgent.mailcowLabel')}</span>
+                <code>{status.mailcowVersion ?? t('admin.nodeAgent.unknown')}</code>
+              </div>
+              {containers?.total != null && (
+                <div style={rowStyle}>
+                  <span style={termStyle}>{t('admin.nodeAgent.containersLabel')}</span>
+                  <span>{t('admin.nodeAgent.containersRunning', { running: containers.running ?? 0, total: containers.total })}</span>
+                  {containers.problems?.length > 0 && <span style={{ color: 'var(--red)' }}>{containers.problems.join(', ')}</span>}
+                </div>
+              )}
+              <div style={noteStyle}>{t('admin.nodeAgent.reportedAt', { at: when(agent.statusAt) })}</div>
+            </>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            {!agent.configured && (
+              <button type="button" style={primaryButtonStyle} disabled={busy} onClick={issue}>{t('admin.nodeAgent.connect')}</button>
+            )}
+            {agent.configured && (
+              <>
+                <button type="button" style={buttonStyle} disabled={busy} onClick={issue}>{t('admin.nodeAgent.rotate')}</button>
+                {!confirmRevoke && (
+                  <button type="button" style={buttonStyle} disabled={busy} onClick={() => setConfirmRevoke(true)}>{t('admin.nodeAgent.revoke')}</button>
+                )}
+                {confirmRevoke && (
+                  <>
+                    <button type="button" style={dangerButtonStyle} disabled={busy} onClick={revoke}>{t('admin.nodeAgent.revokeConfirm')}</button>
+                    <button type="button" style={buttonStyle} disabled={busy} onClick={() => setConfirmRevoke(false)}>{t('admin.nodeAgent.cancel')}</button>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+          {confirmRevoke && <div style={noteStyle}>{t('admin.nodeAgent.revokeNote')}</div>}
+
+          {issued && (
+            <div data-agent-token style={{ marginTop: 12 }}>
+              <div style={subTitleStyle}>{t(issued.rotated ? 'admin.nodeAgent.tokenRotatedTitle' : 'admin.nodeAgent.tokenTitle')}</div>
+              <div style={noteStyle}>{t('admin.nodeAgent.tokenOnce')}</div>
+              <code data-agent-token-value style={codeStyle}>{issued.token}</code>
+              <div style={noteStyle}>{t('admin.nodeAgent.setupSteps')}</div>
+              <code data-agent-setup style={codeStyle}>{agentSetupCommands(window.location.origin).join('\n')}</code>
+              <div style={noteStyle}>{t('admin.nodeAgent.cfAccessNote')}</div>
+              <button type="button" style={{ ...buttonStyle, marginTop: 8 }} onClick={() => setIssued(null)}>{t('admin.nodeAgent.tokenSaved')}</button>
+            </div>
+          )}
+
+          <div style={subTitleStyle}>{t('admin.nodeAgent.backupTitle')}</div>
+          {!backup && <div style={noteStyle}>{t('admin.nodeAgent.backupUnknown')}</div>}
+          {backup && (
+            <>
+              <div style={rowStyle}>
+                <span style={termStyle}>{t('admin.nodeAgent.backupStateLabel')}</span>
+                <span data-backup-state={backup.state} style={{ color: BACKUP_COLORS[backup.state], fontWeight: 600 }}>{t(BACKUP_STATE_KEYS[backup.state])}</span>
+              </div>
+              {backup.last && (
+                <>
+                  <div style={rowStyle}>
+                    <span style={termStyle}>{t('admin.nodeAgent.backupAtLabel')}</span>
+                    <span>{when(backup.last.finishedAt)}</span>
+                  </div>
+                  {backup.last.processedBytes != null && (
+                    <div style={rowStyle}>
+                      <span style={termStyle}>{t('admin.nodeAgent.backupSizeLabel')}</span>
+                      <span>{size(backup.last.processedBytes)}</span>
+                    </div>
+                  )}
+                </>
+              )}
+              {backup.problem && <div style={{ ...noteStyle, color: 'var(--red)' }}>{backup.problem}</div>}
+            </>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              style={primaryButtonStyle}
+              disabled={busy || !!running || connection === 'not_set_up'}
+              onClick={backupNow}
+            >
+              {t('admin.nodeAgent.backupNow')}
+            </button>
+            {connection === 'waiting' && !running && <span style={noteStyle}>{t('admin.nodeAgent.backupWaitsForAgent')}</span>}
+          </div>
+          {lastBackupJob && (
+            <div data-backup-job={lastBackupJob.state} style={{ marginTop: 8 }}>
+              <div style={rowStyle}>
+                <span style={termStyle}>{t('admin.nodeAgent.jobLabel')}</span>
+                <span>{t(JOB_STATE_KEYS[lastBackupJob.state] ?? 'admin.nodeAgent.unknown')}</span>
+                <span>{when(lastBackupJob.finishedAt ?? lastBackupJob.startedAt ?? lastBackupJob.createdAt)}</span>
+              </div>
+              {lastBackupJob.step && (
+                <div style={rowStyle}>
+                  <span style={termStyle}>{t('admin.nodeAgent.stepLabel')}</span>
+                  <span>{lastBackupJob.step}</span>
+                </div>
+              )}
+              {lastBackupJob.state === 'failed' && lastBackupJob.error && (
+                <div style={{ ...noteStyle, color: 'var(--red)' }}>
+                  {JOB_ERROR_KEYS[lastBackupJob.error] ? t(JOB_ERROR_KEYS[lastBackupJob.error]) : lastBackupJob.error}
+                </div>
+              )}
+              {lastBackupJob.logTail && <pre data-backup-log style={{ ...codeStyle, maxHeight: 220, overflow: 'auto' }}>{lastBackupJob.logTail}</pre>}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}

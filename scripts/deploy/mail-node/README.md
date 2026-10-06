@@ -6,7 +6,7 @@ what [`eop-ranges.sh`](eop-ranges.sh) keeps current there (requirements R-39 and
 and the node's backup and restore ([`node-backup.sh`](node-backup.sh), [`node-restore.sh`](node-restore.sh)).
 Everything the mailcow API can do, the panel does ("Apply settings", runbook section 6). The owner's
 runbook is [docs/operations/mail-node.md](../../../docs/operations/mail-node.md), sections 3 and 4,
-and 7 and 8 for the backup and the move.
+7 and 8 for the backup and the move, and 7a for the node agent.
 
 | File | What it is |
 |---|---|
@@ -16,9 +16,10 @@ and 7 and 8 for the backup and the move.
 | `node-backup.sh` | the nightly backup of the node into restic; installed to `/opt/mailexpert-node` once the restic keys are stored |
 | `node-restore.sh` | restores a node backup onto a fresh server (a move, a rebuilt node) |
 | `backup-lib.sh` | shared by the two and `setup.sh`; uses the panel's `lib/backup.sh` (restic in its pinned container) |
+| `node-agent.sh` | the node agent: long-polls the panel over HTTPS with its own token and runs only `status` and `backup` jobs; installed to `/opt/mailexpert-node` with `setup.sh --panel-url --agent-token-file` (runbook section 7a) |
 | `extra-cf.sh` | edits one `key = value` line of Postfix's `extra.cf`; the local stand uses it too |
 | `dovecot-extra.conf` | the Dovecot settings `setup.sh` keeps as a block in `data/conf/dovecot/extra.conf` |
-| `systemd/`, `cron/` | the timers, the boot unit, and the cron files for a host without systemd |
+| `systemd/`, `cron/`, `logrotate/` | the timers, the boot unit, the agent's service, and the cron and logrotate files for a host without systemd |
 
 ## setup.sh
 
