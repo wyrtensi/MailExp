@@ -947,3 +947,111 @@ describe('a rule forward held back by a rejected password', () => {
     } finally { warn.mockRestore(); error.mockRestore(); }
   });
 });
+
+describe('applyInboxRules — body rules while the body is not fetched', () => {
+  const bodyRule = (overrides = {}) => mkRule(
+    [{ type: 'move', value: 'Processed' }],
+    { conditions: [{ field: 'body', operator: 'not_contains', value: 'invoice' }], ...overrides }
+  );
+  const withBody = (bodyText, bodyHtml = null) => ({ rows: [{ id: 'msg-1', body_text: bodyText, body_html: bodyHtml }] });
+  const silence = () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    return () => { warn.mockRestore(); error.mockRestore(); };
+  };
+
+  it('skips a negative body rule while the body is not fetched: the message stays', async () => {
+    query.mockResolvedValueOnce({ rows: [bodyRule()] }).mockResolvedValueOnce(withBody(null));
+    const restore = silence();
+    try {
+      const result = await applyInboxRules([mkMsg()], account, mockImap);
+      expect(result.remaining).toHaveLength(1);
+      expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+    } finally { restore(); }
+  });
+
+  // A body condition on an unseen body is unknown: it never decides. The other conditions still
+  // can, when they settle the rule on their own.
+  const mixed = (logic, subjectValue, bodyCond = { field: 'body', operator: 'not_contains', value: 'invoice' }) => bodyRule({
+    condition_logic: logic,
+    conditions: [{ field: 'subject', operator: 'contains', value: subjectValue }, bodyCond],
+  });
+  const runUnknownBody = async (rule) => {
+    query.mockResolvedValueOnce({ rows: [rule] }).mockResolvedValueOnce(withBody(null)).mockResolvedValue({ rows: [] });
+    mockImap.bulkMoveMessages.mockResolvedValue({ failed: [], uidMap: new Map() });
+    const restore = silence();
+    try { return await applyInboxRules([mkMsg()], account, mockImap); } finally { restore(); }
+  };
+
+  it('fires an OR rule whose known condition matches, while the body is unknown', async () => {
+    const result = await runUnknownBody(mixed('OR', 'Test', { field: 'body', operator: 'contains', value: 'urgent' }));
+    expect(result.remaining).toHaveLength(0);
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
+  });
+
+  it('skips an OR rule whose known conditions do not match, while the body is unknown', async () => {
+    const result = await runUnknownBody(mixed('OR', 'Nope'));
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+
+  it('does not match an AND rule whose known condition fails, while the body is unknown', async () => {
+    const result = await runUnknownBody(mixed('AND', 'Nope'));
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+
+  it('skips an AND rule whose known conditions match, while the body is unknown', async () => {
+    const result = await runUnknownBody(mixed('AND', 'Test'));
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+
+  it('skips body rules when the body could not be read, and still runs the others', async () => {
+    const other = mkRule([{ type: 'mark_read', value: '' }], { id: 'rule-other' });
+    query
+      .mockResolvedValueOnce({ rows: [bodyRule(), other] })
+      .mockRejectedValueOnce(new Error('db down'))
+      .mockResolvedValue({ rows: [] });
+    const restore = silence();
+    try {
+      const result = await applyInboxRules([mkMsg()], account, mockImap);
+      expect(result.remaining).toHaveLength(1);
+      expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+      expect(result.mutedIds.has('msg-1')).toBe(true);
+    } finally { restore(); }
+  });
+
+  it('moves a message whose loaded body does not contain the value', async () => {
+    query.mockResolvedValueOnce({ rows: [bodyRule()] }).mockResolvedValueOnce(withBody('hello there')).mockResolvedValue({ rows: [] });
+    mockImap.bulkMoveMessages.mockResolvedValue({ failed: [], uidMap: new Map() });
+    const result = await applyInboxRules([mkMsg()], account, mockImap);
+    expect(result.remaining).toHaveLength(0);
+    expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a message whose loaded body contains the value', async () => {
+    query.mockResolvedValueOnce({ rows: [bodyRule()] }).mockResolvedValueOnce(withBody('your Invoice is attached'));
+    const result = await applyInboxRules([mkMsg()], account, mockImap);
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+
+  it('treats an HTML-only body that was fetched as known, as before', async () => {
+    query.mockResolvedValueOnce({ rows: [bodyRule()] }).mockResolvedValueOnce(withBody(null, '<p>hello</p>')).mockResolvedValue({ rows: [] });
+    mockImap.bulkMoveMessages.mockResolvedValue({ failed: [], uidMap: new Map() });
+    const restore = silence();
+    try {
+      const result = await applyInboxRules([mkMsg()], account, mockImap);
+      expect(result.remaining).toHaveLength(0);
+      expect(mockImap.bulkMoveMessages).toHaveBeenCalledOnce();
+    } finally { restore(); }
+  });
+
+  it('reads the text of an HTML-only body: a negative rule keeps a letter whose HTML has the value', async () => {
+    query.mockResolvedValueOnce({ rows: [bodyRule()] }).mockResolvedValueOnce(withBody(null, '<p>Your <b>Invoice</b> &amp; receipt</p>'));
+    const result = await applyInboxRules([mkMsg()], account, mockImap);
+    expect(result.remaining).toHaveLength(1);
+    expect(mockImap.bulkMoveMessages).not.toHaveBeenCalled();
+  });
+});

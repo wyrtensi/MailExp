@@ -326,6 +326,9 @@ export default function MessageList() {
   const searchSeq = useRef(0);
   const refreshRequestRef = useRef(null);
   if (refreshRequestRef.current === null) refreshRequestRef.current = createLatestRequest();
+  // Bumped only when the first-page load resets the list (account, folder, filter, refresh
+  // token). A next page that started under an older generation belongs to a list that is gone.
+  const listGenerationRef = useRef(0);
   // Bumped to force the search effect to re-run (e.g. after rules move messages) so an
   // active search snapshot drops messages that no longer match. See #223.
   const [searchReloadToken, setSearchReloadToken] = useState(0);
@@ -412,6 +415,7 @@ export default function MessageList() {
   // Reset and load fresh when account/folder/filter changes
   useEffect(() => {
     let cancelled = false;
+    listGenerationRef.current += 1;
     const run = async () => {
       // Don't attempt to load until we know which accounts exist.
       // Without this guard, the unified inbox query fires before getAccounts()
@@ -479,6 +483,8 @@ export default function MessageList() {
   const loadMore = useCallback(async () => {
     if (loadingMessages || !hasMoreMessages) return;
     setLoadingMessages(true);
+    const generation = listGenerationRef.current;
+    const sameList = () => generation === listGenerationRef.current;
     try {
       // Read current offset directly from store to avoid stale closure
       const currentOffset = useStore.getState().messagesOffset;
@@ -490,14 +496,24 @@ export default function MessageList() {
       if (unreadOnly) params.unreadOnly = 'true';
       if (useStore.getState().threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
-      const data = await api.getMessages(params);
-      appendMessages(applyReadGuard(data.messages));
-      setMessagesOffset(currentOffset + data.messages.length);
-      setHasMoreMessages(currentOffset + data.messages.length < data.total);
+      // A page that started before the list was reset (account, folder or filter changed) must
+      // not be appended to the new list or overwrite its offset. It also goes through the
+      // shared request guard, so an archive or delete meanwhile drops it, as it drops a refresh.
+      await refreshRequestRef.current.run(
+        () => api.getMessages(params),
+        (data) => {
+          if (!sameList()) return;
+          appendMessages(applyReadGuard(data.messages));
+          setMessagesOffset(currentOffset + data.messages.length);
+          setHasMoreMessages(currentOffset + data.messages.length < data.total);
+        },
+      );
     } catch (err) {
-      console.error('Failed to load more messages:', err);
+      if (sameList()) console.error('Failed to load more messages:', err);
     } finally {
-      setLoadingMessages(false);
+      // After a reset the loading flag belongs to the first-page load that replaced this list.
+      // Otherwise clear it even when the page was dropped: nothing else would.
+      if (sameList()) setLoadingMessages(false);
     }
   }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
 
