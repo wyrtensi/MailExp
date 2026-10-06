@@ -789,3 +789,39 @@ describe('MessageList — an uncached thread row fetches the thread to look for 
     }
   });
 });
+
+describe('MessageList — a late "load more" response from a previous folder is dropped', () => {
+  // The first page already ignores a response for a folder the user has left. The next-page
+  // request did not: it appended the old folder's rows to the new one and overwrote its
+  // offset and hasMore, so INBOX mail showed up (and could be acted on) inside Archive.
+  test('switching folders while the next page is in flight keeps only the new folder', async () => {
+    const row = (id, folder) => ({ ...MESSAGE, id, folder, uid: id, message_id: `<${id}@example.com>` });
+    let release;
+    const pendingPage = new Promise(resolve => { release = resolve; });
+    const originalGetMessages = api.getMessages;
+    api.getMessages = async (params) => {
+      if (params.folder === 'Archive') return { messages: [row('archive-1', 'Archive')], total: 1 };
+      if (params.offset > 0) return pendingPage;
+      return { messages: [row('inbox-1', 'INBOX'), row('inbox-2', 'INBOX')], total: 4 };
+    };
+    try {
+      await mount({ rows: [], threadedView: false, state: { pageSize: 2, scrollMode: 'infinite', messagesOffset: 0 } });
+      const loadMore = [...container.querySelectorAll('button')].find(b => b.textContent === 'messageList.loadMore');
+      assert.ok(loadMore, 'the first INBOX page must offer "load more"');
+      await React.act(async () => loadMore.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+
+      await React.act(async () => useStore.getState().setSelectedAccount('acct-1', 'Archive'));
+      assert.deepEqual(useStore.getState().messages.map(m => m.id), ['archive-1']);
+
+      await React.act(async () => release({ messages: [row('inbox-3', 'INBOX'), row('inbox-4', 'INBOX')], total: 4 }));
+
+      const state = useStore.getState();
+      assert.deepEqual(state.messages.map(m => m.id), ['archive-1'], 'the old INBOX page must not be appended to Archive');
+      assert.equal(state.messagesOffset, 1, 'the old response must not overwrite the Archive offset');
+      assert.equal(state.hasMoreMessages, false);
+      assert.equal(state.loadingMessages, false);
+    } finally {
+      api.getMessages = originalGetMessages;
+    }
+  });
+});

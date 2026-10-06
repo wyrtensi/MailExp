@@ -479,6 +479,7 @@ export default function MessageList() {
   const loadMore = useCallback(async () => {
     if (loadingMessages || !hasMoreMessages) return;
     setLoadingMessages(true);
+    let current = true;
     try {
       // Read current offset directly from store to avoid stale closure
       const currentOffset = useStore.getState().messagesOffset;
@@ -490,14 +491,22 @@ export default function MessageList() {
       if (unreadOnly) params.unreadOnly = 'true';
       if (useStore.getState().threadedView) params.threaded = 'true';
       if (selectedFolder === 'INBOX' && (categorizationEnabled || selectedAccount?.categorization_enabled)) params.category = activeCategory;
-      const data = await api.getMessages(params);
-      appendMessages(applyReadGuard(data.messages));
-      setMessagesOffset(currentOffset + data.messages.length);
-      setHasMoreMessages(currentOffset + data.messages.length < data.total);
+      // Shares the first-page request guard: switching account, folder or filter starts a new
+      // first-page load, so a next page still in flight belongs to a list that is gone and
+      // must not be appended to the new one or overwrite its offset.
+      current = await refreshRequestRef.current.run(
+        () => api.getMessages(params),
+        (data) => {
+          appendMessages(applyReadGuard(data.messages));
+          setMessagesOffset(currentOffset + data.messages.length);
+          setHasMoreMessages(currentOffset + data.messages.length < data.total);
+        },
+      );
     } catch (err) {
       console.error('Failed to load more messages:', err);
     } finally {
-      setLoadingMessages(false);
+      // A superseded request leaves the loading flag to the load that replaced it.
+      if (current) setLoadingMessages(false);
     }
   }, [selectedAccountId, selectedFolder, unreadOnly, activeCategory, pageSize, loadingMessages, hasMoreMessages, categorizationEnabled, selectedAccount?.categorization_enabled, applyReadGuard, appendMessages, setHasMoreMessages, setLoadingMessages, setMessagesOffset]);
 
