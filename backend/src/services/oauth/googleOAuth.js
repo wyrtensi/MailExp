@@ -148,7 +148,8 @@ export async function verifyGoogleIdToken({ idToken, clientId }) {
 
 // Refresh a Google access token through the app that issued it and persist the result. The
 // stored refresh token is kept when Google does not return a new one. Returns the account
-// with the plaintext access token, matching refreshMicrosoftToken.
+// with the plaintext access token, matching refreshMicrosoftToken, or the stored row (encrypted
+// tokens) when a reconnect replaced the credentials during the provider call.
 export async function refreshGoogleToken(account) {
   const app = await getGoogleAppById(account.oauth_app_id);
   // A refresh token only works with its issuing client: without that app the mailbox has
@@ -179,13 +180,27 @@ export async function refreshGoogleToken(account) {
     ? tokens.refresh_token
     : null;
 
-  await query(`
+  // Compare-and-set on the grant the refresh started from: a reconnect may have committed new
+  // tokens, possibly through another app, while the provider call was in flight. The stored
+  // refresh token is compared as stored (ciphertext with its own IV), so any rewrite of it
+  // counts as a change. A lost race keeps the reconnect's credentials and hands them back.
+  const saved = await query(`
     UPDATE email_accounts SET
       oauth_access_token = $1,
       oauth_refresh_token = COALESCE($2, oauth_refresh_token),
       oauth_token_expiry = $3
     WHERE id = $4
-  `, [encrypt(tokens.access_token), newRefreshToken ? encrypt(newRefreshToken) : null, expiry, account.id]);
+      AND oauth_refresh_token IS NOT DISTINCT FROM $5
+      AND oauth_app_id IS NOT DISTINCT FROM $6
+  `, [
+    encrypt(tokens.access_token), newRefreshToken ? encrypt(newRefreshToken) : null, expiry, account.id,
+    account.oauth_refresh_token, account.oauth_app_id ?? null,
+  ]);
+  if (saved?.rowCount === 0) {
+    const { rows } = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
+    if (!rows[0]) throw new GoogleOAuthError('authentication_failed');
+    return rows[0];
+  }
 
   return { ...account, oauth_access_token: tokens.access_token, oauth_token_expiry: expiry };
 }
