@@ -1,0 +1,8 @@
+# MailExpert mail node agent (scripts/deploy/mail-node/setup.sh, once the panel's token is given):
+# used only on a host without systemd. Every minute cron tries to start node-agent.sh; flock -n lets
+# only one run, so a running agent keeps the lock and one that stopped is started again within a
+# minute (at boot too). Output goes to @LOG@ (rotated by logrotate), not mail.
+MAILTO=""
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+* * * * * root flock -n /run/mailexpert-node-agent.lock @DIR@/node-agent.sh >>@LOG@ 2>&1
