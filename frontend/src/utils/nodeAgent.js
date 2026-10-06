@@ -10,13 +10,14 @@ export function panelUrl(origin) {
   return /^https?:\/\/[^/\s]+$/.test(url) ? url : 'https://<PANEL_HOST>';
 }
 
-// The commands that connect the node: the token saved into a 0600 file first (never on a command
-// line, where the shell history and the process list would keep it), then setup.sh.
+// The commands that connect the node, for root or a sudo user: the token saved into a 0600 file
+// first (never on a command line, where the shell history and the process list would keep it),
+// then setup.sh, then the file removed.
 export function agentSetupCommands(origin, tokenFile = AGENT_TOKEN_FILE) {
   return [
-    `(umask 077 && cat > ${tokenFile})`,
+    `sudo sh -c 'umask 077 && cat > ${tokenFile}'`,
     `sudo scripts/deploy/mail-node/setup.sh --panel-url ${panelUrl(origin)} --agent-token-file ${tokenFile}`,
-    `rm ${tokenFile}`,
+    `sudo rm ${tokenFile}`,
   ];
 }
 
@@ -54,6 +55,9 @@ export const JOB_ERROR_KEYS = Object.freeze({
   not_picked_up: 'admin.nodeAgent.errorNotPickedUp',
   timed_out: 'admin.nodeAgent.errorTimedOut',
   agent_revoked: 'admin.nodeAgent.errorRevoked',
+  agent_token_rotated: 'admin.nodeAgent.errorRotated',
+  agent_restarted: 'admin.nodeAgent.errorRestarted',
+  agent_stopped: 'admin.nodeAgent.errorStopped',
 });
 
 // The node's last backup as the status report has it: none (no backup recorded), off (no restic

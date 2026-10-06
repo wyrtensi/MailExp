@@ -2951,7 +2951,7 @@
       "tokenTitle": "The node agent's token",
       "tokenRotatedTitle": "A new token: the old one no longer works",
       "tokenOnce": "Shown only now: the panel keeps only its hash. Put it on the node with the commands below.",
-      "setupSteps": "On the node, in the MailExpert checkout as root: run the first command, paste the token, press Enter and Ctrl-D; then run setup.sh and remove the file.",
+      "setupSteps": "On the node, in the MailExpert checkout (as root or a sudo user): run the first command, paste the token, press Enter and Ctrl-D; then run setup.sh and remove the file.",
       "cfAccessNote": "Panel behind Cloudflare Access: put CF_ACCESS_CLIENT_ID=... and CF_ACCESS_CLIENT_SECRET=... of an Access service token into the same file, with AGENT_TOKEN=<token> on its own line (docs/operations/mail-node.md).",
       "tokenSaved": "I saved it, hide the token",
       "backupTitle": "Node backup",
@@ -2973,7 +2973,10 @@
       "stepLabel": "Step",
       "errorNotPickedUp": "The agent did not pick the job up within 30 minutes.",
       "errorTimedOut": "No word from the agent within the job's time bound.",
-      "errorRevoked": "The token was revoked while the job waited or ran."
+      "errorRevoked": "The token was revoked while the job waited or ran.",
+      "errorRotated": "A new token was issued while the job waited or ran.",
+      "errorRestarted": "The agent restarted while the job ran.",
+      "errorStopped": "The agent was stopped while the job ran."
     },
     "quarantine": {
       "title": "Mail node quarantine",

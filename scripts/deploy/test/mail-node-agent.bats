@@ -184,6 +184,36 @@ job_reports() { agent_requests | grep "^POST /api/node-agent/jobs/$1 " | cut -d'
   run bash "$AGENT" --once
   [ "$status" -eq 0 ]
   [[ $output == *"without a valid id"* ]]
+  queue_job 'not json at all'
+  run bash "$AGENT" --once
+  [ "$status" -eq 0 ]
+  [[ $output == *"without a valid id"* ]]
+}
+
+@test "a refused status report does not stop the poll" {
+  write_agent_env
+  export MOCK_POST_STATUS=500
+  run bash "$AGENT" --once
+  [ "$status" -eq 0 ]
+  [[ $output == *"POST /api/node-agent/status: HTTP 500"* ]]
+  [ "$(agent_requests | cut -d' ' -f1-2 | tail -n 1)" = 'GET /api/node-agent/next?wait=50' ]
+}
+
+@test "a stopped agent stops its backup and reports the job failed" {
+  write_agent_env
+  queue_job '{"id":"12","kind":"backup","params":{"tag":"manual"}}'
+  export MOCK_BACKUP_SECONDS=10
+  bash "$AGENT" --once 3>&- &
+  pid=$!
+  for _ in $(seq 50); do
+    if grep -q -- '--tag manual' "$MOCK_DIR/backup-calls" 2>/dev/null; then break; fi
+    sleep 0.1
+  done
+  kill -TERM "$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -eq 143 ]
+  [ "$(job_reports 12 | tail -n 1 | jq -c '{state, error}')" = '{"state":"failed","error":"agent_stopped"}' ]
 }
 
 @test "a status job sends the report and succeeds" {

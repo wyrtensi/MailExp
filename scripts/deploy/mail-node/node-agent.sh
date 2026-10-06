@@ -51,6 +51,9 @@ WORK=''
 PANEL_URL=''
 LAST_STATUS=0
 BACKOFF=0
+# The job being run and its backup process, for the stop handler.
+CURRENT_JOB=''
+CURRENT_PID=''
 
 usage() {
   sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
@@ -59,6 +62,19 @@ usage() {
 # shellcheck disable=SC2317,SC2329 # invoked only through the EXIT trap
 cleanup() {
   if [ -n "$WORK" ]; then rm -rf "$WORK"; fi
+}
+
+# shellcheck disable=SC2317,SC2329 # invoked only through the TERM and INT traps
+# on_stop: the agent is stopped (systemd, a reboot, setup.sh restarting it): the backup it runs is
+# stopped and its job reported failed, if the panel answers. The panel also fails a job left
+# running at the agent's next poll.
+on_stop() {
+  trap - TERM INT
+  if [ -n "$CURRENT_PID" ]; then kill "$CURRENT_PID" 2>/dev/null || true; fi
+  if [ -n "$CURRENT_JOB" ]; then
+    report "$CURRENT_JOB" failed "the agent was stopped" '' agent_stopped || true
+  fi
+  exit 143
 }
 
 # load_conf: agent.env checked and turned into curl's config file (the headers with the secrets).
@@ -201,6 +217,7 @@ run_backup() {
   log "job $id: backup (--tag $tag) started"
   timeout -k 60 "$(backup_timeout)" "$NODE_DIR/node-backup.sh" --tag "$tag" >"$log" 2>&1 &
   pid=$!
+  CURRENT_PID=$pid
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
     waited=$((waited + 1))
@@ -210,6 +227,7 @@ run_backup() {
     fi
   done
   wait "$pid" || rc=$?
+  CURRENT_PID=''
   if [ "$rc" = 0 ]; then
     report "$id" succeeded "$(last_step "$log")" "$log" || true
     log "job $id: backup done"
@@ -229,7 +247,8 @@ run_job() {
     warn "the panel sent a job without a valid id; ignored"
     return 0
   fi
-  kind=$(jq -r '.kind // empty' "$file")
+  kind=$(jq -r '.kind // empty' "$file" 2>/dev/null) || kind=''
+  CURRENT_JOB=$id
   case $kind in
     status)
       if send_status; then
@@ -248,6 +267,7 @@ run_job() {
       report "$id" failed "unknown job kind" '' unknown_kind || true
       ;;
   esac
+  CURRENT_JOB=''
 }
 
 # backoff: waits after an error, twice as long each time up to MAX_BACKOFF.
@@ -262,7 +282,8 @@ round() {
   local now code out=$WORK/next.json
   now=$(date +%s)
   if [ $((now - LAST_STATUS)) -ge "$STATUS_EVERY" ]; then
-    if send_status; then LAST_STATUS=$now; else return 1; fi
+    # A refused report is tried again next round; the poll goes on regardless.
+    if send_status; then LAST_STATUS=$now; fi
   fi
   code=$(panel GET "/api/node-agent/next?wait=$POLL_WAIT" '' "$out" $((POLL_WAIT + 15)))
   case $code in
@@ -286,10 +307,11 @@ main() {
   command -v jq >/dev/null || die "jq is required" 1
   WORK=$(mktemp -d)
   trap cleanup EXIT
+  trap on_stop TERM INT
   load_conf
   if [ "$once" = 1 ]; then
-    round
-    return
+    # In a condition, so a failure inside the round is reported here, not by set -e mid-way.
+    if round; then return 0; else return 1; fi
   fi
   log "agent started: $PANEL_URL"
   while :; do

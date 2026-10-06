@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 
 // The mail node's agent (scripts/deploy/mail-node/node-agent.sh): a service on the node host that
 // long-polls the panel for jobs over HTTPS (it opens no port on the node), runs the ones it knows
@@ -59,45 +59,58 @@ export function bearerToken(header) {
 
 // Issues the agent's token, replacing the one before (a rotation ends it at once). Returns the
 // token, the only time it exists outside the agent's file.
+const failActiveJobs = (client, error) => client.query(
+  `UPDATE node_agent_jobs SET state = 'failed', error = $1, finished_at = now(), updated_at = now()
+    WHERE state IN ('queued', 'running')`,
+  [error]
+);
+
 export async function issueToken(userId) {
   const token = newToken();
-  const { rows: before } = await query('SELECT token_hash FROM node_agent WHERE id = 1');
-  const { rows } = await query(
-    `INSERT INTO node_agent (id, token_hash, token_created_at, token_created_by, last_seen_at)
-     VALUES (1, $1, now(), $2, NULL)
-     ON CONFLICT (id) DO UPDATE SET token_hash = EXCLUDED.token_hash, token_created_at = EXCLUDED.token_created_at,
-       token_created_by = EXCLUDED.token_created_by, last_seen_at = NULL
-     RETURNING token_created_at`,
-    [hashToken(token), userId ?? null]
-  );
-  return { token, createdAt: rows[0].token_created_at, rotated: !!before[0]?.token_hash };
+  return withTransaction(async (client) => {
+    const { rows: before } = await client.query('SELECT token_hash FROM node_agent WHERE id = 1 FOR UPDATE');
+    const rotated = !!before[0]?.token_hash;
+    const { rows } = await client.query(
+      `INSERT INTO node_agent (id, token_hash, token_created_at, token_created_by, last_seen_at)
+       VALUES (1, $1, now(), $2, NULL)
+       ON CONFLICT (id) DO UPDATE SET token_hash = EXCLUDED.token_hash, token_created_at = EXCLUDED.token_created_at,
+         token_created_by = EXCLUDED.token_created_by, last_seen_at = NULL
+       RETURNING token_created_at`,
+      [hashToken(token), userId ?? null]
+    );
+    // The old token's agent can no longer report what it holds.
+    if (rotated) await failActiveJobs(client, 'agent_token_rotated');
+    return { token, createdAt: rows[0].token_created_at, rotated };
+  });
 }
 
 // Revokes the token: the agent is refused from its next request. Its waiting and running jobs fail
 // now, since nobody can report them any more. Returns whether there was a token.
 export async function revokeToken() {
-  const { rowCount } = await query(
-    'UPDATE node_agent SET token_hash = NULL, last_seen_at = NULL WHERE id = 1 AND token_hash IS NOT NULL'
-  );
-  await query(
-    `UPDATE node_agent_jobs SET state = 'failed', error = 'agent_revoked', finished_at = now(), updated_at = now()
-      WHERE state IN ('queued', 'running')`
-  );
-  return rowCount > 0;
+  return withTransaction(async (client) => {
+    const { rowCount } = await client.query(
+      'UPDATE node_agent SET token_hash = NULL, last_seen_at = NULL WHERE id = 1 AND token_hash IS NOT NULL'
+    );
+    await failActiveJobs(client, 'agent_revoked');
+    return rowCount > 0;
+  });
 }
 
-// Whether a presented token is the agent's (compared by hash, in constant time); a match records
-// the agent as seen.
+// The stored hash when a presented token is the agent's (compared by hash, in constant time), or
+// null; a match records the agent as seen. Later writes for the agent check the hash is still the
+// current one, so a poll or report already under way ends with a rotation or revocation.
 export async function authenticateAgent(token) {
-  if (!token || !TOKEN_PATTERN.test(token)) return false;
+  if (!token || !TOKEN_PATTERN.test(token)) return null;
   const { rows } = await query('SELECT token_hash FROM node_agent WHERE id = 1');
   const stored = rows[0]?.token_hash;
-  if (!stored || !/^[0-9a-f]{64}$/.test(stored)) return false;
+  if (!stored || !/^[0-9a-f]{64}$/.test(stored)) return null;
   const given = Buffer.from(hashToken(token), 'hex');
-  if (!timingSafeEqual(given, Buffer.from(stored, 'hex'))) return false;
+  if (!timingSafeEqual(given, Buffer.from(stored, 'hex'))) return null;
   await query('UPDATE node_agent SET last_seen_at = now() WHERE id = 1');
-  return true;
+  return stored;
 }
+
+const TOKEN_CURRENT = 'EXISTS (SELECT 1 FROM node_agent WHERE id = 1 AND token_hash = $1)';
 
 const capText = (value, max) => (typeof value === 'string' && value ? value.slice(0, max) : null);
 // The end of a log, which holds the outcome.
@@ -147,9 +160,13 @@ export function sanitizeStatus(body) {
   };
 }
 
-export async function recordStatus(body) {
+export async function recordStatus(body, tokenHash) {
   const status = sanitizeStatus(body);
-  await query('UPDATE node_agent SET status = $1::jsonb, status_at = now() WHERE id = 1', [JSON.stringify(status)]);
+  const { rowCount } = await query(
+    'UPDATE node_agent SET status = $2::jsonb, status_at = now() WHERE id = 1 AND token_hash = $1',
+    [tokenHash, JSON.stringify(status)]
+  );
+  if (!rowCount) throw new NodeAgentError('agent_unauthorized');
   return status;
 }
 
@@ -170,8 +187,19 @@ function presentJob(row) {
   };
 }
 
+// Expiry runs at most this often (every read and poll asks for it).
+const EXPIRE_EVERY_MS = 30 * 1000;
+let lastExpiry = 0;
+// Tests: the next expireStaleJobs runs at once.
+export function resetExpiryThrottle() {
+  lastExpiry = 0;
+}
+
 // Fails jobs past their bounds: queued and never picked up, or running without word from the agent.
 export async function expireStaleJobs() {
+  const now = Date.now();
+  if (now - lastExpiry < EXPIRE_EVERY_MS) return;
+  lastExpiry = now;
   await query(
     `UPDATE node_agent_jobs SET state = 'failed', error = 'not_picked_up', finished_at = now(), updated_at = now()
       WHERE state = 'queued' AND created_at < now() - ($1::double precision * interval '1 millisecond')`,
@@ -229,13 +257,26 @@ export async function enqueueJob({ kind, params = {}, createdBy = null }) {
   }
 }
 
-// The oldest queued job, now running; null when there is none.
-export async function claimNextJob() {
+// A poll comes only from an idle agent (it runs one job at a time, then polls): a job still running
+// then was lost when the agent restarted (a reboot, an update of its files), and fails now instead
+// of blocking the next one until its bound.
+export async function failOrphanedJobs(tokenHash) {
+  await query(
+    `UPDATE node_agent_jobs SET state = 'failed', error = 'agent_restarted', finished_at = now(), updated_at = now()
+      WHERE state = 'running' AND ${TOKEN_CURRENT}`,
+    [tokenHash]
+  );
+}
+
+// The oldest queued job, now running, while tokenHash is still the agent's token; null otherwise.
+export async function claimNextJob(tokenHash) {
   await expireStaleJobs();
   const { rows } = await query(
     `UPDATE node_agent_jobs SET state = 'running', started_at = now(), updated_at = now()
       WHERE id = (SELECT id FROM node_agent_jobs WHERE state = 'queued' ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED)
-      RETURNING *`
+        AND ${TOKEN_CURRENT}
+      RETURNING *`,
+    [tokenHash]
   );
   return presentJob(rows[0]);
 }
@@ -249,10 +290,10 @@ async function unclaimJob(id) {
 }
 
 // The agent's long poll: a job as soon as one is queued, or null after waitMs.
-export async function waitForJob({ waitMs = MAX_POLL_WAIT_MS, signal } = {}) {
+export async function waitForJob({ tokenHash, waitMs = MAX_POLL_WAIT_MS, signal } = {}) {
   const deadline = Date.now() + Math.min(Math.max(waitMs, 0), MAX_POLL_WAIT_MS);
   for (;;) {
-    const job = await claimNextJob();
+    const job = await claimNextJob(tokenHash);
     if (job) {
       if (signal?.aborted) {
         await unclaimJob(job.id);
@@ -278,7 +319,7 @@ export async function waitForJob({ waitMs = MAX_POLL_WAIT_MS, signal } = {}) {
 
 // The agent's report on a job it runs: running with a step and the end of its log, then
 // succeeded or failed. Only a running job takes a report.
-export async function reportJob(id, body) {
+export async function reportJob(id, body, tokenHash) {
   const input = body && typeof body === 'object' ? body : {};
   const state = input.state ?? 'running';
   if (!JOB_STATES.has(state) || state === 'queued') throw new NodeAgentError('job_state_invalid');
@@ -290,11 +331,13 @@ export async function reportJob(id, body) {
         step = COALESCE($3, step), log_tail = COALESCE($4, log_tail),
         error = CASE WHEN $2 = 'failed' THEN COALESCE($5, error, 'failed') ELSE error END,
         finished_at = CASE WHEN $6 THEN now() ELSE finished_at END, updated_at = now()
-      WHERE id = $1 AND state = 'running'
+      WHERE id = $1 AND state = 'running' AND EXISTS (SELECT 1 FROM node_agent WHERE id = 1 AND token_hash = $7)
       RETURNING *`,
-    [id, state, capText(input.step, MAX_STEP), capTail(input.log, MAX_LOG_TAIL), capText(input.error, MAX_ERROR), final]
+    [id, state, capText(input.step, MAX_STEP), capTail(input.log, MAX_LOG_TAIL), capText(input.error, MAX_ERROR), final, tokenHash]
   );
   if (rows[0]) return presentJob(rows[0]);
+  const { rows: agent } = await query('SELECT 1 FROM node_agent WHERE id = 1 AND token_hash = $1', [tokenHash]);
+  if (!agent.length) throw new NodeAgentError('agent_unauthorized');
   const { rows: existing } = await query('SELECT state FROM node_agent_jobs WHERE id = $1', [id]);
   throw new NodeAgentError(existing[0] ? 'job_not_running' : 'job_not_found');
 }

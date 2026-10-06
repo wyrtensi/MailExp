@@ -7,9 +7,9 @@ import {
 describe('agentSetupCommands', () => {
   it('saves the token to a 0600 file, never on the command line, and names the panel the admin has open', () => {
     const [save, setup, cleanup] = agentSetupCommands('https://panel.example.com/');
-    assert.equal(save, '(umask 077 && cat > /root/mailexpert-agent-token)');
+    assert.equal(save, "sudo sh -c 'umask 077 && cat > /root/mailexpert-agent-token'");
     assert.equal(setup, 'sudo scripts/deploy/mail-node/setup.sh --panel-url https://panel.example.com --agent-token-file /root/mailexpert-agent-token');
-    assert.equal(cleanup, 'rm /root/mailexpert-agent-token');
+    assert.equal(cleanup, 'sudo rm /root/mailexpert-agent-token');
   });
 
   it('falls back to a placeholder for an origin that is not a plain URL', () => {

@@ -7,6 +7,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 const dbState = vi.hoisted(() => ({ db: null }));
 vi.mock('../services/db.js', () => ({
   query: (sql, params) => dbState.db.query(sql, params),
+  withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
+}));
+// The limiter in memory, as it falls back without Redis.
+const limits = vi.hoisted(() => new Map());
+vi.mock('../services/rateLimiter.js', () => ({
+  peek: async (key, max) => ({ limited: (limits.get(key) ?? 0) >= max }),
+  consume: async (key, max) => {
+    limits.set(key, (limits.get(key) ?? 0) + 1);
+    return { limited: limits.get(key) > max };
+  },
 }));
 const auth = vi.hoisted(() => ({ admin: true }));
 vi.mock('../middleware/auth.js', () => ({
@@ -19,7 +29,8 @@ const { createRealSchemaDb } = await import('../services/testing/realSchema.js')
 const { default: express } = await import('express');
 const { default: adminRoutes, agentRouter } = await import('./mailNodeAgent.js');
 const { recordAudit } = await import('../services/auditLog.js');
-const { hashToken, MAX_LOG_TAIL, MAX_STEP } = await import('../services/mailNode/nodeAgent.js');
+const { hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle } = await import('../services/mailNode/nodeAgent.js');
+const { AGENT_AUTH_FAILURES } = await import('./mailNodeAgent.js');
 
 const ADMIN = '60000000-0000-4000-8000-000000000001';
 
@@ -46,6 +57,8 @@ beforeEach(async () => {
   await db.query('DELETE FROM node_agent_jobs');
   await db.query('DELETE FROM node_agent');
   recordAudit.mockClear();
+  limits.clear();
+  resetExpiryThrottle();
 });
 
 async function call(method, path, body, headers = {}) {
@@ -212,6 +225,7 @@ describe('jobs', () => {
     await db.query("UPDATE node_agent_jobs SET state = 'running', started_at = now() - interval '7 hours' WHERE id = $1", [job.id]);
     const queued = await admin('POST', '/agent/jobs', { kind: 'status' });
     await db.query("UPDATE node_agent_jobs SET created_at = now() - interval '2 hours' WHERE id = $1", [queued.body.job.id]);
+    resetExpiryThrottle();
     const { body } = await admin('GET', '/agent/jobs');
     const byId = Object.fromEntries(body.jobs.map((j) => [j.id, j]));
     expect(byId[job.id]).toMatchObject({ state: 'failed', error: 'timed_out' });
@@ -225,6 +239,67 @@ describe('jobs', () => {
     await issue();
     expect((await admin('POST', '/agent/jobs', { kind: 'update' })).status).toBe(400);
     expect((await admin('POST', '/agent/jobs', {})).status).toBe(400);
+  });
+});
+
+describe('restarts, rotations and polls', () => {
+  it('a poll fails the job the agent was running before it restarted, so a new backup may start', async () => {
+    const token = await issue();
+    const { body: { job } } = await admin('POST', '/agent/jobs', { kind: 'backup' });
+    await agent(token, 'GET', '/next?wait=0');
+    expect((await admin('POST', '/agent/jobs', { kind: 'backup' })).status).toBe(409);
+    expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(204);
+    const { body } = await admin('GET', '/agent/jobs');
+    expect(body.jobs.find((j) => j.id === job.id)).toMatchObject({ state: 'failed', error: 'agent_restarted' });
+    expect((await admin('POST', '/agent/jobs', { kind: 'backup' })).status).toBe(202);
+  });
+
+  it('a rotation fails the active jobs; a poll already waiting with the old token claims nothing and its reports are refused', async () => {
+    const old = await issue();
+    const { body: { job } } = await admin('POST', '/agent/jobs', { kind: 'backup' });
+    await agent(old, 'GET', '/next?wait=0');
+    const first = await admin('POST', '/agent/token');
+    expect(first.body.rotated).toBe(true);
+    expect((await agent(old, 'POST', `/jobs/${job.id}`, { state: 'succeeded' })).status).toBe(401);
+    expect((await admin('GET', '/agent/jobs')).body.jobs[0]).toMatchObject({ id: job.id, state: 'failed', error: 'agent_token_rotated' });
+    // A poll waiting with a token that is rotated meanwhile takes no job queued after the rotation.
+    const poll = agent(first.body.token, 'GET', '/next?wait=2');
+    await new Promise((r) => setTimeout(r, 200));
+    const rotated = await admin('POST', '/agent/token');
+    const { body: { job: next } } = await admin('POST', '/agent/jobs', { kind: 'backup' });
+    expect((await poll).status).toBe(204);
+    expect((await admin('GET', '/agent/jobs')).body.jobs[0]).toMatchObject({ id: next.id, state: 'queued' });
+    const claimed = await agent(rotated.body.token, 'GET', '/next?wait=0');
+    expect(claimed.body.id).toBe(next.id);
+  });
+
+  it('a new poll ends the one before', async () => {
+    const token = await issue();
+    const first = agent(token, 'GET', '/next?wait=10');
+    await new Promise((r) => setTimeout(r, 200));
+    const started = Date.now();
+    const second = agent(token, 'GET', '/next?wait=1');
+    expect((await first).status).toBe(204);
+    expect(Date.now() - started).toBeLessThan(3000);
+    expect((await second).status).toBe(204);
+  });
+
+  it('HEAD on next is refused and claims nothing', async () => {
+    const token = await issue();
+    await admin('POST', '/agent/jobs', { kind: 'backup' });
+    const res = await fetch(`${base}/node-agent/next?wait=0`, { method: 'HEAD', headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status).toBe(405);
+    const { body } = await admin('GET', '/agent/jobs');
+    expect(body.jobs[0].state).toBe('queued');
+  });
+
+  it('too many refused tokens from one address answer 429, even a valid token then', async () => {
+    const token = await issue();
+    for (let i = 0; i < AGENT_AUTH_FAILURES; i += 1) {
+      expect((await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0')).status).toBe(401);
+    }
+    expect((await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0')).status).toBe(429);
+    expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(429);
   });
 });
 
