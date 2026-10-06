@@ -86,6 +86,8 @@ export default function ContactsPage() {
   const searchRef      = useRef('');
   // Latest sender lookup; an older one that resolves later is ignored.
   const focusRequestRef = useRef(0);
+  // Latest contact click; starting a new contact also bumps it, so a click still loading is dropped.
+  const selectRequestRef = useRef(0);
 
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
   useEffect(() => { totalRef.current = total; }, [total]);
@@ -177,9 +179,12 @@ export default function ContactsPage() {
   }, []);
 
   const selectContact = async (c) => {
+    const request = ++selectRequestRef.current;
+    const stale = () => request !== selectRequestRef.current;
     setError(null);
     try {
       const full = await api.getContact(c.id);
+      if (stale()) return;
       setSelected(full);
       setEditing(false);
       setShowNew(false);
@@ -187,11 +192,12 @@ export default function ContactsPage() {
       setError(null);
       if (isMobile) setMobilePanel('detail');
     } catch (err) {
-      setError(err.message);
+      if (!stale()) setError(err.message);
     }
   };
 
   const startNew = () => {
+    selectRequestRef.current += 1; // a contact click still loading must not close this form
     setSelected(null);
     setForm(emptyContact());
     setEditing(false);
