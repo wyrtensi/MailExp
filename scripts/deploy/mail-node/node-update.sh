@@ -94,7 +94,7 @@ run_step() {
   return "$rc"
 }
 
-# shellcheck disable=SC2329 # invoked through run_step
+# shellcheck disable=SC2317,SC2329 # invoked through run_step
 # run_setup: setup.sh of the checkout as it is now, without options.
 run_setup() {
   timeout -k 60 "$SETUP_TIMEOUT" "$SRC/scripts/deploy/mail-node/setup.sh"
