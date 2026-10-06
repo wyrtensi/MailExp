@@ -38,8 +38,8 @@ describe('IMAP ID', () => {
       expect(command).toBe('ID');
       expect(attributes).toEqual([null]);
       // imapflow's own compiler turns that into the bytes it writes to the socket.
-      const [line] = await compile({ tag: 'A1', command, attributes });
-      expect(Buffer.from(line).toString()).toBe('A1 ID NIL');
+      const line = await compile({ tag: 'A1', command, attributes });
+      expect(line.toString()).toBe('A1 ID NIL');
     }
   });
 
