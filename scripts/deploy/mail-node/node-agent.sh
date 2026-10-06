@@ -213,7 +213,7 @@ write_update_state() {
   local file tmp
   file=$(update_state_file "$1")
   tmp=$file.tmp
-  install -d -m 700 "$NODE_STATE"
+  install -d "$NODE_STATE"
   jq -cn --arg id "$1" --arg state "$2" --arg step "$3" --arg error "${4:-}" --arg pid "${5:-}" \
     '{id: $id, state: $state, step: $step, error: (if $error == "" then null else $error end),
       pid: (if $pid == "" then null else ($pid | tonumber) end)}' >"$tmp"

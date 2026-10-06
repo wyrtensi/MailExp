@@ -35,15 +35,18 @@ function entriesFor(result) {
 
 const keyOf = (requestId, action) => `${requestId}:${action}`;
 
-// The node's part of an update (services/mailNode/nodeAgent.js): once the host's updater reports an
-// update to the version this panel now runs as succeeded (update.sh found the new panel healthy),
+// The node's part of an update (services/mailNode/nodeAgent.js): once the host's updater reports its
+// newest update (results come newest first) as succeeded to the version this panel now runs
+// (update.sh found the new panel healthy; an older result is not looked at, so a rollback never
+// takes the node back by itself),
 // the node agent gets an update job to the same commit. queueNodeUpdateIfBehind queues one job per
 // commit at most, so the pass every 30 s asks again harmlessly (and catches an agent that connects
 // later). Journaled as the panel's own action.
 export async function updateNodeAfterPanel(results, {
   version = currentOf().version, queue = queueNodeUpdateIfBehind, recordAudit = dbRecordAudit,
 } = {}) {
-  if (!version || !results.some((r) => r.state === 'succeeded' && r.target === version)) return null;
+  const newest = results[0];
+  if (!version || newest?.state !== 'succeeded' || newest.target !== version) return null;
   const job = await queue();
   if (job) {
     await recordAudit([{

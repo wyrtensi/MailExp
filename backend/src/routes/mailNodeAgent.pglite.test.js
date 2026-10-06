@@ -398,6 +398,10 @@ describe('the node update', () => {
     expect(await updateNodeAfterPanel([{ state: 'rolled_back', target: 'sha-feedfacefeed' }], { version: 'sha-feedfacefeed', queue, recordAudit })).toBeNull();
     expect(await updateNodeAfterPanel([{ state: 'succeeded', target: 'sha-111111111111' }], { version: 'sha-feedfacefeed', queue, recordAudit })).toBeNull();
     expect(await updateNodeAfterPanel([{ state: 'succeeded', target: 'sha-feedfacefeed' }], { version: null, queue, recordAudit })).toBeNull();
+    // Only the newest update counts: an older success to this version (before a rollback) does not.
+    expect(await updateNodeAfterPanel([
+      { state: 'succeeded', target: 'sha-111111111111' }, { state: 'succeeded', target: 'sha-feedfacefeed' },
+    ], { version: 'sha-feedfacefeed', queue, recordAudit })).toBeNull();
     expect(await queueNodeUpdateIfBehind({ env: {} })).toBeNull();
     expect(await updateJobs()).toHaveLength(0);
     expect(recordAudit).not.toHaveBeenCalledWith([expect.objectContaining({ action: 'mail_node.agent_job_requested' })]);

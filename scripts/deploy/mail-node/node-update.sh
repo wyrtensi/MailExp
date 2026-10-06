@@ -155,7 +155,7 @@ update_main() {
   is_job_id "$UPDATE_ID" || die "usage: node-update.sh <job id> <sha>" 2
   is_sha "$sha" || die "the commit must be 40 hex digits" 2
   close_inherited_fds
-  install -d -m 700 "$NODE_STATE"
+  install -d "$NODE_STATE"
   UPDATE_LOG=$(update_log_file "$UPDATE_ID")
   : >>"$UPDATE_LOG"
   chmod 600 "$UPDATE_LOG"
