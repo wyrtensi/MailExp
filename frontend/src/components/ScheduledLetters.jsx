@@ -89,12 +89,18 @@ function ScheduledDialog() {
 
   const close = useCallback(() => setShowScheduled(false), [setShowScheduled]);
 
+  // Only the newest list request may apply: switching the mailbox filter starts a new one, and a
+  // slower answer for the previous filter must not replace the letters of the current one.
+  const loadSeqRef = useRef(0);
   const load = useCallback(async () => {
+    const seq = ++loadSeqRef.current;
     try {
       const data = await api.scheduled.list(accountId || undefined);
+      if (seq !== loadSeqRef.current) return;
       setLetters(data.letters || []);
       setLoadError('');
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       setLoadError(err?.message || t('scheduled.loadFailed'));
     }
   }, [accountId, t]);

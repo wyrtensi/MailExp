@@ -195,3 +195,33 @@ test('same-user refresh retains restores and identity changes clear the entire q
   await closeComposer();
   assert.equal(useStore.getState().composing, false);
 });
+
+test('a late list response for the previous mailbox filter does not replace the current one', async () => {
+  const letter = accountId => ({
+    id: `${accountId}-job`, accountId, status: 'queued', scheduled: true, canManage: false,
+    subject: `${accountId} letter`, to: ['recipient@example.com'], sendAt,
+  });
+  let releaseA;
+  api.scheduled.list = accountId => (accountId === 'a'
+    ? new Promise(resolve => { releaseA = resolve; })
+    : Promise.resolve({ letters: [letter(accountId)] }));
+  useStore.setState({
+    accounts: [{ id: 'a', email_address: 'a@example.com' }, { id: 'b', email_address: 'b@example.com' }],
+    selectedAccountId: 'a',
+  });
+  await React.act(async () => { useStore.getState().setShowScheduled(true); });
+  assert.ok(releaseA, 'the list for mailbox A is pending');
+
+  const picker = document.querySelector('[data-scheduled-dialog] select');
+  await React.act(async () => {
+    picker.value = 'b';
+    picker.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+  const shown = () => [...document.querySelectorAll('[data-scheduled-letter]')].map(el => el.dataset.scheduledLetter);
+  assert.deepEqual(shown(), ['b-job']);
+
+  await React.act(async () => releaseA({ letters: [letter('a')] }));
+  assert.equal(picker.value, 'b');
+  assert.deepEqual(shown(), ['b-job'], 'the obsolete mailbox A response must be ignored');
+  await React.act(async () => { useStore.getState().setShowScheduled(false); });
+});
