@@ -789,3 +789,41 @@ describe('MessageList — an uncached thread row fetches the thread to look for 
     }
   });
 });
+
+// The paginated footer pages through the folder (messagesTotal, loadPage), and the search
+// "load more" lived only in the infinite-scroll footer, so in paginated mode search results
+// past the first pageSize could not be reached at all.
+describe('MessageList — search results past the first page in paginated mode', () => {
+  const HITS = ['hit-1', 'hit-2', 'hit-3'].map((id, i) => ({ ...MESSAGE, id, uid: 10 + i, folder: 'Archive', subject: id }));
+
+  test('the paginated list offers the next search results instead of the folder pages', async () => {
+    const originalSearch = api.search;
+    const { pageSize, scrollMode } = useStore.getState();
+    const searches = [];
+    api.search = async (q, accountId, { offset = 0, limit } = {}) => {
+      searches.push({ offset, limit });
+      return { messages: HITS.slice(offset, offset + limit) };
+    };
+    try {
+      await mount({
+        rows: [MESSAGE, { ...MESSAGE, id: 'msg-3', uid: 3 }], threadedView: false,
+        state: { scrollMode: 'paginated', pageSize: 2, searchResults: [] },
+      });
+      await React.act(async () => { useStore.setState({ searchQuery: 'needle' }); });
+      await React.act(async () => { await new Promise(r => setTimeout(r, 350)); }); // 300ms debounce
+      assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['hit-1', 'hit-2']);
+
+      const buttonTexts = [...container.querySelectorAll('button')].map(b => b.textContent);
+      assert.ok(!buttonTexts.some(text => /messageList\.(prevPage|nextPage)/.test(text)),
+        'the folder pagination does not stand in for the search results');
+      const more = [...container.querySelectorAll('button')].find(b => b.textContent === 'messageList.loadMore');
+      assert.ok(more, 'the search can be continued');
+      await React.act(async () => { more.click(); });
+      assert.deepEqual(searches.at(-1), { offset: 2, limit: 2 });
+      assert.deepEqual(useStore.getState().searchResults.map(m => m.id), ['hit-1', 'hit-2', 'hit-3']);
+    } finally {
+      api.search = originalSearch;
+      await React.act(async () => { useStore.setState({ searchQuery: '', pageSize, scrollMode }); });
+    }
+  });
+});

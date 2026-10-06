@@ -4016,8 +4016,10 @@ export default function MessageList() {
           />
         )}
 
-        {/* Infinite scroll footer */}
-        {scrollMode === 'infinite' && (<>
+        {/* Infinite scroll footer. Search results always continue with "load more", in the
+            paginated mode too: the search has no total to count pages by, and the folder
+            pagination below would page the folder, not the results. */}
+        {(scrollMode === 'infinite' || searchQuery.trim()) && (<>
           {/* Search mode: load more search results */}
           {searchQuery.trim() ? (<>
             {searchLoadingMore && (
@@ -4090,7 +4092,7 @@ export default function MessageList() {
         </>)}
 
         {/* Pagination footer */}
-        {scrollMode === 'paginated' && !loadingMessages && messagesTotal > 0 && (() => {
+        {scrollMode === 'paginated' && !searchQuery.trim() && !loadingMessages && messagesTotal > 0 && (() => {
           const totalPages = Math.ceil(messagesTotal / pageSize) || 1;
           const btnStyle = (disabled) => ({
             padding: '5px 14px', fontSize: 12, borderRadius: 6, cursor: disabled ? 'default' : 'pointer',
