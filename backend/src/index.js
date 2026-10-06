@@ -9,6 +9,7 @@ import './loadEnv.js';
 import { redisClient } from './services/redis.js';
 import { buildSessionOptions } from './utils/sessionConfig.js';
 import { parseTrustProxy } from './utils/trustProxy.js';
+import { composeJson } from './middleware/composeBody.js';
 
 import sendRoutes from './routes/send.js';
 import draftRoutes from './routes/draft.js';
@@ -150,9 +151,9 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'same-origin');
   next();
 });
-// 25 MB attachment limit → ~34 MB base64 on the wire; add headroom for the rest of the payload.
-app.use('/api/mail/send', express.json({ limit: '35mb' }));
-app.use('/api/mail/draft', express.json({ limit: '35mb' }));
+// 25 MB attachment limit as base64 plus the body (middleware/composeBody.js).
+app.use('/api/mail/send', composeJson());
+app.use('/api/mail/draft', composeJson());
 // A pet-import body carries a base64 spritesheet (~33% larger than the 5 MB sheet cap
 // enforced after decode in gtdPet.importPet), so it needs more than the global 1 MB.
 app.use('/api/gtd/pet/import', express.json({ limit: '8mb' }));
