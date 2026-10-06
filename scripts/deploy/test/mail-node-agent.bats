@@ -28,17 +28,22 @@ setup() {
 #!/usr/bin/env bash
 # The panel for node-agent.sh: the URL, method and headers come in the config file (-K). Any other
 # URL (the Microsoft endpoints setup.sh's eop-ranges.sh reads) goes to the shared curl mock.
+# eop-ranges.sh hands its config on a descriptor, read once: it is copied to a file first.
 orig=("$@")
 out='' conf='' body=''
 for ((i = 0; i < $#; i++)); do
-  if [ "${orig[$i]}" = -K ]; then conf=${orig[$((i + 1))]}; fi
+  if [ "${orig[$i]}" = -K ]; then
+    conf=$MOCK_DIR/curl-conf.$$
+    cat "${orig[$((i + 1))]}" >"$conf"
+    orig[$((i + 1))]=$conf
+  fi
 done
-if ! grep -q '^url = "https://panel.example.com/' "$conf"; then exec "$MOCK_SHARED_BIN/curl" "${orig[@]}"; fi
+if ! grep -q '^url = "https://panel.example.com/' "$conf" 2>/dev/null; then exec "$MOCK_SHARED_BIN/curl" "${orig[@]}"; fi
 printf '%s\n' "$*" >>"$MOCK_DIR/agent-argv"
 while [ $# -gt 0 ]; do
   case $1 in
     -o) out=$2 && shift ;;
-    -K) conf=$2 && shift ;;
+    -K) shift ;;
     --data-binary) body=${2#@} && shift ;;
     -w | --max-time | --proto) shift ;;
   esac
@@ -226,6 +231,8 @@ job_reports() { agent_requests | grep "^POST /api/node-agent/jobs/$1 " | cut -d'
 
 setup_with_agent() {
   run bash "$NODE_SCRIPTS/setup.sh" --mailcow-dir "$MC" --panel-ip 203.0.113.10 "$@"
+  # Shown by bats when the test fails.
+  printf '%s\n' "$output"
 }
 
 @test "setup.sh connects the agent: agent.env 0600 from the token file, the unit, the token never printed" {

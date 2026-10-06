@@ -95,7 +95,7 @@ panel() {
     printf 'request = "%s"\n' "$method"
     if [ -n "$body" ]; then printf 'header = "Content-Type: application/json"\n'; fi
   } >"$conf"
-  local -a args=(-sS --proto =https --max-time "$max" -K "$conf" -o "$out" -w '%{http_code}')
+  local -a args=(-sS --proto '=https' --max-time "$max" -K "$conf" -o "$out" -w '%{http_code}')
   local code
   if [ -n "$body" ]; then args+=(--data-binary "@$body"); fi
   code=$(curl "${args[@]}" 2>/dev/null) || code=000
