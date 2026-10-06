@@ -194,6 +194,9 @@ describe('MessageList — the delete guard names the row mailbox', () => {
       ['b1'],
       'the same conversation in the other mailbox was never archived and must still show',
     );
+    // Undo the pending archive: its delayed commit would otherwise run during a later test,
+    // against that test's fixtures, and restore 'a1' into the shared store.
+    await React.act(async () => { shortcutBus.emit('undoAction'); });
   });
 });
 
@@ -822,6 +825,70 @@ describe('MessageList — a late "load more" response from a previous folder is 
       assert.equal(state.loadingMessages, false);
     } finally {
       api.getMessages = originalGetMessages;
+    }
+  });
+
+  test('a stale next page that fails does not end the new folder\'s first-page load early', async () => {
+    // Clearing the flag here let the old INBOX rows, still on screen with hasMore=true, offer
+    // "load more" while Archive was loading.
+    const row = (id, folder) => ({ ...MESSAGE, id, folder, uid: id, message_id: `<${id}@example.com>` });
+    let rejectPage, releaseArchive;
+    const pendingPage = new Promise((_, reject) => { rejectPage = reject; });
+    const pendingArchive = new Promise(resolve => { releaseArchive = resolve; });
+    const originalGetMessages = api.getMessages;
+    const originalError = console.error;
+    console.error = () => {};
+    api.getMessages = async (params) => {
+      if (params.folder === 'Archive') return pendingArchive;
+      if (params.offset > 0) return pendingPage;
+      return { messages: [row('inbox-1', 'INBOX'), row('inbox-2', 'INBOX')], total: 4 };
+    };
+    try {
+      await mount({ rows: [], threadedView: false, state: { pageSize: 2, scrollMode: 'infinite', messagesOffset: 0 } });
+      const loadMore = [...container.querySelectorAll('button')].find(b => b.textContent === 'messageList.loadMore');
+      await React.act(async () => loadMore.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+      await React.act(async () => useStore.getState().setSelectedAccount('acct-1', 'Archive'));
+
+      await React.act(async () => rejectPage(new Error('network down')));
+      assert.equal(useStore.getState().loadingMessages, true, 'Archive is still loading its first page');
+
+      await React.act(async () => releaseArchive({ messages: [row('archive-1', 'Archive')], total: 1 }));
+      const state = useStore.getState();
+      assert.deepEqual(state.messages.map(m => m.id), ['archive-1']);
+      assert.equal(state.loadingMessages, false);
+    } finally {
+      api.getMessages = originalGetMessages;
+      console.error = originalError;
+    }
+  });
+
+  test('archiving a row while the next page loads does not leave the list stuck loading', async () => {
+    // Archive invalidates in-flight list responses. The next page may be dropped then, but with
+    // no newer load to clear it the loading flag stayed set: a permanent spinner, no
+    // "load more", and background refreshes ignored.
+    const row = (id, folder) => ({ ...MESSAGE, id, folder, uid: id, message_id: `<${id}@example.com>` });
+    let release;
+    const pendingPage = new Promise(resolve => { release = resolve; });
+    const originalGetMessages = api.getMessages;
+    api.getMessages = async (params) => {
+      if (params.offset > 0) return pendingPage;
+      return { messages: [row('inbox-1', 'INBOX'), row('inbox-2', 'INBOX')], total: 4 };
+    };
+    ARCHIVED = ['inbox-1'];
+    try {
+      await mount({ rows: [], threadedView: false, state: { pageSize: 2, scrollMode: 'infinite', messagesOffset: 0, selectedMessageId: 'inbox-1', notifications: [] } });
+      const loadMore = [...container.querySelectorAll('button')].find(b => b.textContent === 'messageList.loadMore');
+      await React.act(async () => loadMore.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+      await React.act(async () => { shortcutBus.emit('archive'); });
+
+      await React.act(async () => release({ messages: [row('inbox-3', 'INBOX'), row('inbox-4', 'INBOX')], total: 4 }));
+      assert.equal(useStore.getState().loadingMessages, false);
+    } finally {
+      // Undo the pending archive so its delayed commit cannot outlive the test.
+      await React.act(async () => { shortcutBus.emit('undoAction'); });
+      api.getMessages = originalGetMessages;
+      ARCHIVED = [];
+      clearDeleteGuard('inbox-1');
     }
   });
 });
