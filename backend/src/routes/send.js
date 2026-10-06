@@ -345,7 +345,8 @@ router.post('/send', async (req, res) => {
   }
 
   // What the composer reopens with on undo or edit (no attachment contents: those are in the
-  // letter itself), and a small client context (reply or forward, the thread) it hands back as is.
+  // letter itself, forwarded ones included, and come back as the writer's own attachments), and a
+  // small client context (reply or forward, the thread) it hands back.
   const compose = {
     accountId: account.id,
     aliasId: aliasId || null,
@@ -375,6 +376,7 @@ router.post('/send', async (req, res) => {
     snippet: buildSentSnippet(body, bodyIsHtml),
   };
   const uploads = uploadedAttachments.map((_, i) => inlineImageAttachments.length + i);
+  const forwarded = resolvedFwdAttachments.map((_, i) => inlineImageAttachments.length + uploadedAttachments.length + i);
 
   try {
     const { job, created } = await enqueueOutgoingSend({
@@ -383,7 +385,7 @@ router.post('/send', async (req, res) => {
       dedupeKey,
       sendAt,
       compose,
-      mail: { options: mailOptions, meta, uploads },
+      mail: { options: mailOptions, meta, uploads, forwarded },
     });
     const conflict = created ? null : sendRetryConflict(job, sendAt);
     if (conflict) return res.status(conflict.status).json({ error: conflict.error, code: conflict.code });

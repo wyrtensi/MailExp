@@ -1,5 +1,6 @@
 import { query } from './db.js';
 import { parseHeadersInput } from './messageParser.js';
+import { htmlToText } from '../utils/htmlToText.js';
 import { resolveArchiveFolder, isAllMailFolder, resolveTrashFolder, resolveAllTrashPaths, getDeleteStrategy, adjustFolderCounts } from '../utils/mailUtils.js';
 
 async function getRulesForAccount(accountId) {
@@ -118,6 +119,8 @@ function evaluateCondition(cond, msg) {
       return value === 'read' ? isRead : !isRead;
     }
     case 'body': {
+      // An unseen body decides nothing: unknown, never treated as empty (see evaluateRule).
+      if (msg._bodyUnknown) return null;
       return matchOperator(operator, msg._bodyText || '', value);
     }
     case 'header': {
@@ -132,13 +135,15 @@ function evaluateCondition(cond, msg) {
   }
 }
 
+// Three-valued: a condition is true, false or unknown (null: a body condition while the body is
+// not fetched). The known conditions decide when they can on their own (OR: one is true; AND: one
+// is false); otherwise an unknown condition leaves the rule undecided, and it does not match.
 function evaluateRule(rule, msg) {
   const conditions = Array.isArray(rule.conditions) ? rule.conditions : [];
   if (conditions.length === 0) return false;
-  if (rule.condition_logic === 'OR') {
-    return conditions.some(c => evaluateCondition(c, msg));
-  }
-  return conditions.every(c => evaluateCondition(c, msg));
+  const results = conditions.map(c => evaluateCondition(c, msg));
+  if (rule.condition_logic === 'OR') return results.some(r => r === true);
+  return results.every(r => r === true);
 }
 
 // Applies inbox rules to a batch of new INBOX messages. Returns { remaining, mutedIds }:
@@ -163,23 +168,31 @@ export async function applyInboxRules(messages, account, imapManager) {
     Array.isArray(r.conditions) && r.conditions.some(c => c?.field === 'body')
   );
 
+  // A body that is not fetched yet (lazy body fetch) or could not be read is unknown
+  // (msg._bodyUnknown), never empty: a not_contains condition would otherwise match and
+  // move or delete a message whose text nobody has seen. Body conditions on it decide
+  // nothing; see evaluateRule. An HTML-only body is read through its text.
   if (needsBody) {
     const ids = messages.map(m => m.id);
     try {
       const res = await query(
-        'SELECT id, body_text FROM messages WHERE id = ANY($1::uuid[])',
+        'SELECT id, body_text, body_html FROM messages WHERE id = ANY($1::uuid[])',
         [ids]
       );
       const byId = {};
       for (const row of res.rows) byId[row.id] = row;
       for (const msg of messages) {
-        msg._bodyText = byId[msg.id]?.body_text || '';
-        if (!msg._bodyText) {
-          console.warn(`inboxRules: body_text not yet available for message ${msg.id} — body rules will not match (account uses lazy body fetch)`);
+        const row = byId[msg.id];
+        msg._bodyUnknown = !row || (row.body_text == null && row.body_html == null);
+        if (msg._bodyUnknown) {
+          console.warn(`inboxRules: body not yet available for message ${msg.id}; body conditions cannot match (account uses lazy body fetch)`);
+        } else {
+          msg._bodyText = row.body_text || (row.body_html ? htmlToText(row.body_html) : '');
         }
       }
     } catch (err) {
-      console.error('inboxRules: failed to fetch body_text for rules:', err.message);
+      for (const msg of messages) msg._bodyUnknown = true;
+      console.error('inboxRules: failed to fetch body_text for rules; body conditions cannot match:', err.message);
     }
   }
 

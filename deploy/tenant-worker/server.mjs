@@ -43,7 +43,7 @@ const STATUS = {
   unauthorized: 401, unknown_op: 404, invalid_args: 400, invalid_tenant: 400, invalid_json: 400, body_too_large: 413,
   exo_throttled: 429, exo_exists: 409, quarantine_not_allowed: 403,
   certificate_mismatch: 409, tenant_not_allowed: 403, exo_not_found: 422, busy: 503, exo_timeout: 504, exo_connect_failed: 502, exo_failed: 502,
-  runner_failed: 502, runner_exited: 502, not_found: 404,
+  runner_failed: 502, runner_exited: 502, not_found: 404, invalid_request: 400, internal_error: 500,
 };
 
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
@@ -269,7 +269,15 @@ export function createHandler({ token, certificate, runner, pinned = {}, dryRun 
   };
 
   return async function handle(req, res) {
-    const url = new URL(req.url, 'http://worker');
+    // A request target the HTTP parser takes but the URL parser refuses (e.g. "//[") is refused
+    // here, not thrown: the caller does not wait for this promise.
+    let url;
+    try {
+      url = new URL(req.url, 'http://worker');
+    } catch {
+      log(`refused ${req.method}: invalid request target`);
+      return fail(res, 'invalid_request', 'The request target is not a valid URL');
+    }
     try {
       if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { ok: true, dryRun });
       if (!authorized(req)) return fail(res, 'unauthorized', 'Missing or wrong token');
@@ -299,6 +307,20 @@ export function createHandler({ token, certificate, runner, pinned = {}, dryRun 
       log(`failed ${req.method} ${url.pathname.slice(0, 80)}: ${clip(err?.message)}`);
       return fail(res, 'runner_failed', 'The worker failed');
     }
+  };
+}
+
+// The http.createServer callback for a handler: a rejection that escapes the handler is answered
+// (500 while nothing was sent yet) and logged, never left unhandled, which would end the process.
+export function requestListener(handle, log = () => {}) {
+  return (req, res) => {
+    Promise.resolve()
+      .then(() => handle(req, res))
+      .catch((err) => {
+        log(`unhandled error for ${req.method}: ${clip(err?.message)}`);
+        if (!res.headersSent) fail(res, 'internal_error', 'The worker failed');
+        else res.destroy();
+      });
   };
 }
 
@@ -369,7 +391,7 @@ export async function main(env = process.env) {
   log(`certificate ${info.thumbprint}, valid until ${info.notAfter}${config.dryRun ? '; dry run: commands are printed, nothing connects' : ''}`);
   const runner = createRunner({ dryRun: config.dryRun, timeoutMs: config.timeoutMs, log });
   const handle = createHandler({ token: config.token, certificate, runner, pinned: config.pinned, dryRun: config.dryRun, log });
-  const server = http.createServer((req, res) => { handle(req, res); });
+  const server = http.createServer(requestListener(handle, log));
   server.requestTimeout = config.timeoutMs + 30000;
   server.listen(config.port, () => log(`listening on ${config.port}`));
   const shutdown = () => {

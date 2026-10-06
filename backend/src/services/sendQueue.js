@@ -35,10 +35,11 @@ let broadcast = () => {};
 
 // ── The letter as stored (outgoing_messages.mail) ───────────────────────────────────────────
 
-// mail: { options, meta } with Buffer attachment contents, plus uploads: the indexes of the
-// attachments the writer added (the rest are inline images and forwarded attachments, which the
-// composer gets back another way). Stored as JSON with the contents in base64.
-export function serializeMail({ options, meta, uploads = [] }) {
+// mail: { options, meta } with Buffer attachment contents, plus uploads and forwarded: the indexes
+// of the attachments the writer added and of those forwarded from another letter (the rest are
+// inline images, which stay in the body). Stored as JSON with the contents in base64. A letter
+// stored before forwarded was kept has no such key (deserializeMail gives null).
+export function serializeMail({ options, meta, uploads = [], forwarded = [] }) {
   const attachments = (options.attachments || []).map(a => ({
     ...a,
     content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : Buffer.from(String(a.content ?? '')).toString('base64'),
@@ -48,6 +49,7 @@ export function serializeMail({ options, meta, uploads = [] }) {
     options: { ...options, ...(attachments.length ? { attachments } : {}) },
     meta,
     uploads,
+    forwarded,
   }));
 }
 
@@ -62,6 +64,7 @@ export function deserializeMail(buffer) {
     options: { ...stored.options, ...(attachments.length ? { attachments } : {}) },
     meta: stored.meta,
     uploads: stored.uploads || [],
+    forwarded: Array.isArray(stored.forwarded) ? stored.forwarded : null,
   };
 }
 
@@ -302,16 +305,25 @@ export async function cancelScheduled(id, { userId, isAdmin, reason = 'discard' 
   };
 }
 
-// The composer's fields back, with the attachments the writer added (their contents from the
-// stored letter). Inline images are still data: URIs in the body; forwarded attachments are
-// references the next send resolves again.
+// The composer's fields back, with the attachments the writer added and those forwarded from
+// another letter, all with their contents from the stored letter. Inline images are still data:
+// URIs in the body. Forwarded attachments come back as the writer's own, not as references: the
+// stored letter is deleted with this cancel, and the original they point to may be gone by now
+// (a reference the next send resolves again would fail, or send other bytes than were queued).
 function restoredCompose({ compose, mail }) {
   const stored = deserializeMail(mail);
-  const attachments = stored.uploads
-    .map(index => stored.options.attachments?.[index])
+  const all = stored.options.attachments || [];
+  // A letter stored before the forwarded indexes were kept: what is neither an upload nor an
+  // inline image (those carry a cid) was forwarded.
+  const forwarded = stored.forwarded
+    ?? all.map((a, index) => index).filter(index => !stored.uploads.includes(index) && !all[index].cid);
+  const attachments = [...stored.uploads, ...forwarded]
+    .map(index => all[index])
     .filter(Boolean)
     .map(a => ({ filename: a.filename, contentType: a.contentType, size: a.content.length, content: a.content.toString('base64') }));
-  return { ...compose, attachments };
+  const context = compose.context && typeof compose.context === 'object' ? { ...compose.context } : compose.context;
+  if (context) delete context.forwardedAttachments;
+  return { ...compose, attachments, forwardedAttachments: [], context };
 }
 
 // Moves a waiting letter to another time (it is a scheduled letter from then on, even one moved
