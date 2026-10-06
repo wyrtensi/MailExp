@@ -164,14 +164,24 @@ set_aside() {
   log "not in the snapshot, set aside: $rel"
 }
 
-# mirror_dir <snapshot's copy> <directory relative to MAILCOW_DIR>: the directory becomes exactly
-# the snapshot's. What is here but not in the snapshot, or of another kind there (a directory where
-# the snapshot has a file, a link where it has a file), is set aside whole (a directory once, with
-# what it holds), then the snapshot's files are copied over the rest. The backup copies these
-# directories whole, so nothing in them is the server's own to keep.
+# mirror_dir <snapshot's copy> <directory relative to MAILCOW_DIR> [<kept path>...]: the directory
+# becomes exactly the snapshot's. What is here but not in the snapshot, or of another kind there (a
+# directory where the snapshot has a file, a link where it has a file), is set aside whole (a
+# directory once, with what it holds), then the snapshot's files are copied over the rest. The
+# backup copies these directories whole, so nothing in them is the server's own to keep, except the
+# kept paths (relative to the directory, with the directories holding them): those the snapshot
+# lacks stay, so a mirror never takes mailcow's own tracked files out of its checkout.
 mirror_dir() {
   local src=$1 rel=$2 dst=$MAILCOW_DIR/$2 path sub
   local -a paths
+  local -A keep=()
+  shift 2
+  for path in "$@"; do
+    while [ -n "$path" ] && [ "$path" != . ]; do
+      keep[$path]=1
+      path=$(dirname "$path")
+    done
+  done
   mkdir -p "$dst"
   mapfile -d '' -t paths < <(cd "$dst" && find . -mindepth 1 -print0)
   # find lists a directory before what it holds: once it is set aside, those are gone here.
@@ -180,14 +190,61 @@ mirror_dir() {
     [ -e "$dst/$sub" ] || [ -L "$dst/$sub" ] || continue
     if [ -e "$src/$sub" ] || [ -L "$src/$sub" ]; then
       [ "$(entry_kind "$dst/$sub")" != "$(entry_kind "$src/$sub")" ] || continue
+    elif [ -n "${keep[$sub]:-}" ]; then
+      continue
     fi
     set_aside "$rel/$sub"
   done
   cp -a "$src/." "$dst/"
 }
 
+# mailcow_tracked <directory relative to MAILCOW_DIR>: the files mailcow's checkout tracks there,
+# relative to that directory, NUL-separated. Outside a git checkout, its placeholders README.md
+# and .gitkeep, the only files mailcow ships in data/hooks.
+mailcow_tracked() {
+  local rel=$1 path
+  if git -C "$MAILCOW_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    while IFS= read -r -d '' path; do
+      if [[ $path == "$rel"/* ]]; then printf '%s\0' "${path#"$rel"/}"; fi
+    done < <(git -C "$MAILCOW_DIR" ls-files -z -- "$rel")
+  elif [ -d "$MAILCOW_DIR/$rel" ]; then
+    while IFS= read -r -d '' path; do
+      printf '%s\0' "${path#./}"
+    done < <(cd "$MAILCOW_DIR/$rel" && find . -mindepth 1 ! -type d \( -name README.md -o -name .gitkeep \) -print0)
+  fi
+}
+
+# mirror_hooks <snapshot's copy>: data/hooks mirrors the snapshot, mailcow's tracked files kept.
+mirror_hooks() {
+  local -a tracked
+  mapfile -d '' -t tracked < <(mailcow_tracked data/hooks)
+  mirror_dir "$1" data/hooks "${tracked[@]}"
+}
+
+# warn_unrecorded_hooks: a snapshot made before node-backup.sh always recorded data/hooks has no
+# hooks directory when the node had none, the same as one that never recorded it. The hooks here
+# stay as they are (a guess must not remove them), named so the owner sets aside by hand the ones
+# the old node no longer had.
+warn_unrecorded_hooks() {
+  local path list=''
+  local -a hooks
+  local -A tracked=()
+  [ -d "$MAILCOW_DIR/data/hooks" ] || return 0
+  while IFS= read -r -d '' path; do tracked[$path]=1; done < <(mailcow_tracked data/hooks)
+  mapfile -d '' -t hooks < <(cd "$MAILCOW_DIR/data/hooks" && find . -mindepth 1 ! -type d -print0 | sort -z)
+  for path in "${hooks[@]}"; do
+    path=${path#./}
+    [ -z "${tracked[$path]:-}" ] || continue
+    list+="${list:+, }data/hooks/$path"
+  done
+  [ -n "$list" ] || return 0
+  warn "the snapshot does not record data/hooks (made by an older node-backup.sh), so the hooks here stay: $list; move the ones the old node no longer had out of $MAILCOW_DIR/data/hooks by hand"
+}
+
 # place_files <dir with the restored backup>: mailcow.conf and the node's files where mailcow and
-# setup.sh read them. data/conf, data/assets/ssl and data/hooks mirror the snapshot (mirror_dir);
+# setup.sh read them. data/conf, data/assets/ssl and data/hooks mirror the snapshot (mirror_dir;
+# data/hooks only when the snapshot records it, see warn_unrecorded_hooks, and never without
+# mailcow's tracked files, see mirror_hooks);
 # mailcow's web settings and CSS (MAILCOW_CUSTOM_FILES) are copied when the snapshot has them.
 place_files() {
   local src=$1/mailexpert file
@@ -196,7 +253,7 @@ place_files() {
   mkdir -p "$MAILCOW_DIR/data/conf" "$MAILCOW_DIR/data/assets"
   if [ -d "$src/conf" ]; then mirror_dir "$src/conf" data/conf; fi
   if [ -d "$src/ssl" ]; then mirror_dir "$src/ssl" data/assets/ssl; fi
-  if [ -d "$src/hooks" ]; then mirror_dir "$src/hooks" data/hooks; fi
+  if [ -d "$src/hooks" ]; then mirror_hooks "$src/hooks"; else warn_unrecorded_hooks; fi
   for file in "${MAILCOW_CUSTOM_FILES[@]}"; do
     if [ -f "$src/$file" ]; then
       mkdir -p "$MAILCOW_DIR/data/$(dirname "$file")"
