@@ -152,14 +152,28 @@ async function doRefreshMicrosoftToken(account) {
   const expiry = new Date(Date.now() + refreshExpiresInSecs * 1000);
   const isPublic = !!account.oauth_public_client || becamePublic;
 
-  await query(`
+  // Compare-and-set on the grant and flow the refresh started from: a reconnect (auth-code or
+  // device-code) may have committed new tokens while the provider call was in flight. The stored
+  // refresh token is compared as stored (ciphertext with its own IV), so any rewrite of it
+  // counts as a change. A lost race keeps the reconnect's credentials and hands them back.
+  const saved = await query(`
     UPDATE email_accounts SET
       oauth_access_token = $1,
       oauth_refresh_token = COALESCE($2, oauth_refresh_token),
       oauth_token_expiry = $3,
       oauth_public_client = $4
     WHERE id = $5
-  `, [encrypt(access_token), refresh_token ? encrypt(refresh_token) : null, expiry, isPublic, account.id]);
+      AND oauth_refresh_token IS NOT DISTINCT FROM $6
+      AND oauth_public_client = $7
+  `, [
+    encrypt(access_token), refresh_token ? encrypt(refresh_token) : null, expiry, isPublic, account.id,
+    account.oauth_refresh_token, !!account.oauth_public_client,
+  ]);
+  if (saved?.rowCount === 0) {
+    const { rows } = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
+    if (!rows[0]) throw new Error('OAuth account no longer exists');
+    return rows[0];
+  }
 
   // Return plaintext tokens so callers can use them immediately without decrypting
   return { ...account, oauth_access_token: access_token, oauth_token_expiry: expiry, oauth_public_client: isPublic };
