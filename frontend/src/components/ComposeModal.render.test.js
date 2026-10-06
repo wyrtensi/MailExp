@@ -538,6 +538,7 @@ async function openNewCompose() {
   useStore.getState().openCompose({
     accountId: 'acct', to: ['recipient@example.invalid'], subject: 'Documents', body: 'Please review.', bodyIsHtml: false,
   });
+  assert.equal(useStore.getState().composeData.draftUid, undefined, 'a new letter, not a draft left open by an earlier test');
   const root = createRoot(document.getElementById('root'));
   await React.act(async () => { root.render(React.createElement(ComposeHost)); });
   await React.act(async () => {});
