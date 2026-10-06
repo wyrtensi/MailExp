@@ -545,3 +545,67 @@ describe('Review round', () => {
     await vi.waitFor(async () => expect(await audit('message.send_failed')).toHaveLength(1));
   });
 });
+
+describe('Editing a scheduled forward', () => {
+  const FORWARDED = 'forwarded attachment bytes';
+  // A scheduled forward of one attachment of a received letter, next to one the writer added: the
+  // send resolves the reference and the queue stores the bytes. The source row is then deleted, as
+  // when the original was purged while the forward waited.
+  const scheduleForward = async () => {
+    imapManager.moveQueue = { serverLocation: async row => ({ uid: row.uid, folder: row.folder }) };
+    imapManager.fetchAttachment = vi.fn(async () => Buffer.from(FORWARDED));
+    const { rows: [source] } = await db.query(
+      `INSERT INTO messages (account_id, uid, folder, message_id, subject, attachments)
+       VALUES ($1, 88, 'INBOX', '<forward-source@example.com>', 'Source', $2::jsonb) RETURNING id`,
+      [ACCOUNT, JSON.stringify([{ part: '2', filename: 'report.pdf', type: 'application/pdf', size: FORWARDED.length }])]
+    );
+    const at = new Date(Date.now() + 3600e3).toISOString();
+    const { status, body } = await send({
+      sendAt: at,
+      forwardedAttachments: [{ messageId: source.id, part: '2' }],
+      context: { isForward: true, forwardedAttachments: [{ messageId: source.id, part: '2', filename: 'report.pdf', size: FORWARDED.length }] },
+    });
+    expect(status).toBe(200);
+    await db.query('DELETE FROM messages WHERE id = $1', [source.id]);
+    return body;
+  };
+  const editAndResend = async (jobId) => {
+    const edit = await call('POST', `/scheduled/${jobId}/cancel`, { body: { reason: 'edit' } });
+    expect(edit.status).toBe(200);
+    const answer = await edit.json();
+    const res = await call('POST', '/send', {
+      body: { ...answer.compose, subject: 'Edited subject', sendAt: answer.sendAt }, key: `edit-${jobId}`,
+    });
+    return { answer, res, body: await res.json() };
+  };
+  const sentAttachments = () => sendMail.mock.calls[0][0].attachments.map(a => [a.filename, Buffer.from(a.content).toString()]);
+
+  it('gives the stored forwarded attachment back with its bytes, so it is sent again without its source', async () => {
+    const queued = await scheduleForward();
+    const { answer, res, body } = await editAndResend(queued.jobId);
+    expect(answer.compose.attachments).toEqual([
+      { filename: 'notes.txt', contentType: 'text/plain', size: 11, content: Buffer.from('hello notes').toString('base64') },
+      { filename: 'report.pdf', contentType: 'application/pdf', size: FORWARDED.length, content: Buffer.from(FORWARDED).toString('base64') },
+    ]);
+    // No reference is handed back: the next send would resolve it again against a source that is gone.
+    expect(answer.compose.forwardedAttachments).toEqual([]);
+    expect(answer.compose.context).toEqual({ isForward: true });
+    expect(res.status).toBe(200);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).toHaveBeenCalledOnce();
+    expect(sendMail.mock.calls[0][0].subject).toBe('Edited subject');
+    expect(sentAttachments()).toEqual([['notes.txt', 'hello notes'], ['report.pdf', FORWARDED]]);
+  });
+
+  it('gives back the forwarded attachment of a letter queued before the forwarded indexes were stored', async () => {
+    const queued = await scheduleForward();
+    const { rows: [row] } = await db.query('SELECT mail FROM outgoing_messages WHERE job_id = $1', [queued.jobId]);
+    const stored = JSON.parse(Buffer.from(row.mail).toString('utf8'));
+    delete stored.forwarded;
+    await db.query('UPDATE outgoing_messages SET mail = $2 WHERE job_id = $1', [queued.jobId, Buffer.from(JSON.stringify(stored))]);
+    const { answer, res } = await editAndResend(queued.jobId);
+    expect(answer.compose.attachments.map(a => a.filename)).toEqual(['notes.txt', 'report.pdf']);
+    expect(res.status).toBe(200);
+  });
+});
