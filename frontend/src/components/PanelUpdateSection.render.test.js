@@ -405,6 +405,36 @@ describe('the panel update section', () => {
     assert.equal(get(root, '[data-panel-update-reload]'), null);
   });
 
+  test('after a success the node part follows the agent update job, and names its failure', async () => {
+    const sha = 'b'.repeat(40);
+    const job = { id: '9', kind: 'update', params: { sha }, state: 'running', step: 'node-backup.sh --tag pre-update', error: null, createdAt: ago(60000), startedAt: ago(50000), finishedAt: null };
+    answers['GET /api/admin/update'] = state({
+      updateAvailable: false, compare: { status: 'identical', aheadBy: 0, url: null },
+      run: { ...RUN, state: 'succeeded', terminal: true, finishedAt: ago(90000), exitCode: 0 },
+      node: { configured: true, connected: true, scriptsCommit: 'a'.repeat(40), panelCommit: sha, job },
+    });
+    const root = await mount();
+    assert.equal(get(root, '[data-panel-update-node]').dataset.panelUpdateNode, 'running');
+    assert.equal(text(root, '[data-node-state]'), 'Updating the node');
+    assert.equal(text(root, '[data-node-step]'), 'node-backup.sh --tag pre-update');
+    assert.match(text(root, '[data-panel-update-node]'), /to bbbbbbbbbbbb/);
+    // Followed while it runs.
+    assert.ok(timers.some((entry) => !entry.cleared));
+
+    answers['GET /api/admin/update'] = state({
+      node: { configured: true, connected: true, scriptsCommit: 'a'.repeat(40), panelCommit: sha, job: { ...job, state: 'failed', error: 'backup_not_configured', finishedAt: ago(1000) } },
+    });
+    const again = await mount();
+    assert.equal(text(again, '[data-node-state]'), 'Node update failed');
+    assert.match(text(again, '[data-node-error]'), /node backup is not set up/);
+  });
+
+  test('without a node agent there is no node part', async () => {
+    answers['GET /api/admin/update'] = state({ node: { configured: false, connected: false, scriptsCommit: null, panelCommit: null, job: null } });
+    const root = await mount();
+    assert.equal(get(root, '[data-panel-update-node]'), null);
+  });
+
   test('a failed update names the logs, the runbook and the rollback command', async () => {
     answers['GET /api/admin/update'] = state({
       check: READY,

@@ -682,6 +682,19 @@ test('the node agent: a token shown once, a backup job that finishes, a revocati
   await answer('/mail-node/agent/token', 'POST', '/mail-node/agent/token');
 });
 
+test('the node update: the panel commit, one job at a time, the node part on the panel update', async () => {
+  const before = await demoRequest('GET', '/mail-node/agent');
+  assert.match(before.panelCommit, /^[0-9a-f]{40}$/);
+  const queued = await answer('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'update' });
+  assert.equal(queued.job.kind, 'update');
+  assert.equal(queued.job.params.sha, before.panelCommit);
+  await reject('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'backup' }, /already waiting or running/);
+  await reject('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'update' }, /already waiting or running/);
+  const panel = await demoRequest('GET', '/admin/update');
+  assert.equal(panel.node.configured, true);
+  assert.equal(panel.node.job.kind, 'update');
+});
+
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {
   const source = fs.readFileSync(API_PATH, 'utf8');
   const patterns = extractPatterns(source, ['POST', 'PUT', 'PATCH', 'DELETE']);

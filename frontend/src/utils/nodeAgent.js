@@ -34,9 +34,16 @@ export const AGENT_CONNECTION_KEYS = Object.freeze({
   connected: 'admin.nodeAgent.stateConnected',
 });
 
+const isActive = (job) => job?.state === 'queued' || job?.state === 'running';
+
 // The job of a kind still queued or running, or null.
 export function activeJob(jobs, kind) {
-  return (Array.isArray(jobs) ? jobs : []).find((job) => job?.kind === kind && (job.state === 'queued' || job.state === 'running')) ?? null;
+  return (Array.isArray(jobs) ? jobs : []).find((job) => job?.kind === kind && isActive(job)) ?? null;
+}
+
+// A backup or an update still queued or running: the server takes one of them at a time.
+export function nodeBusyJob(jobs) {
+  return activeJob(jobs, 'update') ?? activeJob(jobs, 'backup');
 }
 
 // The newest job of a kind, whatever its state.
@@ -58,7 +65,50 @@ export const JOB_ERROR_KEYS = Object.freeze({
   agent_token_rotated: 'admin.nodeAgent.errorRotated',
   agent_restarted: 'admin.nodeAgent.errorRestarted',
   agent_stopped: 'admin.nodeAgent.errorStopped',
+  // The update job (scripts/deploy/mail-node/node-update.sh); other codes show as they are, next to
+  // the node's own step text.
+  unknown_kind: 'admin.nodeAgent.errorUnknownKind',
+  not_in_main: 'admin.nodeAgent.errorNotInMain',
+  backup_not_configured: 'admin.nodeAgent.errorBackupNotConfigured',
+  backup_failed: 'admin.nodeAgent.errorBackupFailed',
+  rolled_back: 'admin.nodeAgent.errorRolledBack',
+  rollback_failed: 'admin.nodeAgent.errorRollbackFailed',
+  post_check_failed: 'admin.nodeAgent.errorPostCheckFailed',
+  update_interrupted: 'admin.nodeAgent.errorUpdateInterrupted',
+  node_standby: 'admin.nodeAgent.errorNodeStandby',
 });
+
+// The node's scripts against the panel's commit: unknown (either is not a commit), current, or
+// behind (the node runs another commit; "Update node now" brings it to the panel's).
+export function scriptsState(nodeCommit, panelCommit) {
+  const sha = /^[0-9a-f]{40}$/;
+  if (!sha.test(nodeCommit ?? '') || !sha.test(panelCommit ?? '')) return 'unknown';
+  return nodeCommit === panelCommit ? 'current' : 'behind';
+}
+
+export const SCRIPTS_STATE_KEYS = Object.freeze({
+  unknown: 'admin.nodeAgent.scriptsUnknown',
+  current: 'admin.nodeAgent.scriptsCurrent',
+  behind: 'admin.nodeAgent.scriptsBehind',
+});
+
+// The node's part of a panel update (GET /api/admin/update -> node): null when no agent is set up
+// (the node is updated by hand); otherwise the last update job's state (queued, running,
+// succeeded, failed), or current / behind / unknown when there is no job yet.
+export function nodeUpdatePart(node) {
+  if (!node?.configured) return null;
+  const job = node.job ?? null;
+  if (job && JOB_STATE_KEYS[job.state]) {
+    return { state: job.state, step: job.step ?? null, error: job.error ?? null, at: job.finishedAt ?? job.startedAt ?? job.createdAt ?? null, target: job.params?.sha ?? null };
+  }
+  return { state: scriptsState(node.scriptsCommit, node.panelCommit), step: null, error: null, at: null, target: null };
+}
+
+// The node's part is still under way: the panel update view keeps following it.
+export function nodeUpdateActive(node) {
+  return isActive(node?.job);
+}
+
 
 // The node's last backup as the status report has it: none (no backup recorded), off (no restic
 // keys on the node), ok, or old (node-backup.sh --status found it too old, or the node never

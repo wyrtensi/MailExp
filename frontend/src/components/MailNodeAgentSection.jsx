@@ -8,11 +8,13 @@ import {
   BACKUP_STATE_KEYS,
   JOB_ERROR_KEYS,
   JOB_STATE_KEYS,
-  activeJob,
+  SCRIPTS_STATE_KEYS,
   agentConnection,
   agentSetupCommands,
   backupSummary,
   latestJob,
+  nodeBusyJob,
+  scriptsState,
   shortCommit,
 } from '../utils/nodeAgent.js';
 
@@ -33,16 +35,43 @@ const codeStyle = {
 };
 const STATE_COLORS = { connected: 'var(--green)', waiting: 'var(--amber)', not_set_up: 'var(--text-tertiary)' };
 const BACKUP_COLORS = { ok: 'var(--green)', old: 'var(--red)', none: 'var(--amber)', off: 'var(--text-tertiary)' };
+const SCRIPTS_COLORS = { current: 'var(--green)', behind: 'var(--amber)', unknown: 'var(--text-tertiary)' };
 // While a job runs the section follows it every few seconds.
 const FOLLOW_MS = 4000;
 
 const when = (at) => (at ? formatDateTime(at, { seconds: true }) : null);
 
+// A job's state, step, failure and the end of its output (data-<name>-job, data-<name>-log).
+function JobDetails({ job, name, t }) {
+  return (
+    <div {...{ [`data-${name}-job`]: job.state }} style={{ marginTop: 8 }}>
+      <div style={rowStyle}>
+        <span style={termStyle}>{t('admin.nodeAgent.jobLabel')}</span>
+        <span>{t(JOB_STATE_KEYS[job.state] ?? 'admin.nodeAgent.unknown')}</span>
+        <span>{when(job.finishedAt ?? job.startedAt ?? job.createdAt)}</span>
+      </div>
+      {job.step && (
+        <div style={rowStyle}>
+          <span style={termStyle}>{t('admin.nodeAgent.stepLabel')}</span>
+          <span>{job.step}</span>
+        </div>
+      )}
+      {job.state === 'failed' && job.error && (
+        <div style={{ ...noteStyle, color: 'var(--red)' }}>
+          {JOB_ERROR_KEYS[job.error] ? t(JOB_ERROR_KEYS[job.error]) : job.error}
+        </div>
+      )}
+      {job.logTail && <pre {...{ [`data-${name}-log`]: '' }} style={{ ...codeStyle, maxHeight: 220, overflow: 'auto' }}>{job.logTail}</pre>}
+    </div>
+  );
+}
+
 // Settings -> Mail node -> "Node agent" (admins only): the service on the node host that takes jobs
 // from the panel (scripts/deploy/mail-node/node-agent.sh). Its state and last report (scripts
 // commit, mailcow version, containers, the node's last backup); connecting it (a token shown once,
-// with the setup.sh commands), rotating and revoking the token; and "Back up mail now" with the
-// job's progress. The server journals every change.
+// with the setup.sh commands), rotating and revoking the token; "Back up mail now" and "Update node
+// now" (the node's scripts to the panel's commit; the panel also asks for it after its own update)
+// with the job's progress. The server journals every change.
 export default function MailNodeAgentSection() {
   const { t } = useTranslation();
   const [agent, setAgent] = useState(null);
@@ -62,7 +91,8 @@ export default function MailNodeAgentSection() {
   useEffect(() => { load(); }, [load]);
 
   const jobs = agent?.jobs ?? [];
-  const running = activeJob(jobs, 'backup');
+  // A backup or an update: one at a time, and the section follows it.
+  const running = nodeBusyJob(jobs);
   const runningId = running?.id ?? null;
   useEffect(() => {
     if (!runningId) return undefined;
@@ -94,11 +124,14 @@ export default function MailNodeAgentSection() {
     setConfirmRevoke(false);
   });
   const backupNow = () => run(() => api.mailNode.requestAgentJob('backup'));
+  const updateNow = () => run(() => api.mailNode.requestAgentJob('update'));
 
   const connection = agentConnection(agent);
   const status = agent?.status ?? null;
   const backup = backupSummary(status);
   const lastBackupJob = latestJob(jobs, 'backup');
+  const lastUpdateJob = latestJob(jobs, 'update');
+  const scripts = scriptsState(status?.scriptsCommit, agent?.panelCommit);
   const size = (bytes) => {
     const p = sizeParts(bytes);
     return `${p.value} ${t(p.unitKey)}`;
@@ -213,27 +246,30 @@ export default function MailNodeAgentSection() {
             </button>
             {connection === 'waiting' && !running && <span style={noteStyle}>{t('admin.nodeAgent.backupWaitsForAgent')}</span>}
           </div>
-          {lastBackupJob && (
-            <div data-backup-job={lastBackupJob.state} style={{ marginTop: 8 }}>
-              <div style={rowStyle}>
-                <span style={termStyle}>{t('admin.nodeAgent.jobLabel')}</span>
-                <span>{t(JOB_STATE_KEYS[lastBackupJob.state] ?? 'admin.nodeAgent.unknown')}</span>
-                <span>{when(lastBackupJob.finishedAt ?? lastBackupJob.startedAt ?? lastBackupJob.createdAt)}</span>
-              </div>
-              {lastBackupJob.step && (
-                <div style={rowStyle}>
-                  <span style={termStyle}>{t('admin.nodeAgent.stepLabel')}</span>
-                  <span>{lastBackupJob.step}</span>
-                </div>
-              )}
-              {lastBackupJob.state === 'failed' && lastBackupJob.error && (
-                <div style={{ ...noteStyle, color: 'var(--red)' }}>
-                  {JOB_ERROR_KEYS[lastBackupJob.error] ? t(JOB_ERROR_KEYS[lastBackupJob.error]) : lastBackupJob.error}
-                </div>
-              )}
-              {lastBackupJob.logTail && <pre data-backup-log style={{ ...codeStyle, maxHeight: 220, overflow: 'auto' }}>{lastBackupJob.logTail}</pre>}
-            </div>
-          )}
+          {lastBackupJob && <JobDetails job={lastBackupJob} name="backup" t={t} />}
+
+          <div style={subTitleStyle}>{t('admin.nodeAgent.updateTitle')}</div>
+          <div style={rowStyle}>
+            <span style={termStyle}>{t('admin.nodeAgent.panelCommitLabel')}</span>
+            <code>{shortCommit(agent.panelCommit) ?? t('admin.nodeAgent.unknown')}</code>
+          </div>
+          <div style={rowStyle}>
+            <span style={termStyle}>{t('admin.nodeAgent.scriptsStateLabel')}</span>
+            <span data-scripts-state={scripts} style={{ color: SCRIPTS_COLORS[scripts], fontWeight: 600 }}>{t(SCRIPTS_STATE_KEYS[scripts])}</span>
+          </div>
+          <div style={noteStyle}>{t('admin.nodeAgent.updateNote')}</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              style={buttonStyle}
+              disabled={busy || !!running || connection === 'not_set_up' || !agent.panelCommit}
+              onClick={updateNow}
+            >
+              {t('admin.nodeAgent.updateNow')}
+            </button>
+            {running && <span style={noteStyle}>{t('admin.nodeAgent.busyNote')}</span>}
+          </div>
+          {lastUpdateJob && <JobDetails job={lastUpdateJob} name="update" t={t} />}
         </>
       )}
     </div>

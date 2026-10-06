@@ -4,6 +4,8 @@
 // (`run`). The host (systemd units running the deploy scripts) writes the check and run results;
 // the backend only relays them. Nothing here touches the network or the DOM.
 
+import { nodeUpdateActive } from './nodeAgent.js';
+
 export const POLL_INTERVAL_MS = 3000;
 // A run the host has not touched for this long is not running any more (the host rewrites the
 // result at least every 10 s while it updates); the backend applies the same limit to `busy`.
@@ -75,7 +77,9 @@ export function isActiveResult(result, now = Date.now()) {
 // Whether the screen keeps asking the server: something is running or waiting for the host.
 export function needsPolling(data, now = Date.now()) {
   if (!data) return false;
-  return !!(data.busy || data.pending || isActiveResult(data.run, now) || isActiveResult(data.check, now));
+  return !!(data.busy || data.pending || isActiveResult(data.run, now) || isActiveResult(data.check, now)
+    // The node's part (the agent's update job) after the panel's.
+    || nodeUpdateActive(data.node));
 }
 
 // "The panel is restarting": the backend is gone for a moment while the containers are replaced

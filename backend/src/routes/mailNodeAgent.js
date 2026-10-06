@@ -13,6 +13,7 @@ import {
   getAgentState,
   issueToken,
   listJobs,
+  panelCommit,
   recordStatus,
   reportJob,
   revokeToken,
@@ -59,7 +60,8 @@ router.use(requireAuth);
 
 router.get('/agent', requireAdmin, handle(async (_req, res) => {
   const [state, jobs] = await Promise.all([getAgentState(), listJobs(10)]);
-  res.json({ ...state, jobs });
+  // panelCommit: what "Update node now" brings the node's scripts to (null on a build without one).
+  res.json({ ...state, panelCommit: panelCommit(), jobs });
 }));
 
 router.get('/agent/jobs', requireAdmin, handle(async (req, res) => {

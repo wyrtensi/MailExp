@@ -183,3 +183,38 @@ describe('MailNodeAgentSection', () => {
     await again.unmount();
   });
 });
+
+describe('MailNodeAgentSection: the node update', () => {
+  const PANEL = 'feedfacefeedfacefeedfacefeedfacefeedface';
+
+  test('"Update node now" queues an update; its failure shows; a backup and an update exclude each other', async () => {
+    let state = { ...CONNECTED, panelCommit: PANEL };
+    const job = { id: '8', kind: 'update', params: { sha: PANEL }, state: 'running', step: 'setup.sh at feedfacefeed', logTail: '== setup.sh', error: null, createdAt: '2026-10-07T10:00:00.000Z', startedAt: '2026-10-07T10:00:02.000Z', finishedAt: null };
+    answers['GET /api/mail-node/agent'] = () => state;
+    answers['POST /api/mail-node/agent/jobs'] = () => { state = { ...state, jobs: [job] }; return { job: { ...job, state: 'queued' } }; };
+    const { host, unmount } = await mount();
+    assert.equal(host.querySelector('[data-scripts-state]').dataset.scriptsState, 'behind');
+    await click(button(host, 'admin.nodeAgent.updateNow'));
+    assert.deepEqual(calls.find((c) => c.method === 'POST').body, { kind: 'update' });
+    assert.equal(host.querySelector('[data-update-job]').dataset.updateJob, 'running');
+    assert.equal(host.querySelector('[data-update-log]').textContent, '== setup.sh');
+    assert.equal(button(host, 'admin.nodeAgent.updateNow').disabled, true);
+    assert.equal(button(host, 'admin.nodeAgent.backupNow').disabled, true);
+    await unmount();
+
+    state = { ...state, jobs: [{ ...job, state: 'failed', error: 'rolled_back', finishedAt: '2026-10-07T10:05:00.000Z' }] };
+    const again = await mount();
+    assert.equal(again.host.querySelector('[data-update-job]').dataset.updateJob, 'failed');
+    assert.match(again.host.textContent, /admin\.nodeAgent\.errorRolledBack/);
+    assert.equal(button(again.host, 'admin.nodeAgent.updateNow').disabled, false);
+    await again.unmount();
+  });
+
+  test('without the panel commit the node cannot be updated from here', async () => {
+    answers['GET /api/mail-node/agent'] = { ...CONNECTED, panelCommit: null };
+    const { host, unmount } = await mount();
+    assert.equal(host.querySelector('[data-scripts-state]').dataset.scriptsState, 'unknown');
+    assert.equal(button(host, 'admin.nodeAgent.updateNow').disabled, true);
+    await unmount();
+  });
+});

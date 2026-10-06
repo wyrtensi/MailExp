@@ -1,7 +1,7 @@
 import { demoNodeTime, demoTime } from './clock.js';
 import { fleetAccounts, fleetDomains, fleetLetters } from './fleet.js';
 import { demoOutageRequest, demoOutageWaiting } from './outages.js';
-import { demoNodeAgentRequest } from './nodeAgent.js';
+import { demoNodeAgentRequest, demoNodeUpdateState } from './nodeAgent.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
 import { demoRole } from '../utils/demoRole.js';
 import {
@@ -2801,6 +2801,7 @@ export async function demoRequest(method, path, body = {}) {
       pending: null,
       check: null,
       run: null,
+      node: demoNodeUpdateState(),
       links: {},
     };
   }
