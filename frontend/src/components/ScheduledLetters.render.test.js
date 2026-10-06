@@ -225,3 +225,29 @@ test('a late list response for the previous mailbox filter does not replace the 
   assert.deepEqual(shown(), ['b-job'], 'the obsolete mailbox A response must be ignored');
   await React.act(async () => { useStore.getState().setShowScheduled(false); });
 });
+
+test('a late list failure for the previous mailbox filter does not hide the current letters', async () => {
+  let rejectA;
+  api.scheduled.list = accountId => (accountId === 'a'
+    ? new Promise((_, reject) => { rejectA = reject; })
+    : Promise.resolve({ letters: [{
+      id: 'b-job', accountId: 'b', status: 'queued', scheduled: true, canManage: false,
+      subject: 'b letter', to: ['recipient@example.com'], sendAt,
+    }] }));
+  useStore.setState({
+    accounts: [{ id: 'a', email_address: 'a@example.com' }, { id: 'b', email_address: 'b@example.com' }],
+    selectedAccountId: 'a',
+  });
+  await React.act(async () => { useStore.getState().setShowScheduled(true); });
+  const picker = document.querySelector('[data-scheduled-dialog] select');
+  await React.act(async () => {
+    picker.value = 'b';
+    picker.dispatchEvent(new window.Event('change', { bubbles: true }));
+  });
+
+  await React.act(async () => rejectA(new Error('stale list failed')));
+  const alert = document.querySelector('[data-scheduled-dialog] [role="alert"]');
+  assert.equal(alert?.textContent ?? null, null, 'the obsolete failure must not be shown');
+  assert.deepEqual([...document.querySelectorAll('[data-scheduled-letter]')].map(el => el.dataset.scheduledLetter), ['b-job']);
+  await React.act(async () => { useStore.getState().setShowScheduled(false); });
+});
