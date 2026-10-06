@@ -57,6 +57,13 @@ function emptyContact() {
 
 const PAGE_SIZE = 100;
 
+// Takes the next request number from a ref and returns a check that is true once a newer
+// request has taken it.
+function claimRequest(ref) {
+  const request = ++ref.current;
+  return () => request !== ref.current;
+}
+
 export default function ContactsPage() {
   const { t } = useTranslation();
   const { setShowContacts, contactsFocus, clearContactsFocus, openCompose, setSelectedAccount } = useStore();
@@ -84,10 +91,12 @@ export default function ContactsPage() {
   const totalRef       = useRef(0);
   const loadingMoreRef = useRef(false);
   const searchRef      = useRef('');
-  // Latest sender lookup; an older one that resolves later is ignored.
+  // Latest sender lookup; an older one that resolves later does not touch the list.
   const focusRequestRef = useRef(0);
-  // Latest contact click; starting a new contact also bumps it, so a click still loading is dropped.
-  const selectRequestRef = useRef(0);
+  // Owner of the detail panel. A contact click, a sender lookup, a new contact and leaving the
+  // form or the panel each take it, so an older click or lookup that resolves later cannot open
+  // its contact over them or overwrite a form the user is typing into.
+  const detailRequestRef = useRef(0);
 
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
   useEffect(() => { totalRef.current = total; }, [total]);
@@ -118,6 +127,7 @@ export default function ContactsPage() {
     clearContactsFocus();
     const request = ++focusRequestRef.current;
     const stale = () => request !== focusRequestRef.current;
+    const detailStale = claimRequest(detailRequestRef);
     (async () => {
       clearTimeout(searchTimer.current);
       setSearch(email);
@@ -129,9 +139,10 @@ export default function ContactsPage() {
         setContacts(res.contacts);
         setTotal(res.total);
         const match = contactForEmail(res.contacts, email);
+        if (detailStale()) return;
         if (match) {
           const full = await api.getContact(match.id);
-          if (stale()) return;
+          if (stale() || detailStale()) return;
           setSelected(full);
           setShowNew(false);
         } else {
@@ -179,8 +190,7 @@ export default function ContactsPage() {
   }, []);
 
   const selectContact = async (c) => {
-    const request = ++selectRequestRef.current;
-    const stale = () => request !== selectRequestRef.current;
+    const stale = claimRequest(detailRequestRef);
     setError(null);
     try {
       const full = await api.getContact(c.id);
@@ -197,7 +207,7 @@ export default function ContactsPage() {
   };
 
   const startNew = () => {
-    selectRequestRef.current += 1; // a contact click still loading must not close this form
+    claimRequest(detailRequestRef);
     setSelected(null);
     setForm(emptyContact());
     setEditing(false);
@@ -208,6 +218,7 @@ export default function ContactsPage() {
   };
 
   const goBackToList = () => {
+    claimRequest(detailRequestRef);
     setMobilePanel('list');
     setSelected(null);
     setShowNew(false);
@@ -233,6 +244,7 @@ export default function ContactsPage() {
 
   const cancelEdit = () => {
     if (showNew) {
+      claimRequest(detailRequestRef);
       setShowNew(false);
       if (isMobile) setMobilePanel('list');
     } else {
