@@ -64,8 +64,8 @@ export async function markReconnectRequired(accountId, rejectedRefreshToken) {
 // Refresh through the provider module, then normalize failures. Provider modules persist
 // the new tokens themselves in a single UPDATE that keeps the stored refresh token when
 // none is returned, and only while the grant they refreshed is still the stored one (otherwise
-// they return the stored row a reconnect wrote meanwhile). The original error is intentionally not attached as `cause`: its
-// message may contain the provider response.
+// they return the stored row a reconnect wrote meanwhile). The original error is intentionally
+// not attached as `cause`: its message may contain the provider response.
 export async function refreshOAuthToken(account) {
   let refresh;
   if (account.oauth_provider === 'microsoft') refresh = refreshMicrosoftToken;

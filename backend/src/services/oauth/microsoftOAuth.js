@@ -171,7 +171,11 @@ async function doRefreshMicrosoftToken(account) {
   ]);
   if (saved?.rowCount === 0) {
     const { rows } = await query('SELECT * FROM email_accounts WHERE id = $1', [account.id]);
-    if (!rows[0]) throw new Error('OAuth account no longer exists');
+    if (!rows[0]) {
+      const err = new Error('OAuth account no longer exists');
+      err.code = 'account_not_found';
+      throw err;
+    }
     return rows[0];
   }
 

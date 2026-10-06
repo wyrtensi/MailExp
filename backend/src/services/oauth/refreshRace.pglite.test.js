@@ -110,6 +110,16 @@ describe('Google refresh racing a reconnect', () => {
     expect(decrypt(result.oauth_access_token)).toBe('new-consent-access');
   });
 
+  it('fails when the mailbox was deleted during the provider call', async () => {
+    const account = await insertGoogleAccount();
+    const provider = holdTokenResponse();
+    const pending = refreshGoogleToken(account);
+    await provider.reached;
+    await state.db.query('DELETE FROM email_accounts WHERE id = $1', [ACCOUNT]);
+    provider.respond({ access_token: 'stale-access', expires_in: 3600 });
+    await expect(pending).rejects.toMatchObject({ code: 'authentication_failed' });
+  });
+
   it('saves a refresh that no reconnect raced', async () => {
     const account = await insertGoogleAccount();
     vi.stubGlobal('fetch', async (_url, options) => {
@@ -157,6 +167,53 @@ describe('Microsoft refresh racing a reconnect', () => {
     expect(decrypt(stored.oauth_refresh_token)).toBe('new-consent-refresh');
     expect(result.oauth_public_client).toBe(true);
     expect(decrypt(result.oauth_access_token)).toBe('new-consent-access');
+  });
+
+  it('discards the refresh when a reconnect changed only the client mode', async () => {
+    const account = await insertMicrosoftAccount();
+    const provider = holdTokenResponse();
+    const pending = refreshMicrosoftToken(account);
+    await provider.reached;
+    // The stored refresh token stays byte-for-byte the same; only the flow changes.
+    await state.db.query('UPDATE email_accounts SET oauth_public_client = true WHERE id = $1', [ACCOUNT]);
+    provider.respond({ access_token: 'stale-access', refresh_token: 'stale-refresh', expires_in: 3600 });
+    const result = await pending;
+
+    const stored = await readAccount();
+    expect(stored.oauth_public_client).toBe(true);
+    expect(stored.oauth_refresh_token).toBe(account.oauth_refresh_token);
+    expect(decrypt(stored.oauth_access_token)).toBe('old-access');
+    expect(result.oauth_public_client).toBe(true);
+  });
+
+  it('fails with a stable code when the mailbox was deleted during the provider call', async () => {
+    const account = await insertMicrosoftAccount();
+    const provider = holdTokenResponse();
+    const pending = refreshMicrosoftToken(account);
+    await provider.reached;
+    await state.db.query('DELETE FROM email_accounts WHERE id = $1', [ACCOUNT]);
+    provider.respond({ access_token: 'stale-access', refresh_token: 'stale-refresh', expires_in: 3600 });
+    await expect(pending).rejects.toMatchObject({ code: 'account_not_found' });
+  });
+
+  it('records the public client mode a self-healed refresh discovered', async () => {
+    const account = await insertMicrosoftAccount();
+    const secrets = [];
+    vi.stubGlobal('fetch', async (_url, options) => {
+      secrets.push(options.body.has('client_secret'));
+      if (options.body.has('client_secret')) {
+        return { ok: false, json: async () => ({ error: 'invalid_client', error_description: 'AADSTS90023: Public clients cannot send a client secret.' }) };
+      }
+      return { ok: true, json: async () => ({ access_token: 'healed-access', refresh_token: 'healed-refresh', expires_in: 3600 }) };
+    });
+    const result = await refreshMicrosoftToken(account);
+
+    const stored = await readAccount();
+    expect(secrets).toEqual([true, false]);
+    expect(result.oauth_public_client).toBe(true);
+    expect(stored.oauth_public_client).toBe(true);
+    expect(decrypt(stored.oauth_access_token)).toBe('healed-access');
+    expect(decrypt(stored.oauth_refresh_token)).toBe('healed-refresh');
   });
 
   it('saves a refresh that no reconnect raced', async () => {
