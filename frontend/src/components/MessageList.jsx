@@ -128,7 +128,7 @@ export default function MessageList() {
     loadingMessages, setLoadingMessages, selectedMessageId, lastViewedMessageId,
     setSelectedMessage, updateMessage, removeMessage, removeMessages,
     decrementUnread, incrementUnread, addNotification, notifications, removeNotification,
-    searchQuery, setSearchQuery, setIsSearching,
+    searchQuery, setSearchQuery, isSearching, setIsSearching,
     searchResults, setSearchResults, openCompose, accountsReady, accounts,
     messagesRefreshToken, layout, setLayout, pageSize, setPageSize, scrollMode,
     setMobileSidebarOpen, unreadCounts, showContacts, setShowContacts,
@@ -4020,8 +4020,9 @@ export default function MessageList() {
             paginated mode too: the search has no total to count pages by, and the folder
             pagination below would page the folder, not the results. */}
         {(scrollMode === 'infinite' || searchQuery.trim()) && (<>
-          {/* Search mode: load more search results */}
-          {searchQuery.trim() ? (<>
+          {/* Search mode: load more search results. Hidden while a new search runs, since
+              until it answers the footer would describe the previous results. */}
+          {searchQuery.trim() ? !isSearching && (<>
             {searchLoadingMore && (
               <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 12 }}>
                 <div style={{

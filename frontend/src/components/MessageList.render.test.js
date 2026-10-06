@@ -826,4 +826,48 @@ describe('MessageList — search results past the first page in paginated mode',
       await React.act(async () => { useStore.setState({ searchQuery: '', pageSize, scrollMode }); });
     }
   });
+
+  test('a new search hides the footer of the previous results, and clearing it brings the folder page back', async () => {
+    const originalSearch = api.search;
+    const { pageSize, scrollMode } = useStore.getState();
+    api.search = async (q, accountId, { offset = 0, limit } = {}) => ({ messages: HITS.slice(offset, offset + limit) });
+    const footerTexts = () => [...container.querySelectorAll('button, div')]
+      .filter(el => el.children.length === 0).map(el => el.textContent.trim());
+    const pager = () => {
+      const buttons = [...container.querySelectorAll('button')];
+      return {
+        prev: buttons.find(b => b.textContent.includes('messageList.prevPage')),
+        next: buttons.find(b => b.textContent.includes('messageList.nextPage')),
+      };
+    };
+    const wait = () => React.act(async () => { await new Promise(r => setTimeout(r, 350)); }); // 300ms debounce
+    try {
+      const rows = ['f-1', 'f-2', 'f-3', 'f-4'].map((id, i) => ({ ...MESSAGE, id, uid: 20 + i }));
+      await mount({ rows, threadedView: false, state: { scrollMode: 'paginated', pageSize: 2, searchResults: [] } });
+      await React.act(async () => {});
+      await React.act(async () => { pager().next.click(); });
+      assert.equal(pager().next.disabled, true, 'precondition: the folder is on its last page');
+      assert.equal(pager().prev.disabled, false);
+
+      await React.act(async () => { useStore.setState({ searchQuery: 'needle' }); });
+      await wait();
+      await React.act(async () => { [...container.querySelectorAll('button')].find(b => b.textContent === 'messageList.loadMore').click(); });
+      assert.ok(footerTexts().includes('messageList.noMoreMessages'), 'precondition: all three hits are loaded');
+
+      await React.act(async () => { useStore.setState({ searchQuery: 'needle again' }); });
+      assert.equal(useStore.getState().isSearching, true, 'the new search is still running');
+      assert.ok(!footerTexts().includes('messageList.noMoreMessages'), 'no "no more" for the results being replaced');
+      assert.ok(!footerTexts().includes('messageList.loadMore'));
+      await wait();
+
+      await React.act(async () => { useStore.setState({ searchQuery: '' }); });
+      await React.act(async () => {});
+      assert.ok(pager().next, 'the folder pagination is back');
+      assert.equal(pager().next.disabled, true, 'still on the last folder page');
+      assert.equal(pager().prev.disabled, false);
+    } finally {
+      api.search = originalSearch;
+      await React.act(async () => { useStore.setState({ searchQuery: '', pageSize, scrollMode }); });
+    }
+  });
 });
