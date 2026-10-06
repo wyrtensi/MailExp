@@ -1,7 +1,7 @@
 import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers';
-import { createPrefSaveQueue } from './prefSaveQueue.js';
+import { createPrefSaveQueue, PREF_SAVE_SETTLE_TIMEOUT_MS } from './prefSaveQueue.js';
 
 function harness({ saveImpl, exitImpl } = {}) {
   const saves = [];
@@ -251,6 +251,45 @@ describe('serialized writes: an older save cannot land after a newer one', () =>
     await settle();
     assert.deepEqual(exitSaves, [{ theme: 'daylight' }]);
     assert.deepEqual(saves, [{ theme: 'dusk' }, { theme: 'night' }]);
+  });
+
+  test('a save that never settles stops holding later writes after the settle timeout', async () => {
+    // The request layer has no timeout, so a hung PATCH would otherwise hold every later
+    // preference write for the rest of the session.
+    const { queue, saves } = harness({ saveImpl: () => (saves.length === 1 ? new Promise(() => {}) : Promise.resolve()) });
+    queue.schedule({ theme: 'dusk' });
+    mock.timers.tick(1000);
+    queue.schedule({ theme: 'daylight' });
+    mock.timers.tick(1000);
+    mock.timers.tick(PREF_SAVE_SETTLE_TIMEOUT_MS - 1001);
+    await settle();
+    assert.deepEqual(saves, [{ theme: 'dusk' }], 'still waiting just before the timeout');
+    mock.timers.tick(1);
+    await settle();
+    assert.deepEqual(saves, [{ theme: 'dusk' }, { theme: 'daylight' }]);
+    assert.equal(queue.hasPending(), false);
+  });
+
+  test('a save that settles late after its timeout does not release anything twice', async () => {
+    const slow = deferred();
+    const second = deferred();
+    const { queue, saves } = harness({
+      saveImpl: () => (saves.length === 1 ? slow.promise : saves.length === 2 ? second.promise : Promise.resolve()),
+    });
+    queue.schedule({ theme: 'dusk' });
+    mock.timers.tick(1000);
+    queue.schedule({ theme: 'daylight' });
+    mock.timers.tick(PREF_SAVE_SETTLE_TIMEOUT_MS);
+    await settle();
+    assert.equal(saves.length, 2, 'the held write went out after the timeout');
+    queue.schedule({ theme: 'night' });
+    mock.timers.tick(1000);
+    slow.resolve();   // the hung save finally answers while "daylight" is in flight
+    await settle();
+    assert.equal(saves.length, 2, '"night" must still wait for "daylight"');
+    second.resolve();
+    await settle();
+    assert.deepEqual(saves.at(-1), { theme: 'night' });
   });
 
   test('cancel drops a write held behind an in-flight save', async () => {

@@ -18,7 +18,13 @@
 //
 // The queue takes its save functions as dependencies so this behaviour can be tested
 // without a network or a DOM.
-export function createPrefSaveQueue({ save, saveOnExit, delayMs = 1000, onError } = {}) {
+
+// How long a save may stay unsettled before later writes stop waiting for it.
+export const PREF_SAVE_SETTLE_TIMEOUT_MS = 20_000;
+
+export function createPrefSaveQueue({
+  save, saveOnExit, delayMs = 1000, settleTimeoutMs = PREF_SAVE_SETTLE_TIMEOUT_MS, onError,
+} = {}) {
   let timer = null;
   let pending = {};
   let inFlight = 0; // saves sent and not yet settled; more than one only after an exit flush
@@ -55,12 +61,22 @@ export function createPrefSaveQueue({ save, saveOnExit, delayMs = 1000, onError 
     }
     if (!result || typeof result.then !== 'function') return;
     inFlight += 1;
+    // Released once, by whichever comes first: the save settling or the settle timeout. The
+    // request layer has no timeout of its own, so a hung save would otherwise hold every later
+    // write for the rest of the session. A save that answers after its timeout still reports
+    // a failure, but no longer counts as in flight.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      clearTimeout(settleTimer);
+      inFlight -= 1;
+      if (inFlight === 0) send(takeHeld(), false);
+    };
+    const settleTimer = setTimeout(release, settleTimeoutMs);
     result
       .then(null, err => onError?.(err, keys))
-      .then(() => {
-        inFlight -= 1;
-        if (inFlight === 0) send(takeHeld(), false);
-      });
+      .then(release);
   };
 
   return {
