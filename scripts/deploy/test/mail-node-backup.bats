@@ -819,6 +819,60 @@ keys() {
   [[ $output == *"not in the snapshot, set aside: data/hooks/postfix"* ]]
 }
 
+@test "a node without hooks: the snapshot records an empty data/hooks, the update sets a rehearsal's hooks aside" {
+  configured
+  run bash "$BACKUP" --tag manual
+  [ "$status" -eq 0 ]
+  SNAP=$MOCK_DIR/repo/$(latest_id)/backup/mailexpert
+  [ -d "$SNAP/hooks" ] && [ -z "$(ls -A "$SNAP/hooks")" ]
+  # The rehearsal restores a snapshot with a hook.
+  mkdir -p "$MC/data/hooks/postfix"
+  printf '#!/bin/sh\necho postfix\n' >"$MC/data/hooks/postfix/pre_start.sh"
+  chmod 755 "$MC/data/hooks/postfix/pre_start.sh"
+  run bash "$BACKUP" --tag manual
+  [ "$status" -eq 0 ]
+  FIRST=$(latest_id)
+  fresh_node
+  run bash "$RESTORE" latest --mailcow-dir "$MC" --rehearsal < <(keys)
+  [ "$status" -eq 0 ]
+  [ -x "$MC/data/hooks/postfix/pre_start.sh" ]
+  # The owner removed the whole hooks directory on the old node before the move backup, which
+  # then records data/hooks empty.
+  repo_copy "$FIRST" 0000000b "$(cat "$MOCK_DIR/repo/$FIRST.host")" mailcow move
+  SNAP=$MOCK_DIR/repo/0000000b$(printf 'c%.0s' $(seq 56))/backup/mailexpert
+  rm -r "$SNAP/hooks/postfix"
+  run bash "$RESTORE" 0000000b --mailcow-dir "$MC" --update
+  [ "$status" -eq 0 ]
+  [ -d "$MC/data/hooks" ] && [ -z "$(ls -A "$MC/data/hooks")" ]
+  set -- "$MAILEXPERT_NODE_BACKUP_DIR"/pre-restore-*
+  [ "$#" -eq 1 ] && [ -x "$1/data/hooks/postfix/pre_start.sh" ]
+  [[ $output == *"not in the snapshot, set aside: data/hooks/postfix"* ]]
+  [[ $output != *"does not record data/hooks"* ]]
+}
+
+@test "a snapshot made before data/hooks was always recorded keeps the node's hooks and names them" {
+  configured
+  mkdir -p "$MC/data/hooks/dovecot"
+  printf '#!/bin/sh\necho dovecot\n' >"$MC/data/hooks/dovecot/pre_start.sh"
+  chmod 755 "$MC/data/hooks/dovecot/pre_start.sh"
+  run bash "$BACKUP" --tag manual
+  [ "$status" -eq 0 ]
+  FIRST=$(latest_id)
+  fresh_node
+  run bash "$RESTORE" latest --mailcow-dir "$MC" --rehearsal < <(keys)
+  [ "$status" -eq 0 ]
+  # An older backup of a node without hooks has no hooks directory at all: "none" and "not
+  # recorded" look the same, so the hooks here stay, named in a warning.
+  repo_copy "$FIRST" 0000000c "$(cat "$MOCK_DIR/repo/$FIRST.host")" mailcow move
+  rm -r "$MOCK_DIR/repo/0000000c$(printf 'c%.0s' $(seq 56))/backup/mailexpert/hooks"
+  run bash "$RESTORE" 0000000c --mailcow-dir "$MC" --update
+  [ "$status" -eq 0 ]
+  [ -x "$MC/data/hooks/dovecot/pre_start.sh" ]
+  set -- "$MAILEXPERT_NODE_BACKUP_DIR"/pre-restore-*/data/hooks
+  [ ! -e "$1" ]
+  [[ $output == *"warning: the snapshot does not record data/hooks"*"data/hooks/dovecot/pre_start.sh"* ]]
+}
+
 @test "a restore that stopped half way is run again" {
   configured
   run bash "$BACKUP" --tag manual
