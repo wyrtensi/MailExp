@@ -43,13 +43,18 @@ describe('addAccountOptions', () => {
     assert.deepEqual([domain(null).enabled, domain(null).hintKey], [false, null]);
   });
 
-  it('keeps Gmail listed but inactive, with the reason, while no app can take an address', () => {
+  it('keeps Gmail listed but inactive, with the reason, while Google is not configured', () => {
     const [notConfigured] = addAccountOptions({ googleStatus: { configured: false, available: false } });
     assert.equal(notConfigured.enabled, false);
     assert.equal(notConfigured.hintKey, 'admin.integrations.google.errorNotConfigured');
+  });
+
+  // An address already in an app's grant journal goes back there without a new seat, even when
+  // every app is full or closed; only the server knows the address, so it decides at start.
+  it('keeps Gmail usable while no app has a free seat, with a note that only known addresses fit', () => {
     const [full] = addAccountOptions({ googleStatus: { configured: true, available: false } });
-    assert.equal(full.enabled, false);
-    assert.equal(full.hintKey, 'admin.integrations.google.errorNoAppCapacity');
+    assert.equal(full.enabled, true);
+    assert.equal(full.hintKey, 'admin.accounts.add.gmailOnlyKnown');
   });
 
   it('keeps Gmail inactive without a reason while the status loads', () => {

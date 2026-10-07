@@ -98,7 +98,10 @@ export default function App() {
     const oauthError = params.get('oauth_error');
     if ((oauthSuccess || oauthError) && window.opener) {
       if (oauthSuccess) {
-        window.opener.postMessage({ type: 'oauth_success', provider: oauthSuccess, result: params.get('oauth_result') || undefined }, window.location.origin);
+        window.opener.postMessage({
+          type: 'oauth_success', provider: oauthSuccess,
+          result: params.get('oauth_result') || undefined, notice: params.get('oauth_notice') || undefined,
+        }, window.location.origin);
       } else {
         // oauth_account: the Microsoft mailbox to reconnect by device code instead (redirect_not_configured).
         window.opener.postMessage({ type: 'oauth_error', error: oauthError, provider: params.get('oauth_provider') || undefined, account: params.get('oauth_account') || undefined }, window.location.origin);

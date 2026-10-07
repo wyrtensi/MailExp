@@ -21,9 +21,12 @@ async function applyMigration(db, sql) {
   for (const statement of statements) await db.query(statement);
 }
 
-export async function createRealSchemaDb() {
+// `before` (a migration file name or its number prefix, e.g. '0096') stops ahead of that migration,
+// for a test that fills the older schema and then applies the migration itself.
+export async function createRealSchemaDb({ before = null } = {}) {
   const db = new PGlite({ extensions: { pg_trgm } });
-  const files = readdirSync(migrationsDir).filter(f => /^\d{4}_.+\.sql$/.test(f)).sort();
+  const files = readdirSync(migrationsDir).filter(f => /^\d{4}_.+\.sql$/.test(f)).sort()
+    .filter(f => !before || f < before);
   for (const file of files) {
     try {
       await applyMigration(db, readFileSync(join(migrationsDir, file), 'utf8'));

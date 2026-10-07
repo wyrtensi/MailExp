@@ -133,7 +133,7 @@ describe('resolveGoogleConfig', () => {
     process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
     query.mockResolvedValue({ rows: [APP] });
     expect(await resolveGoogleConfig()).toEqual({
-      appId: 'app-1', clientId: CLIENT_ID, clientSecret: 'app-secret', redirectUri: REDIRECT_URI,
+      appId: 'app-1', projectNumber: '123456789012', clientId: CLIENT_ID, clientSecret: 'app-secret', redirectUri: REDIRECT_URI,
     });
     expect(query.mock.calls[0][0]).toMatch(/status <> 'disabled'/);
   });
@@ -172,19 +172,22 @@ describe('resolveGoogleConfig', () => {
 });
 
 describe('recordGoogleGrant', () => {
-  it('upserts one journal row per app and lower-cased email, keeping a known subject', async () => {
+  it('upserts one journal row per project and lower-cased email, keeping a known subject', async () => {
     query.mockResolvedValue({ rows: [] });
-    await recordGoogleGrant({ appId: 'app-1', email: 'User@Gmail.com', sub: 'sub-1' });
+    await recordGoogleGrant({ projectNumber: '123456789012', email: 'User@Gmail.com', sub: 'sub-1' });
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(app_id, email, google_sub\) VALUES \(\$1, lower\(\$2\), \$3\)/);
-    expect(sql).toMatch(/ON CONFLICT \(app_id, email\) DO UPDATE SET google_sub = COALESCE\(google_oauth_grants\.google_sub, EXCLUDED\.google_sub\)/);
-    expect(params).toEqual(['app-1', 'User@Gmail.com', 'sub-1']);
+    // By the project itself, not through the app row: an app deleted during the code exchange
+    // must not lose a user Google already counted.
+    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(project_number, email, google_sub\) VALUES \(\$1, lower\(\$2\), \$3\)/);
+    expect(sql).not.toMatch(/google_oauth_apps/);
+    expect(sql).toMatch(/ON CONFLICT \(project_number, email\) DO UPDATE SET google_sub = COALESCE\(google_oauth_grants\.google_sub, EXCLUDED\.google_sub\)/);
+    expect(params).toEqual(['123456789012', 'User@Gmail.com', 'sub-1']);
   });
 
   it('runs on a transaction client when one is passed', async () => {
     const { client } = scriptedClient([[/INSERT INTO google_oauth_grants/, { rows: [] }]]);
-    await recordGoogleGrant({ appId: 'app-1', email: 'u@gmail.com' }, client);
-    expect(client.query.mock.calls[0][1]).toEqual(['app-1', 'u@gmail.com', null]);
+    await recordGoogleGrant({ projectNumber: '123456789012', email: 'u@gmail.com' }, client);
+    expect(client.query.mock.calls[0][1]).toEqual(['123456789012', 'u@gmail.com', null]);
     expect(query).not.toHaveBeenCalled();
   });
 });
@@ -269,9 +272,11 @@ describe('importLegacyGoogleConfig', () => {
     delete process.env.GOOGLE_CLIENT_SECRET;
   });
 
-  function importDb({ appExists = false, config = null } = {}) {
+  function importDb({ appExists = false, config = null, done = false } = {}) {
     const { client, calls } = scriptedClient([
       [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT 1 FROM system_settings/, { rows: done ? [{ '?column?': 1 }] : [] }],
+      [/^\s*INSERT INTO system_settings/, { rows: [] }],
       [/^\s*SELECT 1 FROM google_oauth_apps/, { rows: appExists ? [{ '?column?': 1 }] : [] }],
       [/^\s*SELECT config FROM integration_config/, { rows: config ? [{ config }] : [] }],
       [/^\s*INSERT INTO google_oauth_apps/, { rows: [{ id: 'app-new' }] }],
@@ -284,9 +289,19 @@ describe('importLegacyGoogleConfig', () => {
   }
   const findCall = (calls, re) => calls.find(([sql]) => re.test(sql));
 
-  it('does nothing once an app exists', async () => {
+  it('does nothing once an app exists, and records that the import is behind it', async () => {
     const calls = importDb({ appExists: true, config: { clientId: CLIENT_ID, clientSecret: 'enc(s)' } });
     expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    expect(findCall(calls, /INSERT INTO system_settings/)[1]).toEqual(['google_oauth_legacy_import_done']);
+  });
+
+  it('does nothing once the import was recorded, even with no app left', async () => {
+    process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
+    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    const calls = importDb({ done: true });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /FROM google_oauth_apps/)).toBeUndefined();
     expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
   });
 
@@ -303,9 +318,9 @@ describe('importLegacyGoogleConfig', () => {
     expect(bindSql).toMatch(/oauth_provider = 'google' AND oauth_app_id IS NULL/);
     expect(bindParams).toEqual(['app-new']);
     const [grantSql, grantParams] = findCall(calls, /INSERT INTO google_oauth_grants/);
-    expect(grantSql).toMatch(/SELECT DISTINCT \$1::uuid, lower\(email_address\)/);
-    expect(grantSql).toMatch(/ON CONFLICT \(app_id, email\) DO NOTHING/);
-    expect(grantParams).toEqual(['app-new']);
+    expect(grantSql).toMatch(/SELECT DISTINCT \$2::text, lower\(email_address\) FROM email_accounts WHERE oauth_app_id = \$1/);
+    expect(grantSql).toMatch(/ON CONFLICT \(project_number, email\) DO NOTHING/);
+    expect(grantParams).toEqual(['app-new', '123456789012']);
     expect(findCall(calls, /UPDATE integration_config/)[0]).toMatch(/jsonb_build_object\('redirectUri', config->'redirectUri'\)/);
   });
 
@@ -362,7 +377,7 @@ describe('app registry for the admin screen', () => {
     expect(app).toEqual({ id: 'app-1', grants_count: 3, accounts_count: 2 });
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/client_secret/);
-    expect(sql).toMatch(/\(SELECT count\(\*\) FROM google_oauth_grants g WHERE g\.app_id = a\.id\)::int AS grants_count/);
+    expect(sql).toMatch(/\(SELECT count\(\*\) FROM google_oauth_grants g WHERE g\.project_number = a\.project_number\)::int AS grants_count/);
     expect(sql).toMatch(/\(SELECT count\(\*\) FROM email_accounts e WHERE e\.oauth_app_id = a\.id\)::int AS accounts_count/);
     expect(sql).toMatch(/WHERE a\.id = \$1/);
     expect(params).toEqual(['app-1']);

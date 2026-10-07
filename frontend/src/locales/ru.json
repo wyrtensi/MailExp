@@ -1184,6 +1184,7 @@
       "add": {
         "gmailTitle": "Личный Gmail",
         "gmailDescription": "Свой ящик @gmail.com: вход через Google, пароль MailExpert не видит.",
+        "gmailOnlyKnown": "Ни в одном Google-приложении нет места для нового адреса Gmail. Адрес, который уже подключался раньше, добавить можно.",
         "manualTitle": "Другой сервер (IMAP и SMTP вручную)",
         "manualDescription": "Настройки IMAP и SMTP вводятся вручную.",
         "emailLabel": "Адрес Gmail",
@@ -1971,6 +1972,7 @@
       "google": {
         "title": "Google / Gmail",
         "resultCreated": "Ящик Gmail подключён.",
+        "noticeSenderNameDuplicate": "Второе имя отправителя не сохранено: оно совпадает с именем, под которым ящик отправляет письма.",
         "resultUpdated": "Ящик Gmail переподключён.",
         "resultConnected": "Ящик Gmail авторизован.",
         "errorAccessDenied": "Вход через Google отменён. Ящик не подключён.",
@@ -2029,7 +2031,7 @@
         "disableConfirmTitle": "Отключить «{{label}}»?",
         "disableConfirm": "Ящиков, которые потребуют переподключения: {{count}}. Они переподключатся через другое приложение.",
         "deleteConfirmTitle": "Удалить «{{label}}»?",
-        "deleteConfirm": "Вместе с приложением удаляется журнал адресов, которые оно обслуживало.",
+        "deleteConfirm": "Журнал адресов, которые обслуживало приложение, остаётся за его проектом Google Cloud: клиент этого проекта, добавленный снова, увидит эти места занятыми.",
         "deleteInUse": "Приложение можно удалить, когда к нему не привязан ни один ящик.",
         "loadFailed": "Не удалось загрузить Google-приложения: {{message}}",
         "errorGeneric": "Запрос не выполнен. Повторите попытку.",
@@ -2043,7 +2045,7 @@
         "errorSameProject": "Приложение из этого проекта Google Cloud уже добавлено. Клиенты одного проекта делят его лимит.",
         "errorInUse": "К приложению ещё привязаны ящики.",
         "errorNotFound": "Приложения больше нет. Обновите страницу.",
-        "errorCallbackInvalid": "Введите полный адрес, начинающийся с https:// или http://.",
+        "errorCallbackInvalid": "Введите полный адрес, который начинается с https:// или http:// и заканчивается на /oauth/google/callback, без ? и #.",
         "errorClientJsonInvalid": "Это не корректный JSON или не файл OAuth-клиента Google.",
         "errorClientJsonServiceAccount": "Это ключ сервисного аккаунта, а не OAuth-клиент. Скачайте JSON OAuth-клиента (Credentials → OAuth client → Download JSON).",
         "errorClientJsonNotWeb": "Это десктопный (installed) OAuth-клиент. Создайте клиент типа Web application.",

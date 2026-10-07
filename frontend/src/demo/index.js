@@ -4,6 +4,7 @@ import { demoOutageRequest, demoOutageWaiting } from './outages.js';
 import { demoNodeAgentRequest, demoNodeUpdateState } from './nodeAgent.js';
 import { DEMO_TENANT_SETTINGS, demoTenantAlerts, demoTenantRequest } from './tenant.js';
 import { demoRole } from '../utils/demoRole.js';
+import { googleCallbackFormError } from '../utils/googleApps.js';
 import {
   DOMAIN_STATES, MAILBOX_READY_STATES, MAX_DELETE_AFTER_DAYS, canMarkReady, canRestartOnboarding, deletionDate,
   deletionReasonError, eopSettingsConflict, normalizeEopSettings, normalizeExpectedValues, parseNetworkList, parseWholeNumber,
@@ -2567,7 +2568,7 @@ export async function demoRequest(method, path, body = {}) {
     const provider = decodeURIComponent(integrationMatch[1]);
     if (provider === 'google') {
       const redirectUri = String(body?.redirectUri ?? '').trim();
-      if (redirectUri && !/^https?:\/\//i.test(redirectUri)) throw demoError('redirect_uri must be an absolute URL', 'redirect_uri_invalid');
+      if (redirectUri && googleCallbackFormError(redirectUri)) throw demoError('redirect_uri must be the full callback URL', 'redirect_uri_invalid');
       integrationsConfig = { ...integrationsConfig, google: { ...(redirectUri ? { redirectUri } : {}), updated_at: new Date().toISOString() } };
     } else {
       const cfg = { ...clone(body || {}) };

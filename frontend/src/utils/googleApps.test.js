@@ -264,6 +264,19 @@ describe('googleCallbackFormError', () => {
       assert.equal(googleCallbackFormError(value), 'admin.integrations.googleApps.errorCallbackInvalid', value);
     }
   });
+
+  it('requires the callback path, without a query or fragment', () => {
+    for (const value of [
+      'https://mail.example.com/wrong',
+      'https://mail.example.com/',
+      'https://mail.example.com/oauth/google/callback/',
+      'https://mail.example.com/oauth/google/callback?x=1',
+      'https://mail.example.com/oauth/google/callback?',
+      'https://mail.example.com/oauth/google/callback#top',
+    ]) {
+      assert.equal(googleCallbackFormError(value), 'admin.integrations.googleApps.errorCallbackInvalid', value);
+    }
+  });
 });
 
 describe('googleCallbackAltUri', () => {

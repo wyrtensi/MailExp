@@ -74,16 +74,19 @@ export async function resolveGoogleConfig({ appId = null, origin = null } = {}) 
   if (!app || app.status === 'disabled') return null;
   const clientSecret = decrypt(app.client_secret);
   if (!clientSecret) return null;
-  return { appId: app.id, clientId: app.client_id, clientSecret, redirectUri };
+  return { appId: app.id, projectNumber: app.project_number, clientId: app.client_id, clientSecret, redirectUri };
 }
 
-// Journal the Google account an app issued tokens to. Google counts it against the app's
-// user cap from that moment, so rows are kept when the mailbox is removed.
-export async function recordGoogleGrant({ appId, email, sub = null }, db = { query }) {
+// Journal the Google account an app issued tokens to. Google counts it against the user cap of
+// the app's Cloud project from that moment, so rows are kept when the mailbox is removed, and are
+// keyed by the project: they outlive the app row and count again for a client of that project
+// added later. Written by the project number the flow resolved at its start, not through the app
+// row, so an app deleted during the code exchange does not lose a user Google already counted.
+export async function recordGoogleGrant({ projectNumber, email, sub = null }, db = { query }) {
   await db.query(
-    `INSERT INTO google_oauth_grants (app_id, email, google_sub) VALUES ($1, lower($2), $3)
-     ON CONFLICT (app_id, email) DO UPDATE SET google_sub = COALESCE(google_oauth_grants.google_sub, EXCLUDED.google_sub)`,
-    [appId, email, sub],
+    `INSERT INTO google_oauth_grants (project_number, email, google_sub) VALUES ($1, lower($2), $3)
+     ON CONFLICT (project_number, email) DO UPDATE SET google_sub = COALESCE(google_oauth_grants.google_sub, EXCLUDED.google_sub)`,
+    [projectNumber, email, sub],
   );
 }
 
@@ -144,7 +147,7 @@ function normalizeUserLimit(userLimit) {
 // mailboxes bound to each app. The secret is never selected.
 const APPS_WITH_COUNTS_SELECT = `
   SELECT a.id, a.label, a.client_id, a.project_number, a.user_limit, a.status, a.gmail_api_disabled_at, a.created_at,
-         (SELECT count(*) FROM google_oauth_grants g WHERE g.app_id = a.id)::int AS grants_count,
+         (SELECT count(*) FROM google_oauth_grants g WHERE g.project_number = a.project_number)::int AS grants_count,
          (SELECT count(*) FROM email_accounts e WHERE e.oauth_app_id = a.id)::int AS accounts_count
   FROM google_oauth_apps a`;
 
@@ -204,7 +207,8 @@ export async function updateGoogleApp(appId, { label, clientSecret, userLimit } 
 }
 
 // Only an app without mailboxes can go: a bound mailbox's refresh token works with no other
-// client. Its grant journal goes with it (ON DELETE CASCADE).
+// client. Its grant journal stays: it belongs to the Cloud project, whose users Google keeps
+// counting, and a client of that project added again finds it.
 export async function deleteGoogleApp(appId) {
   await withTransaction(async (client) => {
     const bound = await client.query(
@@ -220,12 +224,14 @@ export async function deleteGoogleApp(appId) {
 const KNOWN_EMAILS_LIMIT = 8;
 
 // Addresses Google has issued tokens to that no mailbox uses any more, for the "connected
-// before" hint of the Gmail form. Addresses only: no apps, no dates.
+// before" hint of the Gmail form. Addresses only: no apps, no dates. Only projects that still have
+// an app: an address of a deleted one would need a new seat.
 export async function findKnownGoogleEmails(q) {
   const pattern = String(q).trim().toLowerCase().replace(/[\\%_]/g, '\\$&');
   const { rows } = await query(
     `SELECT DISTINCT g.email FROM google_oauth_grants g
      WHERE g.email LIKE '%' || $1 || '%' ESCAPE '\\'
+       AND EXISTS (SELECT 1 FROM google_oauth_apps a WHERE a.project_number = g.project_number)
        AND NOT EXISTS (SELECT 1 FROM email_accounts e WHERE lower(e.email_address) = g.email)
      ORDER BY g.email LIMIT ${KNOWN_EMAILS_LIMIT}`,
     [pattern],
@@ -233,14 +239,33 @@ export async function findKnownGoogleEmails(q) {
   return rows.map((row) => row.email);
 }
 
+// system_settings key recording that the single-app settings were taken over by the app registry.
+const LEGACY_IMPORT_DONE_KEY = 'google_oauth_legacy_import_done';
+
+async function markLegacyImportDone(client) {
+  await client.query(
+    `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, 'true', NOW())
+     ON CONFLICT (key) DO NOTHING`,
+    [LEGACY_IMPORT_DONE_KEY],
+  );
+}
+
 // One-time import of the single-app settings (Settings → Integrations, or the
 // GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment) as the first app. Runs at every
-// startup and does nothing once any app exists.
+// startup. Once an app exists, or an import ran, it is recorded and never runs again: an app the
+// administrator deleted must not come back from environment variables still passed to the backend.
+// While no app ever existed and there is nothing to import, nothing is recorded, so a client set
+// later is still imported.
 export async function importLegacyGoogleConfig() {
   return withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-import'))");
+    const done = await client.query('SELECT 1 FROM system_settings WHERE key = $1', [LEGACY_IMPORT_DONE_KEY]);
+    if (done.rows.length) return null;
     const existing = await client.query('SELECT 1 FROM google_oauth_apps LIMIT 1');
-    if (existing.rows.length) return null;
+    if (existing.rows.length) {
+      await markLegacyImportDone(client);
+      return null;
+    }
 
     const stored = await client.query("SELECT config FROM integration_config WHERE provider = 'google'");
     const config = stored.rows[0]?.config || {};
@@ -273,10 +298,10 @@ export async function importLegacyGoogleConfig() {
       [appId],
     );
     await client.query(
-      `INSERT INTO google_oauth_grants (app_id, email)
-       SELECT DISTINCT $1::uuid, lower(email_address) FROM email_accounts WHERE oauth_app_id = $1
-       ON CONFLICT (app_id, email) DO NOTHING`,
-      [appId],
+      `INSERT INTO google_oauth_grants (project_number, email)
+       SELECT DISTINCT $2::text, lower(email_address) FROM email_accounts WHERE oauth_app_id = $1
+       ON CONFLICT (project_number, email) DO NOTHING`,
+      [appId, projectNumber],
     );
     if (stored.rows.length) {
       await client.query(
@@ -285,6 +310,7 @@ export async function importLegacyGoogleConfig() {
          WHERE provider = 'google'`,
       );
     }
+    await markLegacyImportDone(client);
     console.log(`Google OAuth: imported the client from ${source.from} as app "Google 1"`);
     return appId;
   });

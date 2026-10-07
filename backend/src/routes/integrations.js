@@ -5,6 +5,7 @@ import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
 import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
 import { MAIL_NODE_PROVIDER, getMailNodeConfig } from '../services/mailNode/mailcow.js';
+import { GOOGLE_CALLBACK_PATH } from '../services/oauth/constants.js';
 
 const router = Router();
 
@@ -30,15 +31,19 @@ function applyGoogleEnv(config) {
   else delete process.env.GOOGLE_REDIRECT_URI;
 }
 
-// The shared Google callback URL: an absolute http(s) address, trimmed. Null for anything else,
-// so a relative path or a script URL never reaches process.env or the OAuth redirect.
+// The shared Google callback URL: an absolute http(s) address on the callback path, trimmed,
+// without a query or fragment. Null for anything else, so a relative path or a script URL never
+// reaches process.env or the OAuth redirect, and a URL Google would send back to a page that does
+// not finish the flow (another path), or that the redirect cannot rebuild for another public host
+// (getGoogleRedirectUri keeps only the path), is refused here.
 function parseRedirectUri(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
-  if (!trimmed) return null;
+  if (!trimmed || /[?#]/.test(trimmed)) return null;
   try {
     const url = new URL(trimmed);
-    return url.protocol === 'https:' || url.protocol === 'http:' ? trimmed : null;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.pathname === GOOGLE_CALLBACK_PATH ? trimmed : null;
   } catch {
     return null;
   }
@@ -101,7 +106,9 @@ router.get('/status', async (req, res) => {
     },
     google: {
       configured,
-      // Whether an active app still has a free seat: the Gmail option is offered only then.
+      // Whether an active app still has a free seat. Without one the Gmail form stays usable with
+      // a note: an address an app already counted goes back there without a seat, and the start
+      // route decides per address (no_app_capacity otherwise).
       available: await googleAvailable(configured),
     },
     // Whether the add-mailbox dialog offers a mailbox on the mail node.
@@ -126,7 +133,7 @@ router.post('/:provider', requireAdmin, async (req, res) => {
     // so any client ID or secret in the body is ignored.
     const redirectUri = parseRedirectUri(req.body?.redirectUri);
     if (!redirectUri) {
-      return res.status(400).json({ error: 'Callback URL must be a full http or https address', code: 'redirect_uri_invalid' });
+      return res.status(400).json({ error: `Callback URL must be a full http or https address with the path ${GOOGLE_CALLBACK_PATH} and no query or fragment`, code: 'redirect_uri_invalid' });
     }
     const googleConfig = { redirectUri };
     await query(`

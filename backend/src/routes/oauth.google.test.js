@@ -85,6 +85,9 @@ const REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
 const USER_ID = '11111111-1111-1111-1111-111111111111';
 const MAIL_SCOPE = 'https://mail.google.com/';
 const ACCOUNT_ID = '22222222-2222-2222-2222-222222222222';
+// The id of the seat reservation the start route took for the flow.
+const RESERVATION = 'reservation-1';
+const PROJECT_NUMBER = '123456789012';
 
 function buildApp() {
   const app = express();
@@ -110,15 +113,19 @@ afterAll(async () => {
 });
 
 // Transaction client whose SQL is routed by statement type.
+const MAILBOX_LOOKUP = /^\s*SELECT id, oauth_provider, oauth_refresh_token, oauth_app_id, oauth_subject\b[\s\S]*?FROM email_accounts/;
 let dbState;
-function installDb({ existing = null } = {}) {
-  dbState = { existing, calls: [] };
+function installDb({ existing = null, appStatus = 'active' } = {}) {
+  dbState = { existing, appStatus, calls: [] };
   const client = {
     query: vi.fn(async (sql, params) => {
       dbState.calls.push([sql, params]);
       if (/pg_advisory_xact_lock/.test(sql)) return { rows: [] };
-      if (/^\s*SELECT id, oauth_provider, oauth_refresh_token, oauth_app_id, oauth_subject FROM email_accounts/.test(sql)) {
+      if (MAILBOX_LOOKUP.test(sql)) {
         return { rows: dbState.existing ? [dbState.existing] : [] };
+      }
+      if (/^\s*SELECT status FROM google_oauth_apps/.test(sql)) {
+        return { rows: dbState.appStatus ? [{ status: dbState.appStatus }] : [] };
       }
       if (/^\s*INSERT INTO email_accounts/.test(sql)) return { rows: [{ id: 'new-acc' }] };
       if (/^\s*INSERT INTO account_aliases/.test(sql)) return { rows: [{ id: 'alias-1', name: params[1], email: params[2] }] };
@@ -149,7 +156,7 @@ async function startFlow(query = '') {
 // state is created the way that route creates it, through the real single-use store.
 async function seedAddState(email = 'user@gmail.com', names = {}) {
   const { state } = await createOAuthState({
-    provider: 'google', userId: USER_ID, loginHint: email, appId: APP_ID, mode: 'add', email, ...names,
+    provider: 'google', userId: USER_ID, loginHint: email, appId: APP_ID, mode: 'add', email, reservation: RESERVATION, ...names,
   });
   return { state };
 }
@@ -172,7 +179,7 @@ const errorLocation = (code) => `/?oauth_error=${code}&oauth_provider=google`;
 
 let logSpies;
 beforeEach(() => {
-  googleApps.config = { appId: APP_ID, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI };
+  googleApps.config = { appId: APP_ID, projectNumber: PROJECT_NUMBER, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI };
   googleApps.byId = { [APP_ID]: googleApps.config };
   recordGoogleGrant.mockClear();
   redisStore.clear();
@@ -332,7 +339,7 @@ describe('GET /oauth/google/callback', () => {
     // No sender name from the form: sender_name stays empty and the mailbox sends under its name.
     expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1', 'gmail', null]);
     expect(sqlCall(/^\s*INSERT INTO account_aliases/)).toBeUndefined();
-    expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
+    expect(recordGoogleGrant).toHaveBeenCalledWith({ projectNumber: PROJECT_NUMBER, email: 'user@gmail.com', sub: 'sub-1' });
 
     expect(imapManager.connectAccount).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-acc' }));
     expectCooldownClearedBeforeConnect('new-acc');
@@ -360,6 +367,24 @@ describe('GET /oauth/google/callback', () => {
     expect(sqlCall(/^\s*INSERT INTO account_aliases/)).toBeUndefined();
   });
 
+  it('tells the user when the second name was dropped as equal to the Google profile name', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await seedAddState('user@gmail.com', { senderNameAlt: 'user name' });
+
+    const res = await callback({ code: 'auth-code-xyz', state });
+
+    expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=created&oauth_notice=sender_name_duplicate');
+  });
+
+  it('adds no notice when the second name is kept', async () => {
+    mockSuccessfulGoogle();
+    const { state } = await seedAddState('user@gmail.com', { senderNameAlt: 'Other Name' });
+
+    const res = await callback({ code: 'auth-code-xyz', state });
+
+    expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=created');
+  });
+
   it('updates an existing account, keeps the stored refresh token and clears the reconnect flag', async () => {
     const { state } = await startReconnect();
     installDb({ existing: existingMailbox() });
@@ -370,7 +395,7 @@ describe('GET /oauth/google/callback', () => {
     expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=updated');
     const lock = sqlCall(/pg_advisory_xact_lock/);
     expect(lock[1]).toEqual([`oauth-account:user@gmail.com`]);
-    expect(sqlCall(/^\s*SELECT id, oauth_provider, oauth_refresh_token, oauth_app_id, oauth_subject FROM email_accounts/)[0]).toMatch(/lower\(email_address\) = lower\(\$1\)/);
+    expect(sqlCall(MAILBOX_LOOKUP)[0]).toMatch(/lower\(email_address\) = lower\(\$1\)/);
     const [updateSql, updateParams] = sqlCall(/^\s*UPDATE email_accounts/);
     expect(updateSql).toMatch(/oauth_refresh_token = COALESCE\(\$2, oauth_refresh_token\)/);
     expect(updateSql).toMatch(/oauth_reconnect_required = false/);
@@ -394,6 +419,57 @@ describe('GET /oauth/google/callback', () => {
     expect(res.headers.get('location')).toBe(errorLocation('missing_refresh_token'));
     expect(sqlCall(/^\s*INSERT INTO email_accounts/)).toBeUndefined();
     expect(imapManager.connectAccount).not.toHaveBeenCalled();
+  });
+
+  it('refuses a reconnect without a new refresh token when the stored one is the token that failed', async () => {
+    const { state } = await startReconnect();
+    installDb({ existing: existingMailbox({ oauth_reconnect_required: true }) });
+    mockSuccessfulGoogle({ refreshToken: null });
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe(errorLocation('missing_refresh_token'));
+    expect(sqlCall(/^\s*UPDATE email_accounts/)).toBeUndefined();
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
+  });
+
+  it('accepts a reconnect of a flagged mailbox when Google returned a new refresh token', async () => {
+    const { state } = await startReconnect();
+    installDb({ existing: existingMailbox({ oauth_reconnect_required: true }) });
+    mockSuccessfulGoogle({ refreshToken: 'fresh-refresh' });
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe('/?oauth_success=google&oauth_result=updated');
+    expect(sqlCall(/^\s*UPDATE email_accounts/)[1][1]).toBe('enc(fresh-refresh)');
+  });
+
+  it('does not create a mailbox through an app disabled during the code exchange', async () => {
+    const { state } = await seedAddState();
+    installDb({ appStatus: 'disabled' });
+    mockSuccessfulGoogle();
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe(errorLocation('not_configured'));
+    expect(sqlCall(/^\s*SELECT status FROM google_oauth_apps/)[0]).toMatch(/FOR SHARE/);
+    expect(sqlCall(/^\s*INSERT INTO email_accounts/)).toBeUndefined();
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
+    // No mailbox keeps this grant: the fresh token is revoked.
+    expect(revokeGoogleToken).toHaveBeenCalledWith('refresh-tok');
+  });
+
+  it('does not clear the reconnect flag through an app disabled during the code exchange', async () => {
+    const { state } = await startReconnect();
+    installDb({ existing: existingMailbox({ oauth_reconnect_required: true }), appStatus: 'disabled' });
+    mockSuccessfulGoogle();
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe(errorLocation('not_configured'));
+    expect(sqlCall(/^\s*UPDATE email_accounts/)).toBeUndefined();
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
+  });
+
+  it('does not connect through an app deleted during the code exchange', async () => {
+    const { state } = await seedAddState();
+    installDb({ appStatus: null });
+    mockSuccessfulGoogle();
+    const res = await callback({ code: 'c', state });
+    expect(res.headers.get('location')).toBe(errorLocation('not_configured'));
+    expect(sqlCall(/^\s*INSERT INTO email_accounts/)).toBeUndefined();
   });
 
   it('rejects an existing account without any refresh token to keep', async () => {
@@ -445,7 +521,7 @@ describe('GET /oauth/google/callback', () => {
     const res = await callback({ code: 'c', state }, { user: '22222222-2222-2222-2222-222222222222' });
     expect(res.headers.get('location')).toBe(errorLocation('invalid_state'));
     expect(exchangeGoogleCode).not.toHaveBeenCalled();
-    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com', RESERVATION);
     expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
   });
 
@@ -463,7 +539,7 @@ describe('GET /oauth/google/callback', () => {
     const res = await callback({ code: 'secret-auth-code', state });
     expect(res.headers.get('location')).toBe(errorLocation('authentication_failed'));
     expect(loggedText()).not.toMatch(/secret-auth-code|client-secret-value/);
-    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com', RESERVATION);
     expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
   });
 
@@ -480,7 +556,7 @@ describe('GET /oauth/google/callback', () => {
     const { state } = await seedAddState();
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('scope_missing'));
-    expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
+    expect(recordGoogleGrant).toHaveBeenCalledWith({ projectNumber: PROJECT_NUMBER, email: 'user@gmail.com', sub: 'sub-1' });
     expect(withTransaction).not.toHaveBeenCalled();
     expect(revokeGoogleToken).toHaveBeenCalledWith('refresh-tok');
   });
@@ -610,13 +686,22 @@ describe('reconnect by mailbox id', () => {
     expect(res.headers.get('location')).toBe(`/?oauth_error=${code}&oauth_provider=google`);
   });
 
+  it('keeps the reservation of a reconnect moving to another app in its state and releases exactly it', async () => {
+    selection.result = { appId: APP_ID, reserved: true, reservation: RESERVATION };
+    query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google', oauth_app_id: null }] });
+    const { state } = await startFlow(`?account=${ACCOUNT_ID}`);
+    expect(JSON.parse([...redisStore.values()][0])).toMatchObject({ reservation: RESERVATION });
+    await callback({ state, error: 'access_denied' });
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com', RESERVATION);
+  });
+
   it('frees a reserved seat when the resolved app is not configured', async () => {
-    selection.result = { appId: APP_ID, reserved: true };
+    selection.result = { appId: APP_ID, reserved: true, reservation: RESERVATION };
     query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google', oauth_app_id: null }] });
     googleApps.byId = {};
     const res = await get(`/oauth/google?account=${ACCOUNT_ID}`);
     expect(res.headers.get('location')).toBe('/?oauth_error=not_configured&oauth_provider=google');
-    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com', RESERVATION);
   });
 
   it('reports invalid_state when the reconnect target mailbox is gone by callback', async () => {
@@ -673,7 +758,7 @@ describe('callback refusals after Google issued tokens', () => {
     const { state } = await seedAddState();
     mockSuccessfulGoogle();
     await callback({ code: 'c', state });
-    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com', RESERVATION);
     expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
     expect(recordGoogleGrant.mock.invocationCallOrder[0]).toBeLessThan(releaseGoogleSeat.mock.invocationCallOrder[0]);
 
@@ -681,7 +766,7 @@ describe('callback refusals after Google issued tokens', () => {
     recordGoogleGrant.mockClear();
     const second = await seedAddState();
     await callback({ state: second.state, error: 'access_denied' });
-    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith(APP_ID, 'user@gmail.com', RESERVATION);
     expect(releaseGoogleSeat).toHaveBeenCalledTimes(1);
   });
 });
@@ -690,7 +775,7 @@ describe('reconnect onto another app', () => {
   it('revokes the old refresh token after the move', async () => {
     const NEW_APP = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
     googleApps.byId[NEW_APP] = { ...googleApps.config, appId: NEW_APP };
-    selection.result = { appId: NEW_APP, reserved: true };
+    selection.result = { appId: NEW_APP, reserved: true, reservation: RESERVATION };
     query.mockResolvedValueOnce({ rows: [{ id: ACCOUNT_ID, email_address: 'user@gmail.com', oauth_provider: 'google', oauth_app_id: APP_ID }] });
     const { state } = await startFlow(`?account=${ACCOUNT_ID}`);
     installDb({ existing: { id: ACCOUNT_ID, oauth_provider: 'google', oauth_refresh_token: 'old-refresh', oauth_app_id: APP_ID, oauth_subject: 'sub-1' } });

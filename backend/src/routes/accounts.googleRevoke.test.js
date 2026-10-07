@@ -49,7 +49,7 @@ describe('DELETE /api/accounts/:id revokes the Google grant', () => {
   // The revoke runs fire-and-forget after the response; let its microtask/promise chain settle.
   const flush = () => new Promise((resolve) => setImmediate(resolve));
 
-  it('revokes with the decrypted refresh token, after the row is gone', async () => {
+  it('revokes with the decrypted refresh token', async () => {
     query.mockImplementation(async (sql) => (
       sql.startsWith('SELECT id, email_address, mail_node')
         ? { rows: [{
@@ -64,6 +64,34 @@ describe('DELETE /api/accounts/:id revokes the Google grant', () => {
     expect(revokeGoogleToken).toHaveBeenCalledWith('refresh-1');
     // No write to the grant journal — revoking is best-effort against Google only.
     expect(query.mock.calls.some(([sql]) => /google_oauth_grants/.test(sql))).toBe(false);
+  });
+
+  // Google revokes a person's access to the whole project, so a revoke answered late would also
+  // cut a fresh grant for the same address. While the row exists, adding the address is refused
+  // (already_connected), so the row goes only after Google has answered.
+  it('finishes the revoke before the row is deleted, so a quick re-add cannot be cut by it', async () => {
+    let finishRevoke;
+    revokeGoogleToken.mockImplementationOnce(() => new Promise((resolve) => { finishRevoke = resolve; }));
+    query.mockImplementation(async (sql) => (
+      sql.startsWith('SELECT id, email_address, mail_node')
+        ? { rows: [{
+            id: ID, email_address: 'user@gmail.com', mail_node: false,
+            oauth_provider: 'google', oauth_refresh_token: 'enc(refresh-1)', oauth_access_token: null,
+          }] }
+        : { rows: [] }
+    ));
+    const deleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE FROM email_accounts'));
+    let answered = false;
+    const pending = del().then((res) => { answered = true; return res; });
+    await vi.waitFor(() => expect(revokeGoogleToken).toHaveBeenCalledWith('refresh-1'));
+    await flush();
+    expect(deleted()).toBe(false);
+    expect(answered).toBe(false);
+
+    finishRevoke(true);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(deleted()).toBe(true);
   });
 
   it('falls back to the access token when there is no refresh token', async () => {

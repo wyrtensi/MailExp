@@ -21,7 +21,9 @@ import { isUuid } from '../utils/uuid.js';
 import { THREAD_MODE_GMAIL } from '../services/threading/threadId.js';
 
 // Mounted at /oauth/google. Redirect targets carry only stable codes — never provider
-// error text, authorization codes or tokens.
+// error text, authorization codes or tokens: /?oauth_success=google&oauth_result=<created|updated>,
+// plus &oauth_notice=sender_name_duplicate when the form's second sender name was dropped, or
+// /?oauth_error=<code>&oauth_provider=google.
 const router = Router();
 
 const PROVIDER = 'google';
@@ -80,6 +82,7 @@ router.get('/', async (req, res) => {
       mode: 'reconnect',
       email: target.email,
       accountId: target.account.id,
+      reservation: selected.reservation,
     });
     res.redirect(buildGoogleAuthorizationUrl({
       clientId: config.clientId,
@@ -89,7 +92,7 @@ router.get('/', async (req, res) => {
       loginHint: target.email,
     }));
   } catch (err) {
-    if (selected?.reserved) await releaseGoogleSeat(selected.appId, target.email);
+    if (selected?.reserved) await releaseGoogleSeat(selected.appId, target.email, selected.reservation);
     const known = err instanceof CallbackError || err instanceof GoogleAppSelectionError;
     if (!known) console.error(`Google OAuth start failed: ${err?.name || 'Error'}`);
     res.redirect(errorRedirect(known ? err.code : 'authentication_failed'));
@@ -150,19 +153,19 @@ router.get('/callback', async (req, res) => {
     issued = { appId: config.appId, tokens, email: identity.email };
     // Google counts this account against the app's user cap once it issued tokens, even if
     // the consent is refused below.
-    await recordGoogleGrant({ appId: config.appId, email: identity.email, sub: identity.sub });
+    await recordGoogleGrant({ projectNumber: config.projectNumber, email: identity.email, sub: identity.sub });
     // Now that the journal has the email, the reservation can go. A brief double count
     // (reservation + grant) is intended: it is only more conservative than the alternative of
     // releasing before the exchange, which would let the seat look free while it is in flight.
     if (pending.appId) {
-      await releaseGoogleSeat(pending.appId, pending.email);
+      await releaseGoogleSeat(pending.appId, pending.email, pending.reservation);
       released = true;
     }
     // The user may pick another Google account on Google's page than the one asked for.
     if (identity.email.toLowerCase() !== pending.email) throw new CallbackError('account_mismatch');
     if (!hasGoogleMailScope(tokens.scope)) throw new CallbackError('scope_missing');
 
-    const { account, result, previousAppId, previousRefreshToken } =
+    const { account, result, previousAppId, previousRefreshToken, senderNameDropped } =
       await saveGoogleAccount(pending, identity, tokens, config.appId);
     issued = null; // the tokens are stored now: nothing to revoke
     recordGoogleConsent({ userId: pending.userId, account, result, previousAppId, appId: config.appId });
@@ -172,14 +175,16 @@ router.get('/callback', async (req, res) => {
     }
 
     reconnectAccount(account, result);
-    res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}`);
+    // The second sender name from the form was not kept (same as the main one): say so.
+    const notice = senderNameDropped ? '&oauth_notice=sender_name_duplicate' : '';
+    res.redirect(`/?oauth_success=${PROVIDER}&oauth_result=${result}${notice}`);
   } catch (err) {
     const stable = typeof err?.code === 'string' && CALLBACK_ERROR_CODES.has(err.code)
       ? err.code
       : 'authentication_failed';
     // Log the stable code and error class only; messages may carry provider details.
     console.error(`Google OAuth callback failed: ${stable} (${err?.name || 'Error'})`);
-    if (pending?.appId && pending.email && !released) await releaseGoogleSeat(pending.appId, pending.email);
+    if (pending?.appId && pending.email && !released) await releaseGoogleSeat(pending.appId, pending.email, pending.reservation);
     if (issued) await revokeRefusedGrant(issued);
     res.redirect(errorRedirect(stable));
   }
@@ -213,8 +218,14 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
   return withTransaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`oauth-account:${email}`]);
 
+    // The app may have been disabled or removed while the code was exchanged, and disabling flags
+    // only the mailboxes bound to it at that moment. FOR SHARE makes a disable that comes later
+    // wait for this transaction, so it then flags the mailbox written here.
+    const app = await client.query('SELECT status FROM google_oauth_apps WHERE id = $1 FOR SHARE', [appId]);
+    if (!app.rows.length || app.rows[0].status === 'disabled') throw new CallbackError('not_configured');
+
     const existing = await client.query(
-      `SELECT id, oauth_provider, oauth_refresh_token, oauth_app_id, oauth_subject FROM email_accounts
+      `SELECT id, oauth_provider, oauth_refresh_token, oauth_app_id, oauth_subject, oauth_reconnect_required FROM email_accounts
        WHERE lower(email_address) = lower($1)
        ORDER BY created_at LIMIT 1`,
       [email],
@@ -230,11 +241,15 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
     let accountId;
     let result;
     let previousAppId = null;
+    let senderNameDropped = false;
     if (row) {
       previousAppId = row.oauth_app_id;
       // A stored refresh token only works with the app that issued it, so it can be kept
-      // only when the account stays on the same app.
-      const canKeepStoredRefresh = !!row.oauth_refresh_token && row.oauth_app_id === appId;
+      // only when the account stays on the same app, and never when the mailbox is flagged for
+      // reconnect: that flag is set when Google rejected the stored token (invalid_grant), so
+      // keeping it would report success and fail again on the next refresh. The consent URL asks
+      // for offline access with prompt=consent, so Google normally returns a new one.
+      const canKeepStoredRefresh = !!row.oauth_refresh_token && row.oauth_app_id === appId && !row.oauth_reconnect_required;
       if (!encryptedRefresh && !canKeepStoredRefresh) throw new CallbackError('missing_refresh_token');
       accountId = row.id;
       result = 'updated';
@@ -281,11 +296,14 @@ async function saveGoogleAccount(pending, identity, tokens, appId) {
       const mainName = (pending.senderName || identity.name || email).toLowerCase();
       const secondName = pending.senderNameAlt && pending.senderNameAlt.toLowerCase() !== mainName ? pending.senderNameAlt : null;
       await addSecondSenderName(client, { accountId, email, senderNameAlt: secondName });
+      senderNameDropped = !!pending.senderNameAlt && !secondName;
       result = 'created';
     }
 
     const accountResult = await client.query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
-    return { account: accountResult.rows[0], result, previousAppId, previousRefreshToken: row?.oauth_refresh_token ?? null };
+    return {
+      account: accountResult.rows[0], result, previousAppId, previousRefreshToken: row?.oauth_refresh_token ?? null, senderNameDropped,
+    };
   });
 }
 

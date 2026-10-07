@@ -41,18 +41,14 @@ const START_ERROR_FALLBACK_KEY = 'admin.integrations.google.errorGeneric';
 
 const normalize = (email) => String(email ?? '').trim().toLowerCase();
 
-// Why Gmail cannot be chosen right now, or null. `googleStatus` is the `google` part of
-// GET /api/integrations/status, or null while it loads.
-function gmailUnavailableHint(googleStatus) {
-  if (!googleStatus) return null;
-  if (!googleStatus.configured) return 'admin.integrations.google.errorNotConfigured';
-  return 'admin.integrations.google.errorNoAppCapacity';
-}
-
 // Options the dialog lists, one tab each. Manual server setup is for administrators only (the server answers
-// 403 to anyone else). Gmail is listed for everyone but stays inactive, with the reason, while no
-// Google app can take a new address; the mailbox on the mail node likewise until an administrator
-// sets the node up. `domainStatus` is the `domainMail` part of GET /api/integrations/status.
+// 403 to anyone else). Gmail is listed for everyone but stays inactive, with the reason, while Google
+// is not configured; the mailbox on the mail node likewise until an administrator sets the node up.
+// While no Google app has a free seat Gmail stays usable with a note: an address an app already
+// counted goes back there without a new seat, and only the server, given the address, can tell
+// (it answers no_app_capacity otherwise). `hintKey` is the reason of an inactive option, or the
+// note shown above the form of an active one. `googleStatus` and `domainStatus` are the `google`
+// and `domainMail` parts of GET /api/integrations/status, or null while it loads.
 export function addAccountOptions({ isAdmin = false, googleStatus = null, domainStatus = null } = {}) {
   const options = [];
   for (const kind of ADD_ACCOUNT_KINDS) {
@@ -60,8 +56,9 @@ export function addAccountOptions({ isAdmin = false, googleStatus = null, domain
     let enabled = true;
     let hintKey = null;
     if (kind === 'gmail') {
-      enabled = googleStatus?.available === true;
-      hintKey = enabled ? null : gmailUnavailableHint(googleStatus);
+      enabled = googleStatus?.configured === true;
+      if (googleStatus && !enabled) hintKey = 'admin.integrations.google.errorNotConfigured';
+      else if (enabled && googleStatus.available !== true) hintKey = 'admin.accounts.add.gmailOnlyKnown';
     } else if (kind === 'domain') {
       enabled = domainStatus?.configured === true;
       hintKey = enabled || !domainStatus ? null : 'admin.accounts.add.domainNotConfigured';
