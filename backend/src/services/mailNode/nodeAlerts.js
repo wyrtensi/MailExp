@@ -3,6 +3,7 @@ import { recordAudit } from '../auditLog.js';
 import { safeFetch } from '../safeFetch.js';
 import { getContainers, getMailNodeConfig, listQueue, parsePingUrl, parseWholeNumber } from './mailcow.js';
 import { getEopSettings } from './eopSettings.js';
+import { getSeats, withSeatLicenses } from './eopSeats.js';
 import { getNodeDnsCheck } from './dnsCheckJob.js';
 import { SYSTEM_ACTOR } from './domains.js';
 import { summarizeQueue } from './mailQueue.js';
@@ -38,6 +39,9 @@ import { checkSpamRule } from './nodeApply.js';
 // - terrl: the tenant's external recipients of the last 24 hours at 80 percent of the limit or more
 //   (services/mailNode/terrl.js). It counts the log too, so when the log could not be read the
 //   budget keeps its previous alert instead of falling back to the journal and flapping;
+// - seats: EOP seats (services/mailNode/eopSeats.js): fewer purchased than used (eop_seats_over), the
+//   purchased number from Graph older than 3 days (eop_seats_stale), an open seat request
+//   (eop_seats_requested), all warnings. The purchased number is not in the alerts, as in no screen;
 // - trace: letters to the node's domains still waiting in EOP's queue after an outage of the node
 //   (R-43, services/mailNode/outageTrace.js), a warning with the time EOP gives up on the first;
 // - tenant: with a tenant driver and the tenant configured, what the tenant poll stored
@@ -98,6 +102,9 @@ export const ALERTS = Object.freeze({
   tenant_domain_authoritative: ['tenant_domains', 'warning'],
   tenant_phish_held: ['tenant_quarantine', 'warning'],
   tenant_alias_contacts_held: ['tenant_domains', 'warning'],
+  eop_seats_over: ['seats', 'warning'],
+  eop_seats_stale: ['seats', 'warning'],
+  eop_seats_requested: ['seats', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
 export const ALERT_KEYS = Object.freeze(Object.keys(ALERTS));
@@ -186,6 +193,24 @@ export function containerSignal(containers) {
 export function spamRuleSignal(rule) {
   if (rule?.state !== 'outdated' && rule?.state !== 'missing') return [];
   return [{ key: 'spam_rule_outdated', severity: 'warning', details: { state: rule.state, checkedAt: rule.at ?? null } }];
+}
+
+// The EOP seats (services/mailNode/eopSeats.js getSeats): fewer purchased than used, a purchased
+// number older than 3 days, open seat requests. The purchased number stays out of the alert, as out
+// of every screen.
+export function seatSignals(seats) {
+  const alerts = [];
+  if (seats?.over) alerts.push({ key: 'eop_seats_over', severity: 'warning', details: { used: seats.used } });
+  if (seats?.stale) alerts.push({ key: 'eop_seats_stale', severity: 'warning', details: { at: seats.at, code: seats.error?.code ?? null } });
+  const requests = seats?.requests ?? [];
+  if (requests.length) {
+    alerts.push({
+      key: 'eop_seats_requested',
+      severity: 'warning',
+      details: { count: requests.length, seats: requests.reduce((sum, r) => sum + r.seats, 0), since: requests[0].requestedAt },
+    });
+  }
+  return alerts;
 }
 
 export function terrlSignal(budget) {
@@ -438,10 +463,12 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
     log, now, userId, fresh, failed,
   });
   await tenantStep({ eop, now, fresh, failed });
+  const seats = await read('seats', () => getSeats({ now }));
+  if (seats) fresh.push(...seatSignals(seats));
   // The budget counts the log as well: without it the count would drop and the alert flap, so the
   // budget's alert stays as it was until the log reads again.
   if (log) {
-    const budget = await read('terrl', async () => computeTerrlBudget({ eop, log, aliasDomains: await aliasDomainsOf(cfg), now }));
+    const budget = await read('terrl', async () => computeTerrlBudget({ eop: await withSeatLicenses(eop), log, aliasDomains: await aliasDomainsOf(cfg), now }));
     if (budget) fresh.push(...terrlSignal(budget));
   } else {
     failed.push('terrl');
@@ -592,6 +619,9 @@ function summaryOf(alert) {
     case 'tenant_antispam_not_enforced': return { fields: d.fields ?? [], code: d.code, unconfirmed: d.unconfirmed === true };
     case 'spam_rule_outdated': return { state: d.state };
     case 'tenant_alias_contacts_held': return { count: d.count, domains: d.domains ?? [] };
+    case 'eop_seats_over': return { used: d.used };
+    case 'eop_seats_stale': return { at: d.at, code: d.code };
+    case 'eop_seats_requested': return { count: d.count, seats: d.seats };
     default: return { count: d.count };
   }
 }
