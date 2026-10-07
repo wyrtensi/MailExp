@@ -31,7 +31,7 @@ const { default: adminRoutes, agentRouter } = await import('./mailNodeAgent.js')
 const { recordAudit } = await import('../services/auditLog.js');
 const {
   hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle, queueNodeUpdateIfBehind, getNodeUpdateState,
-  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS,
+  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS, pinnedMailcow,
 } = await import('../services/mailNode/nodeAgent.js');
 const { updateNodeAfterPanel } = await import('../services/panelUpdate/reconcile.js');
 const { AGENT_AUTH_FAILURES } = await import('./mailNodeAgent.js');
@@ -317,6 +317,12 @@ describe('the status report', () => {
     const res = await agent(token, 'POST', '/status', {
       scriptsCommit: '0123456789abcdef0123456789abcdef01234567',
       mailcowVersion: '2026-09',
+      mailcowCommit: 'ca07d8d3331849ae294179aedce95c8126d3050f',
+      mailcowTag: '2026-09',
+      mailcowPinTag: '2026-09a; rm -rf /',
+      mailcowPinCommit: '81f6f7b002f2681b732aed74ae53179377def5e0',
+      mailcowUpstreamCommit: 'not a commit',
+      mailcowRelation: 'behind',
       containers: { total: 18, running: 17, problems: ['clamd-mailcow: exited', 42, 'x'.repeat(300)] },
       backup: {
         configured: true, ok: false, problem: 'the last backup is 30 hours old',
@@ -330,6 +336,12 @@ describe('the status report', () => {
     expect(body.status).toEqual({
       scriptsCommit: '0123456789abcdef0123456789abcdef01234567',
       mailcowVersion: '2026-09',
+      mailcowCommit: 'ca07d8d3331849ae294179aedce95c8126d3050f',
+      mailcowTag: '2026-09',
+      mailcowPinTag: null,
+      mailcowPinCommit: '81f6f7b002f2681b732aed74ae53179377def5e0',
+      mailcowUpstreamCommit: null,
+      mailcowRelation: 'behind',
       containers: { total: 18, running: 17, problems: ['clamd-mailcow: exited', 'x'.repeat(100)] },
       backup: {
         configured: true, ok: false, problem: 'the last backup is 30 hours old',
@@ -343,6 +355,10 @@ describe('the status report', () => {
     expect((await agent(token, 'POST', '/status', ['x'])).status).toBe(200);
     const { body } = await admin('GET', '/agent');
     expect(body.status.backup).toEqual({ configured: false, ok: false, problem: null, last: null });
+    expect(body.status.mailcowRelation).toBe('unknown');
+    // The panel's own pin, from the repository's deploy/mailcow-version.
+    expect(body.pinnedMailcow).toEqual(pinnedMailcow());
+    expect(body.pinnedMailcow.commit).toMatch(/^[0-9a-f]{40}$/);
   });
 });
 
@@ -515,6 +531,7 @@ describe('the node update', () => {
     await connectedAgent();
     expect(await getNodeUpdateState({ env: PANEL_ENV })).toEqual({
       configured: true, connected: true, scriptsCommit: NODE_SHA, panelCommit: PANEL_SHA, job: null,
+      mailcow: { commit: null, tag: null, relation: 'unknown' }, pinnedMailcow: pinnedMailcow(),
     });
     await admin('POST', '/agent/jobs', { kind: 'update' });
     const state = await getNodeUpdateState({ env: PANEL_ENV });

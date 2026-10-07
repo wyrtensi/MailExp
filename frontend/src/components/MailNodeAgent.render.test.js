@@ -210,6 +210,29 @@ describe('MailNodeAgentSection: the node update', () => {
     await again.unmount();
   });
 
+  test('mailcow against the version the release pins: pending, and a warning for an untested one', async () => {
+    const pinnedMailcow = { tag: '2026-09a', commit: '81f6f7b002f2681b732aed74ae53179377def5e0' };
+    const behind = {
+      ...STATUS, mailcowCommit: 'ca07d8d3331849ae294179aedce95c8126d3050f', mailcowTag: '2026-09',
+      mailcowPinCommit: pinnedMailcow.commit, mailcowUpstreamCommit: pinnedMailcow.commit, mailcowRelation: 'behind',
+    };
+    answers['GET /api/mail-node/agent'] = { ...CONNECTED, status: behind, panelCommit: PANEL, pinnedMailcow };
+    const first = await mount();
+    assert.equal(first.host.querySelector('[data-mailcow-state]').dataset.mailcowState, 'pending');
+    assert.match(first.host.textContent, /2026-09a/);
+    assert.equal(first.host.querySelector('[data-mailcow-warning]'), null);
+    await first.unmount();
+
+    answers['GET /api/mail-node/agent'] = {
+      ...CONNECTED, panelCommit: PANEL, pinnedMailcow,
+      status: { ...behind, mailcowCommit: '0123456789abcdef0123456789abcdef01234567', mailcowTag: '2026-10', mailcowRelation: 'newer' },
+    };
+    const second = await mount();
+    assert.equal(second.host.querySelector('[data-mailcow-state]').dataset.mailcowState, 'untested');
+    assert.match(second.host.querySelector('[data-mailcow-warning]').textContent, /admin\.nodeAgent\.mailcowUntestedNote/);
+    await second.unmount();
+  });
+
   test('without the panel commit the node cannot be updated from here', async () => {
     answers['GET /api/mail-node/agent'] = { ...CONNECTED, panelCommit: null };
     const { host, unmount } = await mount();

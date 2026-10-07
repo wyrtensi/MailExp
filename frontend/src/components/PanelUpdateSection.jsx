@@ -9,7 +9,7 @@ import {
   requestErrorKey, rollbackCommand, rollbackInfo, safeGithubUrl, shouldOfferReload, stateInfo, textList,
   updateBlockReason, updateStatus, updateTarget,
 } from '../utils/panelUpdate.js';
-import { JOB_ERROR_KEYS, nodeUpdatePart } from '../utils/nodeAgent.js';
+import { JOB_ERROR_KEYS, mailcowName, nodeUpdatePart } from '../utils/nodeAgent.js';
 
 export const RUNBOOK_DOCS_URL = 'https://github.com/wyrtensi/MailExpert/blob/main/docs/operations/README.md';
 
@@ -142,6 +142,14 @@ function NodePart({ node, t }) {
         </div>
       )}
       {!node.connected && part.state !== 'succeeded' && <div style={{ ...noteStyle, marginTop: 4 }}>{t('admin.panelUpdate.nodeNotConnected')}</div>}
+      {node.pinnedMailcow && (
+        <div data-node-mailcow style={{ fontSize: 12, marginTop: 4 }}>
+          {t('admin.panelUpdate.nodeMailcow', {
+            node: mailcowName(node.mailcow?.tag, node.mailcow?.commit) ?? t('admin.panelUpdate.nodeMailcowUnknown'),
+            pinned: mailcowName(node.pinnedMailcow.tag, node.pinnedMailcow.commit),
+          })}
+        </div>
+      )}
       <div style={{ ...noteStyle, marginTop: 4 }}>{t('admin.panelUpdate.nodeHint')}</div>
     </div>
   );

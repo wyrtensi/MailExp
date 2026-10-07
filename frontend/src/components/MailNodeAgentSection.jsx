@@ -8,11 +8,14 @@ import {
   BACKUP_STATE_KEYS,
   JOB_ERROR_KEYS,
   JOB_STATE_KEYS,
+  MAILCOW_STATE_KEYS,
   SCRIPTS_STATE_KEYS,
   agentConnection,
   agentSetupCommands,
   backupSummary,
   latestJob,
+  mailcowName,
+  mailcowState,
   nodeBusyJob,
   scriptsState,
   shortCommit,
@@ -35,6 +38,9 @@ const codeStyle = {
 };
 const STATE_COLORS = { connected: 'var(--green)', waiting: 'var(--amber)', not_set_up: 'var(--text-tertiary)' };
 const BACKUP_COLORS = { ok: 'var(--green)', old: 'var(--red)', none: 'var(--amber)', off: 'var(--text-tertiary)' };
+const MAILCOW_COLORS = {
+  matches: 'var(--green)', pending: 'var(--amber)', waitingRelease: 'var(--text-secondary)', untested: 'var(--red)', unknown: 'var(--text-tertiary)',
+};
 const SCRIPTS_COLORS = { current: 'var(--green)', behind: 'var(--amber)', newer: 'var(--amber)', unknown: 'var(--text-tertiary)' };
 // While a job runs the section follows it every few seconds.
 const FOLLOW_MS = 4000;
@@ -132,6 +138,8 @@ export default function MailNodeAgentSection() {
   const lastBackupJob = latestJob(jobs, 'backup');
   const lastUpdateJob = latestJob(jobs, 'update');
   const scripts = scriptsState(status?.scriptsCommit, agent?.panelCommit, lastUpdateJob);
+  const pinned = agent?.pinnedMailcow ?? null;
+  const mailcow = mailcowState(status, pinned);
   const size = (bytes) => {
     const p = sizeParts(bytes);
     return `${p.value} ${t(p.unitKey)}`;
@@ -164,8 +172,17 @@ export default function MailNodeAgentSection() {
               </div>
               <div style={rowStyle}>
                 <span style={termStyle}>{t('admin.nodeAgent.mailcowLabel')}</span>
-                <code>{status.mailcowVersion ?? t('admin.nodeAgent.unknown')}</code>
+                <code>{mailcowName(status.mailcowTag, status.mailcowCommit) ?? status.mailcowVersion ?? t('admin.nodeAgent.unknown')}</code>
               </div>
+              <div style={rowStyle}>
+                <span style={termStyle}>{t('admin.nodeAgent.mailcowPinnedLabel')}</span>
+                <code>{mailcowName(pinned?.tag, pinned?.commit) ?? t('admin.nodeAgent.unknown')}</code>
+                <span data-mailcow-state={mailcow} style={{ color: MAILCOW_COLORS[mailcow], fontWeight: 600 }}>{t(MAILCOW_STATE_KEYS[mailcow])}</span>
+              </div>
+              {mailcow === 'untested' && (
+                <div role="alert" data-mailcow-warning style={{ ...noteStyle, color: 'var(--red)' }}>{t('admin.nodeAgent.mailcowUntestedNote', { pinned: mailcowName(pinned?.tag, pinned?.commit) ?? '?' })}</div>
+              )}
+              {mailcow === 'waitingRelease' && <div data-mailcow-info style={noteStyle}>{t('admin.nodeAgent.mailcowWaitingReleaseNote')}</div>}
               {containers?.total != null && (
                 <div style={rowStyle}>
                   <span style={termStyle}>{t('admin.nodeAgent.containersLabel')}</span>
