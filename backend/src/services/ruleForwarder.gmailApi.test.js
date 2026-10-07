@@ -36,6 +36,8 @@ describe('forwardRuleMessage on a Gmail mailbox', () => {
     };
     input = { ruleId: 'rule-1', message: { id: messageRow.id }, account, imapManager, recipient: 'recipient@example.com' };
     query
+      // The mailbox's fresh state: it may send.
+      .mockResolvedValueOnce({ rows: [{ enabled: true, mail_node: false, delete_after: null, deactivated_at: null }] })
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [messageRow] })
       .mockResolvedValueOnce({ rows: [] });

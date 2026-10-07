@@ -12,6 +12,8 @@ import {
   forwardRuleMessage,
 } from './ruleForwarder.js';
 
+// The fresh state of a mailbox that may send (forwardRuleMessage reads it first).
+const SENDABLE = { rows: [{ enabled: true, mail_node: false, delete_after: null, deactivated_at: null }] };
 const account = {
   id: 'account-1',
   sender_name: 'Mailbox',
@@ -182,8 +184,23 @@ describe('forwardRuleMessage', () => {
     expect(query).toHaveBeenCalledTimes(1);
   });
 
+  it('skips a forward from a disabled mailbox of any kind, read fresh: it cannot send', async () => {
+    for (const mailNode of [false, true]) {
+      query.mockReset();
+      query.mockResolvedValueOnce({ rows: [{ enabled: false, mail_node: mailNode, delete_after: null, deactivated_at: null }] });
+      // The account object the rule runs with may predate the change: it still says enabled.
+      const result = await forwardRuleMessage({ ...input, account: { ...account, enabled: true, mail_node: mailNode } });
+      expect(result).toBe('disabled');
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls[0][0]).toContain('FROM email_accounts');
+    }
+    expect(createAccountSmtpTransport).not.toHaveBeenCalled();
+    expect(transport.sendMail).not.toHaveBeenCalled();
+  });
+
   it('reserves, sends once, and marks the delivery sent', async () => {
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [messageRow] })
       .mockResolvedValueOnce({ rows: [] });
@@ -195,23 +212,25 @@ describe('forwardRuleMessage', () => {
 
   it('returns duplicate without sending when the existing reservation is sent', async () => {
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ status: 'sent' }] });
 
     await expect(forwardRuleMessage(input)).resolves.toBe('duplicate');
-    expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls[1][0]).toContain('SELECT status');
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[2][0]).toContain('SELECT status');
     expect(transport.sendMail).not.toHaveBeenCalled();
     expect(createAccountSmtpTransport).not.toHaveBeenCalled();
   });
 
   it('rejects a pending reservation without starting another delivery', async () => {
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ status: 'pending' }] });
 
     await expect(forwardRuleMessage(input)).rejects.toThrow('Forward delivery pending');
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(3);
     expect(transport.sendMail).not.toHaveBeenCalled();
     expect(createAccountSmtpTransport).not.toHaveBeenCalled();
   });
@@ -231,6 +250,7 @@ describe('forwardRuleMessage', () => {
       });
     });
     query.mockImplementation(async sql => {
+      if (sql.includes('FROM email_accounts')) return SENDABLE;
       if (sql.includes('INSERT INTO inbox_rule_forwards')) {
         if (reservationCreated) return { rows: [] };
         reservationCreated = true;
@@ -263,6 +283,7 @@ describe('forwardRuleMessage', () => {
 
   it('deletes a pending reservation after a known pre-delivery failure', async () => {
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockRejectedValueOnce(new Error('body unavailable'))
       .mockResolvedValueOnce({ rows: [] });
@@ -273,13 +294,14 @@ describe('forwardRuleMessage', () => {
 
   it('keeps the reservation when recording success fails after SMTP delivery', async () => {
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [messageRow] })
       .mockRejectedValueOnce(new Error('database unavailable'));
 
     await expect(forwardRuleMessage(input)).rejects.toThrow('database unavailable');
     expect(transport.sendMail).toHaveBeenCalledTimes(1);
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(4);
   });
 
   it('fetches only stored attachment parts once and preserves their metadata', async () => {
@@ -294,6 +316,7 @@ describe('forwardRuleMessage', () => {
       ['3', notes],
     ]));
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -333,6 +356,7 @@ describe('forwardRuleMessage', () => {
     imapManager.fetchMessageBody.mockResolvedValue({ text: 'Body', html: null, attachments: [] });
     imapManager.fetchMultipleAttachments.mockResolvedValue(new Map([['2', Buffer.from('pdf')]]));
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -360,6 +384,7 @@ describe('forwardRuleMessage', () => {
       ['2', pdf],
     ]));
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -436,6 +461,7 @@ describe('forwardRuleMessage', () => {
       ['4', pdf],
     ]));
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -473,6 +499,7 @@ describe('forwardRuleMessage', () => {
       ['2', Buffer.alloc((25 * 1024 * 1024) + 1)],
     ]));
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -495,6 +522,7 @@ describe('forwardRuleMessage', () => {
       }],
     };
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -513,6 +541,7 @@ describe('forwardRuleMessage', () => {
     };
     imapManager.fetchMultipleAttachments.mockResolvedValue(new Map());
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValueOnce({ rows: [] });
@@ -529,6 +558,7 @@ describe('forwardRuleMessage', () => {
       error: 'SMTP is unavailable',
     });
     query
+      .mockResolvedValueOnce(SENDABLE)
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })
       .mockResolvedValueOnce({ rows: [messageRow] })
       .mockResolvedValueOnce({ rows: [] });
@@ -547,6 +577,7 @@ describe('forwardRuleMessage', () => {
       .mockRejectedValueOnce(Object.assign(new Error(unsafeMessage), { responseCode: 550 }))
       .mockResolvedValueOnce({ accepted: true });
     query.mockImplementation(async sql => {
+      if (sql.includes('FROM email_accounts')) return SENDABLE;
       if (sql.includes('INSERT INTO inbox_rule_forwards')) {
         if (reservationStatus) return { rows: [] };
         reservationStatus = 'pending';
@@ -595,6 +626,7 @@ describe('forwardRuleMessage', () => {
     let reservationStatus = null;
     transport.sendMail.mockRejectedValueOnce(Object.assign(new Error('Connection closed unexpectedly'), { code: 'ECONNECTION', command: 'CONN' }));
     query.mockImplementation(async sql => {
+      if (sql.includes('FROM email_accounts')) return SENDABLE;
       if (sql.includes('INSERT INTO inbox_rule_forwards')) {
         if (reservationStatus) return { rows: [] };
         reservationStatus = 'pending';
@@ -633,6 +665,7 @@ describe('forwardRuleMessage', () => {
     let reservationStatus = null;
     transport.sendMail.mockRejectedValueOnce(new OAuthTokenError('oauth_reconnect_required'));
     query.mockImplementation(async sql => {
+      if (sql.includes('FROM email_accounts')) return SENDABLE;
       if (sql.includes('INSERT INTO inbox_rule_forwards')) {
         if (reservationStatus) return { rows: [] };
         reservationStatus = 'pending';
