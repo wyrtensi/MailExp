@@ -71,7 +71,7 @@ case " $* " in
   *" ps "*) printf '%s\n' "${STUB_SERVICES-backend}"; exit "${STUB_PS_STATUS:-0}" ;;
   # docker compose exec forwards stdin: a call that reads it would take what the CLI should get.
   *" test -f "*) if [ -n "${STUB_READ_STDIN:-}" ]; then cat >/dev/null; fi; exit "${STUB_TEST_STATUS:-0}" ;;
-  *" node "*) echo "cli says hi"; if [ -n "${STUB_READ_STDIN:-}" ]; then echo "cli read: $(cat)"; fi; echo "cli warns" >&2; exit "${STUB_CLI_STATUS:-0}" ;;
+  *" node "*) if [ -n "${STUB_CLI_SLEEP:-}" ]; then sleep "$STUB_CLI_SLEEP"; fi; echo "cli says hi"; if [ -n "${STUB_READ_STDIN:-}" ]; then echo "cli read: $(cat)"; fi; echo "cli warns" >&2; exit "${STUB_CLI_STATUS:-0}" ;;
 esac
 exit 0
 STUB_EOF
@@ -159,6 +159,24 @@ STUB_EOF
   STUB_CLI_STATUS=1 run bash "$SCRIPT" --prefix "$P" agent token issue --out "$BATS_TEST_TMPDIR/new"
   [ "$status" -eq 1 ]
   [ ! -e "$BATS_TEST_TMPDIR/new" ]
+}
+
+# TERM only: a background job of a non-interactive shell starts with INT ignored, and an ignored
+# signal cannot be trapped, so INT (Ctrl-C in a terminal, same trap) cannot be sent here.
+@test "agent token --out removes its file when the wrapper is stopped with TERM" {
+  stub_root
+  local file=$BATS_TEST_TMPDIR/stopped pid code=0
+  STUB_CLI_SLEEP=2 bash "$SCRIPT" --prefix "$P" agent token issue --out "$file" --yes 2>/dev/null &
+  pid=$!
+  for _ in $(seq 50); do
+    if [ -e "$file" ]; then break; fi
+    sleep 0.1
+  done
+  [ -e "$file" ]
+  kill -s TERM "$pid"
+  wait "$pid" || code=$?
+  [ "$code" -eq 143 ]
+  [ ! -e "$file" ]
 }
 
 @test "only agent token takes --out as a host file; --out - and other commands pass through unchanged" {

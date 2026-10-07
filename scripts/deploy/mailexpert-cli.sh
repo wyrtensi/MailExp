@@ -99,6 +99,13 @@ token_out_file() {
 }
 
 
+# The token file of `agent token --out` until the CLI has written it whole; removed on the way out.
+TOKEN_FILE_PENDING=
+# shellcheck disable=SC2317,SC2329 # invoked only through `trap remove_pending_token_file EXIT` in main
+remove_pending_token_file() {
+  if [ -n "$TOKEN_FILE_PENDING" ]; then rm -f -- "$TOKEN_FILE_PENDING"; fi
+}
+
 main() {
   exit_on_unexpected_failure
   local prefix=/opt/mailexpert
@@ -170,11 +177,16 @@ main() {
   if [ -n "$out_file" ]; then
     # Made here, only the owner reads it, never over a file that appeared meanwhile.
     (umask 077 && set -o noclobber && : >"$out_file") 2>/dev/null || die "--out: $out_file could not be created" 2
+    # Until the CLI has written it whole, the file goes on any way out: a failure, die, Ctrl-C or
+    # TERM (the signal traps exit, which runs the EXIT trap).
+    TOKEN_FILE_PENDING=$out_file
+    trap remove_pending_token_file EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     app_compose exec -T backend node "$CLI_PATH" "$@" >"$out_file" || status=$?
     if [ "$status" = 0 ]; then
+      TOKEN_FILE_PENDING=
       printf 'token written to %s (0600): give it to setup.sh --agent-token-file on the node\n' "$out_file" >&2
-    else
-      rm -f -- "$out_file"
     fi
   else
     app_compose exec "${tty[@]}" backend node "$CLI_PATH" "$@" || status=$?
