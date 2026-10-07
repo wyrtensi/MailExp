@@ -1244,10 +1244,11 @@ export default function ComposeModal() {
     }
   };
 
-  // The Android Back button closes the composer through the same check as the close button.
-  const handleCloseRef = useRef(handleClose);
-  handleCloseRef.current = handleClose;
-  useEffect(() => onComposeCloseRequest(() => handleCloseRef.current()), []);
+  // The Android Back button closes the composer through the same check as the close button; with
+  // the close dialog already open it dismisses the dialog.
+  const backRef = useRef(null);
+  backRef.current = () => (showCloseDialog ? setShowCloseDialog(false) : handleClose());
+  useEffect(() => onComposeCloseRequest(() => backRef.current()), []);
 
   const renderSignatureEditor = () => plaintextEmail ? (
     <textarea
