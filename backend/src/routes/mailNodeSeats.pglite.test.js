@@ -143,6 +143,29 @@ describe('the Graph read', () => {
     expect(await get()).toMatchObject({ free: 10, source: 'graph', error: { code: 'graph_failed' } });
   });
 
+  it('remembers when Graph first failed while it never answered, and forgets it after a good read', async () => {
+    graphMode();
+    await saveEopSettings({ ...TENANT, licenses: 2 });
+    driver.fake.model.subscribedSkus = null;
+    await send('POST', '/seats/check');
+    await runDue();
+    const first = (await getSeatRead()).firstErrorAt;
+    expect(first).toEqual(expect.any(String));
+    await db.exec('DELETE FROM jobs');
+    await send('POST', '/seats/check');
+    await runDue();
+    expect((await getSeatRead()).firstErrorAt).toBe(first);
+    expect(await get()).toMatchObject({ notReconciled: true, stale: false });
+    driver.fake.model.subscribedSkus = structuredClone(TENANT_FIXTURES.graph.subscribedSkus);
+    driver.fake.model.subscribedSkus.value[0].prepaidUnits = { enabled: 4, warning: 2, suspended: 0, lockedOut: 0 };
+    await db.exec('DELETE FROM jobs');
+    await send('POST', '/seats/check');
+    await runDue();
+    expect(await getSeatRead()).toMatchObject({ ok: true, purchased: 6, warning: 2 });
+    expect((await getSeatRead()).firstErrorAt).toBeUndefined();
+    expect(await get()).toMatchObject({ free: 6 });
+  });
+
   it('a seat request asks Graph again', async () => {
     graphMode();
     await saveEopSettings(TENANT);

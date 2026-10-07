@@ -718,6 +718,13 @@ describe('seatSignals (EOP seats)', () => {
     ]);
   });
 
+  it('warns while some purchased units are in warning, naming how many', () => {
+    expect(seatSignals({ ...base, warning: 2 })).toEqual([
+      { key: 'eop_seats_warning', severity: 'warning', details: { warning: 2 } },
+    ]);
+    expect(seatSignals({ ...base, warning: 0 })).toEqual([]);
+  });
+
   it('warns when the purchased number is older than 3 days', () => {
     expect(seatSignals({ ...base, stale: true, error: { code: 'graph_forbidden' } })).toEqual([
       { key: 'eop_seats_stale', severity: 'warning', details: { at: base.at, code: 'graph_forbidden' } },

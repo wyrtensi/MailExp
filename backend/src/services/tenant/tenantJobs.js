@@ -169,7 +169,13 @@ export async function readSeats(session, previous = null, now = Date.now()) {
   try {
     return { at, ok: true, ...parseSubscribedSkus(await session.graph.request('GET', '/subscribedSkus')) };
   } catch (err) {
-    return { ...(previous ?? {}), ok: false, error: failureOf(err), errorAt: at };
+    // firstErrorAt: when it began to fail while it never answered, so a missing permission alerts
+    // after 3 days (eopSeats.js purchasedSeats).
+    const never = !Number.isInteger(previous?.purchased);
+    return {
+      ...(previous ?? {}), ok: false, error: failureOf(err), errorAt: at,
+      ...(never ? { firstErrorAt: previous?.firstErrorAt ?? at } : {}),
+    };
   }
 }
 

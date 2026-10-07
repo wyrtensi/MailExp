@@ -1041,6 +1041,7 @@ const ALERT_TITLE_KEYS = {
   tenant_antispam_not_enforced: 'admin.nodeOps.alertTenantAntispamNotEnforced',
   eop_seats_over: 'admin.nodeOps.alertEopSeatsOver',
   eop_seats_stale: 'admin.nodeOps.alertEopSeatsStale',
+  eop_seats_warning: 'admin.nodeOps.alertEopSeatsWarning',
   eop_seats_requested: 'admin.nodeOps.alertEopSeatsRequested',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
@@ -1149,6 +1150,8 @@ export function alertDetail(alert) {
       return { key: 'admin.nodeOps.alertDetailEopSeatsOver', values: { used: d.used ?? 0 } };
     case 'eop_seats_stale':
       return { key: 'admin.nodeOps.alertDetailEopSeatsStale', values: { code: d.code ?? '—' }, at: d.at ?? null };
+    case 'eop_seats_warning':
+      return { key: 'admin.nodeOps.alertDetailEopSeatsWarning', values: { warning: d.warning ?? 0 } };
     case 'eop_seats_requested':
       return { key: 'admin.nodeOps.alertDetailEopSeatsRequested', values: { count: d.count ?? 0, seats: d.seats ?? 0 }, at: d.since ?? null };
     // Alias contacts kept on an Authoritative domain for an administrator (section 5.14).

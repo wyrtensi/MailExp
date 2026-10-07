@@ -3006,7 +3006,9 @@
       "alertDetailEopSeatsOver": "Used: {{used}}. New mailboxes are refused.",
       "alertDetailEopSeatsStale": "Last good read below; error: {{code}}",
       "alertDetailEopSeatsRequested": "Open requests: {{count}}, seats: {{seats}}",
-      "sourceSeats": "EOP seats"
+      "sourceSeats": "EOP seats",
+      "alertEopSeatsWarning": "Some EOP seats are in warning",
+      "alertDetailEopSeatsWarning": "{{warning}} seats are in warning: they still work and count as purchased, but the subscription needs attention."
     },
     "nodeAgent": {
       "title": "Node agent",

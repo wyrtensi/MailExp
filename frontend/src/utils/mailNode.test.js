@@ -735,6 +735,9 @@ describe('EOP seats and deactivation', () => {
 
   it('names the seat alerts', () => {
     assert.equal(alertTitleKey('eop_seats_over'), 'admin.nodeOps.alertEopSeatsOver');
+    assert.equal(alertTitleKey('eop_seats_warning'), 'admin.nodeOps.alertEopSeatsWarning');
+    assert.deepEqual(alertDetail({ key: 'eop_seats_warning', details: { warning: 2 } }),
+      { key: 'admin.nodeOps.alertDetailEopSeatsWarning', values: { warning: 2 } });
     assert.deepEqual(alertDetail({ key: 'eop_seats_requested', details: { count: 2, seats: 3, since: '2026-10-06T10:00:00.000Z' } }),
       { key: 'admin.nodeOps.alertDetailEopSeatsRequested', values: { count: 2, seats: 3 }, at: '2026-10-06T10:00:00.000Z' });
   });

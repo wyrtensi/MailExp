@@ -41,12 +41,14 @@ const LATEST = `
 
 const whole = (value) => (Number.isInteger(value) && value >= 0 ? value : 0);
 
-// The EOP subscriptions of a GET /subscribedSkus answer: { found, purchased, skus }. Several EOP
-// subscriptions add up; none means 0 seats.
+// The EOP subscriptions of a GET /subscribedSkus answer: { found, purchased, warning, skus }.
+// purchased = prepaidUnits.enabled + prepaidUnits.warning (units in warning, a lapsed payment say,
+// still work; the alert eop_seats_warning says so); suspended and locked-out units do not count.
+// Several EOP subscriptions add up; none means 0 seats.
 export function parseSubscribedSkus(answer) {
   const rows = Array.isArray(answer?.value) ? answer.value : [];
   const eop = rows.filter((row) => String(row?.skuPartNumber ?? '').toUpperCase() === EOP_SKU_PART_NUMBER);
-  if (!eop.length) return { found: false, purchased: 0, skus: [] };
+  if (!eop.length) return { found: false, purchased: 0, warning: 0, skus: [] };
   const skus = eop.map((row) => ({
     skuId: row.skuId ?? null,
     appliesTo: row.appliesTo ?? null,
@@ -56,7 +58,12 @@ export function parseSubscribedSkus(answer) {
     warning: whole(row.prepaidUnits?.warning),
     consumedUnits: whole(row.consumedUnits),
   }));
-  return { found: true, purchased: skus.reduce((sum, sku) => sum + sku.enabled, 0), skus };
+  return {
+    found: true,
+    purchased: skus.reduce((sum, sku) => sum + sku.enabled + sku.warning, 0),
+    warning: skus.reduce((sum, sku) => sum + sku.warning, 0),
+    skus,
+  };
 }
 
 // 'graph' when the tenant gives the number (a real driver and the four tenant fields), else 'manual'.
@@ -70,14 +77,20 @@ export function seatSource(eop, driver) {
 export function purchasedSeats({ eop, read, source, now = Date.now() }) {
   const manual = Number.isInteger(eop?.licenses) ? eop.licenses : null;
   if (source !== 'graph') {
-    return { purchased: manual, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null };
+    return { purchased: manual, warning: 0, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null };
   }
   const at = Date.parse(read?.at ?? '');
   const error = read?.ok === false ? (read.error ?? null) : null;
   if (!Number.isInteger(read?.purchased) || !Number.isFinite(at)) {
-    return { purchased: manual, mode: 'graph', source: 'manual', at: null, stale: false, notReconciled: true, error };
+    // Never read: stale once the first failed try is older than 3 days (a missing permission, say).
+    const first = Date.parse(read?.firstErrorAt ?? '');
+    const never = Number.isFinite(first) && now - first > SEATS_STALE_MS;
+    return { purchased: manual, warning: 0, mode: 'graph', source: 'manual', at: null, stale: never, notReconciled: true, error };
   }
-  return { purchased: read.purchased, mode: 'graph', source: 'graph', at: read.at, stale: now - at > SEATS_STALE_MS, notReconciled: false, error };
+  return {
+    purchased: read.purchased, warning: whole(read.warning), mode: 'graph', source: 'graph', at: read.at,
+    stale: now - at > SEATS_STALE_MS, notReconciled: false, error,
+  };
 }
 
 async function readConfig(provider, db) {

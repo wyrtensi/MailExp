@@ -42,7 +42,8 @@ import { checkSpamRule } from './nodeApply.js';
 //   budget keeps its previous alert instead of falling back to the journal and flapping;
 // - seats: EOP seats (services/mailNode/eopSeats.js): fewer purchased than used (eop_seats_over), the
 //   purchased number from Graph older than 3 days (eop_seats_stale), an open seat request
-//   (eop_seats_requested), all warnings. The purchased number is not in the alerts, as in no screen;
+//   (eop_seats_requested), purchased units in warning (eop_seats_warning), all warnings; the number
+//   counts as old too when Graph never answered and the first failed try is older than 3 days. The purchased number is not in the alerts, as in no screen;
 // - trace: letters to the node's domains still waiting in EOP's queue after an outage of the node
 //   (R-43, services/mailNode/outageTrace.js), a warning with the time EOP gives up on the first;
 // - tenant: with a tenant driver and the tenant configured, what the tenant poll stored
@@ -105,6 +106,7 @@ export const ALERTS = Object.freeze({
   tenant_alias_contacts_held: ['tenant_domains', 'warning'],
   eop_seats_over: ['seats', 'warning'],
   eop_seats_stale: ['seats', 'warning'],
+  eop_seats_warning: ['seats', 'warning'],
   eop_seats_requested: ['seats', 'warning'],
   eop_host_missing: ['settings', 'info'],
 });
@@ -202,6 +204,8 @@ export function spamRuleSignal(rule) {
 export function seatSignals(seats) {
   const alerts = [];
   if (seats?.over) alerts.push({ key: 'eop_seats_over', severity: 'warning', details: { used: seats.used } });
+  // Units in warning still work (they count as purchased), but the subscription needs attention.
+  if (seats?.warning > 0) alerts.push({ key: 'eop_seats_warning', severity: 'warning', details: { warning: seats.warning } });
   if (seats?.stale) alerts.push({ key: 'eop_seats_stale', severity: 'warning', details: { at: seats.at, code: seats.error?.code ?? null } });
   const requests = seats?.requests ?? [];
   if (requests.length) {
@@ -625,6 +629,7 @@ function summaryOf(alert) {
     case 'tenant_alias_contacts_held': return { count: d.count, domains: d.domains ?? [] };
     case 'eop_seats_over': return { used: d.used };
     case 'eop_seats_stale': return { at: d.at, code: d.code };
+    case 'eop_seats_warning': return { warning: d.warning };
     case 'eop_seats_requested': return { count: d.count, seats: d.seats };
     default: return { count: d.count };
   }

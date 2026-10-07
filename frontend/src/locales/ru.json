@@ -3056,7 +3056,9 @@
       "alertDetailEopSeatsOver": "Занято: {{used}}. Новые ящики не создаются.",
       "alertDetailEopSeatsStale": "Последнее удачное чтение ниже; ошибка: {{code}}",
       "alertDetailEopSeatsRequested": "Открытых запросов: {{count}}, мест: {{seats}}",
-      "sourceSeats": "места EOP"
+      "sourceSeats": "места EOP",
+      "alertEopSeatsWarning": "Часть мест EOP в состоянии предупреждения",
+      "alertDetailEopSeatsWarning": "Мест в предупреждении: {{warning}}. Они работают и считаются купленными, но подписке нужно внимание."
     },
     "nodeAgent": {
       "title": "Служба узла",

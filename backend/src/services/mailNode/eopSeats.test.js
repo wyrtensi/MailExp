@@ -29,11 +29,18 @@ describe('parseSubscribedSkus', () => {
     }]);
   });
 
+  it('counts the units in warning too: they still work, and says how many there are', () => {
+    const one = TENANT_FIXTURES.graph.subscribedSkus.value[0];
+    const parsed = parseSubscribedSkus({ value: [{ ...one, prepaidUnits: { enabled: 10, warning: 3, suspended: 4 } }] });
+    expect(parsed.purchased).toBe(13);
+    expect(parsed.warning).toBe(3);
+  });
+
   it('adds up two EOP subscriptions and answers 0 without one', () => {
     const one = TENANT_FIXTURES.graph.subscribedSkus.value[0];
     expect(parseSubscribedSkus({ value: [one, { ...one, prepaidUnits: { enabled: 5 } }] }).purchased).toBe(15);
-    expect(parseSubscribedSkus({ value: [TENANT_FIXTURES.graph.subscribedSkus.value[1]] })).toEqual({ found: false, purchased: 0, skus: [] });
-    expect(parseSubscribedSkus(null)).toEqual({ found: false, purchased: 0, skus: [] });
+    expect(parseSubscribedSkus({ value: [TENANT_FIXTURES.graph.subscribedSkus.value[1]] })).toEqual({ found: false, purchased: 0, warning: 0, skus: [] });
+    expect(parseSubscribedSkus(null)).toEqual({ found: false, purchased: 0, warning: 0, skus: [] });
   });
 });
 
@@ -49,7 +56,7 @@ describe('seatSource', () => {
 describe('purchasedSeats', () => {
   it('takes the manual number in manual mode', () => {
     expect(purchasedSeats({ eop: { licenses: 4 }, read: null, source: 'manual', now: NOW })).toEqual({
-      purchased: 4, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null,
+      purchased: 4, warning: 0, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null,
     });
     expect(purchasedSeats({ eop: { licenses: null }, read: null, source: 'manual', now: NOW }).purchased).toBeNull();
   });
@@ -58,15 +65,31 @@ describe('purchasedSeats', () => {
     const at = new Date(NOW - SEATS_STALE_MS - 1000).toISOString();
     const read = { at, ok: false, purchased: 7, error: { code: 'graph_forbidden', message: 'x' } };
     expect(purchasedSeats({ eop: { licenses: 99 }, read, source: 'graph', now: NOW })).toEqual({
-      purchased: 7, mode: 'graph', source: 'graph', at, stale: true, notReconciled: false, error: { code: 'graph_forbidden', message: 'x' },
+      purchased: 7, warning: 0, mode: 'graph', source: 'graph', at, stale: true, notReconciled: false, error: { code: 'graph_forbidden', message: 'x' },
     });
     const fresh = { at: new Date(NOW - 1000).toISOString(), ok: true, purchased: 7 };
     expect(purchasedSeats({ eop: {}, read: fresh, source: 'graph', now: NOW }).stale).toBe(false);
   });
 
+  it('is stale when Graph never answered and the first failed try is older than 3 days (a missing permission)', () => {
+    const firstErrorAt = new Date(NOW - SEATS_STALE_MS - 1000).toISOString();
+    const read = { ok: false, firstErrorAt, errorAt: new Date(NOW - 1000).toISOString(), error: { code: 'graph_forbidden', message: 'x' } };
+    expect(purchasedSeats({ eop: { licenses: 2 }, read, source: 'graph', now: NOW })).toMatchObject({
+      purchased: 2, notReconciled: true, stale: true, error: { code: 'graph_forbidden', message: 'x' },
+    });
+    const young = { ...read, firstErrorAt: new Date(NOW - 1000).toISOString() };
+    expect(purchasedSeats({ eop: { licenses: 2 }, read: young, source: 'graph', now: NOW }).stale).toBe(false);
+  });
+
+  it('carries the units in warning of the last good read', () => {
+    const at = new Date(NOW - 1000).toISOString();
+    expect(purchasedSeats({ eop: {}, read: { at, ok: true, purchased: 7, warning: 2 }, source: 'graph', now: NOW }).warning).toBe(2);
+    expect(purchasedSeats({ eop: { licenses: 3 }, read: null, source: 'manual', now: NOW }).warning).toBe(0);
+  });
+
   it('falls back to the manual number until Graph answered once', () => {
     expect(purchasedSeats({ eop: { licenses: 2 }, read: null, source: 'graph', now: NOW })).toEqual({
-      purchased: 2, mode: 'graph', source: 'manual', at: null, stale: false, notReconciled: true, error: null,
+      purchased: 2, warning: 0, mode: 'graph', source: 'manual', at: null, stale: false, notReconciled: true, error: null,
     });
   });
 });
