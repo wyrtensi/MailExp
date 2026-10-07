@@ -251,7 +251,7 @@ export class FolderStatusMonitor {
       });
       for (const item of changed) {
         if (queued >= 2) break;
-        if (this.enqueueSync(account, item.row.path, item.status)) queued++;
+        if (this.enqueueSync(account, item.row.path, item.status, item.row.special_use)) queued++;
       }
       if (failed) throw new Error('One or more folder status checks failed');
       this.failures.delete(account.id);

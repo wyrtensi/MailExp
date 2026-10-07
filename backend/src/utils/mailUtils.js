@@ -89,7 +89,7 @@ export async function resolveArchiveFolder(accountId, folderMappings) {
 }
 
 // True when `path` is this account's Gmail-style "All Mail" folder (special_use = '\All').
-// All Mail is excluded from sync/backfill (imapManager.js skipFolderPatterns) and from
+// All Mail is excluded from sync/backfill (imapManager.js skipsDuplicateView) and from
 // the relocate guard, so no sync loop ever maintains a messages row filed under it.
 // Callers that move a message there (see resolveArchiveFolder) must delete the source
 // row instead of re-homing it into folder = <All Mail path> — the message should
