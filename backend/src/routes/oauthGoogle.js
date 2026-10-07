@@ -82,6 +82,7 @@ router.get('/', async (req, res) => {
       mode: 'reconnect',
       email: target.email,
       accountId: target.account.id,
+      reservation: selected.reservation,
     });
     res.redirect(buildGoogleAuthorizationUrl({
       clientId: config.clientId,
@@ -91,7 +92,7 @@ router.get('/', async (req, res) => {
       loginHint: target.email,
     }));
   } catch (err) {
-    if (selected?.reserved) await releaseGoogleSeat(selected.appId, target.email);
+    if (selected?.reserved) await releaseGoogleSeat(selected.appId, target.email, selected.reservation);
     const known = err instanceof CallbackError || err instanceof GoogleAppSelectionError;
     if (!known) console.error(`Google OAuth start failed: ${err?.name || 'Error'}`);
     res.redirect(errorRedirect(known ? err.code : 'authentication_failed'));
@@ -157,7 +158,7 @@ router.get('/callback', async (req, res) => {
     // (reservation + grant) is intended: it is only more conservative than the alternative of
     // releasing before the exchange, which would let the seat look free while it is in flight.
     if (pending.appId) {
-      await releaseGoogleSeat(pending.appId, pending.email);
+      await releaseGoogleSeat(pending.appId, pending.email, pending.reservation);
       released = true;
     }
     // The user may pick another Google account on Google's page than the one asked for.
@@ -183,7 +184,7 @@ router.get('/callback', async (req, res) => {
       : 'authentication_failed';
     // Log the stable code and error class only; messages may carry provider details.
     console.error(`Google OAuth callback failed: ${stable} (${err?.name || 'Error'})`);
-    if (pending?.appId && pending.email && !released) await releaseGoogleSeat(pending.appId, pending.email);
+    if (pending?.appId && pending.email && !released) await releaseGoogleSeat(pending.appId, pending.email, pending.reservation);
     if (issued) await revokeRefusedGrant(issued);
     res.redirect(errorRedirect(stable));
   }

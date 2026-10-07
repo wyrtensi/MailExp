@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { query, withTransaction } from '../db.js';
 import { redisClient } from '../redis.js';
 import { OAUTH_STATE_TTL_SECONDS } from './oauthState.js';
@@ -32,33 +32,50 @@ export function googleEmailDigest(email) {
   return createHash('sha256').update(String(email).trim().toLowerCase()).digest('hex');
 }
 
-// Live reservations of one app. Expired ones are dropped on every count.
-export async function countGoogleReservations(appId, now = Date.now()) {
+// Every consent flow holds its own reservation, `<email digest>:<reservation id>`, so a flow that
+// ends (or fails) releases only its own: another flow for the same address still holds the seat.
+// A seat is one address, so the count is of distinct digests. A member without an id is a
+// reservation stored before reservations named their flow; it is counted the same way and expires
+// with its TTL.
+const reservationMember = (email, reservation) =>
+  (reservation ? `${googleEmailDigest(email)}:${reservation}` : googleEmailDigest(email));
+const memberDigest = (member) => String(member).split(':')[0];
+
+// Digests of the addresses with a live reservation in one app. Expired ones are dropped first.
+async function reservedDigests(appId, now) {
   const key = reservationKey(appId);
   await redisClient.zRemRangeByScore(key, '-inf', now);
-  return redisClient.zCard(key);
+  return new Set((await redisClient.zRange(key, 0, -1)).map(memberDigest));
+}
+
+// Live reservations of one app, one per address.
+export async function countGoogleReservations(appId, now = Date.now()) {
+  return (await reservedDigests(appId, now)).size;
 }
 
 async function hasLiveReservation(appId, email, now) {
-  const expiresAt = await redisClient.zScore(reservationKey(appId), googleEmailDigest(email));
-  return expiresAt !== null && Number(expiresAt) > now;
+  return (await reservedDigests(appId, now)).has(googleEmailDigest(email));
 }
 
-// A repeated start for the same email refreshes its one reservation instead of adding another.
+// Adds this flow's reservation and returns its id.
 async function reserveSeat(appId, email, now) {
   const key = reservationKey(appId);
-  await redisClient.zAdd(key, { score: now + OAUTH_STATE_TTL_SECONDS * 1000, value: googleEmailDigest(email) });
+  const reservation = randomBytes(16).toString('hex');
+  await redisClient.zAdd(key, { score: now + OAUTH_STATE_TTL_SECONDS * 1000, value: reservationMember(email, reservation) });
   // The set itself never outlives its newest reservation.
   await redisClient.expire(key, OAUTH_STATE_TTL_SECONDS);
+  return reservation;
 }
 
 // Called on the callback once the grant is journaled (so a seat never looks free while the code
 // exchange is in flight), on every callback path that ends before that, and by a start that fails
-// after reserving. A brief double count (reservation + grant) is intended.
-export async function releaseGoogleSeat(appId, email) {
+// after reserving. A brief double count (reservation + grant) is intended. `reservation` is the
+// id selectGoogleApp returned for this flow; without one, only a reservation stored before
+// reservations named their flow is released.
+export async function releaseGoogleSeat(appId, email, reservation = null) {
   if (!appId || !email) return;
   try {
-    await redisClient.zRem(reservationKey(appId), googleEmailDigest(email));
+    await redisClient.zRem(reservationKey(appId), reservationMember(email, reservation));
   } catch (err) {
     console.error(`Google OAuth reservation release failed: ${err?.name || 'Error'}`);
   }
@@ -70,8 +87,9 @@ async function hasFreeSeat(app, now) {
 
 // Picks the app for one address and, when that costs a new seat, reserves it. Every caller names
 // the address: adding goes through POST /api/oauth/google/start (under the CSRF check), and a
-// reconnect names the mailbox. Returns { appId, reserved }; `reserved` tells the caller to release
-// the seat if it gives up before the callback.
+// reconnect names the mailbox. Returns { appId, reserved } and, when `reserved`, the flow's
+// `reservation` id: the caller keeps it in the OAuth state and passes it to releaseGoogleSeat when
+// the flow ends or it gives up before the callback.
 export async function selectGoogleApp({ email, account = null } = {}) {
   if (!email) throw new TypeError('selectGoogleApp needs an email');
   return withTransaction(async (client) => {
@@ -90,17 +108,16 @@ export async function selectGoogleApp({ email, account = null } = {}) {
 
     const now = Date.now();
     const active = usable.filter((app) => app.status === 'active');
-    // A repeated start for the same email keeps its app and refreshes its one reservation.
+    // A repeated start for the same email keeps its app: its seat is already counted, and the new
+    // flow adds its own reservation next to the other one.
     for (const app of active) {
       if (await hasLiveReservation(app.id, email, now)) {
-        await reserveSeat(app.id, email, now);
-        return { appId: app.id, reserved: true };
+        return { appId: app.id, reserved: true, reservation: await reserveSeat(app.id, email, now) };
       }
     }
     for (const app of active) {
       if (await hasFreeSeat(app, now)) {
-        await reserveSeat(app.id, email, now);
-        return { appId: app.id, reserved: true };
+        return { appId: app.id, reserved: true, reservation: await reserveSeat(app.id, email, now) };
       }
     }
     throw new GoogleAppSelectionError('no_app_capacity');

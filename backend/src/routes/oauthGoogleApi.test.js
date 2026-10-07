@@ -11,7 +11,7 @@ vi.mock('../middleware/auth.js', () => ({
 vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 // googleLaunch.js is loaded for real (for GOOGLE_EMAIL_PATTERN); keep it off a real Redis client.
 vi.mock('../services/redis.js', () => ({ redisClient: { set: vi.fn(), getDel: vi.fn() } }));
-const selection = vi.hoisted(() => ({ result: { appId: 'app-1', reserved: true }, error: null }));
+const selection = vi.hoisted(() => ({ result: { appId: 'app-1', reserved: true, reservation: 'res-1' }, error: null }));
 vi.mock('../services/oauth/googleAppSelection.js', () => {
   class GoogleAppSelectionError extends Error {
     constructor(code) { super(code); this.code = code; }
@@ -59,7 +59,7 @@ beforeAll(async () => {
 afterAll(() => new Promise((resolve) => server.close(resolve)));
 beforeEach(() => {
   vi.clearAllMocks();
-  selection.result = { appId: 'app-1', reserved: true };
+  selection.result = { appId: 'app-1', reserved: true, reservation: 'res-1' };
   selection.error = null;
   config.value = { appId: 'app-1', clientId: CLIENT_ID, clientSecret: 's', redirectUri: 'https://mail.example.com/oauth/google/callback' };
   query.mockResolvedValue({ rows: [] });
@@ -84,6 +84,7 @@ describe('POST /api/oauth/google/start', () => {
     expect(JSON.stringify(body)).not.toMatch(/gmail/i);
     expect(createOAuthState).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'google', userId: 'u1', appId: 'app-1', mode: 'add', email: 'a@gmail.com', loginHint: 'a@gmail.com',
+      reservation: 'res-1',
     }));
     const { url } = createGoogleLaunch.mock.calls[0][0];
     const google = new URL(url);
@@ -130,21 +131,21 @@ describe('POST /api/oauth/google/start', () => {
     const res = await start('a@gmail.com');
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'not_configured' });
-    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com', 'res-1');
   });
 
   it('frees the reserved seat when reading the app configuration throws', async () => {
     resolveGoogleConfig.mockRejectedValueOnce(new Error('db down'));
     const res = await start('A@Gmail.com');
     expect(res.status).toBe(500);
-    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com', 'res-1');
   });
 
   it('frees the reserved seat when createGoogleLaunch fails after the reservation', async () => {
     createGoogleLaunch.mockRejectedValueOnce(new Error('redis down'));
     const res = await start('A@Gmail.com');
     expect(res.status).toBe(500);
-    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
+    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com', 'res-1');
   });
 });
 
