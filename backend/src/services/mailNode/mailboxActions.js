@@ -10,16 +10,21 @@ import {
 import { MAIL_NODE_ERRORS } from './errors.js';
 import { DISK_WARN_PERCENT } from './diskWatch.js';
 import {
-  addMailboxFilter, deleteMailbox, deleteMailboxFilters, getDiskStatus, getMailNodeConfig, listDomains, listMailboxFilters,
-  listMailboxes, parseHostName, parseLocalPart, provisionMailbox,
+  deleteMailbox, getDeleteAfterDays, getDiskStatus, getMailNodeConfig, listDomains, listMailboxes, parseHostName, parseLocalPart,
+  provisionMailbox,
 } from './mailcow.js';
+import { READ_ONLY_FILTER_DESC, closeLocalDelivery, openLocalDelivery } from './readOnlyFilter.js';
 import { cancelDeletion, requestDeletion } from './mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from './domains.js';
 import { getEopSettings } from './eopSettings.js';
 import {
   confirmSeat, dropPendingSeat, getHoldDays, lockSeats, releaseSeat, reserveSeat, returnSeat, seatSupply,
 } from './eopSeats.js';
-import { defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';import { MIRRORED_STATES, kickDomainSync } from '../tenant/tenantDomains.js';
+import { defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';
+import { MIRRORED_STATES, kickDomainSync } from '../tenant/tenantDomains.js';
+
+// Kept here for the callers that import it from the actions.
+export { READ_ONLY_FILTER_DESC, closeLocalDelivery, openLocalDelivery };
 
 // The node mailbox actions that routes/accounts.js, routes/mailNode.js and the panel CLI
 // (src/cli/mailexpert.js) share: list, create, ask to delete and cancel. They answer a result or
@@ -320,43 +325,6 @@ export async function setNodeMailboxNames(ref, { name, senderName, senderNameAlt
   return { account: withoutSecrets(row), aliases };
 }
 
-// --- read-only filter -----------------------------------------------------------------------------
-
-// A read-only mailbox refuses local delivery too (EOP seats design): mail from another mailbox of the
-// node never passes EOP, so the missing tenant recipient does not stop it. A per-mailbox Sieve
-// prefilter through the mailcow API refuses it; IMAP is untouched, so the panel still reads the
-// mailbox. Research and its limits: eop-panel-requirements.md section 5.16.
-export const READ_ONLY_FILTER_DESC = 'mailexpert-read-only';
-const READ_ONLY_SCRIPT = 'require ["reject"];\nreject "This mailbox is closed and no longer takes mail.";\n';
-
-export async function closeLocalDelivery(cfg, email) {
-  const filters = await listMailboxFilters(cfg, email);
-  if (filters.some((f) => f.desc === READ_ONLY_FILTER_DESC && f.type === 'prefilter' && f.active)) return;
-  await addMailboxFilter(cfg, { email, type: 'prefilter', desc: READ_ONLY_FILTER_DESC, script: READ_ONLY_SCRIPT });
-}
-
-export async function openLocalDelivery(cfg, email) {
-  const ids = (await listMailboxFilters(cfg, email)).filter((f) => f.desc === READ_ONLY_FILTER_DESC).map((f) => f.id);
-  await deleteMailboxFilters(cfg, ids);
-}
-
-// Opens local delivery before a mailbox works again, runs the change, and closes it again when the
-// change was refused or failed: the mailbox is still read-only then.
-async function openThen(cfg, email, change) {
-  await openLocalDelivery(cfg, email);
-  let result;
-  try {
-    result = await change();
-  } catch (err) {
-    await closeLocalDelivery(cfg, email).catch((e) => console.error(`Read-only filter of ${email} not restored: ${e.message}`));
-    throw err;
-  }
-  if (result.error) {
-    await closeLocalDelivery(cfg, email).catch((e) => console.error(`Read-only filter of ${email} not restored: ${e.message}`));
-  }
-  return result;
-}
-
 // --- deletion -------------------------------------------------------------------------------------
 
 // The reason as stored: line breaks made \n, invisible format characters (bidi controls,
@@ -381,13 +349,69 @@ async function kickMailboxDomain(email, actor) {
   await kickDomainSync(String(email).toLowerCase().split('@')[1], jobBy(actor));
 }
 
+// One action at a time per mailbox, across processes (the panel and the CLI): every action below runs
+// in one transaction that takes this lock first, does its node call and its row changes inside, and
+// commits together. Taken before the seats lock, never after.
+async function lockMailbox(client, accountId) {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mail_node:mailbox:${accountId}`]);
+}
+
+// The mailbox as the action sees it once it holds the lock.
+async function readMailbox(client, accountId) {
+  const { rows: [row] } = await client.query(
+    'SELECT email_address, mail_node, imap_host, delete_after, deactivated_at FROM email_accounts WHERE id = $1 FOR UPDATE', [accountId],
+  );
+  return row ?? null;
+}
+
+const isWorking = (row) => !row.delete_after && !row.deactivated_at;
+
+// A change that makes a mailbox read-only: the node's filter first, then the change (a function of
+// the open transaction); when the change is refused or throws, the mailbox is working still, so the
+// filter goes again. A filter the node keeps after a failed removal is healed by the reconciliation
+// (readOnlyFilter.js reconcileLocalDelivery, run with the alerts).
+async function closeThen(cfg, row, change) {
+  const workingBefore = isWorking(row);
+  await closeLocalDelivery(cfg, row.email_address);
+  const undo = () => (workingBefore
+    ? openLocalDelivery(cfg, row.email_address).catch((e) => console.error(`Read-only filter of ${row.email_address} not removed: ${e.code || 'error'}`))
+    : undefined);
+  let result;
+  try {
+    result = await change();
+  } catch (err) {
+    await undo();
+    throw err;
+  }
+  if (result.error) await undo();
+  return result;
+}
+
+// The opposite: a change that makes a read-only mailbox work. Local delivery opens first; when the
+// change is refused or throws, the mailbox is read-only still and the filter closes again.
+async function openThen(cfg, row, change) {
+  await openLocalDelivery(cfg, row.email_address);
+  const redo = () => closeLocalDelivery(cfg, row.email_address)
+    .catch((e) => console.error(`Read-only filter of ${row.email_address} not restored: ${e.code || 'error'}`));
+  let result;
+  try {
+    result = await change();
+  } catch (err) {
+    await redo();
+    throw err;
+  }
+  if (result.error) await redo();
+  return result;
+}
+
 // Asks to delete a mail node mailbox (owner decision D-14 as changed by the EOP seats design,
 // 2026-10-07): its seat goes on hold at once and it is read-only until delete_after (now plus the
 // days an administrator set): the tenant recipient is removed by the domain sync queued here,
 // sending is refused, the panel still reads it. Then the deletion job deletes it on the node with
 // all its mail and removes it here (services/mailNode/mailboxDeletion.js); the seat ledger row
-// stays. email: the
-// mailbox's address as typed in the confirmation; reason: why. Nothing is asked of the node now.
+// stays. The node is asked now: its read-only filter (services/mailNode/readOnlyFilter.js) is put in
+// before the request is saved, so a node that cannot be reached (a MailNodeError) refuses the request
+// and nothing changes. email: the mailbox's address as typed in the confirmation; reason: why.
 // mayDelete(row): who may (the route's rule for the signed-in user); the CLI acts as an
 // administrator. Answers { account }.
 export async function requestMailboxDeletion({ accountId, email, reason: rawReason }, actor, { mayDelete = null } = {}) {
@@ -404,10 +428,16 @@ export async function requestMailboxDeletion({ accountId, email, reason: rawReas
   if (typed !== String(rows[0].email_address).trim().toLowerCase()) return { error: 'confirmation_mismatch' };
   const { reason, error } = parseDeletionReason(rawReason);
   if (error) return { error };
+  // Read before the transaction opens: inside it only its own client is used.
   const holdDays = await getHoldDays();
-  // The node is asked first: when it cannot take the filter (a MailNodeError) nothing changes here.
-  await closeLocalDelivery(cfg, rows[0].email_address);
-  const result = await requestDeletion({ accountId, userId: actor?.userId ?? null, reason, holdDays });
+  const days = await getDeleteAfterDays();
+  const result = await withTransaction(async (client) => {
+    await lockMailbox(client, accountId);
+    const row = await readMailbox(client, accountId);
+    if (!row) return { error: 'account_not_found' };
+    if (row.delete_after) return { error: 'deletion_already_requested' };
+    return closeThen(cfg, row, () => requestDeletion({ accountId, userId: actor?.userId ?? null, reason, holdDays, days, client }));
+  });
   if (result.error) return { error: result.error };
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.deletion_requested',
@@ -418,23 +448,22 @@ export async function requestMailboxDeletion({ accountId, email, reason: rawReas
   return { account: withoutSecrets(account) };
 }
 
-// Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel. Answers
+// Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel. A mailbox that
+// is not deactivated works again, so its read-only filter goes first (the node is asked: when it
+// cannot be reached the cancel is refused); a deactivated one stays read-only and keeps it. Answers
 // { account }.
 export async function cancelMailboxDeletion({ accountId }, actor) {
   // An active mailbox takes its EOP seat back (services/mailNode/eopSeats.js).
   const { purchased } = await seatSupply();
-  // A mailbox that is not deactivated works again after the cancel: its read-only filter goes first
-  // (a deactivated one stays read-only and keeps it).
-  const { rows: [before] } = await query('SELECT email_address, mail_node, imap_host, delete_after, deactivated_at FROM email_accounts WHERE id = $1', [accountId]);
-  let result;
-  if (before?.mail_node && before.delete_after && !before.deactivated_at) {
-    const cfg = await getMailNodeConfig();
+  const cfg = await getMailNodeConfig();
+  const result = await withTransaction(async (client) => {
+    await lockMailbox(client, accountId);
+    const row = await readMailbox(client, accountId);
+    if (!row?.mail_node || !row.delete_after || row.deactivated_at) return cancelDeletion({ accountId, purchased, client });
     if (!cfg) return { error: 'mail_node_not_configured' };
-    if (onOtherMailHost(before, cfg)) return { error: 'mail_node_host_mismatch' };
-    result = await openThen(cfg, before.email_address, () => cancelDeletion({ accountId, purchased }));
-  } else {
-    result = await cancelDeletion({ accountId, purchased });
-  }
+    if (onOtherMailHost(row, cfg)) return { error: 'mail_node_host_mismatch' };
+    return openThen(cfg, row, () => cancelDeletion({ accountId, purchased, client }));
+  });
   if (result.error) return { error: result.error };
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.deletion_cancelled',
@@ -449,76 +478,71 @@ export async function cancelMailboxDeletion({ accountId }, actor) {
 
 // Deactivates a mail node mailbox (EOP seats design, 2026-10-07; administrators): read-only like one
 // pending deletion (no sending, no incoming mail: the tenant recipient goes with the domain sync
-// queued here), its letters still read over IMAP, the mailcow mailbox untouched; its EOP seat goes on
-// hold. reason: why, required, kept on the row and in the journal. Answers { account }.
+// queued here, local delivery with the node's read-only filter), its letters still read over IMAP,
+// the mailcow mailbox untouched; its EOP seat goes on hold. reason: why, required, kept on the row
+// and in the journal. Answers { account }.
 export async function deactivateNodeMailbox({ accountId, reason: rawReason }, actor) {
-  const { rows: [row] } = await query('SELECT id, email_address, mail_node, imap_host FROM email_accounts WHERE id = $1', [accountId]);
-  if (!row) return { error: 'account_not_found' };
-  if (!row.mail_node) return { error: 'not_mail_node' };
+  const { rows: [first] } = await query('SELECT id, email_address, mail_node, imap_host FROM email_accounts WHERE id = $1', [accountId]);
+  if (!first) return { error: 'account_not_found' };
+  if (!first.mail_node) return { error: 'not_mail_node' };
   const cfg = await getMailNodeConfig();
   if (!cfg) return { error: 'mail_node_not_configured' };
-  if (onOtherMailHost(row, cfg)) return { error: 'mail_node_host_mismatch' };
+  if (onOtherMailHost(first, cfg)) return { error: 'mail_node_host_mismatch' };
   const parsed = parseDeletionReason(rawReason);
   if (parsed.error) return { error: parsed.error === 'deletion_reason_required' ? 'deactivation_reason_required' : 'deactivation_reason_too_long' };
   const holdDays = await getHoldDays();
-  // The node is asked first: when it cannot take the filter (a MailNodeError) nothing changes here.
-  // A mailbox read-only already (deactivated or pending deletion) keeps its filter whatever the
-  // transaction answers, so there is nothing to undo.
-  await closeLocalDelivery(cfg, row.email_address);
   const result = await withTransaction(async (client) => {
-    const { rows } = await client.query(`
-      UPDATE email_accounts
-         SET deactivated_at = NOW(), deactivated_by = $2, deactivation_reason = $3,
-             deactivated_by_email = (SELECT COALESCE(NULLIF(email, ''), username) FROM users WHERE id = $2)
-       WHERE id = $1 AND deactivated_at IS NULL AND delete_after IS NULL
-      RETURNING id`, [accountId, actor?.userId ?? null, parsed.reason]);
-    if (!rows.length) {
-      const { rows: [now] } = await client.query('SELECT deactivated_at, delete_after FROM email_accounts WHERE id = $1', [accountId]);
-      return { error: now?.deactivated_at ? 'already_deactivated' : 'mailbox_pending_deletion' };
-    }
-    return { seat: await releaseSeat(accountId, 'deactivated', holdDays, client) };
+    await lockMailbox(client, accountId);
+    const row = await readMailbox(client, accountId);
+    if (!row) return { error: 'account_not_found' };
+    if (row.deactivated_at) return { error: 'already_deactivated' };
+    if (row.delete_after) return { error: 'mailbox_pending_deletion' };
+    // The node first: when it cannot take the filter (a MailNodeError) nothing changes here.
+    return closeThen(cfg, row, async () => {
+      await client.query(`
+        UPDATE email_accounts
+           SET deactivated_at = NOW(), deactivated_by = $2, deactivation_reason = $3,
+               deactivated_by_email = (SELECT COALESCE(NULLIF(email, ''), username) FROM users WHERE id = $2)
+         WHERE id = $1`, [accountId, actor?.userId ?? null, parsed.reason]);
+      return { seat: await releaseSeat(accountId, 'deactivated', holdDays, client) };
+    });
   });
   if (result.error) return result;
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.deactivated',
     details: { mailNode: true, reason: parsed.reason, seat: result.seat?.seat ?? null, freeFrom: result.seat?.freeFrom ?? null },
   }));
-  await kickMailboxDomain(row.email_address, actor);
+  await kickMailboxDomain(first.email_address, actor);
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return { account: withoutSecrets(account) };
 }
 
 // Activates a deactivated mailbox (administrators): it takes its own seat back while it is on hold,
-// else a free one (refused at 0), and works as before; the tenant recipient comes back with the
-// domain sync. A mailbox pending deletion is activated by cancelling the deletion first.
+// else a free one (refused at 0), and works as before; its read-only filter goes first and the tenant
+// recipient comes back with the domain sync. A mailbox pending deletion is activated by cancelling
+// the deletion first.
 export async function activateNodeMailbox({ accountId }, actor) {
   const { purchased } = await seatSupply();
-  // Its read-only filter goes first, when it is deactivated and not pending deletion (the only case
-  // that can succeed); an error below puts it back.
-  const { rows: [before] } = await query('SELECT email_address, mail_node, imap_host, delete_after, deactivated_at FROM email_accounts WHERE id = $1', [accountId]);
-  let cfg = null;
-  if (before?.mail_node && before.deactivated_at && !before.delete_after) {
-    cfg = await getMailNodeConfig();
-    if (!cfg) return { error: 'mail_node_not_configured' };
-    if (onOtherMailHost(before, cfg)) return { error: 'mail_node_host_mismatch' };
-  }
-  const activate = () => withTransaction(async (client) => {
+  const cfg = await getMailNodeConfig();
+  const result = await withTransaction(async (client) => {
+    await lockMailbox(client, accountId);
     await lockSeats(client);
-    const { rows: [row] } = await client.query(
-      'SELECT email_address, mail_node, deactivated_at, delete_after FROM email_accounts WHERE id = $1 FOR UPDATE', [accountId],
-    );
+    const row = await readMailbox(client, accountId);
     if (!row) return { error: 'account_not_found' };
     if (!row.mail_node) return { error: 'not_mail_node' };
     if (!row.deactivated_at) return { error: 'not_deactivated' };
     if (row.delete_after) return { error: 'deletion_pending' };
-    const seat = await returnSeat({ accountId, email: row.email_address, purchased }, client);
-    if (seat.error) return { error: seat.error };
-    await client.query(`
-      UPDATE email_accounts SET deactivated_at = NULL, deactivated_by = NULL, deactivated_by_email = NULL, deactivation_reason = NULL
-       WHERE id = $1`, [accountId]);
-    return { seat, email: row.email_address };
+    if (!cfg) return { error: 'mail_node_not_configured' };
+    if (onOtherMailHost(row, cfg)) return { error: 'mail_node_host_mismatch' };
+    return openThen(cfg, row, async () => {
+      const seat = await returnSeat({ accountId, email: row.email_address, purchased }, client);
+      if (seat.error) return { error: seat.error };
+      await client.query(`
+        UPDATE email_accounts SET deactivated_at = NULL, deactivated_by = NULL, deactivated_by_email = NULL, deactivation_reason = NULL
+         WHERE id = $1`, [accountId]);
+      return { seat, email: row.email_address };
+    });
   });
-  const result = cfg ? await openThen(cfg, before.email_address, activate) : await activate();
   if (result.error) return result;
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.activated', details: { mailNode: true, seat: result.seat.seat, reclaimed: result.seat.reclaimed },

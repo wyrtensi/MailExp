@@ -17,6 +17,8 @@ import {
   addDomain,
   addTlsPolicy,
   addMailboxFilter,
+  editMailboxFilter,
+  listAllMailboxFilters,
   deleteMailboxFilters,
   listMailboxFilters,
   deleteDkim,
@@ -559,6 +561,21 @@ describe('per-mailbox Sieve filters (EOP seats: read-only mailbox)', () => {
     expect(calls()[3]).toMatchObject({ method: 'POST', url: 'https://mail.example.com/api/v1/delete/filter', body: ['7'] });
     await deleteMailboxFilters(CFG, []);
     expect(calls()).toHaveLength(4);
+  });
+
+  it('reads every filter at once and edits one', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { id: 7, username: 'A@example.com', filter_type: 'prefilter', script_desc: 'x', active: 1 },
+      { id: 8, username: 'b@example.com', filter_type: 'postfilter', script_desc: 'y', active: 0 },
+    ]));
+    expect(await listAllMailboxFilters(CFG)).toEqual([
+      { id: 7, username: 'a@example.com', type: 'prefilter', desc: 'x', active: true },
+      { id: 8, username: 'b@example.com', type: 'postfilter', desc: 'y', active: false },
+    ]);
+    expect(calls()[0]).toMatchObject({ method: 'GET', url: 'https://mail.example.com/api/v1/get/filters/all' });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['mailbox_modified', 'a@example.com'] }]));
+    await editMailboxFilter(CFG, 7, { active: '1' });
+    expect(calls()[1]).toMatchObject({ method: 'POST', url: 'https://mail.example.com/api/v1/edit/filter', body: { items: ['7'], attr: { active: '1' } } });
   });
 
   it('throws when mailcow refuses the filter', async () => {

@@ -22,6 +22,7 @@ vi.mock('./mailcow.js', async (importActual) => ({
   listMailboxFilters: vi.fn(async () => []),
   addMailboxFilter: vi.fn(async () => {}),
   deleteMailboxFilters: vi.fn(async () => {}),
+  editMailboxFilter: vi.fn(async () => {}),
 }));
 vi.mock('./domains.js', async (importActual) => ({ ...(await importActual()), getDomainRow: vi.fn(async () => ({ state: 'ready' })) }));
 vi.mock('./nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })), defaultRateLimit: vi.fn() }));
@@ -181,6 +182,49 @@ describe('the read-only filter on the node', () => {
     addMailboxFilter.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'down'));
     await expect(deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR)).rejects.toThrow('down');
     expect((await db.query('SELECT deactivated_at FROM email_accounts WHERE id = $1', [account.id])).rows[0].deactivated_at).toBeNull();
+  });
+
+  it('takes the filter off again when the change after it throws on a mailbox that was working', async () => {
+    const { account } = await create('a');
+    await db.exec("ALTER TABLE email_accounts ADD CONSTRAINT deactivate_blocked CHECK (deactivated_at IS NULL)");
+    try {
+      addMailboxFilter.mockClear();
+      deleteMailboxFilters.mockClear();
+      // The first read (closing) finds none; the second (undoing) finds ours.
+      listMailboxFilters.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 9, type: 'prefilter', desc: 'mailexpert-read-only', active: true }]);
+      await expect(deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR)).rejects.toThrow();
+      expect(addMailboxFilter).toHaveBeenCalledTimes(1);
+      expect(deleteMailboxFilters).toHaveBeenCalledWith(CFG, [9]);
+      expect(await seatCounts()).toEqual({ used: 1, held: 0 });
+    } finally {
+      await db.exec('ALTER TABLE email_accounts DROP CONSTRAINT deactivate_blocked');
+    }
+  });
+
+  it('runs two actions on one mailbox one after the other: the second sees the first', async () => {
+    const { account } = await create('a');
+    addMailboxFilter.mockClear();
+    const [one, two] = await Promise.all([
+      deactivateNodeMailbox({ accountId: account.id, reason: 'one' }, ACTOR),
+      deactivateNodeMailbox({ accountId: account.id, reason: 'two' }, ACTOR),
+    ]);
+    expect([one.error, two.error].sort()).toEqual(['already_deactivated', undefined]);
+    expect(addMailboxFilter).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes the mailbox lock before anything else of an action', async () => {
+    const { account } = await create('a');
+    const seen = [];
+    const original = db.transaction.bind(db);
+    const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
+      query: (sql, params) => { seen.push(sql); return tx.query(sql, params); },
+    })));
+    try {
+      await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seen[0]).toMatch(/pg_advisory_xact_lock/);
   });
 
   it('puts the filter back when an activation is refused for want of a seat', async () => {

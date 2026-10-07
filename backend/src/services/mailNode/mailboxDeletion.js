@@ -61,10 +61,11 @@ export async function deleteOnNode(cfg, email) {
 // configured days and is read-only from now on, its EOP seat on hold for holdDays
 // (services/mailNode/eopSeats.js; a deactivated mailbox's seat is on hold already). Answers
 // { deleteAfter, days, seat } or { error }: account_not_found, not_mail_node,
-// deletion_already_requested.
-export async function requestDeletion({ accountId, userId, reason, holdDays }) {
-  const days = await getDeleteAfterDays();
-  return withTransaction(async (client) => {
+// deletion_already_requested. days: the days before the deletion, read by the caller when it runs
+// this inside its own transaction (client: that transaction, which then also decides the outcome).
+export async function requestDeletion({ accountId, userId, reason, holdDays, days: givenDays = null, client: given = null }) {
+  const days = givenDays ?? await getDeleteAfterDays();
+  const run = async (client) => {
     const { rows } = await client.query(`
       UPDATE email_accounts
          SET deletion_requested_at = NOW(), deletion_requested_by = $2,
@@ -84,7 +85,8 @@ export async function requestDeletion({ accountId, userId, reason, holdDays }) {
     if (!found.length) return { error: 'account_not_found' };
     if (!found[0].mail_node) return { error: 'not_mail_node' };
     return { error: 'deletion_already_requested' };
-  });
+  };
+  return given ? run(given) : withTransaction(run);
 }
 
 // Someone cancels a pending deletion. An active mailbox takes its EOP seat back
@@ -94,8 +96,8 @@ export async function requestDeletion({ accountId, userId, reason, holdDays }) {
 // Refused once the job has claimed the row (deletion_started_at), stale claim included: the node
 // mailbox may be gone already. Answers { deleteAfter, reason, seat } or { error }: account_not_found,
 // deletion_not_requested, deletion_in_progress, seats_unknown, no_free_seats.
-export async function cancelDeletion({ accountId, purchased }) {
-  return withTransaction(async (client) => {
+export async function cancelDeletion({ accountId, purchased, client: given = null }) {
+  const run = async (client) => {
     await lockSeats(client);
     const { rows: [found] } = await client.query(`
       SELECT email_address, delete_after, deletion_reason, deletion_started_at, deactivated_at
@@ -115,7 +117,8 @@ export async function cancelDeletion({ accountId, purchased }) {
              deletion_last_error = NULL
        WHERE id = $1`, [accountId]);
     return { deleteAfter: found.delete_after, reason: found.deletion_reason ?? null, seat };
-  });
+  };
+  return given ? run(given) : withTransaction(run);
 }
 
 // A failed attempt: the row stays pending, its claim (when it has one) is released, the reason code

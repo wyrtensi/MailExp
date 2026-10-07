@@ -88,7 +88,7 @@ export function createFakeMailcow(initial = {}) {
     if (path.startsWith('get/filters/')) {
       // Per-mailbox Sieve filters (functions.mailbox.inc.php filters, filter_details): {} when none.
       const email = decodeURIComponent(path.slice('get/filters/'.length)).toLowerCase();
-      const own = node.filters.filter((f) => f.username === email);
+      const own = node.filters.filter((f) => email === 'all' || f.username === email);
       return own.length ? own.map((f) => ({ ...f })) : {};
     }
     if (path === 'get/global_filters/prefilter') return node.prefilter ? node.prefilter : {};
@@ -164,6 +164,15 @@ export function createFakeMailcow(initial = {}) {
         });
         return [success('add_filter', username)];
       }
+      case 'edit/filter':
+        return body.items.map((id) => {
+          const filter = node.filters.find((f) => f.id === Number(id));
+          if (!filter) return danger('access_denied');
+          const active = body.attr.active === undefined ? filter.active : Number(body.attr.active) ? 1 : 0;
+          if (active) for (const f of node.filters) if (f.username === filter.username && f.filter_type === filter.filter_type) f.active = 0;
+          filter.active = active;
+          return success('mailbox_modified', filter.username);
+        });
       case 'delete/filter':
         node.filters = node.filters.filter((f) => !body.map(Number).includes(f.id));
         return body.map((id) => success('delete_filter', String(id)));

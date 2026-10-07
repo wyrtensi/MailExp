@@ -317,11 +317,13 @@ describe('domain mailboxes in /api/accounts', () => {
     const cancel = () => fetch(`${base}/api/accounts/${ID}/deletion`, { method: 'DELETE' });
 
     const ROW = { id: ID, email_address: 'Info@example.com', mail_node: true, imap_host: 'mail.example.com' };
-    const nodeRow = (extra = {}) => query.mockImplementation(async (sql) => (
-      sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts')
+    // extra: the row after the action; before: what the action finds when it locks the row.
+    const nodeRow = (extra = {}, before = {}) => query.mockImplementation(async (sql) => {
+      if (sql.includes('FOR UPDATE')) return { rows: [{ ...ROW, ...(extra.imap_host ? { imap_host: extra.imap_host } : {}), ...before }] };
+      return sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts')
         ? { rows: [{ ...ROW, ...extra }] }
-        : { rows: [] }
-    ));
+        : { rows: [] };
+    });
     const rowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE'));
 
     it('never removes a node mailbox at once: its deletion has to be asked for', async () => {
@@ -340,7 +342,7 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toMatchObject({ id: ID, delete_after: '2026-10-06T10:00:00.000Z', deletion_reason: 'Left the company' });
-      expect(requestDeletion).toHaveBeenCalledWith({ accountId: ID, userId: 'user-1', reason: 'Left the company', holdDays: 90 });
+      expect(requestDeletion).toHaveBeenCalledWith(expect.objectContaining({ accountId: ID, userId: 'user-1', reason: 'Left the company', holdDays: 90 }));
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_requested',
         details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', days: 5, reason: 'Left the company' },
@@ -408,7 +410,7 @@ describe('domain mailboxes in /api/accounts', () => {
       nodeRow();
       const res = await cancel();
       expect(res.status).toBe(200);
-      expect(cancelDeletion).toHaveBeenCalledWith({ accountId: ID, purchased: 10 });
+      expect(cancelDeletion).toHaveBeenCalledWith(expect.objectContaining({ accountId: ID, purchased: 10 }));
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_cancelled',
         details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' },
