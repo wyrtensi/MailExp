@@ -292,14 +292,46 @@ export async function seatAvailableFor({ accountId, purchased }, db = { query })
   return purchased - used - held < 1 ? 'no_free_seats' : null;
 }
 
-// Closes every open request the purchased number now covers. Returns the closed ids.
+// The purchased number each request needs before it closes, in creation order (Map id -> number).
+// Requests are covered one after another, so one purchase never closes more than it added: a request
+// stacks on every earlier one still open when it was made (open now, or closed after it was made),
+// which its purchased_at_request does not include yet: max(purchased_at_request, the earlier ones'
+// number) + seats. One closed before it was made is already in its purchased_at_request, and a later
+// drop of the purchased number is not overstated by it. An unknown number at request counts as 0.
+export function requestThresholds(requests) {
+  const thresholds = new Map();
+  const earlier = [];
+  for (const request of requests) {
+    const made = new Date(request.requested_at).getTime();
+    const base = earlier.reduce((max, prior) => (
+      prior.closedAt == null || prior.closedAt > made ? Math.max(max, prior.threshold) : max
+    ), request.purchased_at_request ?? 0);
+    const threshold = base + request.seats;
+    thresholds.set(Number(request.id), threshold);
+    earlier.push({ threshold, closedAt: request.closed_at == null ? null : new Date(request.closed_at).getTime() });
+  }
+  return thresholds;
+}
+
+// Closes every open request the purchased number now covers (requestThresholds). Returns the closed
+// ids. Every request is read, the closed ones too (a handful: one per seat order). No lock: two runs
+// at once compute the same set from the same requests, and closed_at IS NULL makes the second a no-op.
 export async function closeFulfilledRequests(purchased, db = { query }) {
   if (!Number.isInteger(purchased)) return [];
+  const { rows: requests } = await db.query(`
+    SELECT id, seats, purchased_at_request, requested_at, closed_at
+      FROM mail_node_seat_requests ORDER BY requested_at, id`);
+  const thresholds = requestThresholds(requests);
+  const due = requests
+    .filter((request) => request.closed_at == null && purchased >= thresholds.get(Number(request.id)))
+    .map((request) => Number(request.id));
+  if (!due.length) return [];
   const { rows } = await db.query(`
     UPDATE mail_node_seat_requests SET closed_at = NOW()
-     WHERE closed_at IS NULL AND $1::int >= COALESCE(purchased_at_request, 0) + seats
-    RETURNING id`, [purchased]);
-  return rows.map((row) => Number(row.id));
+     WHERE id = ANY($1::bigint[]) AND closed_at IS NULL
+    RETURNING id`, [due]);
+  const closed = new Set(rows.map((row) => Number(row.id)));
+  return due.filter((id) => closed.has(id));
 }
 
 // The EOP settings with licenses = the purchased number, for the TERRL budget (services/mailNode/terrl.js).

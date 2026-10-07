@@ -9,7 +9,8 @@ import { TENANT_JOB_KINDS, enqueueTenantJob } from '../tenant/tenantJobs.js';
 // provider today is 'manual': the request is kept (mail_node_seat_requests, migration 0095) and
 // journaled (mail_node.seats_requested), the mail node alerts raise eop_seats_requested, an
 // administrator buys the seats from the reseller, and the request closes by itself once the purchased
-// number grew by N (services/mailNode/eopSeats.js closeFulfilledRequests). A reseller's API
+// number grew by N on top of the requests still open before it (services/mailNode/eopSeats.js
+// closeFulfilledRequests). A reseller's API
 // (SoftwareOne, Insight; docs/architecture/mail-node-research/eop-license-vendors.md) would be one
 // more provider here, chosen by a setting, once the management decides; it would also be asked at
 // creation, activation and the cancel of a deletion.
