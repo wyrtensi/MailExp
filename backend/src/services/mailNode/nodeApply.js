@@ -1,4 +1,4 @@
-import { query } from '../db.js';
+import { query, withSessionLock } from '../db.js';
 import { recordAudit } from '../auditLog.js';
 import { auditOf } from '../actor.js';
 import {
@@ -746,10 +746,14 @@ async function keepSpamRuleState(item) {
   else if (item.status === 'pending' && item.rule) await saveSpamRuleState({ state: item.rule });
 }
 
-// Runs never overlap: two at once could each add the relayhost.
+// Runs never overlap: two at once could each add the relayhost, restart Dovecot twice or lose a
+// stored result. The queue keeps this process's runs in order; the session-level advisory lock keeps
+// them apart from another process's (the backend and the panel CLI).
+export const APPLY_LOCK = 'mailexpert:mail_node_apply';
 let queue = Promise.resolve();
 function serialized(fn) {
-  const run = queue.then(fn, fn);
+  const locked = () => withSessionLock(APPLY_LOCK, fn);
+  const run = queue.then(locked, locked);
   queue = run.catch(() => {});
   return run;
 }

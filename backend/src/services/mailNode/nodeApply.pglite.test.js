@@ -8,7 +8,8 @@ import { createFakeMailcow } from '../testing/fakeMailcow.js';
 
 const dbState = { db: null };
 const fake = vi.hoisted(() => ({ current: null }));
-vi.mock('../db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
+// One process here: the cross-process lock is nodeApply.lock.pglite.test.js's.
+vi.mock('../db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params), withSessionLock: (_name, fn) => fn() }));
 vi.mock('../encryption.js', () => ({
   encrypt: (v) => `enc:${v}`,
   decrypt: (v) => (typeof v === 'string' && v.startsWith('enc:') ? v.slice(4) : v),

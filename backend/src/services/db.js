@@ -57,6 +57,33 @@ export async function withTransaction(fn) {
   }
 }
 
+// Run fn() while a dedicated connection holds the session-level advisory lock `name`: one holder at
+// a time across processes (the backend and the panel CLI), for work that spans many queries and
+// outside calls, not one transaction. The wait has no statement timeout (a holder may run for
+// minutes); the connection's own timeout is back for anything after it. A connection whose unlock
+// failed is destroyed, which ends its session and so its lock.
+export async function withSessionLock(name, fn) {
+  const client = await pool.connect();
+  let broken = false;
+  try {
+    try {
+      await client.query('SET statement_timeout = 0');
+      await client.query('SELECT pg_advisory_lock(hashtext($1))', [name]);
+    } catch (err) {
+      broken = true;
+      throw err;
+    }
+    try {
+      await client.query('RESET statement_timeout');
+      return await fn();
+    } finally {
+      await client.query('SELECT pg_advisory_unlock(hashtext($1))', [name]).catch(() => { broken = true; });
+    }
+  } finally {
+    client.release(broken);
+  }
+}
+
 // One-time startup migration: encrypt any plaintext credentials still in the DB.
 // Safe to run on every startup — already-encrypted values are skipped by isEncrypted().
 export async function encryptExistingCredentials() {
