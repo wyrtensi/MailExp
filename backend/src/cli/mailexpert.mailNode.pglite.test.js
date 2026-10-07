@@ -165,6 +165,14 @@ describe('mailexpert mailbox', () => {
     expect(all.code, all.err).toBe(0);
     expect(all.json().mailboxes.map((m) => [m.email, m.onNode])).toEqual([['old@example.com', true], ['other@new.example', false]]);
     expect(all.json().disk).toMatchObject({ usedPercent: 12, warn: false });
+    expect(all.json().mailboxes.map((m) => m.deactivatedAt)).toEqual([null, null]);
+    await db.query("UPDATE email_accounts SET deactivated_at = '2026-10-07T10:00:00.000Z' WHERE email_address = 'old@example.com'");
+    const off = await cli(['mailbox', 'list', '--json']);
+    expect(off.json().mailboxes.map((m) => [m.email, m.deactivatedAt])).toEqual([['old@example.com', '2026-10-07T10:00:00.000Z'], ['other@new.example', null]]);
+    const human = await cli(['mailbox', 'list']);
+    expect(human.out).toMatch(/old@example\.com.*2026-10-07/);
+    expect(human.out).not.toMatch(/other@new\.example.*2026-10-07/);
+    await db.query("UPDATE email_accounts SET deactivated_at = NULL WHERE email_address = 'old@example.com'");
     const filtered = await cli(['mailbox', 'list', '--domain', 'example.com']);
     expect(filtered.out).toContain('old@example.com');
     expect(filtered.out).not.toContain('other@new.example');

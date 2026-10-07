@@ -99,13 +99,13 @@ export const overrideOf = (row) => (row.node_rl_value ? { value: row.node_rl_val
 // The node mailboxes MailExpert knows (GET /api/mail-node/mailboxes), with quota and usage as the
 // node reports them, and the send limit: the node's (rateLimit, null when the mailbox has none of
 // its own), an administrator's (rateLimitOverride) and the default the mailbox has without one
-// (rateLimitDefault). details: also the names and the pending deletion of each (the CLI's list).
+// (rateLimitDefault). details: also the names and the pending deletion of each (the CLI's list). deactivatedAt: when it was deactivated (read-only), or null.
 // Answers { disk, mailboxes } or { error }; a node that cannot list its mailboxes throws.
 export async function listNodeMailboxes({ details = false } = {}) {
   const cfg = await getMailNodeConfig();
   if (!cfg) return { error: 'mail_node_not_configured' };
   const { rows } = await query(
-    `SELECT id, email_address, node_rl_value, node_rl_frame${details ? ', name, sender_name, delete_after, deletion_reason, deletion_requested_by_email' : ''}
+    `SELECT id, email_address, node_rl_value, node_rl_frame, deactivated_at${details ? ', name, sender_name, delete_after, deletion_reason, deletion_requested_by_email' : ''}
        FROM email_accounts WHERE mail_node = true ORDER BY email_address`,
   );
   const defaultFor = await defaultLimits(rows.map((row) => row.email_address));
@@ -129,6 +129,7 @@ export async function listNodeMailboxes({ details = false } = {}) {
         rateLimit: m?.rateLimit ?? null,
         rateLimitOverride: overrideOf(row),
         rateLimitDefault: defaultFor(row.email_address),
+        deactivatedAt: row.deactivated_at ?? null,
         ...(details ? {
           name: row.name,
           senderName: row.sender_name ?? null,

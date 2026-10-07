@@ -408,7 +408,14 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
                   const editValid = parseWholeNumber(edit, 1, MAX_QUOTA_MB) != null;
                   return (
                     <tr key={m.accountId}>
-                      <td style={cellStyle}>{m.email}</td>
+                      <td style={cellStyle}>
+                        {m.email}
+                        {m.deactivatedAt && (
+                          <span data-mailbox-deactivated={m.email} style={{ marginLeft: 8, fontSize: 12, color: 'var(--red)' }}>
+                            {t('admin.accounts.deactivation.badge')}
+                          </span>
+                        )}
+                      </td>
                       <td style={cellStyle}>
                         {!m.onNode && <span style={{ color: 'var(--red)' }}>{t('admin.mailNode.notOnNode')}</span>}
                         {m.onNode && percent != null && t('admin.mailNode.usage', {

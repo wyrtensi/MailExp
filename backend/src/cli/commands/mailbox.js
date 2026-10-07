@@ -65,7 +65,7 @@ async function mailboxRef(ref) {
 
 const list = {
   name: 'list',
-  summary: 'list the node mailboxes, with quota, usage and pending deletions',
+  summary: 'list the node mailboxes, with quota, usage, deactivation and pending deletions',
   usage: 'mailbox list [--domain DOMAIN]',
   flags: { domain: 'string' },
   async run(ctx) {
@@ -85,6 +85,7 @@ const list = {
       { header: 'QUOTA MB', value: (m) => m.quotaMb },
       { header: 'USED MB', value: (m) => (m.usedBytes == null ? null : Math.round(m.usedBytes / MB)) },
       { header: 'SEND LIMIT', value: (m) => { const l = m.rateLimitOverride ?? m.rateLimitDefault; return l ? `${l.value}/${l.frame}${m.rateLimitOverride ? ' (own)' : ''}` : null; } },
+      { header: 'DEACTIVATED', value: (m) => (m.deactivatedAt ? fmtDate(m.deactivatedAt) : null) },
       { header: 'DELETION', value: (m) => (m.deleteAfter ? fmtDate(m.deleteAfter) : null) },
       { header: 'SENDER NAME', value: (m) => m.senderName },
     ], { empty: domain ? `no node mailboxes on ${domain}` : 'no node mailboxes' });
