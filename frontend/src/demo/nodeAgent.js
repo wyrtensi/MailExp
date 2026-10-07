@@ -17,12 +17,23 @@ const demoError = (message, code, status = 400) => Object.assign(new Error(messa
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 let sequence = 40;
+// The mailcow version the demo release pins (deploy/mailcow-version) and the one the node runs.
+const DEMO_MAILCOW = {
+  old: { tag: '2026-09', commit: 'ca07d8d3331849ae294179aedce95c8126d3050f' },
+  pinned: { tag: '2026-09a', commit: '81f6f7b002f2681b732aed74ae53179377def5e0' },
+};
 let agent = {
   configured: true,
   tokenCreatedAt: at(-30 * 24 * HOUR),
   status: {
     scriptsCommit: '54cdb9e7a1b2c3d4e5f60718293a4b5c6d7e8f90',
     mailcowVersion: '2026-09',
+    mailcowCommit: DEMO_MAILCOW.old.commit,
+    mailcowTag: DEMO_MAILCOW.old.tag,
+    mailcowPinTag: DEMO_MAILCOW.pinned.tag,
+    mailcowPinCommit: DEMO_MAILCOW.pinned.commit,
+    mailcowUpstreamCommit: DEMO_MAILCOW.pinned.commit,
+    mailcowRelation: 'behind',
     containers: { total: 18, running: 18, problems: [] },
     backup: {
       configured: true, ok: true, problem: null,
@@ -49,10 +60,14 @@ function advance() {
     agent.statusAt = finishedAt;
     if (job.kind === 'update') {
       agent.status.scriptsCommit = job.params.sha;
+      // The release pins a newer mailcow: the update brought it there too.
+      Object.assign(agent.status, {
+        mailcowVersion: DEMO_MAILCOW.pinned.tag, mailcowCommit: DEMO_MAILCOW.pinned.commit, mailcowTag: DEMO_MAILCOW.pinned.tag, mailcowRelation: 'match',
+      });
       agent.status.backup.last = { ...agent.status.backup.last, finishedAt, tag: 'pre-update', seconds: 5 };
       return {
         ...job, state: 'succeeded', step: `the node's scripts are at ${job.params.sha.slice(0, 12)}`, finishedAt, updatedAt: finishedAt,
-        logTail: `${job.logTail}\n== setup.sh at ${job.params.sha.slice(0, 12)}\n[mailexpert] nothing to change\n== check: eop-ranges.sh (firewall and ports)`,
+        logTail: `${job.logTail}\n== setup.sh at ${job.params.sha.slice(0, 12)}\n[mailexpert] nothing to change\n== mailcow: the version the release pins\n[mailexpert] mailcow updated to ${DEMO_MAILCOW.pinned.tag}\n== check: eop-ranges.sh (firewall and ports)`,
       };
     }
     return {
@@ -72,6 +87,7 @@ function state() {
     status: agent.status,
     statusAt: agent.statusAt,
     panelCommit: DEMO_PANEL_COMMIT,
+    pinnedMailcow: DEMO_MAILCOW.pinned,
     jobs: jobs.slice(0, 10),
   };
 }
@@ -84,6 +100,8 @@ export function demoNodeUpdateState() {
     connected: agent.configured,
     scriptsCommit: agent.status.scriptsCommit,
     panelCommit: DEMO_PANEL_COMMIT,
+    mailcow: { commit: agent.status.mailcowCommit, tag: agent.status.mailcowTag, relation: agent.status.mailcowRelation },
+    pinnedMailcow: DEMO_MAILCOW.pinned,
     job: jobs.find((job) => job.kind === 'update') ?? null,
   });
 }

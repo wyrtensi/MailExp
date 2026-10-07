@@ -685,6 +685,9 @@ test('the node agent: a token shown once, a backup job that finishes, a revocati
 test('the node update: the panel commit, one job at a time, the node part on the panel update', async () => {
   const before = await demoRequest('GET', '/mail-node/agent');
   assert.match(before.panelCommit, /^[0-9a-f]{40}$/);
+  // mailcow: the node behind the version the release pins, which the update brings it to.
+  assert.equal(before.pinnedMailcow.tag, '2026-09a');
+  assert.equal(before.status.mailcowRelation, 'behind');
   const queued = await answer('/mail-node/agent/jobs', 'POST', '/mail-node/agent/jobs', { kind: 'update' });
   assert.equal(queued.job.kind, 'update');
   assert.equal(queued.job.params.sha, before.panelCommit);
@@ -693,6 +696,8 @@ test('the node update: the panel commit, one job at a time, the node part on the
   const panel = await demoRequest('GET', '/admin/update');
   assert.equal(panel.node.configured, true);
   assert.equal(panel.node.job.kind, 'update');
+  assert.deepEqual(panel.node.pinnedMailcow, before.pinnedMailcow);
+  assert.equal(panel.node.mailcow.tag, '2026-09');
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {

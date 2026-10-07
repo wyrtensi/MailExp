@@ -684,6 +684,24 @@ run_update_with() {
   [ "$(agent_requests | sed -n 's|^POST /api/node-agent/status ||p' | tail -n 1 | jq -r .scriptsCommit)" = "$NEW_SHA" ]
 }
 
+@test "update: setup.sh runs again before mailcow starts after a failed update, and a mailcow left on IPv6 is named" {
+  update_setup
+  write_backup_keys
+  run_update_with 'mailcow_update_if_pinned() { return 1; }'
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <"$MOCK_DIR/setup-calls")" -eq 2 ]
+  grep -q 'ENABLE_IPV6 other than false after setup.sh' "$MAILEXPERT_NODE_STATE/update-42.log"
+  [ "$(jq -r .error <<<"$(last_report)")" = mailcow_update_failed ]
+}
+
+@test "update: mailcow taken past the pin while it updated is its own error" {
+  update_setup
+  write_backup_keys
+  run_update_with 'mailcow_update_if_pinned() { echo "[mailexpert] warning: mailcow_past_pin: past 2026-09a"; return 3; }'
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"mailcow_past_pin"}' ]
+}
+
 @test "update: a mailcow update past its bound is stopped" {
   update_setup
   write_backup_keys

@@ -1,8 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  activeJob, agentConnection, agentSetupCommands, backupSummary, latestJob, nodeBusyJob, nodeUpdateActive, nodeUpdatePart,
-  panelUrl, scriptsState, shortCommit,
+  activeJob, agentConnection, agentSetupCommands, backupSummary, latestJob, MAILCOW_STATE_KEYS, mailcowName, mailcowState,
+  nodeBusyJob, nodeUpdateActive, nodeUpdatePart, panelUrl, scriptsState, shortCommit,
 } from './nodeAgent.js';
 
 describe('agentSetupCommands', () => {
@@ -52,6 +52,53 @@ describe('backupSummary', () => {
     assert.equal(backupSummary({ backup: { configured: true, ok: true, problem: null, last: null } }).state, 'none');
     assert.deepEqual(backupSummary({ backup: { configured: true, ok: true, problem: null, last } }), { state: 'ok', last, problem: null });
     assert.deepEqual(backupSummary({ backup: { configured: true, ok: false, problem: 'too old', last } }), { state: 'old', last, problem: 'too old' });
+  });
+});
+
+describe('mailcowState', () => {
+  const OLD = 'ca07d8d3331849ae294179aedce95c8126d3050f';
+  const PIN = '81f6f7b002f2681b732aed74ae53179377def5e0';
+  const NEWER = '0123456789abcdef0123456789abcdef01234567';
+  const pinned = { tag: '2026-09a', commit: PIN };
+  const status = (fields) => ({ mailcowPinCommit: PIN, mailcowUpstreamCommit: PIN, ...fields });
+
+  it('matches when the node runs the version this release pins', () => {
+    assert.equal(mailcowState(status({ mailcowCommit: PIN, mailcowRelation: 'match' }), pinned), 'matches');
+    // Whatever the node compares it with: the panel's pin decides.
+    assert.equal(mailcowState(status({ mailcowCommit: PIN, mailcowRelation: 'newer' }), pinned), 'matches');
+  });
+
+  it('waits for the next node update while mailcow is behind the pin', () => {
+    assert.equal(mailcowState(status({ mailcowCommit: OLD, mailcowRelation: 'behind' }), pinned), 'pending');
+    // The node's scripts pin an older version it already runs: their update brings the new pin.
+    assert.equal(mailcowState(status({ mailcowCommit: OLD, mailcowRelation: 'match', mailcowPinCommit: OLD }), pinned), 'pending');
+  });
+
+  it('warns about a mailcow newer than the pin or off its history', () => {
+    assert.equal(mailcowState(status({ mailcowCommit: NEWER, mailcowRelation: 'newer' }), pinned), 'untested');
+    assert.equal(mailcowState(status({ mailcowCommit: NEWER, mailcowRelation: 'diverged' }), pinned), 'untested');
+  });
+
+  it('tells a newer mailcow release apart: the node waits for a MailExpert release', () => {
+    assert.equal(mailcowState(status({ mailcowCommit: OLD, mailcowRelation: 'behind', mailcowUpstreamCommit: NEWER }), pinned), 'waitingRelease');
+    // The node's own pin is older than the panel's: its next update brings the panel's pin first.
+    assert.equal(
+      mailcowState(status({ mailcowCommit: OLD, mailcowRelation: 'behind', mailcowPinCommit: OLD, mailcowUpstreamCommit: NEWER }), pinned),
+      'pending',
+    );
+  });
+
+  it('is unknown without a report or a commit', () => {
+    assert.equal(mailcowState(null, pinned), 'unknown');
+    assert.equal(mailcowState(status({ mailcowCommit: null, mailcowRelation: 'unknown' }), pinned), 'unknown');
+    assert.equal(mailcowState(status({ mailcowCommit: OLD, mailcowRelation: 'unknown' }), pinned), 'unknown');
+    for (const state of ['unknown', 'matches', 'pending', 'untested', 'waitingRelease']) assert.ok(MAILCOW_STATE_KEYS[state]);
+  });
+
+  it('names a version by its tag, or its short commit', () => {
+    assert.equal(mailcowName('2026-09a', PIN), '2026-09a');
+    assert.equal(mailcowName(null, PIN), PIN.slice(0, 12));
+    assert.equal(mailcowName(null, null), null);
   });
 });
 

@@ -2143,8 +2143,10 @@
       "nodeUnknown": "Node scripts commit unknown",
       "nodeTarget": "to {{commit}}",
       "nodeNotConnected": "The node agent is not connected: the update waits for it.",
-      "nodeHint": "The node part runs through the node agent (Settings, Mail node, Node agent): a pre-update backup, setup.sh at the panel commit, a rollback when it fails. \"Update node now\" there tries again.",
-      "nodeNewer": "Node scripts newer than the panel"
+      "nodeHint": "The node part runs through the node agent (Settings, Mail node, Node agent): a pre-update backup, setup.sh at the panel commit, a rollback when it fails, then mailcow to the version the release confirms. \"Update node now\" there tries again.",
+      "nodeNewer": "Node scripts newer than the panel",
+      "nodeMailcow": "mailcow: {{node}} on the node, {{pinned}} confirmed by this release",
+      "nodeMailcowUnknown": "unknown"
     },
     "audit": {
       "description": "What users did with mailboxes, messages and users, newest first.",
@@ -2951,6 +2953,14 @@
       "scriptsLabel": "Node scripts (commit)",
       "unknown": "unknown",
       "mailcowLabel": "mailcow version",
+      "mailcowPinnedLabel": "mailcow confirmed by the panel",
+      "mailcowUnknown": "Cannot compare (no version reported)",
+      "mailcowMatches": "Matches",
+      "mailcowPending": "The next node update brings it here",
+      "mailcowUntested": "Newer than confirmed: untested",
+      "mailcowWaitingRelease": "mailcow released a newer version: waiting for a MailExpert release that confirms it",
+      "mailcowUntestedNote": "The node runs a mailcow other than {{pinned}}, which this MailExpert release is tested with (updated by hand?). It may not work with the panel; the node update never takes mailcow back. Restore the node from a backup or wait for a MailExpert release that confirms this version.",
+      "mailcowWaitingReleaseNote": "mailcow is updated only to the version a MailExpert release confirms after testing it: the node stays at its version until then.",
       "containersLabel": "mailcow containers",
       "containersRunning": "{{running}} of {{total}} running",
       "reportedAt": "Reported by the node {{at}}.",
@@ -2995,7 +3005,7 @@
       "scriptsUnknown": "Cannot compare (no commit reported)",
       "scriptsCurrent": "Same commit as the panel",
       "scriptsBehind": "Another commit than the panel",
-      "updateNote": "After a panel update the panel asks the agent to bring the node scripts to the same commit by itself. The agent backs the node up first (tag pre-update; the node backup must be set up), runs setup.sh and goes back to the previous commit if setup.sh fails.",
+      "updateNote": "After a panel update the panel asks the agent to bring the node scripts to the same commit by itself. The agent backs the node up first (tag pre-update; the node backup must be set up), runs setup.sh and goes back to the previous commit if setup.sh fails. When the release confirms a newer mailcow, the agent then updates mailcow to it with mailcow's own update.sh: mail is not accepted for a few minutes (EOP queues it and retries).",
       "updateNow": "Update node now",
       "busyNote": "A backup or an update of the node is running: one at a time.",
       "errorUnknownKind": "The agent on the node does not know this job: update the node scripts by hand once (git checkout of the commit and setup.sh)",
@@ -3012,7 +3022,8 @@
       "errorNotNewer": "The node runs a newer commit than the panel: the update never takes it back",
       "errorUntrustedOrigin": "The node checkout does not fetch from the official repository: refused (NODE_UPDATE_ORIGIN in node.env allows another)",
       "errorLocalChanges": "The node checkout has local changes: refused, the node is unchanged",
-      "errorMailcowUpdateFailed": "The mailcow update failed: mailcow was started again and checked"
+      "errorMailcowUpdateFailed": "The mailcow update failed: mailcow was started again and checked",
+      "errorMailcowPastPin": "mailcow released a newer version while the node updated it: mailcow went past the version this release confirms and is untested. It was started again and checked; the update never takes it back"
     },
     "quarantine": {
       "title": "Mail node quarantine",

@@ -84,6 +84,11 @@ A per-file map: `docs/architecture/codebase-file-map.md`.
   TLS, the settings `setup.sh` writes), and fix whatever the new version broke or exposed in the
   same PR. Say in the PR what was checked. Never change mailcow's own code; adapt our scripts and
   configuration instead.
+- mailcow's version is pinned in `deploy/mailcow-version` (tag and full commit); the node agent's
+  update brings mailcow only to it, with mailcow's own `update.sh`, and only while it is the head of
+  mailcow's `master`. Bump it under the rule above: test the upgrade from the previous pin on the
+  stand first (`mailcow_update_if_pinned`, docs/operations/mail-node.md section 7a), then change
+  both lines in one commit.
 
 ## How to verify a change
 

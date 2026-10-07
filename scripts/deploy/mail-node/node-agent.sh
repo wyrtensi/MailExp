@@ -5,8 +5,9 @@
 # agent runs it and reports to POST /api/node-agent/jobs/<id> its state, step and the end of its
 # output. It runs only the kinds below, whatever the panel sends:
 #   status   the node's status report (POST /api/node-agent/status): the commit of the node scripts,
-#            mailcow's version, its containers, and node-backup.sh --status (the last backup and
-#            whether it is too old);
+#            mailcow's version (its release commit and tag, against the version the checkout's
+#            deploy/mailcow-version pins, and the head of mailcow's master), its containers, and
+#            node-backup.sh --status (the last backup and whether it is too old);
 #   backup   node-backup.sh --tag manual (the panel's "Back up mail now"), bounded by
 #            NODE_AGENT_BACKUP_TIMEOUT seconds (6 hours); a status report follows.
 #   update   the node's scripts to the commit the panel runs (params.sha, 40 hex digits): run by
@@ -161,6 +162,94 @@ mailcow_dir() { env_get "$NODE_CONF" MAILCOW_DIR 2>/dev/null || echo /opt/mailco
 
 mailcow_version() { git -C "$(mailcow_dir)" describe --tags --always 2>/dev/null || echo unknown; }
 
+# scripts_src: the node's checkout of the repository, as setup.sh recorded it (the one it runs from).
+scripts_src() {
+  local file=$NODE_DIR/scripts-src
+  if [ -n "${MAILEXPERT_NODE_SRC:-}" ]; then
+    echo "$MAILEXPERT_NODE_SRC"
+  elif [ -s "$file" ]; then
+    head -n 1 "$file"
+  else
+    echo /opt/mailexpert-node-src
+  fi
+}
+
+# mailcow's official repository: update.sh fetches from it (with --force it resets another origin
+# to it), and only its master moves a node's mailcow.
+MAILCOW_UPSTREAM=${MAILEXPERT_MAILCOW_UPSTREAM:-https://github.com/mailcow/mailcow-dockerized}
+
+# mailcow_pin <checkout> <MAILCOW_TAG|MAILCOW_COMMIT>: the mailcow version the release in the
+# checkout pins (deploy/mailcow-version), checked; status 1 without a valid one.
+mailcow_pin() {
+  local value
+  value=$(env_get "$1/deploy/mailcow-version" "$2" 2>/dev/null) || return 1
+  case $2 in
+    MAILCOW_COMMIT) [[ $value =~ ^[0-9a-f]{40}$ ]] || return 1 ;;
+    *) [[ $value =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$ ]] || return 1 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+# mailcow_base <mailcow dir>: the newest commit of mailcow's master the node's mailcow holds. Once
+# update.sh merged local changes, HEAD is its own merge commit ("After update on ..."), never a
+# commit of mailcow's: the merge base with origin/master is the release the node runs (HEAD when
+# there is no origin/master).
+mailcow_base() {
+  git -C "$1" merge-base HEAD refs/remotes/origin/master 2>/dev/null || git -C "$1" rev-parse --verify -q HEAD 2>/dev/null
+}
+
+# mailcow_relation <mailcow dir> <base commit> <pinned commit>: match, behind (the pin is newer:
+# the node's update brings mailcow to it), newer (the node runs a mailcow newer than the pin: an
+# update by hand, untested) or diverged (neither holds the other). A pin the node has not fetched
+# yet is newer than anything it has: behind.
+mailcow_relation() {
+  local dir=$1 base=$2 pin=$3 newer_tag
+  if [ "$base" = "$pin" ]; then
+    # A newer release checked out by hand while origin/master still names the pin: HEAD holds a
+    # tag past the pin.
+    newer_tag=$(git -C "$dir" tag --merged HEAD --contains "$pin" 2>/dev/null |
+      while read -r t; do [ "$(git -C "$dir" rev-parse -q --verify "$t^{commit}")" = "$pin" ] || echo "$t"; done) || newer_tag=''
+    if [ -n "$newer_tag" ]; then echo newer; else echo match; fi
+    return 0
+  fi
+  if ! git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null; then echo behind && return 0; fi
+  if git -C "$dir" merge-base --is-ancestor "$base" "$pin" 2>/dev/null; then echo behind && return 0; fi
+  if git -C "$dir" merge-base --is-ancestor "$pin" "$base" 2>/dev/null; then echo newer && return 0; fi
+  echo diverged
+}
+
+# mailcow_json: mailcow's version against the pin of the node's checkout, for the status report:
+# {commit, tag, pinTag, pinCommit, upstreamCommit, relation}, null where unknown (relation
+# unknown). upstreamCommit is the head of mailcow's master now (git ls-remote): when it is not the
+# pin, a newer mailcow waits for a MailExpert release that confirms it.
+mailcow_json() {
+  local dir src base='' tag='' pin_tag='' pin='' upstream='' relation=unknown
+  dir=$(mailcow_dir)
+  src=$(scripts_src)
+  pin_tag=$(mailcow_pin "$src" MAILCOW_TAG) || pin_tag=''
+  pin=$(mailcow_pin "$src" MAILCOW_COMMIT) || pin=''
+  base=$(mailcow_base "$dir") || base=''
+  [[ $base =~ ^[0-9a-f]{40}$ ]] || base=''
+  if [ -n "$base" ]; then
+    tag=$(git -C "$dir" describe --tags --exact-match "$base" 2>/dev/null) || tag=''
+    if [ -n "$pin" ]; then relation=$(mailcow_relation "$dir" "$base" "$pin"); fi
+  fi
+  upstream=$(mailcow_upstream_head 15) || upstream=''
+  jq -cn --arg commit "$base" --arg tag "$tag" --arg pinTag "$pin_tag" --arg pin "$pin" \
+    --arg upstream "$upstream" --arg relation "$relation" \
+    'def opt: if . == "" then null else . end;
+     {commit: ($commit | opt), tag: ($tag | opt), pinTag: ($pinTag | opt), pinCommit: ($pin | opt),
+      upstreamCommit: ($upstream | opt), relation: $relation}'
+}
+
+# mailcow_upstream_head <seconds>: the commit of master in mailcow's official repository now.
+mailcow_upstream_head() {
+  local head
+  head=$(timeout "$1" git ls-remote "$MAILCOW_UPSTREAM" refs/heads/master 2>/dev/null | cut -f1) || return 1
+  [[ $head =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$head"
+}
+
 # mailcow_containers: one line per container of mailcow's compose project: service, state, health.
 mailcow_containers() {
   (cd "$(mailcow_dir)" && docker compose ps -a --format $'{{.Service}}\t{{.State}}\t{{.Health}}') 2>/dev/null
@@ -195,9 +284,11 @@ backup_json() {
 # send_status: the status report, built and posted.
 send_status() {
   local file=$WORK/status.json
-  jq -cn --arg commit "$(scripts_commit)" --arg mailcow "$(mailcow_version)" \
+  jq -cn --arg commit "$(scripts_commit)" --arg mailcow "$(mailcow_version)" --argjson pin "$(mailcow_json)" \
     --argjson containers "$(containers_json)" --argjson backup "$(backup_json)" \
-    '{scriptsCommit: $commit, mailcowVersion: $mailcow, containers: $containers, backup: $backup}' >"$file"
+    '{scriptsCommit: $commit, mailcowVersion: $mailcow, mailcowCommit: $pin.commit, mailcowTag: $pin.tag,
+      mailcowPinTag: $pin.pinTag, mailcowPinCommit: $pin.pinCommit, mailcowUpstreamCommit: $pin.upstreamCommit,
+      mailcowRelation: $pin.relation, containers: $containers, backup: $backup}' >"$file"
   post_json /api/node-agent/status "$file"
 }
 

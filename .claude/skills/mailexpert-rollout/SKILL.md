@@ -58,7 +58,8 @@ If any is missing, ask. Do not guess host names, IPs, emails or versions.
 - Deploy a mutable image tag (`latest` as a tag on a server), build images on a server, or install
   Watchtower-like auto-updaters.
 - Touch a test stand you were not pointed at, or containers of other compose projects.
-- Update mailcow and the panel in the same window.
+- Update mailcow to anything but the version `deploy/mailcow-version` pins, or in the same window as
+  the panel by hand (the node agent's update does it after the panel, by design).
 - Report "done" because a command exited 0: confirm with the post-checks below.
 
 ## First install (fresh server)
@@ -345,6 +346,12 @@ ssh root@<MAIL_HOST> "/opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh
 
 If `setup.sh` says `mailcow.conf` changed and a full `docker compose down && up -d` of mailcow is
 needed, that is a separate GATE: mail stops for the restart, EOP queues inbound mail.
+
+mailcow itself (GATE: mail stops for minutes): only to the version `deploy/mailcow-version` of the
+node's checkout pins. With the node agent the update job does it; by hand, after a pre-update node
+backup, the same code: `sudo bash -c '. /opt/mailexpert-node-src/scripts/deploy/mail-node/node-update.sh; SRC=/opt/mailexpert-node-src; mailcow_update_if_pinned'`
+(exit 0 updated or skipped with the reason, 1 failed: `docker compose up -d` in the mailcow
+directory; `docs/operations/mail-node.md`, section 7a).
 
 Edge image: when the Caddy image changes between the versions (`info: edge: the Caddy image
 changed`), `update.sh` pulls the new one before the backup, pins it by digest and keeps the old

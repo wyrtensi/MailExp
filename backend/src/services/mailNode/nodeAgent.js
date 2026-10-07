@@ -1,5 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { query, withTransaction } from '../db.js';
 import { currentOf } from '../panelUpdate/latest.js';
 
@@ -32,7 +35,10 @@ const MINUTE_MS = 60 * 1000;
 // The bounds of the steps of an update on the node (scripts/deploy/mail-node/node-update.sh, which
 // applies the same numbers): the pre-update backup (node-backup.sh, bounded as a backup job) with
 // up to an hour waiting for another backup's lock, the fetch, setup.sh at the new commit and again
-// at the previous one on a rollback, mailcow's own update (PR D) and the checks after.
+// at the previous one on a rollback (or after a failed mailcow update: one or the other runs),
+// mailcow's own update (update.sh, setup.sh again, the start and the wait for healthy containers,
+// each bounded by what is left of these 30 minutes), mailcow started again after a failed update,
+// and the checks after.
 export const UPDATE_STEP_BOUNDS_MS = Object.freeze({
   fetch: 5 * MINUTE_MS,
   backup: 6 * 60 * MINUTE_MS,
@@ -40,6 +46,7 @@ export const UPDATE_STEP_BOUNDS_MS = Object.freeze({
   setup: 30 * MINUTE_MS,
   rollbackSetup: 30 * MINUTE_MS,
   mailcow: 30 * MINUTE_MS,
+  mailcowRestart: 10 * MINUTE_MS,
   checks: 10 * MINUTE_MS,
 });
 // The longest an update may run at all, whatever it reports: its steps' bounds added up.
@@ -145,6 +152,12 @@ export async function authenticateAgent(token) {
 const TOKEN_CURRENT = 'EXISTS (SELECT 1 FROM node_agent WHERE id = 1 AND token_hash = $1)';
 
 const capText = (value, max) => (typeof value === 'string' && value ? value.slice(0, max) : null);
+const commitOrNull = (value) => (typeof value === 'string' && SHA_PATTERN.test(value) ? value : null);
+const TAG_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._-]{0,39}$/;
+const tagOrNull = (value) => (typeof value === 'string' && TAG_PATTERN.test(value) ? value : null);
+// How the node's mailcow compares with the version its MailExpert checkout pins (node-agent.sh
+// mailcow_relation).
+const MAILCOW_RELATIONS = new Set(['match', 'behind', 'newer', 'diverged', 'unknown']);
 // The end of a log, which holds the outcome.
 const capTail = (value, max) => (typeof value === 'string' && value ? value.slice(-max) : null);
 const wholeNumber = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null);
@@ -178,6 +191,14 @@ export function sanitizeStatus(body) {
   return {
     scriptsCommit: capText(input.scriptsCommit, 64),
     mailcowVersion: capText(input.mailcowVersion, 100),
+    // mailcow's release on the node, the version the node's checkout pins, the head of mailcow's
+    // master, and how the first two compare.
+    mailcowCommit: commitOrNull(input.mailcowCommit),
+    mailcowTag: tagOrNull(input.mailcowTag),
+    mailcowPinTag: tagOrNull(input.mailcowPinTag),
+    mailcowPinCommit: commitOrNull(input.mailcowPinCommit),
+    mailcowUpstreamCommit: commitOrNull(input.mailcowUpstreamCommit),
+    mailcowRelation: MAILCOW_RELATIONS.has(input.mailcowRelation) ? input.mailcowRelation : 'unknown',
     containers: {
       total: wholeNumber(containers.total),
       running: wholeNumber(containers.running),
@@ -315,6 +336,43 @@ export function panelCommit(env = process.env) {
   return currentOf(env).sha;
 }
 
+// The mailcow version this panel's release pins (deploy/mailcow-version, copied into the image as
+// /app/mailcow-version by backend/Dockerfile; the repository's file in development): {tag, commit},
+// or null when it cannot be read. The node's update takes its own copy from its checkout, never
+// this one; the panel only shows it.
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const MAILCOW_VERSION_FILES = Object.freeze([
+  resolve(HERE, '../../../mailcow-version'),
+  resolve(HERE, '../../../../deploy/mailcow-version'),
+]);
+let pinnedCache;
+
+export function parseMailcowVersion(text) {
+  const values = {};
+  for (const line of String(text ?? '').split(/\r?\n/)) {
+    const match = /^(MAILCOW_TAG|MAILCOW_COMMIT)=(.*)$/.exec(line);
+    if (match) values[match[1]] = match[2].trim();
+  }
+  const tag = tagOrNull(values.MAILCOW_TAG);
+  const commit = commitOrNull(values.MAILCOW_COMMIT);
+  return tag && commit ? { tag, commit } : null;
+}
+
+export function pinnedMailcow({ files = MAILCOW_VERSION_FILES, read = readFileSync } = {}) {
+  if (pinnedCache !== undefined && files === MAILCOW_VERSION_FILES) return pinnedCache;
+  let pinned = null;
+  for (const file of files) {
+    try {
+      pinned = parseMailcowVersion(read(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (pinned) break;
+  }
+  if (files === MAILCOW_VERSION_FILES) pinnedCache = pinned;
+  return pinned;
+}
+
 // "Update node now": an update job to the panel's commit. The commit comes from the panel's own
 // build, never from the request.
 export async function enqueueNodeUpdate({ createdBy = null, env = process.env } = {}) {
@@ -360,6 +418,13 @@ export async function getNodeUpdateState({ env = process.env } = {}) {
     connected: state.connected,
     scriptsCommit: state.status?.scriptsCommit ?? null,
     panelCommit: panelCommit(env),
+    // mailcow on the node and the version this release pins: the update brings it there.
+    mailcow: {
+      commit: state.status?.mailcowCommit ?? null,
+      tag: state.status?.mailcowTag ?? null,
+      relation: state.status?.mailcowRelation ?? 'unknown',
+    },
+    pinnedMailcow: pinnedMailcow(),
     job: presentJob(rows[0]),
   };
 }

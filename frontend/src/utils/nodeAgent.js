@@ -81,6 +81,7 @@ export const JOB_ERROR_KEYS = Object.freeze({
   untrusted_origin: 'admin.nodeAgent.errorUntrustedOrigin',
   local_changes: 'admin.nodeAgent.errorLocalChanges',
   mailcow_update_failed: 'admin.nodeAgent.errorMailcowUpdateFailed',
+  mailcow_past_pin: 'admin.nodeAgent.errorMailcowPastPin',
 });
 
 // The node's scripts against the panel's commit: unknown (either is not a commit), current, behind
@@ -102,6 +103,46 @@ export const SCRIPTS_STATE_KEYS = Object.freeze({
   behind: 'admin.nodeAgent.scriptsBehind',
   newer: 'admin.nodeAgent.scriptsNewer',
 });
+
+// mailcow on the node against the version this panel's release pins (pinned: GET
+// /api/mail-node/agent -> pinnedMailcow, from deploy/mailcow-version). The node reports mailcow's
+// release commit and how it compares with the pin of its own checkout (status.mailcowRelation).
+//   unknown         nothing to compare (no report, no git checkout, no pin);
+//   matches         mailcow runs the release this panel pins;
+//   untested        mailcow is newer than its pin or off its history: updated by hand, not tested
+//                   with MailExpert (a warning; the update never takes it back);
+//   waitingRelease  mailcow released a newer version than the pin: the node stays until a
+//                   MailExpert release confirms one (mailcow_pin_not_latest);
+//   pending         the next node update brings mailcow to the pin.
+export function mailcowState(status, pinned) {
+  const sha = /^[0-9a-f]{40}$/;
+  const commit = status?.mailcowCommit;
+  if (!sha.test(commit ?? '')) return 'unknown';
+  if (sha.test(pinned?.commit ?? '') && commit === pinned.commit) return 'matches';
+  const relation = status.mailcowRelation;
+  if (relation === 'newer' || relation === 'diverged') return 'untested';
+  if (relation === 'match') return pinned?.commit ? 'pending' : 'matches';
+  if (relation !== 'behind') return 'unknown';
+  const pin = status.mailcowPinCommit;
+  const upstream = status.mailcowUpstreamCommit;
+  if (sha.test(upstream ?? '') && sha.test(pin ?? '') && upstream !== pin && (!pinned?.commit || pin === pinned.commit)) {
+    return 'waitingRelease';
+  }
+  return 'pending';
+}
+
+export const MAILCOW_STATE_KEYS = Object.freeze({
+  unknown: 'admin.nodeAgent.mailcowUnknown',
+  matches: 'admin.nodeAgent.mailcowMatches',
+  untested: 'admin.nodeAgent.mailcowUntested',
+  waitingRelease: 'admin.nodeAgent.mailcowWaitingRelease',
+  pending: 'admin.nodeAgent.mailcowPending',
+});
+
+// A mailcow version as people read it: its tag, or the first 12 characters of its commit.
+export function mailcowName(tag, commit) {
+  return tag || shortCommit(commit) || null;
+}
 
 // The node's part of a panel update (GET /api/admin/update -> node): null when no agent is set up
 // (the node is updated by hand); otherwise the last update job's state (queued, running,
