@@ -172,12 +172,12 @@ describe('resolveGoogleConfig', () => {
 });
 
 describe('recordGoogleGrant', () => {
-  it('upserts one journal row per app and lower-cased email, keeping a known subject', async () => {
+  it('upserts one journal row per project of the app and lower-cased email, keeping a known subject', async () => {
     query.mockResolvedValue({ rows: [] });
     await recordGoogleGrant({ appId: 'app-1', email: 'User@Gmail.com', sub: 'sub-1' });
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(app_id, email, google_sub\) VALUES \(\$1, lower\(\$2\), \$3\)/);
-    expect(sql).toMatch(/ON CONFLICT \(app_id, email\) DO UPDATE SET google_sub = COALESCE\(google_oauth_grants\.google_sub, EXCLUDED\.google_sub\)/);
+    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(project_number, email, google_sub\)\s+SELECT project_number, lower\(\$2\), \$3 FROM google_oauth_apps WHERE id = \$1/);
+    expect(sql).toMatch(/ON CONFLICT \(project_number, email\) DO UPDATE SET google_sub = COALESCE\(google_oauth_grants\.google_sub, EXCLUDED\.google_sub\)/);
     expect(params).toEqual(['app-1', 'User@Gmail.com', 'sub-1']);
   });
 
@@ -303,9 +303,9 @@ describe('importLegacyGoogleConfig', () => {
     expect(bindSql).toMatch(/oauth_provider = 'google' AND oauth_app_id IS NULL/);
     expect(bindParams).toEqual(['app-new']);
     const [grantSql, grantParams] = findCall(calls, /INSERT INTO google_oauth_grants/);
-    expect(grantSql).toMatch(/SELECT DISTINCT \$1::uuid, lower\(email_address\)/);
-    expect(grantSql).toMatch(/ON CONFLICT \(app_id, email\) DO NOTHING/);
-    expect(grantParams).toEqual(['app-new']);
+    expect(grantSql).toMatch(/SELECT DISTINCT \$2::text, lower\(email_address\) FROM email_accounts WHERE oauth_app_id = \$1/);
+    expect(grantSql).toMatch(/ON CONFLICT \(project_number, email\) DO NOTHING/);
+    expect(grantParams).toEqual(['app-new', '123456789012']);
     expect(findCall(calls, /UPDATE integration_config/)[0]).toMatch(/jsonb_build_object\('redirectUri', config->'redirectUri'\)/);
   });
 
@@ -362,7 +362,7 @@ describe('app registry for the admin screen', () => {
     expect(app).toEqual({ id: 'app-1', grants_count: 3, accounts_count: 2 });
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toMatch(/client_secret/);
-    expect(sql).toMatch(/\(SELECT count\(\*\) FROM google_oauth_grants g WHERE g\.app_id = a\.id\)::int AS grants_count/);
+    expect(sql).toMatch(/\(SELECT count\(\*\) FROM google_oauth_grants g WHERE g\.project_number = a\.project_number\)::int AS grants_count/);
     expect(sql).toMatch(/\(SELECT count\(\*\) FROM email_accounts e WHERE e\.oauth_app_id = a\.id\)::int AS accounts_count/);
     expect(sql).toMatch(/WHERE a\.id = \$1/);
     expect(params).toEqual(['app-1']);

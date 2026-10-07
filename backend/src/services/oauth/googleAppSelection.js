@@ -12,8 +12,8 @@ import { OAUTH_STATE_TTL_SECONDS } from './oauthState.js';
 const SELECTION_LOCK = "SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-selection'))";
 const APPS_WITH_SEATS = `
   SELECT a.id, a.status, a.user_limit,
-         (SELECT count(*) FROM google_oauth_grants g WHERE g.app_id = a.id)::int AS grants,
-         EXISTS (SELECT 1 FROM google_oauth_grants g WHERE g.app_id = a.id AND g.email = lower($1)) AS granted
+         (SELECT count(*) FROM google_oauth_grants g WHERE g.project_number = a.project_number)::int AS grants,
+         EXISTS (SELECT 1 FROM google_oauth_grants g WHERE g.project_number = a.project_number AND g.email = lower($1)) AS granted
   FROM google_oauth_apps a
   ORDER BY a.created_at, a.id`;
 
