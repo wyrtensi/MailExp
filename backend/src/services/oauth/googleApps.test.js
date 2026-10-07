@@ -262,14 +262,10 @@ describe('importLegacyGoogleConfig', () => {
   beforeEach(() => {
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    delete process.env.GOOGLE_CLIENT_ID;
-    delete process.env.GOOGLE_CLIENT_SECRET;
   });
   afterEach(() => {
     errorSpy.mockRestore();
     logSpy.mockRestore();
-    delete process.env.GOOGLE_CLIENT_ID;
-    delete process.env.GOOGLE_CLIENT_SECRET;
   });
 
   function importDb({ appExists = false, config = null, done = false } = {}) {
@@ -297,9 +293,7 @@ describe('importLegacyGoogleConfig', () => {
   });
 
   it('does nothing once the import was recorded, even with no app left', async () => {
-    process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
-    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
-    const calls = importDb({ done: true });
+    const calls = importDb({ done: true, config: { clientId: CLIENT_ID, clientSecret: 'enc(s)' } });
     expect(await importLegacyGoogleConfig()).toBeNull();
     expect(findCall(calls, /FROM google_oauth_apps/)).toBeUndefined();
     expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
@@ -330,16 +324,7 @@ describe('importLegacyGoogleConfig', () => {
     expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1][1]).toBe('enc(plain-secret)');
   });
 
-  it('falls back to the environment when nothing is stored', async () => {
-    process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
-    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
-    const calls = importDb();
-    expect(await importLegacyGoogleConfig()).toBe('app-new');
-    expect(findCall(calls, /INSERT INTO google_oauth_apps/)[1]).toEqual([CLIENT_ID, 'enc(env-secret)', '123456789012']);
-    expect(findCall(calls, /UPDATE integration_config/)).toBeUndefined();
-  });
-
-  it('does nothing without any stored or environment client', async () => {
+  it('does nothing without a stored client', async () => {
     const calls = importDb();
     expect(await importLegacyGoogleConfig()).toBeNull();
     expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
