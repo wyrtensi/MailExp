@@ -1122,14 +1122,15 @@ const PROVIDERS = {
     pushesFlags: false,
     snippetIndex: false,
     speculativeFetch: false,
-    // All Mail, Starred and Important repeat letters stored under other labels. Gmail flags them
-    // \All, \Flagged and \Important (localized names keep the flag); the exact names cover a
-    // row saved without the flag. Matched exactly, never as a substring: a user label such as
-    // "Projects/All Mail" is a real folder. [Gmail] / [GoogleMail] (the prefix Gmail uses in
-    // some countries) are namespace containers, not selectable mailboxes; real subfolders like
-    // [Gmail]/Drafts are kept.
+    // All Mail, Starred and Important repeat letters stored under other labels. Gmail's LIST flags
+    // them \All, \Flagged and \Important (localized names keep the flag). imapflow resolves only
+    // the first two into specialUse; syncFolders stores \Important from the raw LIST flags
+    // (folderSpecialUse). The exact names cover a row saved without the flag. Matched exactly,
+    // never as a substring: a user label such as "Projects/All Mail" is a real folder. [Gmail],
+    // [GoogleMail] and [Google Mail] (the prefixes Gmail uses in some countries) are namespace
+    // containers, not selectable mailboxes; real subfolders like [Gmail]/Drafts are kept.
     skipSpecialUse: ['\\All', '\\Flagged', '\\Important'],
-    skipFolderNames: ['[gmail]', '[googlemail]'].flatMap(ns => [ns, ...['all mail', 'starred', 'important'].map(view => `${ns}/${view}`)]),
+    skipFolderNames: ['[gmail]', '[googlemail]', '[google mail]'].flatMap(ns => [ns, ...['all mail', 'starred', 'important'].map(view => `${ns}/${view}`)]),
   },
   yahoo: {
     // Yahoo accepts about three simultaneous sessions per account: a fourth login gets
@@ -1356,6 +1357,14 @@ export async function emitSectionsChanged(mgr, account, changedCount) {
 export function skipsDuplicateView(profile, path, specialUse) {
   return (!!specialUse && profile.skipSpecialUse.includes(specialUse))
     || profile.skipFolderNames.includes(String(path).toLowerCase());
+}
+
+// The special use a folder row stores: imapflow's specialUse, else Gmail's \Important from the raw
+// LIST flags (imapflow knows only \All \Archive \Drafts \Flagged \Junk \Sent \Trash), so the
+// Important view is skipped (skipsDuplicateView) and treated as virtual (moveQueue.js) in any language.
+export function folderSpecialUse(mailbox) {
+  if (mailbox?.specialUse) return mailbox.specialUse;
+  return mailbox?.flags?.has?.('\\Important') ? '\\Important' : null;
 }
 
 export function providerProfile(account) {
@@ -4576,7 +4585,7 @@ export class ImapManager {
           VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (account_id, path) DO UPDATE
           SET name = $3, special_use = $5, no_select = $6, updated_at = NOW()
-        `, [account.id, mb.path, mb.name, mb.delimiter, mb.specialUse || null, noSelect]);
+        `, [account.id, mb.path, mb.name, mb.delimiter, folderSpecialUse(mb), noSelect]);
       }
       // Many IMAP servers omit INBOX from LIST responses (it is implicit per RFC 3501).
       // Without a row in folders, subfolders like INBOX/Work have no parent in the map
