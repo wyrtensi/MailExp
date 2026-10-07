@@ -76,6 +76,7 @@ const CONCRETE_PATH = {
   '/mail-node/queue/:param:param': '/mail-node/queue/D3A1F2B4C5',
   '/mail-node/alerts': '/mail-node/alerts',
   '/mail-node/eop/budget': '/mail-node/eop/budget',
+  '/mail-node/seats': '/mail-node/seats',
   '/mail-node/tenant': '/mail-node/tenant',
   '/mail-node/tenant/jobs/:param': '/mail-node/tenant/jobs/9001',
   '/mail-node/tenant/phish-release': '/mail-node/tenant/phish-release',
@@ -223,6 +224,9 @@ test('as a plain user the admin routes answer 403, the user routes still answer'
       ['GET', '/mail-node/quarantine/settings'],
       ['POST', '/mail-node/quarantine/1/release'],
       ['GET', '/mail-node/outages'],
+      ['POST', '/mail-node/seats/check'],
+      ['PUT', '/mail-node/seats/settings', { holdDays: 30 }],
+      ['POST', '/accounts/demo-gmail/deactivation', { reason: 'r' }],
       ['GET', '/admin/users'],
       ['GET', '/admin/update'],
       ['POST', '/admin/update', { target: 'sha-dddddddddddd', confirm: 'sha-dddddddddddd' }],
@@ -246,7 +250,7 @@ test('as a plain user the admin routes answer 403, the user routes still answer'
     assert.equal((await demoRequest('GET', '/mail-node/tenant/phish-release')).enabled, true);
     globalThis.localStorage = { getItem: () => 'user', setItem: () => {} };
 
-    for (const requestPath of ['/mail-node/domains', '/mail-node/outage-letters', '/integrations/status', '/categories/sources', '/accounts', '/plugins']) {
+    for (const requestPath of ['/mail-node/domains', '/mail-node/seats', '/mail-node/outage-letters', '/integrations/status', '/categories/sources', '/accounts', '/plugins']) {
       await demoRequest('GET', requestPath);
     }
   } finally {
@@ -698,6 +702,19 @@ test('the node update: the panel commit, one job at a time, the node part on the
   assert.equal(panel.node.job.kind, 'update');
   assert.deepEqual(panel.node.pinnedMailcow, before.pinnedMailcow);
   assert.equal(panel.node.mailcow.tag, '2026-09');
+});
+
+test('EOP seats and deactivation: requests, hold and the node mailbox round trip', async () => {
+  const asked = await answer('/mail-node/seats/requests', 'POST', '/mail-node/seats/requests', { seats: 2 });
+  assert.equal(asked.request.seats, 2);
+  assert.equal((await demoRequest('GET', '/mail-node/seats')).requests.length >= 1, true);
+  await reject('/mail-node/seats/check', 'POST', '/mail-node/seats/check', undefined, /entered in the EOP settings/);
+  assert.equal((await answer('/mail-node/seats/settings', 'PUT', '/mail-node/seats/settings', { holdDays: 90 })).holdDays, 90);
+  const node = (await demoRequest('GET', '/accounts')).find((a) => a.mail_node && !a.delete_after);
+  const off = await answer('/accounts/:param/deactivation', 'POST', `/accounts/${node.id}/deactivation`, { reason: 'On leave' });
+  assert.ok(off.deactivated_at);
+  const on = await answer('/accounts/:param/deactivation', 'DELETE', `/accounts/${node.id}/deactivation`);
+  assert.equal(on.deactivated_at, null);
 });
 
 test('every write path pattern api.js can call was exercised above, answered or rejected', async () => {

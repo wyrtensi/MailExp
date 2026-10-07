@@ -18,6 +18,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mailbox.rate_limit_changed': 'admin.audit.actionMailboxRateLimitChanged',
   'mailbox.deletion_requested': 'admin.audit.actionMailboxDeletionRequested',
   'mailbox.deletion_cancelled': 'admin.audit.actionMailboxDeletionCancelled',
+  'mailbox.deactivated': 'admin.audit.actionMailboxDeactivated',
+  'mailbox.activated': 'admin.audit.actionMailboxActivated',
   'mailbox.oauth_subject_reset': 'admin.audit.actionMailboxOauthSubjectReset',
   'message.sent': 'admin.audit.actionMessageSent',
   'message.deleted': 'admin.audit.actionMessageDeleted',
@@ -56,6 +58,8 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'mail_node.agent_token_issued': 'admin.audit.actionMailNodeAgentTokenIssued',
   'mail_node.agent_token_revoked': 'admin.audit.actionMailNodeAgentTokenRevoked',
   'mail_node.agent_job_requested': 'admin.audit.actionMailNodeAgentJobRequested',
+  'mail_node.seats_requested': 'admin.audit.actionMailNodeSeatsRequested',
+  'mail_node.seat_hold_changed': 'admin.audit.actionMailNodeSeatHoldChanged',
   'tenant.connection_tested': 'admin.audit.actionTenantConnectionTested',
   'tenant.recipients_synced': 'admin.audit.actionTenantRecipientsSynced',
   'tenant.connector_reference_taken': 'admin.audit.actionTenantConnectorReference',
@@ -348,6 +352,13 @@ export function auditDetail(entry) {
         key: 'admin.audit.detailDeletionCancelled',
         values: { date: formatDay(details.deleteAfter), reason: details.reason ?? '' },
       };
+    // EOP seats (backend services/mailNode/mailboxActions.js, seatProvider.js, routes/mailNodeSeats.js).
+    case 'mailbox.deactivated':
+      return typeof details.reason === 'string' && details.reason ? { key: 'admin.audit.detailDeactivated', values: { reason: details.reason } } : null;
+    case 'mail_node.seats_requested':
+      return Number.isInteger(details.seats) ? { key: 'admin.audit.detailSeatsRequested', values: { seats: details.seats } } : null;
+    case 'mail_node.seat_hold_changed':
+      return Number.isInteger(details.to) ? { key: 'admin.audit.detailSeatHoldChanged', values: { from: details.from, to: details.to } } : null;
     case 'mailbox.rate_limit_changed':
       return {
         key: details.override ? 'admin.audit.detailRateLimitSet' : 'admin.audit.detailRateLimitDefault',

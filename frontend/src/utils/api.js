@@ -426,6 +426,10 @@ export const api = {
     checkAlerts: () => request('POST', '/mail-node/alerts/check'),
     saveAlertSettings: (data) => request('PUT', '/mail-node/alerts/settings', data),
     getTerrlBudget: () => request('GET', '/mail-node/eop/budget'),
+    getSeats: () => request('GET', '/mail-node/seats'),
+    checkSeats: () => request('POST', '/mail-node/seats/check'),
+    requestSeats: (seats) => request('POST', '/mail-node/seats/requests', { seats }),
+    saveSeatSettings: ({ holdDays }) => request('PUT', '/mail-node/seats/settings', { holdDays }),
     // The Microsoft tenant (stage 7a): what the tenant jobs stored, the buttons that queue a job
     // (202 with { job }), and one job followed until it ends.
     getTenant: () => request('GET', '/mail-node/tenant'),
@@ -484,6 +488,8 @@ export const api = {
   // A mail node mailbox: ask for its deletion after the waiting time ({ email, reason }), or cancel it.
   requestMailboxDeletion: (id, { email, reason }) => request('POST', `/accounts/${id}/deletion`, { email, reason }),
   cancelMailboxDeletion: (id) => request('DELETE', `/accounts/${id}/deletion`),
+  deactivateMailbox: (id, { reason }) => request('POST', `/accounts/${id}/deactivation`, { reason }),
+  activateMailbox: (id) => request('DELETE', `/accounts/${id}/deactivation`),
   reconnectAccount: (id) => request('POST', `/accounts/${id}/reconnect`),
   // Admin: forget which Google/Microsoft account an OAuth mailbox is bound to.
   resetOAuthSubject: (id) => request('POST', `/accounts/${id}/oauth-subject/reset`),

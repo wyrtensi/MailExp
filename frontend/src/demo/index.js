@@ -60,6 +60,8 @@ let demoDeleteAfterDays = 5;
   const pending = FLEET_ACCOUNTS.find(account => account.id === 'demo-fx-46');
   if (pending) {
     Object.assign(pending, {
+      // Its EOP seat is on hold (see demoSeats), so the hover on "temporarily unavailable" has a seat.
+      demo_seat_free_from: new Date(Date.now() + 88 * 86400000).toISOString(),
       // Dated from now, so the demo always shows a deletion still ahead.
       deletion_requested_at: new Date(Date.now() - 2 * 86400000).toISOString(), deletion_requested_by_email: 'demo@mailexpert.local',
       deletion_reason: 'The project ended; its mail was moved to the archive mailbox.',
@@ -1029,6 +1031,34 @@ let demoEopSettings = {
   dbebExternalDomain: null,
 };
 
+// EOP seats in the demo (backend services/mailNode/eopSeats.js): purchased is the EOP settings'
+// Licenses; a seat per working node mailbox; a deactivated or deleting one holds its seat for the
+// hold period (the demo keeps its free date on the account); requests close when Licenses grows.
+let demoSeatRequests = [];
+let demoHoldDays = 90;
+const demoHeld = () => ACCOUNT_FIXTURES.filter(a => a.mail_node && (a.delete_after || a.deactivated_at) && a.demo_seat_free_from
+  && Date.parse(a.demo_seat_free_from) > Date.now());
+function demoSeats() {
+  const purchased = Number.isInteger(demoEopSettings.licenses) ? demoEopSettings.licenses : null;
+  const used = ACCOUNT_FIXTURES.filter(a => a.mail_node && !a.delete_after && !a.deactivated_at).length;
+  const held = demoHeld();
+  demoSeatRequests = demoSeatRequests.filter(r => purchased == null || purchased < r.purchasedAtRequest + r.seats);
+  return {
+    used, held: held.length, free: purchased == null ? null : Math.max(0, purchased - used - held.length), known: purchased != null,
+    mode: 'manual', source: 'manual', checkedAt: null, stale: false, notReconciled: false, over: purchased != null && purchased < used,
+    error: null, holdDays: demoHoldDays,
+    heldSeats: held.map((a, i) => ({ seat: used + i + 1, email: a.email_address, reason: a.deactivated_at ? 'deactivated' : 'deletion_requested', freeFrom: a.demo_seat_free_from })),
+    requests: demoSeatRequests.map(({ id, seats, requestedBy, requestedAt }) => ({ id, seats, requestedBy, requestedAt })),
+  };
+}
+const demoHoldUntil = () => new Date(Date.now() + demoHoldDays * 86400000).toISOString();
+// Activation and the cancel of a deletion: the own held seat back, else a free one.
+function demoTakeSeatBack(account) {
+  const ownHeld = account.demo_seat_free_from && Date.parse(account.demo_seat_free_from) > Date.now();
+  if (!ownHeld && !demoSeats().free) throw demoError('No free EOP seat: ask for more seats first', 'no_free_seats');
+  account.demo_seat_free_from = null;
+}
+
 function eopSettingsAnswer() {
   const s = demoEopSettings;
   return clone({
@@ -1619,6 +1649,7 @@ function createDomainMailbox(body) {
   const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain));
   if (!MAILBOX_READY_STATES.includes(domain?.state)) throw demoError('The domain is not ready for mailboxes', 'domain_not_ready');
   if (!domain.active) throw demoError('Unknown domain', 'domain_unknown');
+  if (!demoSeats().free) throw demoError('No free EOP seat: ask for more seats first', 'no_free_seats');
   const senderName = String(body.senderName ?? '').trim() || null;
   const name = String(body.name ?? '').trim() || senderName || email;
   const account = {
@@ -1962,10 +1993,13 @@ const MAIL_NODE_USER_READS = [
   /^\/mail-node\/outage-letters$/,
   /^\/mail-node\/quarantine$/,
   /^\/mail-node\/messages\/[^/]+\/spam-verdict$/,
+  /^\/mail-node\/seats$/,
 ];
 export function demoAdminOnly(verb, pathname, body = {}) {
   if (pathname === '/admin' || pathname.startsWith('/admin/')) return true;
   if (pathname.startsWith('/mail-node/')) {
+    // Asking for EOP seats is everyone's (routes/mailNodeSeats.js); "Reconcile" and the hold are not.
+    if (verb === 'POST' && pathname === '/mail-node/seats/requests') return false;
     if (verb !== 'GET') return true;
     if (MAIL_NODE_USER_READS.some((re) => re.test(pathname))) return false;
     // GET /mail-node/quarantine/:itemId is the user's; /quarantine/settings is matched first, an admin's.
@@ -1977,6 +2011,7 @@ export function demoAdminOnly(verb, pathname, body = {}) {
   if (/^\/categories\/recategorize\/[^/]+$/.test(pathname)) return verb === 'POST';
   if (pathname === '/accounts') return verb === 'POST' && body?.kind !== 'domain';
   if (/^\/accounts\/[^/]+\/(oauth-subject\/reset|threading\/(preview|mode))$/.test(pathname)) return verb === 'POST';
+  if (/^\/accounts\/[^/]+\/deactivation$/.test(pathname)) return verb === 'POST' || verb === 'DELETE';
   // Switching a plugin on or off is the administrator's; everyone reads the list.
   if (/^\/plugins\/[^/]+$/.test(pathname)) return verb === 'PATCH';
   return false;
@@ -2104,7 +2139,7 @@ export async function demoRequest(method, path, body = {}) {
       throw demoError('Connection settings are locked for a mailbox on the mail node', 'mail_node_connection_locked');
     }
     if (account.mail_node && body?.enabled !== undefined && !body.enabled && account.enabled !== false) {
-      throw demoError('A mail node mailbox cannot be disabled: delete it instead', 'mail_node_disable_unsupported');
+      throw demoError('A mail node mailbox cannot be paused: deactivate it instead', 'mail_node_disable_unsupported');
     }
     const assignable = ['name', 'sender_name', 'color', 'enabled', 'imap_host', 'imap_port', 'smtp_host', 'smtp_port',
       'smtp_tls', 'folder_mappings', 'signature', 'categorization_enabled', 'sort_order', 'include_in_unified_inbox'];
@@ -2131,6 +2166,7 @@ export async function demoRequest(method, path, body = {}) {
     if (!account) throw demoError('Account not found', 'account_not_found');
     if (verb === 'DELETE') {
       if (!account.delete_after) throw demoError('No deletion of this mailbox is pending', 'deletion_not_requested');
+      if (!account.deactivated_at) demoTakeSeatBack(account);
       Object.assign(account, {
         deletion_requested_at: null, deletion_requested_by_email: null, deletion_reason: null, delete_after: null, deletion_last_error: null,
       });
@@ -2150,7 +2186,30 @@ export async function demoRequest(method, path, body = {}) {
       // The requester is whoever the demo is signed in as (the "view as a user" switch).
       deletion_requested_at: now.toISOString(), deletion_requested_by_email: (demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER).email,
       deletion_reason: String(body.reason).trim(), delete_after: deletionDate(demoDeleteAfterDays, now.getTime()), deletion_last_error: null,
+      demo_seat_free_from: account.demo_seat_free_from || demoHoldUntil(),
     });
+    return clone(account);
+  }
+  // Deactivating and activating a mail node mailbox (routes/accounts.js, administrators).
+  const deactivationMatch = pathname.match(/^\/accounts\/([^/]+)\/deactivation$/);
+  if (deactivationMatch && (verb === 'POST' || verb === 'DELETE')) {
+    const account = accountFor(decodeURIComponent(deactivationMatch[1]));
+    if (!account) throw demoError('Account not found', 'account_not_found');
+    if (!account.mail_node) throw demoError('Only a mailbox on the mail node waits before it is deleted', 'not_mail_node');
+    if (verb === 'POST') {
+      if (account.deactivated_at) throw demoError('This mailbox is deactivated already', 'already_deactivated');
+      if (account.delete_after) throw demoError('This mailbox is pending deletion: cancel the deletion to keep it', 'mailbox_pending_deletion');
+      if (deletionReasonError(body?.reason)) throw demoError('Say why the mailbox is deactivated', 'deactivation_reason_required');
+      Object.assign(account, {
+        deactivated_at: new Date().toISOString(), deactivated_by_email: DEMO_USER.email,
+        deactivation_reason: String(body.reason).trim(), demo_seat_free_from: demoHoldUntil(),
+      });
+      return clone(account);
+    }
+    if (!account.deactivated_at) throw demoError('This mailbox is not deactivated', 'not_deactivated');
+    if (account.delete_after) throw demoError('This mailbox is pending deletion: cancel the deletion first', 'deletion_pending');
+    demoTakeSeatBack(account);
+    Object.assign(account, { deactivated_at: null, deactivated_by_email: null, deactivation_reason: null });
     return clone(account);
   }
   // The node's aliases that deliver to a node mailbox, for its delete confirmation. The demo's sales
@@ -2775,6 +2834,29 @@ export async function demoRequest(method, path, body = {}) {
     return clone({ settings: demoAlertSettings });
   }
   if (verb === 'GET' && pathname === '/mail-node/eop/budget') return clone(demoTerrlBudget());
+  if (verb === 'GET' && pathname === '/mail-node/seats') return clone(demoSeats());
+  if (verb === 'POST' && pathname === '/mail-node/seats/check') {
+    throw demoError('The tenant does not give the number of seats: it is entered in the EOP settings (Licenses)', 'seats_manual');
+  }
+  if (verb === 'PUT' && pathname === '/mail-node/seats/settings') {
+    const days = Number(body?.holdDays);
+    if (!Number.isInteger(days) || days < 0 || days > 3650) throw demoError('The hold period must be a whole number of days from 0 to 3650', 'hold_days_invalid');
+    for (const a of ACCOUNT_FIXTURES) {
+      if (a.demo_seat_free_from) a.demo_seat_free_from = new Date(Date.parse(a.demo_seat_free_from) + (days - demoHoldDays) * 86400000).toISOString();
+    }
+    demoHoldDays = days;
+    return { holdDays: days };
+  }
+  if (verb === 'POST' && pathname === '/mail-node/seats/requests') {
+    const seats = Number(body?.seats);
+    if (!Number.isInteger(seats) || seats < 1 || seats > 1000) throw demoError('Ask for a whole number of seats from 1 to 1000', 'seat_count_invalid');
+    const request = {
+      id: demoSeatRequests.length + 1, seats, purchasedAtRequest: demoEopSettings.licenses ?? 0,
+      requestedBy: (demoRole() === 'user' ? DEMO_PLAIN_USER : DEMO_USER).email, requestedAt: new Date().toISOString(),
+    };
+    demoSeatRequests = [...demoSeatRequests, request];
+    return { request: { id: request.id, seats, requestedAt: request.requestedAt } };
+  }
   if (pathname.startsWith('/mail-node/tenant')) {
     const tenantAnswer = demoTenantRequest(verb, pathname, demoEopSettings, demoError, body, { spamRule: demoNode.prefilterWritten ? 'ok' : 'missing' });
     if (tenantAnswer !== undefined) return tenantAnswer;
