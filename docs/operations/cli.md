@@ -110,7 +110,8 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 ждёт ответа: код 2, ошибка `confirmation_required`. `--yes` отвечает «да».
 
 Спрашивают: `domain restart`, `domain allow-authoritative`, `domain internal-relay`,
-`domain approve-alias-removal`, `quarantine pause`. Не спрашивают: `domain hold`, `domain sync`,
+`domain approve-alias-removal`, `quarantine pause`, `user delete`, `user totp-reset`, `sso remove`,
+`integration microsoft remove`. Не спрашивают: `domain hold`, `domain sync`,
 `quarantine resume`, `quarantine release`, `tenant test`, `tenant antispam`, `mailbox ...` (кроме
 `delete`), все команды чтения.
 

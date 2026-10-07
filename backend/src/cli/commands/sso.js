@@ -25,9 +25,9 @@ const TEXT_FIELDS = Object.freeze({
   'admin-group-value': 'admin_group_value',
   'login-match-claim': 'login_match_claim',
 });
-// Switches: flag (true) and no-flag (false) -> the API's boolean field.
+// Switches: flag (true) and no-flag (false) -> the API's boolean field. On or off is --enable or
+// --disable.
 const SWITCHES = Object.freeze({
-  enable: 'enabled',
   'require-email-verified': 'require_email_verified',
   'allow-insecure': 'allow_insecure',
   'rp-logout': 'rp_initiated_logout',
@@ -36,6 +36,7 @@ const SWITCHES = Object.freeze({
 const FLAGS = Object.freeze({
   ...Object.fromEntries(Object.keys(TEXT_FIELDS).map((flag) => [flag, 'string'])),
   ...Object.fromEntries(Object.keys(SWITCHES).flatMap((flag) => [[flag, 'boolean'], [`no-${flag}`, 'boolean']])),
+  enable: 'boolean',
   disable: 'boolean',
 });
 
@@ -57,8 +58,9 @@ const FIELD_HELP = [
 // The flags given, as the API's body.
 function bodyOf(flags) {
   if (flags.enable && flags.disable) throw new UsageError('--enable and --disable exclude each other');
-  if (flags.disable) flags['no-enable'] = true;
   const body = {};
+  if (flags.enable) body.enabled = true;
+  if (flags.disable) body.enabled = false;
   for (const [flag, field] of Object.entries(TEXT_FIELDS)) if (flags[flag] !== undefined) body[field] = flags[flag];
   for (const [flag, field] of Object.entries(SWITCHES)) {
     if (flags[flag] && flags[`no-${flag}`]) throw new UsageError(`--${flag} and --no-${flag} exclude each other`);
@@ -128,7 +130,7 @@ const add = {
   ],
   flags: FLAGS,
   async run(ctx) {
-    const body = bodyOf({ ...ctx.flags });
+    const body = bodyOf(ctx.flags);
     body.client_secret = await readSecret(ctx, 'client secret');
     const { provider } = unwrap(await createOidcProvider(body), OIDC_PROVIDER_ERRORS);
     return { data: { provider }, lines: [`added ${provider.slug}`, ...providerLines(provider)] };
@@ -149,7 +151,7 @@ const set = {
   positionals: ['provider'],
   flags: { ...FLAGS, secret: 'boolean' },
   async run(ctx) {
-    const body = bodyOf({ ...ctx.flags });
+    const body = bodyOf(ctx.flags);
     if (ctx.flags.secret) {
       body.client_secret = await readSecret(ctx, 'client secret');
       if (!body.client_secret) throw new CliError('secret_missing', 'No client secret on stdin');

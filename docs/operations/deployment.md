@@ -292,7 +292,8 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
   stderr). С `--json` обёртка не даёт контейнеру терминал
   (иначе stderr смешался бы со stdout), поэтому подтверждение тогда — только `--yes`.
 - `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
-  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `quarantine pause`. Без
+  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `quarantine pause`, `user delete`,
+  `user totp-reset`, `sso remove`, `integration microsoft remove`. Без
   терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,
