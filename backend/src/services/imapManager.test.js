@@ -6327,6 +6327,14 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
       expect(await mgr.connectAccount(acct)).toBe(true);
       expect(mgr._connectCooldown.has(acct.id)).toBe(false);
     });
+
+    it('does not open IMAP for a disabled mailbox', async () => {
+      const mgr = connectManager();
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      expect(await mgr.connectAccount({ ...acct, enabled: false })).toBe(false);
+      expect(ImapFlow).not.toHaveBeenCalled();
+      expect(mgr.syncMessages).not.toHaveBeenCalled();
+    });
   });
 
   describe('the sync-tick reconnect', () => {

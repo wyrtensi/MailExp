@@ -3047,6 +3047,11 @@ export class ImapManager {
     // keeps climbing the ladder.
     // An OAuth grant that was revoked stays down until the user consents again: the consent
     // callbacks reset the flag and reconnect with the fresh row.
+    // A turned-off mailbox is not connected by any caller: enabling it again connects it.
+    if (account.enabled === false) {
+      logger.debug(`connectAccount: ${logAccount(account)} skipped — mailbox disabled`);
+      return false;
+    }
     if (account.oauth_reconnect_required) {
       logger.debug(`connectAccount: ${logAccount(account)} skipped — OAuth reconnect required`);
       return false;

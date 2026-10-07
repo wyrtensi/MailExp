@@ -615,6 +615,10 @@ router.post('/:id/reconnect', async (req, res) => {
   const { id } = req.params;
   const result = await query('SELECT * FROM email_accounts WHERE id = $1', [id]);
   if (!result.rows.length) return res.status(404).json({ error: 'Account not found' });
+  // A turned-off mailbox stays off until it is enabled again (PUT /:id enabled: true).
+  if (result.rows[0].enabled === false) {
+    return res.status(409).json({ error: 'This mailbox is disabled: enable it to connect.', code: 'mailbox_disabled' });
+  }
 
   // A second press while this mailbox is still connecting starts nothing.
   if (imapManager.isConnecting(id)) return res.json({ ok: true, skipped: true });
