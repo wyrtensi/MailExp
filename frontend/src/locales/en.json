@@ -1984,7 +1984,7 @@
         "disableConfirmTitle": "Disable \"{{label}}\"?",
         "disableConfirm": "Mailboxes that will need a reconnect: {{count}}. They reconnect through another app.",
         "deleteConfirmTitle": "Delete \"{{label}}\"?",
-        "deleteConfirm": "The record of addresses this app has served is deleted with it.",
+        "deleteConfirm": "The record of addresses this app has served stays with its Google Cloud project: a client of that project added again finds those seats taken.",
         "deleteInUse": "An app can be deleted once no mailbox uses it.",
         "loadFailed": "Could not load Google apps: {{message}}",
         "errorGeneric": "The request failed. Please try again.",
