@@ -4,11 +4,12 @@ import { redactEmail } from '../../utils/redact.js';
 import { MailNodeError, deleteMailbox, getDeleteAfterDays, getMailbox, getMailNodeConfig } from './mailcow.js';
 import { SYSTEM_ACTOR } from './domains.js';
 import { failJobsOfDeletedAccount } from '../jobQueue.js';
+import { lockSeats, releaseSeat, returnSeat } from './eopSeats.js';
 
 // Deleting a mail node mailbox (owner decision 2026-10-01, R-33): anyone signed in may ask for it
-// with the mailbox's address typed out and a reason; the mailbox keeps working for the days an
-// administrator set (DEFAULT_DELETE_AFTER_DAYS), anyone may cancel until then, and then this job
-// deletes it for good: on the node with all its mail (delete/mailbox), then the panel row. The rows
+// with the mailbox's address typed out and a reason; the mailbox is read-only for the days an
+// administrator set (DEFAULT_DELETE_AFTER_DAYS; EOP seats design, 2026-10-07: its seat on hold, incoming mail refused, no sending), anyone may cancel until then, and then this job
+// deletes it for good: on the node with all its mail (delete/mailbox), then the panel row. The seat ledger row stays and waits its free-from date. The rows
 // are the source of truth (migration 0081): the job claims a row (deletion_started_at) before it
 // touches the node, a cancel is refused once a row is claimed, and a restart loses nothing.
 
@@ -57,50 +58,64 @@ export async function deleteOnNode(cfg, email) {
 }
 
 // Someone asks to delete a node mailbox, saying why: it is scheduled for deletion after the
-// configured days. Answers { deleteAfter, days } or { error }: account_not_found, not_mail_node,
+// configured days and is read-only from now on, its EOP seat on hold for holdDays
+// (services/mailNode/eopSeats.js; a deactivated mailbox's seat is on hold already). Answers
+// { deleteAfter, days, seat } or { error }: account_not_found, not_mail_node,
 // deletion_already_requested.
-export async function requestDeletion({ accountId, userId, reason }) {
+export async function requestDeletion({ accountId, userId, reason, holdDays }) {
   const days = await getDeleteAfterDays();
-  const { rows } = await query(`
-    UPDATE email_accounts
-       SET deletion_requested_at = NOW(), deletion_requested_by = $2,
-           deletion_requested_by_email = (SELECT COALESCE(NULLIF(email, ''), username) FROM users WHERE id = $2),
-           deletion_reason = $4,
-           delete_after = NOW() + make_interval(days => $3::int),
-           deletion_attempts = 0, deletion_next_attempt_at = NULL, deletion_last_error = NULL,
-           deletion_started_at = NULL
-     WHERE id = $1 AND mail_node AND delete_after IS NULL
-    RETURNING delete_after
-  `, [accountId, userId, days, reason]);
-  if (rows.length) return { deleteAfter: rows[0].delete_after, days };
-  const { rows: found } = await query('SELECT mail_node, delete_after FROM email_accounts WHERE id = $1', [accountId]);
-  if (!found.length) return { error: 'account_not_found' };
-  if (!found[0].mail_node) return { error: 'not_mail_node' };
-  return { error: 'deletion_already_requested' };
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(`
+      UPDATE email_accounts
+         SET deletion_requested_at = NOW(), deletion_requested_by = $2,
+             deletion_requested_by_email = (SELECT COALESCE(NULLIF(email, ''), username) FROM users WHERE id = $2),
+             deletion_reason = $4,
+             delete_after = NOW() + make_interval(days => $3::int),
+             deletion_attempts = 0, deletion_next_attempt_at = NULL, deletion_last_error = NULL,
+             deletion_started_at = NULL
+       WHERE id = $1 AND mail_node AND delete_after IS NULL
+      RETURNING delete_after
+    `, [accountId, userId, days, reason]);
+    if (rows.length) {
+      const seat = await releaseSeat(accountId, 'deletion_requested', holdDays, client);
+      return { deleteAfter: rows[0].delete_after, days, seat };
+    }
+    const { rows: found } = await client.query('SELECT mail_node, delete_after FROM email_accounts WHERE id = $1', [accountId]);
+    if (!found.length) return { error: 'account_not_found' };
+    if (!found[0].mail_node) return { error: 'not_mail_node' };
+    return { error: 'deletion_already_requested' };
+  });
 }
 
-// Someone cancels a pending deletion: the mailbox stays and the request (reason included) is cleared
-// from the row; the journal keeps it. Refused once the job has claimed the row (deletion_started_at),
-// stale claim included: the node mailbox may be gone already. Answers { deleteAfter, reason } (what
-// was set) or { error }: account_not_found, deletion_not_requested, deletion_in_progress.
-export async function cancelDeletion({ accountId }) {
-  const { rows } = await query(`
-    WITH old AS (
-      SELECT id, delete_after, deletion_reason, deletion_started_at FROM email_accounts WHERE id = $1 FOR UPDATE
-    )
-    UPDATE email_accounts a
-       SET deletion_requested_at = NULL, deletion_requested_by = NULL, deletion_requested_by_email = NULL,
-           deletion_reason = NULL, delete_after = NULL, deletion_attempts = 0, deletion_next_attempt_at = NULL,
-           deletion_last_error = NULL
-      FROM old
-     WHERE a.id = old.id AND old.delete_after IS NOT NULL AND old.deletion_started_at IS NULL
-    RETURNING old.delete_after AS was, old.deletion_reason AS reason
-  `, [accountId]);
-  if (rows.length) return { deleteAfter: rows[0].was, reason: rows[0].reason ?? null };
-  const { rows: found } = await query('SELECT delete_after, deletion_started_at FROM email_accounts WHERE id = $1', [accountId]);
-  if (!found.length) return { error: 'account_not_found' };
-  if (found[0].delete_after && found[0].deletion_started_at) return { error: 'deletion_in_progress' };
-  return { error: 'deletion_not_requested' };
+// Someone cancels a pending deletion. An active mailbox takes its EOP seat back
+// (services/mailNode/eopSeats.js returnSeat: its own while on hold, else a free one; purchased: the
+// number now, null while unknown), under the seats lock in one transaction; a deactivated one stays
+// deactivated and takes none. The request (reason included) is cleared; the journal keeps it.
+// Refused once the job has claimed the row (deletion_started_at), stale claim included: the node
+// mailbox may be gone already. Answers { deleteAfter, reason, seat } or { error }: account_not_found,
+// deletion_not_requested, deletion_in_progress, seats_unknown, no_free_seats.
+export async function cancelDeletion({ accountId, purchased }) {
+  return withTransaction(async (client) => {
+    await lockSeats(client);
+    const { rows: [found] } = await client.query(`
+      SELECT email_address, delete_after, deletion_reason, deletion_started_at, deactivated_at
+        FROM email_accounts WHERE id = $1 FOR UPDATE`, [accountId]);
+    if (!found) return { error: 'account_not_found' };
+    if (!found.delete_after) return { error: 'deletion_not_requested' };
+    if (found.deletion_started_at) return { error: 'deletion_in_progress' };
+    let seat = null;
+    if (!found.deactivated_at) {
+      seat = await returnSeat({ accountId, email: found.email_address, purchased }, client);
+      if (seat.error) return { error: seat.error };
+    }
+    await client.query(`
+      UPDATE email_accounts
+         SET deletion_requested_at = NULL, deletion_requested_by = NULL, deletion_requested_by_email = NULL,
+             deletion_reason = NULL, delete_after = NULL, deletion_attempts = 0, deletion_next_attempt_at = NULL,
+             deletion_last_error = NULL
+       WHERE id = $1`, [accountId]);
+    return { deleteAfter: found.delete_after, reason: found.deletion_reason ?? null, seat };
+  });
 }
 
 // A failed attempt: the row stays pending, its claim (when it has one) is released, the reason code

@@ -41,6 +41,16 @@ vi.mock('../services/mailNode/mailboxDeletion.js', () => ({
   requestDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', days: 5 })),
   cancelDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' })),
 }));
+// The EOP seats (services/mailNode/eopSeats.js, covered against PGlite there): a seat is free
+// unless a test says otherwise.
+const seats = vi.hoisted(() => ({ free: true }));
+vi.mock('../services/mailNode/eopSeats.js', () => ({
+  reserveSeat: vi.fn(async () => (seats.free ? { assignmentId: 1, seat: 1 } : { error: 'no_free_seats' })),
+  confirmSeat: vi.fn(async () => {}),
+  dropPendingSeat: vi.fn(async () => {}),
+  getHoldDays: vi.fn(async () => 90),
+  seatSupply: vi.fn(async () => ({ purchased: 10 })),
+}));
 // The send limit a new mailbox gets (services/mailNode/nodeApply.js, covered against PGlite there).
 vi.mock('../services/mailNode/nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })) }));
 // The panel's onboarding state of each domain: only ready (and authoritative) ones take mailboxes.
@@ -79,6 +89,7 @@ describe('domain mailboxes in /api/accounts', () => {
   let aliasInserted;
   beforeEach(() => {
     vi.clearAllMocks();
+    seats.free = true;
     node.cfg = CFG;
     domainStates.clear();
     domainStates.set('example.com', 'ready').set('off.example', 'ready').set('dbeb.example', 'authoritative').set('pending.example', 'connector_ready');
@@ -140,6 +151,14 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(aliasInserted).toEqual([ID, 'Ivan Petrov', 'sales@example.com']);
     expect(body.sender_name).toBe('Иван Петров');
     expect(body.aliases).toEqual([expect.objectContaining({ name: 'Ivan Petrov', email: 'sales@example.com' })]);
+  });
+
+  it('refuses with no_free_seats (409) without asking the node', async () => {
+    seats.free = false;
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com', senderName: 'Info' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('no_free_seats');
+    expect(provisionMailbox).not.toHaveBeenCalled();
   });
 
   it('refuses a sender name that would add a header, before touching mailcow', async () => {
@@ -302,7 +321,7 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toMatchObject({ id: ID, delete_after: '2026-10-06T10:00:00.000Z', deletion_reason: 'Left the company' });
-      expect(requestDeletion).toHaveBeenCalledWith({ accountId: ID, userId: 'user-1', reason: 'Left the company' });
+      expect(requestDeletion).toHaveBeenCalledWith({ accountId: ID, userId: 'user-1', reason: 'Left the company', holdDays: 90 });
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_requested',
         details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', days: 5, reason: 'Left the company' },
@@ -370,7 +389,7 @@ describe('domain mailboxes in /api/accounts', () => {
       nodeRow();
       const res = await cancel();
       expect(res.status).toBe(200);
-      expect(cancelDeletion).toHaveBeenCalledWith({ accountId: ID });
+      expect(cancelDeletion).toHaveBeenCalledWith({ accountId: ID, purchased: 10 });
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_cancelled',
         details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' },

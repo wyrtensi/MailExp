@@ -41,6 +41,7 @@ beforeEach(async () => {
   await db.query('DELETE FROM mailbox_audit_log');
   await db.query('DELETE FROM email_accounts');
   await db.query('DELETE FROM integration_config');
+  await db.query('DELETE FROM mail_node_seat_assignments');
 });
 
 async function addMailbox(email, { mailNode = true, host = 'mail.example.com' } = {}) {
@@ -68,21 +69,21 @@ describe('asking for and cancelling a deletion', () => {
   it('schedules the deletion the configured days ahead with who asked and why, once', async () => {
     const id = await addMailbox('info@example.com');
     const before = Date.now();
-    const result = await requestDeletion({ accountId: id, userId: USER, reason: 'Left the company' });
+    const result = await requestDeletion({ accountId: id, userId: USER, reason: 'Left the company', holdDays: 90 });
     expect(result.days).toBe(5);
     const r = await row(id);
     expect(r).toMatchObject({ deletion_requested_by: USER, deletion_requested_by_email: 'anna@example.com', deletion_reason: 'Left the company' });
     const days = (new Date(r.delete_after).getTime() - before) / 86400000;
     expect(days).toBeGreaterThan(4.99);
     expect(days).toBeLessThan(5.01);
-    expect(await requestDeletion({ accountId: id, userId: USER, reason: 'again' })).toEqual({ error: 'deletion_already_requested' });
+    expect(await requestDeletion({ accountId: id, userId: USER, reason: 'again', holdDays: 90 })).toEqual({ error: 'deletion_already_requested' });
     expect((await row(id)).deletion_reason).toBe('Left the company');
   });
 
   it('takes the days an administrator set; a change does not move dates already set', async () => {
     await db.query(`INSERT INTO integration_config (provider, config) VALUES ('mail_node', '{"deleteAfterDays": 30}')`);
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     const first = (await row(id)).delete_after;
     expect((new Date(first).getTime() - Date.now()) / 86400000).toBeGreaterThan(29.9);
     await db.query(`UPDATE integration_config SET config = '{"deleteAfterDays": 1}' WHERE provider = 'mail_node'`);
@@ -91,22 +92,22 @@ describe('asking for and cancelling a deletion', () => {
 
   it('refuses another mailbox or an unknown one', async () => {
     const gmail = await addMailbox('x@gmail.com', { mailNode: false });
-    expect(await requestDeletion({ accountId: gmail, userId: USER, reason: 'r' })).toEqual({ error: 'not_mail_node' });
-    expect(await requestDeletion({ accountId: '70000000-0000-4000-8000-0000000000ff', userId: USER, reason: 'r' }))
+    expect(await requestDeletion({ accountId: gmail, userId: USER, reason: 'r', holdDays: 90 })).toEqual({ error: 'not_mail_node' });
+    expect(await requestDeletion({ accountId: '70000000-0000-4000-8000-0000000000ff', userId: USER, reason: 'r', holdDays: 90 }))
       .toEqual({ error: 'account_not_found' });
   });
 
   it('cancels a pending deletion, clearing every column, and answers what was set', async () => {
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'Left the company' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'Left the company', holdDays: 90 });
     const { delete_after: was } = await row(id);
-    expect(await cancelDeletion({ accountId: id })).toEqual({ deleteAfter: was, reason: 'Left the company' });
+    expect(await cancelDeletion({ accountId: id, purchased: 100 })).toEqual({ deleteAfter: was, reason: 'Left the company', seat: expect.anything() });
     expect(await row(id)).toMatchObject({
       deletion_requested_at: null, deletion_requested_by: null, deletion_requested_by_email: null, deletion_reason: null,
       delete_after: null, deletion_attempts: 0, deletion_last_error: null,
     });
-    expect(await cancelDeletion({ accountId: id })).toEqual({ error: 'deletion_not_requested' });
-    expect(await cancelDeletion({ accountId: '70000000-0000-4000-8000-0000000000ff' })).toEqual({ error: 'account_not_found' });
+    expect(await cancelDeletion({ accountId: id, purchased: 100 })).toEqual({ error: 'deletion_not_requested' });
+    expect(await cancelDeletion({ accountId: '70000000-0000-4000-8000-0000000000ff', purchased: 100 })).toEqual({ error: 'account_not_found' });
   });
 });
 
@@ -115,8 +116,8 @@ describe('the deletion job', () => {
     const due = await addMailbox('due@example.com');
     const later = await addMailbox('later@example.com');
     const never = await addMailbox('never@example.com');
-    await requestDeletion({ accountId: due, userId: USER, reason: 'Project closed' });
-    await requestDeletion({ accountId: later, userId: USER, reason: 'Not yet' });
+    await requestDeletion({ accountId: due, userId: USER, reason: 'Project closed', holdDays: 90 });
+    await requestDeletion({ accountId: later, userId: USER, reason: 'Not yet', holdDays: 90 });
     await makeDue(due);
     const disconnect = vi.fn(async () => {});
     expect(await runDueDeletions({ disconnect })).toEqual({ deleted: 1, failed: 0 });
@@ -135,7 +136,7 @@ describe('the deletion job', () => {
   it('never touches a row without a date or with a date ahead', async () => {
     await addMailbox('plain@example.com');
     const ahead = await addMailbox('ahead@example.com');
-    await requestDeletion({ accountId: ahead, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: ahead, userId: USER, reason: 'r', holdDays: 90 });
     expect(await runDueDeletions()).toEqual({ deleted: 0, failed: 0 });
     expect(deleteMailbox).not.toHaveBeenCalled();
     expect((await db.query('SELECT count(*)::int AS n FROM email_accounts')).rows[0].n).toBe(2);
@@ -143,7 +144,7 @@ describe('the deletion job', () => {
 
   it('keeps the row pending with the reason and a growing wait when the node fails, then deletes it', async () => {
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(id);
     deleteMailbox.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'The mail node is unreachable (ETIMEDOUT)'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -170,7 +171,7 @@ describe('the deletion job', () => {
     const gone = await addMailbox('gone@example.com');
     const kept = await addMailbox('kept@example.com');
     for (const id of [gone, kept]) {
-      await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+      await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
       await makeDue(id);
     }
     deleteMailbox.mockImplementation(async () => { throw new MailNodeError('mail_node_refused', 'The mail node refused: access_denied'); });
@@ -188,7 +189,7 @@ describe('the deletion job', () => {
 
   it('keeps a row on another host than the node the settings name, and says why', async () => {
     const id = await addMailbox('info@example.com', { host: 'old-node.example.com' });
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(id);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(await runDueDeletions()).toEqual({ deleted: 0, failed: 1 });
@@ -200,7 +201,7 @@ describe('the deletion job', () => {
   it('keeps every due row while the mail node is not set up, saying so and waiting before the next try', async () => {
     node.cfg = null;
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(id);
     expect(await runDueDeletions()).toMatchObject({ deleted: 0, failed: 1, skipped: 'mail_node_not_configured' });
     const r = await row(id);
@@ -212,7 +213,7 @@ describe('the deletion job', () => {
 
   it('runs the steps before the node delete (the tenant hook) and keeps the row when one fails', async () => {
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(id);
     const step = vi.fn(async () => { throw new Error('tenant down'); });
     BEFORE_NODE_DELETE.push(step);
@@ -228,12 +229,12 @@ describe('the deletion job', () => {
     const first = await addMailbox('first@example.com');
     const second = await addMailbox('second@example.com');
     for (const [id, ago] of [[first, '2 minutes'], [second, '1 minute']]) {
-      await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+      await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
       await makeDue(id, ago);
     }
     let cancelled;
     deleteMailbox.mockImplementationOnce(async () => {
-      cancelled = await cancelDeletion({ accountId: second });
+      cancelled = await cancelDeletion({ accountId: second, purchased: 100 });
       return { warnings: [] };
     });
     expect(await runDueDeletions()).toEqual({ deleted: 1, failed: 0 });
@@ -248,13 +249,13 @@ describe('the deletion job', () => {
     const stale = await addMailbox('stale@example.com');
     const fresh = await addMailbox('fresh@example.com');
     for (const id of [stale, fresh]) {
-      await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+      await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
       await makeDue(id);
     }
     await db.query("UPDATE email_accounts SET deletion_started_at = NOW() - interval '11 minutes' WHERE id = $1", [stale]);
     await db.query("UPDATE email_accounts SET deletion_started_at = NOW() - interval '1 minute' WHERE id = $1", [fresh]);
-    expect(await cancelDeletion({ accountId: stale })).toEqual({ error: 'deletion_in_progress' });
-    expect(await cancelDeletion({ accountId: fresh })).toEqual({ error: 'deletion_in_progress' });
+    expect(await cancelDeletion({ accountId: stale, purchased: 100 })).toEqual({ error: 'deletion_in_progress' });
+    expect(await cancelDeletion({ accountId: fresh, purchased: 100 })).toEqual({ error: 'deletion_in_progress' });
     expect(await runDueDeletions()).toEqual({ deleted: 1, failed: 0 });
     expect(deleteMailbox).toHaveBeenCalledWith(CFG, 'stale@example.com');
     expect(await row(stale)).toBeUndefined();
@@ -263,7 +264,7 @@ describe('the deletion job', () => {
 
   it('never stays silent when the node mailbox went but the row changed under the claim', async () => {
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'Left' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'Left', holdDays: 90 });
     await makeDue(id);
     deleteMailbox.mockImplementationOnce(async () => {
       await db.query("UPDATE email_accounts SET deletion_started_at = NOW() + interval '1 hour' WHERE id = $1", [id]);
@@ -281,7 +282,7 @@ describe('the deletion job', () => {
 
   it('writes the final journal entry with the row removal, or neither', async () => {
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(id);
     await db.query('ALTER TABLE mailbox_audit_log RENAME TO mailbox_audit_log_away');
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -303,21 +304,56 @@ describe('the deletion job', () => {
 
   it('refuses a cancel while the job is deleting the mailbox, and a cancel before keeps it', async () => {
     const id = await addMailbox('info@example.com');
-    await requestDeletion({ accountId: id, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(id);
     let cancelDuring;
     deleteMailbox.mockImplementationOnce(async () => {
-      cancelDuring = await cancelDeletion({ accountId: id });
+      cancelDuring = await cancelDeletion({ accountId: id, purchased: 100 });
       return { warnings: [] };
     });
     expect(await runDueDeletions()).toEqual({ deleted: 1, failed: 0 });
     expect(cancelDuring).toEqual({ error: 'deletion_in_progress' });
 
     const kept = await addMailbox('kept@example.com');
-    await requestDeletion({ accountId: kept, userId: USER, reason: 'r' });
+    await requestDeletion({ accountId: kept, userId: USER, reason: 'r', holdDays: 90 });
     await makeDue(kept);
-    await cancelDeletion({ accountId: kept });
+    await cancelDeletion({ accountId: kept, purchased: 100 });
     expect(await runDueDeletions()).toEqual({ deleted: 0, failed: 0 });
     expect(await row(kept)).toBeDefined();
+  });
+});
+
+describe('the seat of a deletion (EOP seats design)', () => {
+  const take = async (id, email, seatNo = 1) => db.query(
+    'INSERT INTO mail_node_seat_assignments (seat_no, account_id, email) VALUES ($1, $2, $3)', [seatNo, id, email],
+  );
+
+  it('puts the seat on hold at the request and takes it back at the cancel', async () => {
+    const id = await addMailbox('info@example.com');
+    await take(id, 'info@example.com');
+    expect((await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 })).seat.seat).toBe(1);
+    expect((await cancelDeletion({ accountId: id, purchased: 1 })).seat).toEqual({ seat: 1, reclaimed: true });
+  });
+
+  it('refuses the cancel at 0 free once the own seat is past its hold, the deletion stays', async () => {
+    const id = await addMailbox('info@example.com');
+    await take(id, 'info@example.com');
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 0 });
+    const other = await addMailbox('other@example.com');
+    await take(other, 'other@example.com');
+    expect(await cancelDeletion({ accountId: id, purchased: 1 })).toEqual({ error: 'no_free_seats' });
+    expect(await cancelDeletion({ accountId: id, purchased: null })).toEqual({ error: 'seats_unknown' });
+    expect((await row(id)).delete_after).not.toBeNull();
+  });
+
+  it('keeps the ledger row after the final deletion', async () => {
+    const id = await addMailbox('info@example.com');
+    await take(id, 'info@example.com');
+    await requestDeletion({ accountId: id, userId: USER, reason: 'r', holdDays: 90 });
+    await makeDue(id);
+    await runDueDeletions();
+    expect(await row(id)).toBeUndefined();
+    const { rows } = await db.query('SELECT account_id, release_reason FROM mail_node_seat_assignments');
+    expect(rows).toEqual([{ account_id: id, release_reason: 'deletion_requested' }]);
   });
 });

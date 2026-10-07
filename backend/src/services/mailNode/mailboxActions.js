@@ -15,6 +15,7 @@ import {
 import { cancelDeletion, requestDeletion } from './mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from './domains.js';
 import { getEopSettings } from './eopSettings.js';
+import { confirmSeat, dropPendingSeat, getHoldDays, reserveSeat, seatSupply } from './eopSeats.js';
 import { defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';
 import { MIRRORED_STATES, kickDomainSync } from '../tenant/tenantDomains.js';
 
@@ -195,7 +196,20 @@ async function createNodeMailboxNow(input, actor, onCreated) {
   if (!onNode?.active) return { error: 'domain_unknown' };
   // The send limit a mailbox of the domain gets (R-10): the domain's, else the EOP settings'.
   const rateLimit = await newMailboxRateLimit(domain);
-  const created = await provisionMailbox(cfg, { localPart, domain, name, rateLimit });
+  // An EOP seat (services/mailNode/eopSeats.js), taken under the seats lock before the node is
+  // asked, so two creations never share the last one. Every failure below gives it back; the insert
+  // confirms it in the same transaction as the row.
+  const seat = await reserveSeat(email);
+  if (seat.error) return { error: seat.error };
+  const giveBack = () => dropPendingSeat(seat.assignmentId)
+    .catch((e) => console.error(`EOP seat of ${email} was not given back: ${e.message}`));
+  let created;
+  try {
+    created = await provisionMailbox(cfg, { localPart, domain, name, rateLimit });
+  } catch (err) {
+    await giveBack();
+    throw err;
+  }
 
   let account;
   let secondName;
@@ -210,6 +224,7 @@ async function createNodeMailboxNow(input, actor, onCreated) {
         RETURNING *
       `, [actor?.userId ?? null, name, email, cfg.mailHost, encrypt(created.password), names.senderName]);
       const row = result.rows[0];
+      await confirmSeat(seat.assignmentId, row.id, client);
       return { account: row, secondName: await addSecondSenderName(client, { accountId: row.id, email, senderNameAlt: names.senderNameAlt }) };
     }));
   } catch (err) {
@@ -221,13 +236,14 @@ async function createNodeMailboxNow(input, actor, onCreated) {
     if (!created.reused) {
       await deleteMailbox(cfg, email).catch((e) => console.error(`Could not undo ${email} on the mail node: ${e.message}`));
     }
+    await giveBack();
     return { error: 'mailbox_create_failed' };
   }
 
   recordAudit(auditOf(actor, {
     accountId: account.id,
     action: 'mailbox.added',
-    details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused },
+    details: { protocol: 'imap', oauthProvider: null, mailNode: true, reused: created.reused, seat: seat.seat },
   }));
   if (onCreated) onCreated(account);
   // R-32 with DBEB: the tenant gets the mailbox's recipient (services/tenant/tenantDomains.js). In an
@@ -334,11 +350,12 @@ export async function requestMailboxDeletion({ accountId, email, reason: rawReas
   if (typed !== String(rows[0].email_address).trim().toLowerCase()) return { error: 'confirmation_mismatch' };
   const { reason, error } = parseDeletionReason(rawReason);
   if (error) return { error };
-  const result = await requestDeletion({ accountId, userId: actor?.userId ?? null, reason });
+  const holdDays = await getHoldDays();
+  const result = await requestDeletion({ accountId, userId: actor?.userId ?? null, reason, holdDays });
   if (result.error) return { error: result.error };
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.deletion_requested',
-    details: { mailNode: true, deleteAfter: result.deleteAfter, days: result.days, reason },
+    details: { mailNode: true, deleteAfter: result.deleteAfter, days: result.days, reason, seat: result.seat },
   }));
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return { account: withoutSecrets(account) };
@@ -347,11 +364,13 @@ export async function requestMailboxDeletion({ accountId, email, reason: rawReas
 // Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel. Answers
 // { account }.
 export async function cancelMailboxDeletion({ accountId }, actor) {
-  const result = await cancelDeletion({ accountId });
+  // An active mailbox takes its EOP seat back (services/mailNode/eopSeats.js).
+  const { purchased } = await seatSupply();
+  const result = await cancelDeletion({ accountId, purchased });
   if (result.error) return { error: result.error };
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.deletion_cancelled',
-    details: { mailNode: true, deleteAfter: result.deleteAfter, reason: result.reason },
+    details: { mailNode: true, deleteAfter: result.deleteAfter, reason: result.reason, seat: result.seat },
   }));
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return { account: withoutSecrets(account) };
