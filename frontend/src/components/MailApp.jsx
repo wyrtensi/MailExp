@@ -24,6 +24,7 @@ import { demoRole, switchDemoRole } from '../utils/demoRole.js';
 import { usePluginSlot, PluginRuntime } from '../plugins/PluginSlot.jsx';
 import { isDemoMode } from '../demo/mode.js';
 import LanguagePicker from './LanguagePicker.jsx';
+import { requestComposeClose } from '../utils/composeCloseRequest.js';
 
 const ContactsPage = lazy(() => import('./ContactsPage.jsx'));
 const WindowLayer  = lazy(() => import('./WindowLayer.jsx'));
@@ -542,7 +543,8 @@ export default function MailApp() {
   useEffect(() => {
     window.__mailexpertHandleAndroidBack = () => {
       if (composingRef.current) {
-        useStore.getState().closeCompose();
+        // The composer runs its unsaved-changes check; only an unmounted one is closed here.
+        if (!requestComposeClose()) useStore.getState().closeCompose();
         return true;
       }
 

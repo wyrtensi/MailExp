@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { UNDO_WINDOW_MS } from '../utils/undoableAction.js';
-import { undoSend } from '../utils/sendTracker.js';
+import { undoSendOutcome } from '../utils/sendTracker.js';
 
 export default function NotificationToasts() {
   const { notifications, removeNotification } = useStore();
@@ -291,7 +291,13 @@ function SendUndoToast({ notification, onDismiss, isMobile }) {
   const handleUndo = async () => {
     if (busy) return;
     setBusy(true);
-    await undoSend(jobId);
+    const outcome = await undoSendOutcome(jobId);
+    // A failed request leaves the letter waiting: keep the toast and the button for another try
+    // (the toast still leaves on its own when the undo window ends).
+    if (outcome === 'failed') {
+      setBusy(false);
+      return;
+    }
     dismiss();
   };
 

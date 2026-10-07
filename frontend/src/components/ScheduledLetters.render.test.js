@@ -251,3 +251,25 @@ test('a late list failure for the previous mailbox filter does not hide the curr
   assert.deepEqual([...document.querySelectorAll('[data-scheduled-letter]')].map(el => el.dataset.scheduledLetter), ['b-job']);
   await React.act(async () => { useStore.getState().setShowScheduled(false); });
 });
+
+test('a failed undo request keeps the job retryable; a send that already started does not', async () => {
+  const { undoSendOutcome } = await import('../utils/sendTracker.js');
+  api.scheduled.cancel = async () => { throw new Error('temporary outage'); };
+  assert.equal(await undoSendOutcome('job-1'), 'failed');
+  api.scheduled.cancel = async () => { throw Object.assign(new Error('started'), { code: 'send_started' }); };
+  assert.equal(await undoSendOutcome('job-1'), 'too_late');
+  assert.equal(await undoSend('job-1'), false);
+  api.scheduled.cancel = async () => ({ compose: null });
+  assert.equal(await undoSendOutcome('job-1'), 'undone');
+});
+
+test('only permanent refusals are final for undo', async () => {
+  const { isFinalUndoRefusal } = await import('../utils/sendTracker.js');
+  const err = (status, code) => Object.assign(new Error('x'), { status, code });
+  for (const e of [err(409, 'not_cancellable'), err(404, 'not_found'), err(403, 'not_author'), err(409, 'send_started'), err(409, 'already_sent')]) {
+    assert.equal(isFinalUndoRefusal(e), true, `${e.status} ${e.code}`);
+  }
+  for (const e of [new Error('network'), err(502), err(500, 'internal'), err(429, 'rate_limited'), err(423, 'locked'), err(401, 'session')]) {
+    assert.equal(isFinalUndoRefusal(e), false, `${e.status} ${e.code}`);
+  }
+});

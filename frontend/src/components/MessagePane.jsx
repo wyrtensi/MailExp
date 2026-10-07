@@ -58,6 +58,7 @@ import SenderAvatarImage from './SenderAvatarImage.jsx';
 import ContextMenu from './ContextMenu.jsx';
 import { formatDateTime, localeTag } from '../utils/formatDate.js';
 import { mailboxBusyOr, mailboxBusyText, isMailboxBusy } from '../utils/mailboxBusy.js';
+import { splitByConfirmed } from '../utils/optimisticRemoval.js';
 
 function parseAddressField(raw) {
   try {
@@ -1652,7 +1653,14 @@ ${bodyContent}
     const timer = setTimeout(async () => {
       if (undone) return;
       try {
-        await api.bulkMove([moved.id], folder);
+        const result = await api.bulkMove([moved.id], folder);
+        // ok with an empty `moved` means nothing was moved: treat it as a failure.
+        if (splitByConfirmed([moved], result?.moved).failed.length) {
+          useStore.getState().restoreMessages([moved]);
+          if (!moved.is_read) incrementUnread(moved.account_id);
+          addNotification({ title: t('message.moved.failTitle'), body: t('message.moved.failBody') });
+          return;
+        }
         useStore.getState().recordRecentFolder({ accountId: moved.account_id, path: folder });
       } catch (err) {
         console.error('Move failed:', err);
@@ -1807,13 +1815,25 @@ ${bodyContent}
     let undone = false;
     const timer = setTimeout(async () => {
       if (undone) return;
+      // The row left the list before the server answered: a failure, or an answer that does not
+      // list it as archived, brings it back together with its unread count.
+      const restoreArchived = () => {
+        useStore.getState().restoreMessages([archived]);
+        if (!archived.is_read) incrementUnread(archived.account_id);
+      };
       try {
         const result = await api.bulkArchive([archived.id]);
-        if (result.noArchiveFolder?.length) {
-          addNotification({ title: t('message.archived.noFolderTitle'), body: t('message.archived.noFolderBody') });
+        if (splitByConfirmed([archived], result?.archived).failed.length) {
+          restoreArchived();
+          if (result?.noArchiveFolder?.length) {
+            addNotification({ title: t('message.archived.noFolderTitle'), body: t('message.archived.noFolderBody') });
+          } else {
+            addNotification({ title: t('message.archived.failTitle'), body: t('message.archived.failBody') });
+          }
         }
       } catch (err) {
         console.error('Archive failed:', err);
+        restoreArchived();
         addNotification({ title: t('message.archived.failTitle'), body: t('message.archived.failBody') });
       }
     }, 4500);
