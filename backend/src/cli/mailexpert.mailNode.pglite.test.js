@@ -102,7 +102,7 @@ beforeEach(async () => {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'log').mockImplementation(() => {});
   await db.exec(`DELETE FROM jobs; DELETE FROM mailbox_audit_log; DELETE FROM account_aliases; DELETE FROM email_accounts;
-    DELETE FROM mail_node_domains; DELETE FROM integration_config;`);
+    DELETE FROM mail_node_domains; DELETE FROM mail_node_seat_assignments; DELETE FROM integration_config;`);
   mc = createFakeMailcow({
     domains: { 'example.com': { relayhost: 0 }, 'new.example': { relayhost: 0 } },
     mailboxes: [{ username: 'old@example.com' }],
@@ -110,7 +110,7 @@ beforeEach(async () => {
   fake.current = mc;
   setTenantDriver(null);
   await saveMailNodeConfig({ mailHost: 'mail.example.com', apiKey: 'node-api-key', quotaMb: 5120, deleteAfterDays: 5, panelIps: [] });
-  await saveEopSettings({ eopHost: 'eop.example.net' });
+  await saveEopSettings({ eopHost: 'eop.example.net', licenses: 10 });
   await db.query("INSERT INTO mail_node_domains (domain, state, origin) VALUES ('example.com', 'ready', 'created'), ('new.example', 'dns_ok', 'created')");
 });
 
