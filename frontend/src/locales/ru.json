@@ -1966,6 +1966,7 @@
       "google": {
         "title": "Google / Gmail",
         "resultCreated": "Ящик Gmail подключён.",
+        "noticeSenderNameDuplicate": "Второе имя отправителя не сохранено: оно совпадает с именем, под которым ящик отправляет письма.",
         "resultUpdated": "Ящик Gmail переподключён.",
         "resultConnected": "Ящик Gmail авторизован.",
         "errorAccessDenied": "Вход через Google отменён. Ящик не подключён.",

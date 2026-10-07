@@ -1924,6 +1924,7 @@
       "google": {
         "title": "Google / Gmail",
         "resultCreated": "Gmail mailbox connected.",
+        "noticeSenderNameDuplicate": "The second sender name was not saved: it is the same as the name the mailbox sends under.",
         "resultUpdated": "Gmail mailbox reconnected.",
         "resultConnected": "Gmail mailbox authorized.",
         "errorAccessDenied": "Google sign-in was cancelled. The mailbox was not connected.",

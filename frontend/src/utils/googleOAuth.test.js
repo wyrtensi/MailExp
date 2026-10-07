@@ -152,7 +152,27 @@ describe('parseOAuthResult', () => {
   });
 });
 
+describe('parseOAuthResult notices', () => {
+  it('adds the notice key when the second sender name was dropped', () => {
+    assert.deepEqual(parseOAuthResult(params('oauth_success=google&oauth_result=created&oauth_notice=sender_name_duplicate')), {
+      provider: 'google', status: 'success', messageKey: 'admin.integrations.google.resultCreated',
+      noticeKey: 'admin.integrations.google.noticeSenderNameDuplicate',
+    });
+  });
+
+  it('ignores an unknown notice', () => {
+    assert.deepEqual(parseOAuthResult(params('oauth_success=google&oauth_result=created&oauth_notice=__proto__')), {
+      provider: 'google', status: 'success', messageKey: 'admin.integrations.google.resultCreated',
+    });
+  });
+});
+
 describe('oauthMessageToSearchParams', () => {
+  it('carries the notice of a popup success message', () => {
+    const p = oauthMessageToSearchParams({ type: 'oauth_success', provider: 'google', result: 'created', notice: 'sender_name_duplicate' });
+    assert.equal(parseOAuthResult(p).noticeKey, 'admin.integrations.google.noticeSenderNameDuplicate');
+  });
+
   it('converts a popup success message', () => {
     const p = oauthMessageToSearchParams({ type: 'oauth_success', provider: 'google', result: 'updated' });
     assert.deepEqual(parseOAuthResult(p), {

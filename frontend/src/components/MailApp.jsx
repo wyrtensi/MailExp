@@ -723,6 +723,9 @@ export default function MailApp() {
         title: t('admin.integrations.google.title'),
         body: t(oauthResult.messageKey),
       });
+      if (oauthResult.noticeKey) {
+        addNotification({ type: 'info', title: t('admin.integrations.google.title'), body: t(oauthResult.noticeKey) });
+      }
     }
 
     if (oauthError) {
@@ -770,6 +773,9 @@ export default function MailApp() {
         title: t('admin.integrations.google.title'),
         body: t(result.messageKey),
       });
+      if (result.noticeKey) {
+        addNotification({ type: 'info', title: t('admin.integrations.google.title'), body: t(result.noticeKey) });
+      }
       if (result.status === 'success') {
         api.getAccounts().then(setAccounts).catch(console.error);
       }

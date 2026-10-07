@@ -2,7 +2,7 @@
 // store, no network, so they can be unit-tested with `node --test`.
 //
 // The backend redirects the OAuth callback ONLY to
-//   /?oauth_success=google&oauth_result=<created|updated>
+//   /?oauth_success=google&oauth_result=<created|updated>[&oauth_notice=sender_name_duplicate]
 //   /?oauth_error=<code>&oauth_provider=google
 // Microsoft answers /?oauth_success=microsoft or /?oauth_error=<code>&oauth_provider=microsoft
 // (utils/microsoftOAuth.js maps its codes).
@@ -18,6 +18,11 @@ const GOOGLE_SUCCESS_KEYS = {
   updated: 'admin.integrations.google.resultUpdated',
 };
 const GOOGLE_SUCCESS_FALLBACK_KEY = 'admin.integrations.google.resultConnected';
+
+// Notices a success may carry: something the user asked for that was not done.
+const GOOGLE_NOTICE_KEYS = {
+  sender_name_duplicate: 'admin.integrations.google.noticeSenderNameDuplicate',
+};
 
 // Stable error codes from the contract.
 const GOOGLE_ERROR_KEYS = {
@@ -62,7 +67,8 @@ export function isGoogleReconnectRequired(account) {
 }
 
 // Maps OAuth callback query parameters to { provider, status, messageKey }, or
-// null when the query carries no OAuth result. `provider` is 'google' or 'other'.
+// null when the query carries no OAuth result. `provider` is 'google' or 'other'. A Google
+// success with a known notice also has `noticeKey`.
 // An error wins over a success if both are present.
 export function parseOAuthResult(searchParams) {
   if (searchParams == null) return null;
@@ -80,7 +86,9 @@ export function parseOAuthResult(searchParams) {
   const success = query.get('oauth_success');
   if (success) {
     if (success === 'google') {
-      return { provider: 'google', status: 'success', messageKey: lookup(GOOGLE_SUCCESS_KEYS, query.get('oauth_result'), GOOGLE_SUCCESS_FALLBACK_KEY) };
+      const result = { provider: 'google', status: 'success', messageKey: lookup(GOOGLE_SUCCESS_KEYS, query.get('oauth_result'), GOOGLE_SUCCESS_FALLBACK_KEY) };
+      const noticeKey = lookup(GOOGLE_NOTICE_KEYS, query.get('oauth_notice'), null);
+      return noticeKey ? { ...result, noticeKey } : result;
     }
     return { provider: 'other', status: 'success', messageKey: GENERIC_SUCCESS_KEY };
   }
@@ -97,6 +105,7 @@ export function oauthMessageToSearchParams(data) {
   if (data.type === 'oauth_success' && str(data.provider)) {
     out.set('oauth_success', data.provider);
     if (str(data.result)) out.set('oauth_result', data.result);
+    if (str(data.notice)) out.set('oauth_notice', data.notice);
   } else if (data.type === 'oauth_error' && str(data.error)) {
     out.set('oauth_error', data.error);
     if (str(data.provider)) out.set('oauth_provider', data.provider);
