@@ -544,6 +544,11 @@
   },
   "messageList": {
     "search": "Search…",
+    "searchLabel": "Search: \"{{query}}\"",
+    "threadLoadFailed": {
+      "title": "Action not performed",
+      "body": "Could not load the full conversations, so nothing was changed. Try again."
+    },
     "unread": "Unread",
     "showAll": "Show all",
     "unreadOnly": "Unread only",

@@ -53,6 +53,10 @@ import {
   unreadCountsByAccount,
 } from '../utils/threadedArchive.js';
 import { createUndoableCommit, UNDO_COMMIT_DELAY_MS, UNDO_WINDOW_MS } from '../utils/undoableAction.js';
+import { splitByConfirmed, unreadByAccount } from '../utils/optimisticRemoval.js';
+import { searchScopeKey } from '../utils/searchScope.js';
+import { unreadAfterHeadRead } from '../utils/threadUnread.js';
+import { snapshotFlag } from '../utils/flagSnapshot.js';
 
 // Folder icon for move picker
 function FolderIcon({ specialUse, size = 13 }) {
@@ -317,13 +321,24 @@ export default function MessageList() {
     }
     let cancelled = false;
     const params = selectedAccountId ? { accountId: selectedAccountId } : {};
-    api.getCategoryCounts(params)
+    const load = () => api.getCategoryCounts(params)
       .then(data => { if (!cancelled) setCategoryCounts(data.counts || {}); })
       .catch(() => {});
-    return () => { cancelled = true; };
+    load();
+    // Another client changed read flags: the badges are server counts, so ask again.
+    window.addEventListener('mailexpert:category-counts-stale', load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('mailexpert:category-counts-stale', load);
+    };
   }, [categorizationActive, selectedAccountId, selectedFolder, messagesRefreshToken, unifiedInboxAccountKey, setCategoryCounts]);
 
   const searchSeq = useRef(0);
+  // The mailbox and folder the list searches right now. An answer is applied only while the
+  // account, folder and query it was asked for are still the ones on screen.
+  const searchTargetRef = useRef({});
+  searchTargetRef.current = { accountId: selectedAccountId, folder: searchFolder };
+  const liveSearchScope = () => searchScopeKey({ ...searchTargetRef.current, query: useStore.getState().searchQuery });
   const refreshRequestRef = useRef(null);
   if (refreshRequestRef.current === null) refreshRequestRef.current = createLatestRequest();
   // Bumped only when the first-page load resets the list (account, folder, filter, refresh
@@ -589,6 +604,8 @@ export default function MessageList() {
       setSearchHasMore(false);
       setSearchError(null);
       searchFetchedOffsetRef.current = 0;
+      // Clearing the field invalidates an answer that is still on its way.
+      searchSeq.current += 1;
       return;
     }
     setIsSearching(true);
@@ -598,12 +615,12 @@ export default function MessageList() {
     searchTimer.current = setTimeout(async () => {
       try {
         const data = await api.search(searchQuery, selectedAccountId || undefined, { offset: 0, limit: searchPageSize, folder: searchFolder });
-        if (searchSeq.current !== seq) return;
+        if (searchSeq.current !== seq || useStore.getState().searchQuery !== searchQuery) return;
         searchFetchedOffsetRef.current = data.messages.length;
         setSearchResults(applyReadGuard(data.messages));
         setSearchHasMore(data.messages.length === searchPageSize);
       } catch (err) {
-        if (searchSeq.current === seq) {
+        if (searchSeq.current === seq && useStore.getState().searchQuery === searchQuery) {
           console.error('Search failed:', err);
           // Clear instead of leaving a previous query's results standing under
           // the new query text, and surface the failure (a swallowed rate-limit
@@ -638,12 +655,15 @@ export default function MessageList() {
   const loadMoreSearch = useCallback(async () => {
     if (searchLoadingMore) return;
     const qSnapshot = searchQuery; // capture before async gap
+    const scope = liveSearchScope();
+    const seq = searchSeq.current;
     setSearchLoadingMore(true);
     try {
       const offset = searchFetchedOffsetRef.current;
       const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
-      // Discard results if the query changed while we were fetching
-      if (useStore.getState().searchQuery !== qSnapshot) return;
+      // Discard results if the search changed (query, mailbox, folder, or it was cleared or rerun)
+      // while we were fetching: the page belongs to a list that is gone.
+      if (searchSeq.current !== seq || liveSearchScope() !== scope) return;
       searchFetchedOffsetRef.current = offset + data.messages.length;
       const current = useStore.getState().searchResults;
       useStore.setState({ searchResults: [...current, ...applyReadGuard(data.messages)] });
@@ -658,9 +678,11 @@ export default function MessageList() {
   const prefetchSearchAfterRemoval = useCallback(async (offset) => {
     const qSnapshot = useStore.getState().searchQuery;
     if (!qSnapshot.trim()) return;
+    const scope = liveSearchScope();
+    const seq = searchSeq.current;
     try {
       const data = await api.search(qSnapshot, selectedAccountId || undefined, { offset, limit: searchPageSize, folder: searchFolder });
-      if (useStore.getState().searchQuery !== qSnapshot) return;
+      if (searchSeq.current !== seq || liveSearchScope() !== scope) return;
       searchFetchedOffsetRef.current = Math.max(searchFetchedOffsetRef.current, offset + data.messages.length);
       const additions = applyReadGuard(data.messages);
       if (!additions.length) {
@@ -1544,7 +1566,11 @@ export default function MessageList() {
       deleteIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
       folders = rowSeenFolders(msgs, resolved, folderOf);
     } catch (err) {
+      // Whole conversations were selected: acting on the visible letters alone would leave the
+      // rest of each thread behind, so nothing is removed and the person is told.
       console.error('Failed to load thread for bulk delete:', err.message);
+      addNotification({ type: 'error', title: t('messageList.threadLoadFailed.title'), body: t('messageList.threadLoadFailed.body') });
+      return;
     }
     const searchOffsetBeforeRemoval = searchFetchedOffsetRef.current;
     const shouldPrefetchSearch = Boolean(useStore.getState().searchQuery.trim() && searchHasMore);
@@ -1624,6 +1650,8 @@ export default function MessageList() {
       moveIds = [...new Set([...ids, ...resolved.flat().map(m => m?.id).filter(Boolean)])];
     } catch (err) {
       console.error('Failed to load thread for bulk move:', err.message);
+      addNotification({ type: 'error', title: t('messageList.threadLoadFailed.title'), body: t('messageList.threadLoadFailed.body') });
+      return;
     }
     ids.forEach(id => removeMessage(id));
     msgs.forEach(msg => { if (!msg.is_read) decrementUnread(msg.account_id); });
@@ -1638,8 +1666,10 @@ export default function MessageList() {
         const movedSet = new Set(result.moved ?? []);
         const failedCount = moveIds.filter(id => !movedSet.has(id)).length;
         if (failedCount > 0) {
-          const failedMsgs = msgs.filter(msg => !movedSet.has(msg.id));
+          const failedMsgs = splitByConfirmed(msgs, movedSet).failed;
           if (failedMsgs.length > 0) useStore.getState().restoreMessages(failedMsgs);
+          // The rows that stay put take their unread count back.
+          unreadByAccount(failedMsgs).forEach(([accountId, count]) => incrementUnread(accountId, count));
           addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: failedCount }) });
         } else if (msgs[0]?.account_id) {
           useStore.getState().recordRecentFolder({ accountId: msgs[0].account_id, path: folder });
@@ -1647,6 +1677,7 @@ export default function MessageList() {
       } catch (err) {
         console.error('Bulk move failed:', err);
         useStore.getState().restoreMessages(msgs);
+        unreadByAccount(msgs).forEach(([accountId, count]) => incrementUnread(accountId, count));
         addNotification({ title: t('messageList.bulkMoved.failTitle'), body: t('messageList.bulkMoved.failBody', { count: moveIds.length }) });
       }
     }, 4500);
@@ -1969,6 +2000,9 @@ export default function MessageList() {
     }
     const actionMessages = [...new Map(groups.flat().map(m => [m.id, m])).values()];
     const cachedThreads = new Map(msgs.filter(isThreadListRow).map(m => [threadCacheKey(m), threadMessages[threadCacheKey(m)]]));
+    // What each message looked like in the store before the optimistic star: the rollback puts
+    // every one back to exactly that, whatever copy of it the fetched conversations carried.
+    const previousStarred = snapshotFlag(useStore.getState(), [...ids, ...actionMessages.map(m => m.id)], 'is_starred', [...msgs, ...actionMessages]);
     actionMessages.forEach(msg => updateMessage(msg.id, { is_starred: markAsStarred }));
     msgs.forEach((msg, i) => {
       updateMessage(msg.id, { is_starred: markAsStarred });
@@ -1980,8 +2014,7 @@ export default function MessageList() {
       await api.bulkStar([...new Set([...ids, ...actionMessages.map(m => m.id)])], markAsStarred);
     } catch (err) {
       console.error('Bulk star failed:', err);
-      actionMessages.forEach(msg => updateMessage(msg.id, { is_starred: msg.is_starred }));
-      msgs.forEach(msg => updateMessage(msg.id, { is_starred: msg.is_starred }));
+      previousStarred.forEach((starred, id) => updateMessage(id, { is_starred: starred }));
       cachedThreads.forEach((cached, key) => cached ? setThreadMessages(key, cached) : invalidateThreadCache(key));
     }
   }, [updateMessage, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache]);
@@ -2628,7 +2661,9 @@ export default function MessageList() {
     if (message.is_read || markReadBehavior === 'manual') return;
     const prevUnread = message.unread_count;
     const doMarkRead = () => {
-      updateMessage(message.id, { is_read: true, unread_count: 0 });
+      // Only the message the row shows is marked read: the rest of the conversation stays unread
+      // and stays counted.
+      updateMessage(message.id, { is_read: true, unread_count: unreadAfterHeadRead(message) });
       decrementUnread(message.account_id);
       adjustCategoryCount(message.category, -1);
       setPending(message.id, message.account_id);
@@ -2710,7 +2745,7 @@ export default function MessageList() {
   const showInboxIcon = !isUnified && selectedFolder === 'INBOX' && !searchQuery.trim();
 
   const label = searchQuery.trim()
-    ? `Search: "${searchQuery}"`
+    ? t('messageList.searchLabel', { query: searchQuery })
     : isUnified ? t('sidebar.allInboxes') : selectedFolder;
 
   const selectedFolderCounts = folders[selectedAccountId]?.find(f => f.path === selectedFolder);
