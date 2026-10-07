@@ -187,6 +187,26 @@ describe('createAccountSendTransport', () => {
       expect(createAccountSmtpTransport).not.toHaveBeenCalled();
     });
 
+    it('flags with the rotated refresh token when the forced refresh rotated it and the retry gets 401 again', async () => {
+      postGmailApiSend.mockRejectedValue(authRetryErr());
+      ensureFreshOAuthAccount.mockImplementation(async (account, opts) => (opts?.force
+        ? { ...account, oauth_access_token: 'still-bad', oauth_refresh_token: 'enc(rotated-refresh-token)' }
+        : account));
+      const { transport } = await createAccountSendTransport(gmailAccount);
+      await expect(transport.sendMail(mailOptions, {})).rejects.toMatchObject({ code: 'oauth_reconnect_required' });
+      expect(markReconnectRequired).toHaveBeenCalledWith(gmailAccount.id, 'enc(rotated-refresh-token)');
+    });
+
+    it('flags with the rotated refresh token when the retry after a rotation lacks a scope', async () => {
+      postGmailApiSend.mockRejectedValueOnce(authRetryErr()).mockRejectedValueOnce(reconnectErr('Insufficient Permission'));
+      ensureFreshOAuthAccount.mockImplementation(async (account, opts) => (opts?.force
+        ? { ...account, oauth_access_token: 'new-at', oauth_refresh_token: 'enc(rotated-refresh-token)' }
+        : account));
+      const { transport } = await createAccountSendTransport(gmailAccount);
+      await expect(transport.sendMail(mailOptions, {})).rejects.toMatchObject({ code: 'oauth_reconnect_required' });
+      expect(markReconnectRequired).toHaveBeenCalledWith(gmailAccount.id, 'enc(rotated-refresh-token)');
+    });
+
     it('propagates a reconnect-required refresh failure during the 401 retry unchanged', async () => {
       postGmailApiSend.mockRejectedValue(authRetryErr());
       const oauthErr = Object.assign(new Error('reconnect'), { code: 'oauth_reconnect_required' });

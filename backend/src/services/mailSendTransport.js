@@ -97,12 +97,17 @@ async function sendGmailApiMessage(account, rawMessage, threadId) {
       const result = await attemptWithThreadFallback(accessToken, rawMessage, threadId);
       return { result, accessToken };
     } catch (retryErr) {
+      // The refresh may have rotated the refresh token: flagging the account must compare against
+      // the one now stored, or the compare-and-set misses the row (markReconnectRequired).
+      const grant = { rejectedRefreshToken: refreshed.oauth_refresh_token };
       if (retryErr?.gmailClassification?.kind === 'auth_retry') {
         throw Object.assign(new Error('Gmail API rejected the access token after a refresh'), {
           gmailApi: true,
           gmailClassification: { kind: 'reconnect', googleMessage: retryErr.gmailClassification.googleMessage || '', status: 401 },
+          ...grant,
         });
       }
+      if (retryErr && typeof retryErr === 'object') Object.assign(retryErr, grant);
       throw retryErr;
     }
   }
@@ -154,7 +159,8 @@ async function sendViaGmailApiWithFallback(account, mailOptions, { threadId = nu
   } catch (err) {
     const kind = err?.gmailClassification?.kind;
     if (kind === 'reconnect') {
-      await markReconnectRequired(account.id, account.oauth_refresh_token)
+      const rejected = Object.hasOwn(err, 'rejectedRefreshToken') ? err.rejectedRefreshToken : account.oauth_refresh_token;
+      await markReconnectRequired(account.id, rejected)
         .catch((e) => console.error(`Flagging oauth_reconnect_required failed for account ${account.id}: ${e.message}`));
       throw new OAuthTokenError('oauth_reconnect_required');
     }
