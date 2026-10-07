@@ -1,0 +1,7 @@
+# The mailcow version this MailExpert release is tested with (docs/architecture/deployment-system.md,
+# section 6). The node's update job (scripts/deploy/mail-node/node-update.sh) brings mailcow to this
+# release with mailcow's own update.sh, only while it is the newest commit of mailcow's master; the
+# panel shows the node's mailcow against it. Bumping it is an external module update (AGENTS.md):
+# release notes and advisories read, the upgrade tested on a stand first.
+MAILCOW_TAG=2026-09a
+MAILCOW_COMMIT=81f6f7b002f2681b732aed74ae53179377def5e0

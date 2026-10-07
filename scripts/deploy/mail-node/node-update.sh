@@ -17,9 +17,10 @@
 # 3. The checkout goes to <sha> (detached) and setup.sh runs without options (it reuses the values
 #    in node.env). When it fails, the checkout goes back to the commit before and setup.sh runs
 #    again: failed, rolled_back (rollback_failed when that fails too).
-# 4. mailcow_update_if_pinned: mailcow's own update (PR D; nothing yet), bounded like a step. When
-#    it fails, mailcow is started again (docker compose up -d) and the checks still run:
-#    mailcow_update_failed.
+# 4. mailcow_update_if_pinned: mailcow brought to the version deploy/mailcow-version of that
+#    commit pins, by mailcow's own update.sh, when the node is behind it and it is the head of
+#    mailcow's master (see the function), bounded like a step. When it fails, mailcow is started
+#    again (docker compose up -d) and the checks still run: mailcow_update_failed.
 # 5. Checks: postfix-mailcow, dovecot-mailcow and nginx-mailcow run, eop-ranges.sh passes (the
 #    firewall and the ports); otherwise post_check_failed. Then a status report (the new scripts
 #    commit) and succeeded.
@@ -47,24 +48,16 @@ FETCH_TIMEOUT=300
 # node-backup.sh waits up to an hour for another backup's lock, on top of the backup's own bound.
 BACKUP_LOCK_WAIT=3600
 MAILCOW_TIMEOUT=${MAILEXPERT_NODE_UPDATE_MAILCOW_TIMEOUT:-1800}
+# Within MAILCOW_TIMEOUT: one run of mailcow's update.sh, and the wait for its containers after.
+MAILCOW_UPDATE_SH_TIMEOUT=${MAILEXPERT_NODE_UPDATE_MAILCOW_SH_TIMEOUT:-1200}
+MAILCOW_HEALTH_WAIT=${MAILEXPERT_NODE_UPDATE_MAILCOW_HEALTH_WAIT:-300}
+MAILCOW_HEALTH_POLL=${MAILEXPERT_NODE_UPDATE_MAILCOW_HEALTH_POLL:-5}
 CHECK_TIMEOUT=600
 KEEP_LOGS=5
 UPDATE_ID=''
 UPDATE_LOG=''
 PREVIOUS=''
 SRC=''
-
-# scripts_src: the node's checkout of the repository, as setup.sh recorded it (the one it runs from).
-scripts_src() {
-  local file=$NODE_DIR/scripts-src
-  if [ -n "${MAILEXPERT_NODE_SRC:-}" ]; then
-    echo "$MAILEXPERT_NODE_SRC"
-  elif [ -s "$file" ]; then
-    head -n 1 "$file"
-  else
-    echo /opt/mailexpert-node-src
-  fi
-}
 
 # step <text>: the step the panel and the state file show.
 step() {
@@ -128,13 +121,169 @@ checkout() {
   git -C "$SRC" checkout --quiet --detach "$1"
 }
 
+# mailcow_wait_healthy: every container of mailcow runs and none is unhealthy or still starting,
+# within MAILCOW_HEALTH_WAIT seconds. Prints what is not, and fails, past it.
+mailcow_wait_healthy() {
+  local waited=0 lines bad
+  while :; do
+    lines=$(mailcow_containers) || lines=''
+    bad=$(printf '%s\n' "$lines" | awk -F'\t' 'NF && ($2 != "running" || $3 == "unhealthy" || $3 == "starting") {
+      printf "%s%s: %s", (n++ ? ", " : ""), $1, ($2 != "running" ? $2 : $3) }')
+    if [ -n "$lines" ] && [ -z "$bad" ]; then return 0; fi
+    if [ "$waited" -ge "$MAILCOW_HEALTH_WAIT" ]; then
+      echo "${bad:-no containers}"
+      return 1
+    fi
+    sleep "$MAILCOW_HEALTH_POLL"
+    waited=$((waited + MAILCOW_HEALTH_POLL))
+  done
+}
+
+# mailcow_update_sh <mailcow dir>: mailcow's own update.sh, unattended: --force answers its
+# questions, --skip-ping-check (the node may block ICMP), --skip-start (setup.sh puts our settings
+# back into mailcow.conf before mailcow starts: one stop instead of two). stdin is /dev/null and
+# setsid leaves it no terminal, so a question it still asks (it reads /dev/tty for a
+# SYSCTL_IPV6_DISABLED=1 line) ends instead of waiting. It exits 2 once when its own _modules
+# changed ("restart the update script"): run again once.
+mailcow_update_sh() {
+  local rc=0 run
+  for run in 1 2; do
+    rc=0
+    (cd "$1" && timeout -k 30 "$MAILCOW_UPDATE_SH_TIMEOUT" setsid ./update.sh --force --skip-ping-check --skip-start </dev/null) || rc=$?
+    if [ "$rc" != 2 ] || [ "$run" = 2 ]; then break; fi
+    log "mailcow: update.sh updated its own modules (exit 2); running it again"
+  done
+  return "$rc"
+}
+
 # shellcheck disable=SC2317,SC2329 # invoked through run_step
 # mailcow_update_if_pinned: mailcow brought to the version the release pins
-# (deploy/mailcow-version), when it differs from the node's. Nothing yet: mailcow's own update is
-# PR D of the node agent series (docs/superpowers/specs/2026-10-06-node-agent-updates-design.md),
-# which fills this in. Status 0: nothing to do.
+# (deploy/mailcow-version of the node's checkout, at the commit the update just checked out; never
+# a version the panel names). Only mailcow's own update.sh moves it, and that script can only go
+# to the head of mailcow's master: the update runs only while that head is the pinned commit. It
+# skips (status 0, a warning in the log) when there is no pin, mailcow is at the pin already, the
+# node runs a newer or another mailcow (never taken back), or mailcow released a newer, untested
+# version (mailcow_pin_not_latest: the next MailExpert release confirms it). Otherwise:
+#   - origin set to mailcow's official repository (update.sh --force does the same), master
+#     fetched; a detached checkout (a clone at a tag) becomes the branch master at the same commit
+#     (no file changes; update.sh needs a branch tracking origin/master);
+#   - update.sh (mailcow_update_sh): it fetches the images, stops mailcow, commits local changes
+#     ("Before update on ...") and merges master (-Xtheirs), and removes the mailcow images no
+#     longer used (docker_garbage);
+#   - setup.sh again (update.sh turns ENABLE_IPV6 on by itself when the host has IPv6 and adds new
+#     keys), docker compose up -d, every container healthy, mailcow at the pin.
+# Mail is not accepted from update.sh's stop to the start (minutes; EOP queues and retries for
+# 24 hours): the log names that window. mailcow.conf values are never printed. Status 1 on a
+# failure; mailcow may be stopped then, and the caller starts it again.
+# Run by hand: SRC=<checkout> and node-update.sh sourced (docs/operations/mail-node.md, 7a).
 mailcow_update_if_pinned() {
-  return 0
+  local src dir tag pin base relation branch hostname origin started stopped problem
+  SRC=${SRC:-$(scripts_src)}
+  src=$SRC
+  dir=$(mailcow_dir)
+  if [ ! -f "$src/deploy/mailcow-version" ]; then
+    log "mailcow: this release pins no mailcow version; not touched"
+    return 0
+  fi
+  if ! tag=$(mailcow_pin "$src" MAILCOW_TAG) || ! pin=$(mailcow_pin "$src" MAILCOW_COMMIT); then
+    warn "mailcow: $src/deploy/mailcow-version has no valid MAILCOW_TAG and MAILCOW_COMMIT"
+    return 1
+  fi
+  git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    warn "mailcow: $dir is not a git checkout of mailcow"
+    return 1
+  }
+  base=$(mailcow_base "$dir") || base=''
+  if [ "$base" = "$pin" ]; then
+    log "mailcow already at $tag"
+    return 0
+  fi
+
+  origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || origin=''
+  if [ "$origin" != "$MAILCOW_UPSTREAM" ]; then
+    log "mailcow: origin set to the official repository $MAILCOW_UPSTREAM (update.sh --force does the same)"
+    if [ -n "$origin" ]; then
+      git -C "$dir" remote set-url origin "$MAILCOW_UPSTREAM"
+    else
+      git -C "$dir" remote add origin "$MAILCOW_UPSTREAM"
+    fi || { warn "mailcow: could not set origin in $dir"; return 1; }
+  fi
+  git -C "$dir" fetch --quiet origin +refs/heads/master:refs/remotes/origin/master || {
+    warn "mailcow: git fetch of master from $MAILCOW_UPSTREAM failed"
+    return 1
+  }
+  base=$(mailcow_base "$dir") || base=''
+  [[ $base =~ ^[0-9a-f]{40}$ ]] || { warn "mailcow: the commit of $dir is unknown"; return 1; }
+  relation=$(mailcow_relation "$dir" "$base" "$pin")
+  case $relation in
+    match) log "mailcow already at $tag"; return 0 ;;
+    newer)
+      warn "mailcow: the node runs ${base:0:12}, newer than $tag that this release confirms (updated by hand?): not taken back"
+      return 0
+      ;;
+    diverged)
+      warn "mailcow: the node runs ${base:0:12}, not in the history of $tag: not touched"
+      return 0
+      ;;
+  esac
+  if [ "$(git -C "$dir" rev-parse refs/remotes/origin/master)" != "$pin" ]; then
+    warn "mailcow_pin_not_latest: mailcow released a newer version than $tag, not tested with this release; mailcow stays at ${base:0:12} until a MailExpert release confirms one"
+    return 0
+  fi
+
+  # update.sh asks about a host name without a subdomain and ends before it stops anything.
+  hostname=$(env_get "$dir/mailcow.conf" MAILCOW_HOSTNAME 2>/dev/null) || hostname=''
+  hostname=${hostname//[^.]/}
+  if [ "${#hostname}" -lt 2 ]; then
+    warn "mailcow: MAILCOW_HOSTNAME in mailcow.conf is not a host name with a subdomain; update.sh would stop to ask: update mailcow by hand"
+    return 1
+  fi
+  branch=$(git -C "$dir" symbolic-ref -q --short HEAD) || branch=''
+  case $branch in
+    master) ;;
+    '')
+      # A clone's master is origin/master (a clone checked out at a tag): moving it loses nothing.
+      # Commits of its own that neither HEAD nor origin/master hold would be lost: not touched.
+      if git -C "$dir" rev-parse -q --verify refs/heads/master >/dev/null &&
+        ! git -C "$dir" merge-base --is-ancestor refs/heads/master HEAD &&
+        ! git -C "$dir" merge-base --is-ancestor refs/heads/master refs/remotes/origin/master; then
+        warn "mailcow: $dir is detached and its branch master holds commits of its own: update mailcow by hand"
+        return 1
+      fi
+      log "mailcow: $dir is detached at ${base:0:12}; the branch master now points there (no file changes)"
+      git -C "$dir" checkout --quiet -B master || { warn "mailcow: git checkout -B master failed"; return 1; }
+      ;;
+    *)
+      warn "mailcow: $dir is on the branch $branch, not master: update mailcow by hand"
+      return 1
+      ;;
+  esac
+  git -C "$dir" branch --quiet --set-upstream-to=origin/master master || {
+    warn "mailcow: could not make master track origin/master"
+    return 1
+  }
+
+  started=$(date -u +%H:%M:%S)
+  log "mailcow: update.sh to $tag; mail is not accepted from its stop until the start below (EOP queues it and retries)"
+  mailcow_update_sh "$dir" || {
+    warn "mailcow: update.sh failed (exit $?)"
+    return 1
+  }
+  log "mailcow: setup.sh again (mailcow.conf: our settings back)"
+  run_setup || { warn "mailcow: setup.sh after update.sh failed"; return 1; }
+  (cd "$dir" && timeout -k 30 "$CHECK_TIMEOUT" docker compose up -d --remove-orphans) || {
+    warn "mailcow: docker compose up -d failed"
+    return 1
+  }
+  stopped=$(date -u +%H:%M:%S)
+  log "mailcow: stopped and started again within $started-$stopped UTC (update.sh stops it after fetching the images)"
+  problem=$(mailcow_wait_healthy) || { warn "mailcow: containers not healthy after ${MAILCOW_HEALTH_WAIT}s: $problem"; return 1; }
+  base=$(mailcow_base "$dir") || base=''
+  if [ "$base" != "$pin" ]; then
+    warn "mailcow: after update.sh it is at ${base:0:12}, not $tag (${pin:0:12})"
+    return 1
+  fi
+  log "mailcow updated to $tag"
 }
 
 # shellcheck disable=SC2317,SC2329 # invoked through run_step
