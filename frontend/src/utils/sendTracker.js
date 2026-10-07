@@ -124,6 +124,15 @@ export async function undoSend(jobId) {
   return (await undoSendOutcome(jobId)) === 'undone';
 }
 
+// Server refusals that retrying cannot change: the job is gone, not yours, or no longer
+// cancellable. Network errors and 5xx (and rate limit, timeout, lock/session) may pass.
+const RETRYABLE_CLIENT_STATUS = new Set([401, 408, 423, 429]);
+export function isFinalUndoRefusal(err) {
+  if (err?.code === 'send_started' || err?.code === 'already_sent') return true;
+  const status = Number(err?.status);
+  return Boolean(err?.code) && status >= 400 && status < 500 && !RETRYABLE_CLIENT_STATUS.has(status);
+}
+
 // The same cancel, with what happened: 'undone'; 'too_late' when the server had already started
 // sending (nothing left to retry); 'failed' when the request itself failed and the job may still
 // be waiting, so the Undo button should stay for another try.
@@ -137,11 +146,11 @@ export async function undoSendOutcome(jobId) {
     return 'undone';
   } catch (err) {
     const { addNotification } = useStore.getState();
-    const tooLate = err?.code === 'send_started' || err?.code === 'already_sent';
+    const tooLate = isFinalUndoRefusal(err);
     addNotification({
       type: 'error',
       title: t('scheduled.undoFailedTitle'),
-      body: tooLate ? t('scheduled.undoTooLate') : (err?.message || t('scheduled.failure.generic')),
+      body: err?.code === 'send_started' || err?.code === 'already_sent' ? t('scheduled.undoTooLate') : (err?.message || t('scheduled.failure.generic')),
     });
     return tooLate ? 'too_late' : 'failed';
   }

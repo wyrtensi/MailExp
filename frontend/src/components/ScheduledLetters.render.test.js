@@ -262,3 +262,14 @@ test('a failed undo request keeps the job retryable; a send that already started
   api.scheduled.cancel = async () => ({ compose: null });
   assert.equal(await undoSendOutcome('job-1'), 'undone');
 });
+
+test('only permanent refusals are final for undo', async () => {
+  const { isFinalUndoRefusal } = await import('../utils/sendTracker.js');
+  const err = (status, code) => Object.assign(new Error('x'), { status, code });
+  for (const e of [err(409, 'not_cancellable'), err(404, 'not_found'), err(403, 'not_author'), err(409, 'send_started'), err(409, 'already_sent')]) {
+    assert.equal(isFinalUndoRefusal(e), true, `${e.status} ${e.code}`);
+  }
+  for (const e of [new Error('network'), err(502), err(500, 'internal'), err(429, 'rate_limited'), err(423, 'locked'), err(401, 'session')]) {
+    assert.equal(isFinalUndoRefusal(e), false, `${e.status} ${e.code}`);
+  }
+});
