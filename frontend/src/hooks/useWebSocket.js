@@ -33,6 +33,8 @@ async function _forwardNativeNewMailNotification(notification) {
 let backfillRefreshTimer = null;
 // Debounce the unread-count refetch triggered by cross-device flag updates.
 let flagCountRefreshTimer = null;
+// Set while a debounced refresh is waiting and a flag change may have left a conversation row stale.
+let flagListReloadPending = false;
 const BACKOFF_BASE = 1000;
 const BACKOFF_MAX = 30000;
 
@@ -423,17 +425,26 @@ export function useWebSocket(enabled = true) {
         // speeding through mail on another device). Sidebar counts follow via a debounced poll.
         const { changes } = data;
         if (Array.isArray(changes) && changes.length) {
-          const { updateMessage } = useStore.getState();
+          const { applyRemoteFlagChange } = useStore.getState();
+          // A change to a message no loaded list holds may belong to a conversation row whose
+          // unread count is now stale: the list is reloaded once, with the counts.
           for (const c of changes) {
             if (!c || !c.id) continue;
             const patch = {};
             if (typeof c.is_read === 'boolean') patch.is_read = c.is_read;
             if (typeof c.is_starred === 'boolean') patch.is_starred = c.is_starred;
-            if (Object.keys(patch).length) updateMessage(c.id, patch);
+            if (Object.keys(patch).length && !applyRemoteFlagChange(c.id, patch) && typeof c.is_read === 'boolean') {
+              flagListReloadPending = flagListReloadPending || useStore.getState().messages.some(m => Number.parseInt(m.message_count, 10) > 1);
+            }
           }
           clearTimeout(flagCountRefreshTimer);
           flagCountRefreshTimer = setTimeout(() => {
             api.getUnreadCounts().then(_applyServerCounts).catch(() => {});
+            // Category badges come from their own endpoint; the list listens for this.
+            window.dispatchEvent(new CustomEvent('mailexpert:category-counts-stale'));
+            const reloadList = flagListReloadPending;
+            flagListReloadPending = false;
+            if (reloadList) window.dispatchEvent(new CustomEvent('mailexpert:refresh'));
           }, 400);
         }
         break;

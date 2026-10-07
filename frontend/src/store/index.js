@@ -23,6 +23,7 @@ import { DEFAULT_HOVER_ACTIONS, sanitizeHoverActionSet } from '../utils/hoverAct
 import { clampRightSidebarWidth } from '../utils/rightSidebar.js';
 import { pinAccountIds, prunePinnedIds, unpinAccountIds } from '../utils/accountOrder.js';
 import { threadCacheKey } from '../utils/threadKey.js';
+import { applyHeadFlagPatch, unreadInConversation } from '../utils/threadUnread.js';
 import {
   cacheFolderOrderFromPreferences,
   mergeFolderOrder,
@@ -375,6 +376,37 @@ export const useStore = create((set, get) => ({
     });
     return { messages, searchResults: state.searchResults.map(apply), threadMessages };
   }),
+  // A read/star change that came from another client (WebSocket message_flags). Unlike
+  // updateMessage it keeps the conversation aggregate right: a change to the message a row
+  // shows moves `unread_count` by one, and a change to a cached sub-message recounts it. A
+  // message that is in none of the loaded lists may belong to a conversation row whose count
+  // is now stale; the return value (false) tells the caller to reload the list.
+  applyRemoteFlagChange: (id, patch) => {
+    const state = get();
+    const inRows = state.messages.some(m => m.id === id) || state.searchResults.some(m => m.id === id);
+    const inCache = Object.values(state.threadMessages).some(subs => subs.some(s => s.id === id));
+    if (!inRows && !inCache) return false;
+    set(s => {
+      const apply = (m) => m.id === id ? { ...m, ...patch } : m;
+      const threadMessages = Object.fromEntries(
+        Object.entries(s.threadMessages).map(([key, subs]) => [key, subs.map(apply)])
+      );
+      const syncRow = (m) => {
+        const subs = threadMessages[threadCacheKey(m)];
+        if (m.id === id) {
+          const row = applyHeadFlagPatch(m, patch);
+          // The cached conversation knows every message: prefer its count to the arithmetic.
+          if (subs?.some(sub => sub.id === id)) row.unread_count = unreadInConversation(subs);
+          return row;
+        }
+        if (!subs || !subs.some(sub => sub.id === id)) return m;
+        const unread_count = unreadInConversation(subs);
+        return { ...m, unread_count, is_read: unread_count === 0 };
+      };
+      return { messages: s.messages.map(syncRow), searchResults: s.searchResults.map(syncRow), threadMessages };
+    });
+    return true;
+  },
   removeMessage: (id) => set(state => ({
     messages: state.messages.filter(m => m.id !== id),
     searchResults: state.searchResults.filter(m => m.id !== id),
