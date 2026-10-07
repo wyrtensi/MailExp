@@ -757,8 +757,8 @@ function serialized(fn) {
 const notConfigured = () => new MailNodeError('mail_node_not_configured', 'The mail node is not set up', 409);
 
 // "Apply" for the node and every domain the panel knows that the node lists. Answers the node's
-// items and each domain's result.
-export function applyNode({ userId, trigger = 'manual' }) {
+// items and each domain's result. actor: as for applyDomain.
+export function applyNode({ userId, actor = null, trigger = 'manual' }) {
   return serialized(async () => {
     const cfg = await getMailNodeConfig();
     if (!cfg) throw notConfigured();
@@ -779,7 +779,7 @@ export function applyNode({ userId, trigger = 'manual' }) {
     await saveNodeResult({ at, items: result.node, owned: result.owned });
     await keepSpamRuleState(result.node.find((i) => i.item === 'prefilter'));
     for (const d of result.domains) await saveDomainResult(d, at);
-    journal({ userId, trigger, scope: 'node', items: [...result.node, ...result.domains.flatMap((d) => d.items)] });
+    journal({ userId, actor, trigger, scope: 'node', items: [...result.node, ...result.domains.flatMap((d) => d.items)] });
     return { at, node: result.node, domains: result.domains };
   });
 }
@@ -818,7 +818,8 @@ function replaceItems(stored, fresh) {
 // The spam filing rule, by its own action. Once it is in place the forwarding hosts that waited for
 // it follow (R-12). The node's stored result gets the new items. Answers the prefilter item, with
 // the forwarding hosts item's status and code in `forwardingHosts` (null when they did not run).
-export function applyPrefilter({ userId, ranges = EOP_RANGES }) {
+// actor: as for applyDomain.
+export function applyPrefilter({ userId, actor = null, ranges = EOP_RANGES }) {
   return serialized(async () => {
     const cfg = await getMailNodeConfig();
     if (!cfg) throw notConfigured();
@@ -831,7 +832,7 @@ export function applyPrefilter({ userId, ranges = EOP_RANGES }) {
     const items = replaceItems(stored?.items ?? [], fresh);
     await saveNodeResult({ at: stored?.at ?? at, items, owned });
     await keepSpamRuleState(item);
-    journal({ userId, trigger: 'manual', scope: 'prefilter', items: fresh });
+    journal({ userId, actor, trigger: 'manual', scope: 'prefilter', items: fresh });
     const fwd = fresh[1];
     return { ...item, forwardingHosts: fwd ? { status: fwd.status, ...(fwd.code ? { code: fwd.code } : {}) } : null };
   });
