@@ -2659,11 +2659,13 @@ export default function MessageList() {
     clearTimeout(autoMarkReadTimerRef.current);
     autoMarkReadTimerRef.current = null;
     if (message.is_read || markReadBehavior === 'manual') return;
-    const prevUnread = message.unread_count;
     const doMarkRead = () => {
       // Only the message the row shows is marked read: the rest of the conversation stays unread
-      // and stays counted.
-      updateMessage(message.id, { is_read: true, unread_count: unreadAfterHeadRead(message) });
+      // and stays counted. The count comes from the row as it is now (a delayed mark-read may
+      // run after the conversation changed), not from the row as it was when opened.
+      const current = useStore.getState().messages.find(m => m.id === message.id) ?? message;
+      const prevUnread = current.unread_count;
+      updateMessage(message.id, { is_read: true, unread_count: unreadAfterHeadRead(current) });
       decrementUnread(message.account_id);
       adjustCategoryCount(message.category, -1);
       setPending(message.id, message.account_id);

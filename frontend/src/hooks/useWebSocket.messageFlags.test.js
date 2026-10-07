@@ -57,6 +57,39 @@ test('message_flags updates the thread aggregate and asks for category counts an
     assert.deepEqual(events.sort(), ['categories', 'refresh']);
   } finally {
     await React.act(async () => root.unmount());
-    dom.window.close();
   }
+});
+
+async function runFlags(message, { selectedAccountId = null } = {}) {
+  api.getUnreadCounts = async () => ({});
+  const events = [];
+  const onCat = () => events.push('categories');
+  const onRefresh = () => events.push('refresh');
+  window.addEventListener('mailexpert:category-counts-stale', onCat);
+  window.addEventListener('mailexpert:refresh', onRefresh);
+  useStore.setState({
+    selectedAccountId,
+    messages: [{ id: 'head', account_id: 'a', thread_id: 't', is_read: false, unread_count: 3, message_count: 4 }],
+    threadMessages: {},
+  });
+  const root = createRoot(document.getElementById('root'));
+  try {
+    await React.act(async () => { root.render(React.createElement(App)); });
+    await React.act(async () => { socket.onmessage({ data: JSON.stringify({ type: 'message_flags', ...message }) }); });
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } finally {
+    await React.act(async () => root.unmount());
+    window.removeEventListener('mailexpert:category-counts-stale', onCat);
+    window.removeEventListener('mailexpert:refresh', onRefresh);
+  }
+  return events;
+}
+
+test('a star-only change does not refresh category counts', async () => {
+  assert.deepEqual(await runFlags({ changes: [{ id: 'head', is_starred: true }] }), []);
+});
+
+test('an unknown message from another mailbox does not reload the shown list', async () => {
+  const events = await runFlags({ accountId: 'b', changes: [{ id: 'elsewhere', is_read: true }] }, { selectedAccountId: 'a' });
+  assert.deepEqual(events, ['categories']);
 });
