@@ -50,7 +50,7 @@ vi.mock('../services/mailNode/mailboxDeletion.js', () => ({
 const seats = vi.hoisted(() => ({ free: true }));
 vi.mock('../services/mailNode/eopSeats.js', () => ({
   reserveSeat: vi.fn(async () => (seats.free ? { assignmentId: 1, seat: 1 } : { error: 'no_free_seats' })),
-  confirmSeat: vi.fn(async () => {}),
+  confirmSeat: vi.fn(async () => true),
   dropPendingSeat: vi.fn(async () => {}),
   getHoldDays: vi.fn(async () => 90),
   seatSupply: vi.fn(async () => ({ purchased: 10 })),

@@ -236,7 +236,8 @@ async function createNodeMailboxNow(input, actor, onCreated) {
         RETURNING *
       `, [actor?.userId ?? null, name, email, cfg.mailHost, encrypt(created.password), names.senderName]);
       const row = result.rows[0];
-      await confirmSeat(seat.assignmentId, row.id, client);
+      // The reservation is gone (it expired): the creation fails and rolls back, see the catch below.
+      if (!await confirmSeat(seat.assignmentId, row.id, client)) throw new Error('The EOP seat reservation expired');
       return { account: row, secondName: await addSecondSenderName(client, { accountId: row.id, email, senderNameAlt: names.senderNameAlt }) };
     }));
   } catch (err) {

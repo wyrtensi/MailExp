@@ -44,6 +44,10 @@ vi.mock('./mailcow.js', async (importActual) => {
   };
 });
 vi.mock('./eopSettings.js', () => ({ getEopSettings: vi.fn(async () => node.eop) }));
+// The node's read-only filters follow the rows (covered in readOnlyFilter.pglite.test.js): only what
+// the run hands it and what comes back.
+const filters = vi.hoisted(() => ({ result: { closed: 0, opened: 0, failed: 0 } }));
+vi.mock('./readOnlyFilter.js', () => ({ reconcileLocalDelivery: vi.fn(async () => fail(filters.result)) }));
 // The EOP seats (covered against PGlite in eopSeats.pglite.test.js): the numbers a test sets.
 const seatState = vi.hoisted(() => ({ seats: null }));
 vi.mock('./eopSeats.js', async (importActual) => ({
@@ -78,6 +82,7 @@ vi.mock('./traceSource.js', async (importActual) => ({
 }));
 
 import { recordAudit } from '../auditLog.js';
+import { reconcileLocalDelivery } from './readOnlyFilter.js';
 import { captureFromLog } from '../deliveryStatus.js';
 import { recordCheck, updateEvidence } from './outages.js';
 import { runOutageTrace } from './outageTrace.js';
@@ -115,6 +120,8 @@ beforeEach(() => {
   node.budget = { warn: false, used: 0, limit: null };
   node.eop = { eopHost: 'eop.test.local' };
   node.prefilter = undefined;
+  filters.result = { closed: 0, opened: 0, failed: 0 };
+  reconcileLocalDelivery.mockClear();
   seatState.seats = { purchased: 5, used: 3, over: false, stale: false, at: null, error: null, requests: [] };
   recordAudit.mockClear();
   safeFetch.mockClear();
@@ -273,6 +280,14 @@ describe('runAlertCheck', () => {
     state = await runAlertCheck({ now: NOW + 60000 });
     expect(state.errors.map((e) => e.source ?? e)).toContain('seats');
     expect(keys(state.alerts)).toContain('eop_seats_over');
+  });
+
+  it("makes the node's read-only filters match the rows on every run, and keeps a failure with the other source errors", async () => {
+    await runAlertCheck({ now: NOW });
+    expect(reconcileLocalDelivery).toHaveBeenCalledWith(node.cfg);
+    filters.result = Object.assign(new Error('down'), { code: 'mail_node_unreachable' });
+    const state = await runAlertCheck({ now: NOW + 60000 });
+    expect(state.errors.map((e) => e.source)).toContain('filters');
   });
 
   it('keeps the state, journals a raised alert once, and pings /fail on every run', async () => {

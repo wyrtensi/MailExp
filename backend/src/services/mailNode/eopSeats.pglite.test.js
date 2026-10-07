@@ -145,6 +145,12 @@ describe('the hold period', () => {
     await saveEopSettings({ licenses: 1 });
     await assign(A, 'a@example.com');
     await release(A);
+    // Two changes at once: each journals the value the other left, never the same old one twice.
+    const [first, second] = await Promise.all([setHoldDays(30), setHoldDays(0)]);
+    expect([first, second].map((r) => r.to)).toEqual([30, 0]);
+    expect(first.from).toBe(90);
+    expect(second.from).toBe(30);
+    await setHoldDays(90);
     expect(await setHoldDays(0)).toEqual({ from: 90, to: 0 });
     expect(await seatCounts()).toEqual({ used: 0, held: 0 });
     expect((await getSeats()).holdDays).toBe(0);

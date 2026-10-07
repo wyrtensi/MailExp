@@ -29,7 +29,7 @@ vi.mock('./nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ val
 vi.mock('../tenant/tenantDomains.js', async (importActual) => ({ ...(await importActual()), kickDomainSync: vi.fn(async () => null) }));
 
 const {
-  MailNodeError, addMailboxFilter, deleteMailboxFilters, listMailboxFilters, provisionMailbox,
+  MailNodeError, addMailboxFilter, deleteMailbox, deleteMailboxFilters, listMailboxFilters, provisionMailbox,
 } = await import('./mailcow.js');
 const { saveEopSettings } = await import('./eopSettings.js');
 const { setTenantDriver } = await import('../tenant/driver.js');
@@ -77,6 +77,20 @@ describe('creation', () => {
     provisionMailbox.mockRejectedValueOnce(new Error('node down'));
     await expect(create('a')).rejects.toThrow('node down');
     expect(await pending()).toBe(0);
+    expect((await create('a')).account).toBeTruthy();
+  });
+
+  it('never leaves a mailbox without a ledger row: a reservation that expired meanwhile fails the creation cleanly', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The pending row is gone by the time the row is inserted (it expired and another creation swept it).
+    provisionMailbox.mockImplementationOnce(async (_cfg, { localPart, domain }) => {
+      await db.query('DELETE FROM mail_node_seat_assignments');
+      return { email: `${localPart}@${domain}`, password: 'p', reused: false };
+    });
+    expect(await create('a')).toEqual({ error: 'mailbox_create_failed' });
+    expect((await db.query('SELECT count(*)::int AS n FROM email_accounts')).rows[0].n).toBe(0);
+    expect(await seatCounts()).toEqual({ used: 0, held: 0 });
+    expect(deleteMailbox).toHaveBeenCalled();
     expect((await create('a')).account).toBeTruthy();
   });
 

@@ -4,6 +4,7 @@ import { safeFetch } from '../safeFetch.js';
 import { getContainers, getMailNodeConfig, listQueue, parsePingUrl, parseWholeNumber } from './mailcow.js';
 import { getEopSettings } from './eopSettings.js';
 import { getSeats, withSeatLicenses } from './eopSeats.js';
+import { reconcileLocalDelivery } from './readOnlyFilter.js';
 import { getNodeDnsCheck } from './dnsCheckJob.js';
 import { SYSTEM_ACTOR } from './domains.js';
 import { summarizeQueue } from './mailQueue.js';
@@ -463,6 +464,9 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
     log, now, userId, fresh, failed,
   });
   await tenantStep({ eop, now, fresh, failed });
+  // The node's read-only filters follow the rows (a failed step of an action, a migration that made
+  // mailboxes read-only, a filter changed by hand): one read, only differences written.
+  await read('filters', () => reconcileLocalDelivery(cfg));
   const seats = await read('seats', () => getSeats({ now }));
   if (seats) fresh.push(...seatSignals(seats));
   // The budget counts the log as well: without it the count would drop and the alert flap, so the

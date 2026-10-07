@@ -106,14 +106,16 @@ export async function getHoldDays(db = { query }) {
 // Saves the hold period and re-dates the seats still waiting (the latest row of each seat, when
 // released): the change applies to them too. Returns { from, to }.
 export async function setHoldDays(days) {
-  const from = await getHoldDays();
-  await withTransaction(async (client) => {
+  // The old value is read under the lock, in the transaction, so two changes at once journal a true chain.
+  const from = await withTransaction(async (client) => {
     await lockSeats(client);
+    const before = await getHoldDays(client);
     await writeConfig(SEAT_SETTINGS_PROVIDER, { holdDays: days }, client);
     await client.query(`
       UPDATE mail_node_seat_assignments a SET free_from = a.released_at + make_interval(days => $1::int)
         FROM (${LATEST}) latest
        WHERE a.id = latest.id AND a.released_at IS NOT NULL`, [days]);
+    return before;
   });
   return { from, to: days };
 }
@@ -211,8 +213,14 @@ export async function reserveSeat(email) {
   });
 }
 
+// Binds the pending row to the new account. Answers false when the row is gone (it expired and
+// another creation swept it): the caller must fail the creation, never keep a mailbox without a ledger row.
 export async function confirmSeat(assignmentId, accountId, client) {
-  await client.query('UPDATE mail_node_seat_assignments SET account_id = $2, pending_until = NULL WHERE id = $1', [assignmentId, accountId]);
+  const { rows } = await client.query(
+    'UPDATE mail_node_seat_assignments SET account_id = $2, pending_until = NULL WHERE id = $1 AND pending_until IS NOT NULL RETURNING id',
+    [assignmentId, accountId],
+  );
+  return rows.length === 1;
 }
 
 // A creation that failed never held the seat: its pending row goes.
