@@ -33,6 +33,10 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
     deleteMailbox: vi.fn(async () => ({ warnings: [] })),
     listAliasesTo: vi.fn(async () => []),
     getMailbox: vi.fn(async () => null),
+    // The read-only filter of a mailbox pending deletion (mailboxActions.js closeLocalDelivery).
+    listMailboxFilters: vi.fn(async () => []),
+    addMailboxFilter: vi.fn(async () => {}),
+    deleteMailboxFilters: vi.fn(async () => {}),
   };
 });
 // The pending deletion of a node mailbox (services/mailNode/mailboxDeletion.js, covered against

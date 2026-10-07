@@ -198,7 +198,7 @@ const requestDelete = {
       }
       typed = await ctx.ask(`The mailbox ${account.email_address} and all its mail will be deleted after the waiting days.\nType its full address to confirm: `);
     }
-    const result = unwrap(await requestMailboxDeletion({ accountId: account.id, email: typed, reason: ctx.flags.reason }, ctx.actor), MAILBOX_ERRORS);
+    const result = unwrap(await nodeAction(() => requestMailboxDeletion({ accountId: account.id, email: typed, reason: ctx.flags.reason }, ctx.actor)), MAILBOX_ERRORS);
     const view = accountView(result.account, await listAliases(account.id));
     return { data: view, lines: [`deletion of ${view.email} asked for: it goes on ${fmtDate(view.deletion?.deleteAfter)}`] };
   },
@@ -212,7 +212,7 @@ const cancelDelete = {
   positionals: ['mailbox'],
   async run(ctx) {
     const account = await mailboxRef(ctx.args.mailbox);
-    const result = unwrap(await cancelMailboxDeletion({ accountId: account.id }, ctx.actor), MAILBOX_ERRORS);
+    const result = unwrap(await nodeAction(() => cancelMailboxDeletion({ accountId: account.id }, ctx.actor)), MAILBOX_ERRORS);
     const view = accountView(result.account, await listAliases(account.id));
     return { data: view, lines: [`deletion of ${view.email} cancelled`] };
   },

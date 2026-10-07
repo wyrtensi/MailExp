@@ -18,6 +18,8 @@ export function createFakeMailcow(initial = {}) {
     domains: {},
     dkim: {},
     mailboxes: [],
+    // Per-mailbox Sieve filters: { id, username, filter_type, script_desc, script_data, active }.
+    filters: [],
     prefilter: STOCK_PREFILTER,
     fail2ban: {
       ban_time: 1800, max_ban_time: 10000, ban_time_increment: true, max_attempts: 10, retry_window: 600,
@@ -83,6 +85,12 @@ export function createFakeMailcow(initial = {}) {
       const key = node.dkim[d];
       return key ? { pubkey: key.pub, length: '2048', dkim_txt: dkimTxt(key.pub), dkim_selector: key.selector, privkey: '' } : {};
     }
+    if (path.startsWith('get/filters/')) {
+      // Per-mailbox Sieve filters (functions.mailbox.inc.php filters, filter_details): {} when none.
+      const email = decodeURIComponent(path.slice('get/filters/'.length)).toLowerCase();
+      const own = node.filters.filter((f) => f.username === email);
+      return own.length ? own.map((f) => ({ ...f })) : {};
+    }
     if (path === 'get/global_filters/prefilter') return node.prefilter ? node.prefilter : {};
     if (path === 'get/fail2ban') return { ...node.fail2ban, regex: { 1: 'x' }, perm_bans: '', active_bans: '' };
     if (path === 'get/fwdhost/all') {
@@ -144,6 +152,21 @@ export function createFakeMailcow(initial = {}) {
           mailbox.rl = Number(body.attr.rl_value) ? { value: String(body.attr.rl_value), frame: body.attr.rl_frame } : null;
           return success('rl_saved', email);
         });
+      case 'add/filter': {
+        // An active filter makes the mailbox's other filters of that type inactive.
+        if (!body.script_data || !body.script_desc) return [danger('value_missing')];
+        if (body.filter_type !== 'prefilter' && body.filter_type !== 'postfilter') return [danger('filter_type')];
+        const username = String(body.username).toLowerCase();
+        const active = Number(body.active) ? 1 : 0;
+        if (active) for (const f of node.filters) if (f.username === username && f.filter_type === body.filter_type) f.active = 0;
+        node.filters.push({
+          id: nextId++, username, filter_type: body.filter_type, script_desc: body.script_desc, script_data: body.script_data, active,
+        });
+        return [success('add_filter', username)];
+      }
+      case 'delete/filter':
+        node.filters = node.filters.filter((f) => !body.map(Number).includes(f.id));
+        return body.map((id) => success('delete_filter', String(id)));
       case 'add/global-filter':
         if (!node.prefilterLost) node.prefilter = body.script_data;
         return node.restartFails

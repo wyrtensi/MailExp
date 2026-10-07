@@ -491,11 +491,16 @@ router.get('/:id/node-aliases', async (req, res) => {
 // repeats the mailbox's address, as typed in the confirmation, and says why ({ email, reason }).
 // Nothing is asked of the node now. services/mailNode/mailboxActions.js, shared with the panel CLI.
 router.post('/:id/deletion', async (req, res) => {
-  const result = await requestMailboxDeletion(
-    { accountId: req.params.id, email: req.body?.email, reason: req.body?.reason },
-    routeActor(req),
-    { mayDelete: (row) => mayDeleteAccount(req, row) },
-  );
+  let result;
+  try {
+    result = await requestMailboxDeletion(
+      { accountId: req.params.id, email: req.body?.email, reason: req.body?.reason },
+      routeActor(req),
+      { mayDelete: (row) => mayDeleteAccount(req, row) },
+    );
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
   if (result.error === 'admin_required') return res.status(403).json({ error: 'Admin access required' });
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
@@ -503,7 +508,12 @@ router.post('/:id/deletion', async (req, res) => {
 
 // Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel.
 router.delete('/:id/deletion', async (req, res) => {
-  const result = await cancelMailboxDeletion({ accountId: req.params.id }, routeActor(req));
+  let result;
+  try {
+    result = await cancelMailboxDeletion({ accountId: req.params.id }, routeActor(req));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
 });
@@ -511,14 +521,24 @@ router.delete('/:id/deletion', async (req, res) => {
 // Deactivates a mail node mailbox (EOP seats design; administrators): read-only, its EOP seat on
 // hold; the body says why ({ reason }). services/mailNode/mailboxActions.js.
 router.post('/:id/deactivation', requireAdmin, async (req, res) => {
-  const result = await deactivateNodeMailbox({ accountId: req.params.id, reason: req.body?.reason }, routeActor(req));
+  let result;
+  try {
+    result = await deactivateNodeMailbox({ accountId: req.params.id, reason: req.body?.reason }, routeActor(req));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
 });
 
 // Activates it again: its own seat while on hold, else a free one (refused at 0).
 router.delete('/:id/deactivation', requireAdmin, async (req, res) => {
-  const result = await activateNodeMailbox({ accountId: req.params.id }, routeActor(req));
+  let result;
+  try {
+    result = await activateNodeMailbox({ accountId: req.params.id }, routeActor(req));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
 });

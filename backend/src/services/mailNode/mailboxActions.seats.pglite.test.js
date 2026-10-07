@@ -19,12 +19,17 @@ vi.mock('./mailcow.js', async (importActual) => ({
   listDomains: vi.fn(async () => [{ domain: 'example.com', active: true }]),
   provisionMailbox: vi.fn(async (_cfg, { localPart, domain }) => ({ email: `${localPart}@${domain}`, password: 'p', reused: false })),
   deleteMailbox: vi.fn(async () => ({ warnings: [] })),
+  listMailboxFilters: vi.fn(async () => []),
+  addMailboxFilter: vi.fn(async () => {}),
+  deleteMailboxFilters: vi.fn(async () => {}),
 }));
 vi.mock('./domains.js', async (importActual) => ({ ...(await importActual()), getDomainRow: vi.fn(async () => ({ state: 'ready' })) }));
 vi.mock('./nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })), defaultRateLimit: vi.fn() }));
 vi.mock('../tenant/tenantDomains.js', async (importActual) => ({ ...(await importActual()), kickDomainSync: vi.fn(async () => null) }));
 
-const { provisionMailbox } = await import('./mailcow.js');
+const {
+  MailNodeError, addMailboxFilter, deleteMailboxFilters, listMailboxFilters, provisionMailbox,
+} = await import('./mailcow.js');
 const { saveEopSettings } = await import('./eopSettings.js');
 const { setTenantDriver } = await import('../tenant/driver.js');
 const { seatCounts } = await import('./eopSeats.js');
@@ -154,5 +159,53 @@ describe('deactivation and activation', () => {
     await db.query("UPDATE mail_node_seat_assignments SET free_from = NOW() - interval '1 minute'");
     await create('b');
     expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
+  });
+});
+
+describe('the read-only filter on the node', () => {
+  it('closes local delivery when the mailbox becomes read-only and opens it when it works again', async () => {
+    await saveEopSettings({ licenses: 2 });
+    const { account } = await create('a');
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    expect(addMailboxFilter).toHaveBeenCalledWith(CFG, expect.objectContaining({ email: 'a@example.com', type: 'prefilter', desc: 'mailexpert-read-only' }));
+    listMailboxFilters.mockResolvedValueOnce([{ id: 7, type: 'prefilter', desc: 'mailexpert-read-only', active: true }]);
+    await activateNodeMailbox({ accountId: account.id }, ACTOR);
+    expect(deleteMailboxFilters).toHaveBeenCalledWith(CFG, [7]);
+    addMailboxFilter.mockClear();
+    await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    expect(addMailboxFilter).toHaveBeenCalledTimes(1);
+  });
+
+  it('changes nothing in the database when the node cannot take the filter', async () => {
+    const { account } = await create('a');
+    addMailboxFilter.mockRejectedValueOnce(new MailNodeError('mail_node_unreachable', 'down'));
+    await expect(deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR)).rejects.toThrow('down');
+    expect((await db.query('SELECT deactivated_at FROM email_accounts WHERE id = $1', [account.id])).rows[0].deactivated_at).toBeNull();
+  });
+
+  it('puts the filter back when an activation is refused for want of a seat', async () => {
+    const { account } = await create('a');
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    await db.query("UPDATE mail_node_seat_assignments SET free_from = NOW() - interval '1 minute'");
+    await create('b');
+    addMailboxFilter.mockClear();
+    deleteMailboxFilters.mockClear();
+    listMailboxFilters.mockResolvedValueOnce([{ id: 7, type: 'prefilter', desc: 'mailexpert-read-only', active: true }]);
+    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
+    expect(deleteMailboxFilters).toHaveBeenCalledWith(CFG, [7]);
+    expect(addMailboxFilter).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not touch the node when the mailbox is not deactivated, or when a cancel leaves it deactivated', async () => {
+    const { account } = await create('a');
+    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'not_deactivated' });
+    expect(await cancelMailboxDeletion({ accountId: account.id }, ACTOR)).toEqual({ error: 'deletion_not_requested' });
+    expect(listMailboxFilters).not.toHaveBeenCalled();
+    expect(addMailboxFilter).not.toHaveBeenCalled();
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    deleteMailboxFilters.mockClear();
+    await cancelMailboxDeletion({ accountId: account.id }, ACTOR);
+    expect(deleteMailboxFilters).not.toHaveBeenCalled();
   });
 });
