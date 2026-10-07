@@ -40,8 +40,11 @@ export function TenantPendingLine({ account, style }) {
   );
 }
 
-// Whether the mailbox's own seat is still on hold (the address is among the held seats).
-const holdsOwnSeat = (account, seats) => (seats?.heldSeats ?? []).some((s) => s.email === String(account.email_address).toLowerCase());
+// Whether the mailbox's own seat is still on hold. The server matches by mailbox id (an address can
+// be reused by another mailbox); an entry without an id falls back to the address.
+const holdsOwnSeat = (account, seats) => (seats?.heldSeats ?? []).some((s) => (s.accountId
+  ? s.accountId === account.id
+  : s.email === String(account.email_address).toLowerCase()));
 
 // Taking the mailbox back costs a seat unless its own is still on hold.
 const seatBlocked = (account, seats) => {

@@ -79,11 +79,11 @@ describe('GET /seats', () => {
     auth.admin = false;
     await saveEopSettings({ licenses: 4 });
     await db.query(`INSERT INTO mail_node_seat_assignments (seat_no, email) VALUES (1, 'a@example.com')`);
-    await db.query(`INSERT INTO mail_node_seat_assignments (seat_no, email, released_at, release_reason, free_from)
-      VALUES (2, 'b@example.com', NOW(), 'deactivated', NOW() + interval '90 days')`);
+    await db.query(`INSERT INTO mail_node_seat_assignments (seat_no, account_id, email, released_at, release_reason, free_from)
+      VALUES (2, '80000000-0000-4000-8000-00000000000b', 'b@example.com', NOW(), 'deactivated', NOW() + interval '90 days')`);
     const seats = await get();
     expect(seats).toMatchObject({ used: 1, held: 1, free: 2, known: true, mode: 'manual', source: 'manual', over: false, holdDays: 90, requests: [] });
-    expect(seats.heldSeats).toEqual([expect.objectContaining({ seat: 2, email: 'b@example.com', reason: 'deactivated' })]);
+    expect(seats.heldSeats).toEqual([expect.objectContaining({ seat: 2, accountId: '80000000-0000-4000-8000-00000000000b', email: 'b@example.com', reason: 'deactivated' })]);
     expect(seats).not.toHaveProperty('purchased');
   });
 });

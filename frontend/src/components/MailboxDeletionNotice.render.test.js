@@ -130,6 +130,16 @@ describe('read-only mailboxes and EOP seats', () => {
     assert.equal(button.disabled, true);
   });
 
+  test('finds the own held seat of a mailbox by account id, not by a reused address', async () => {
+    const held = (extra) => ({ seats: { used: 2, held: 1, free: 0, heldSeats: [{ seat: 3, email: 'info@example.com', reason: 'deactivated', freeFrom: '2027-01-05T00:00:00.000Z', ...extra }] }, onCancel: () => {} });
+    const other = await mount(React.createElement(MailboxDeletionNotice, { account: PENDING, ...held({ accountId: 'zzz' }) }));
+    assert.equal(other.querySelector('[data-cancel-seat]').textContent.includes('admin.mailNode.seats.ownSeatHeld'), false, 'another mailbox holds the seat of that address');
+    const own = await mount(React.createElement(MailboxDeletionNotice, { account: PENDING, ...held({ accountId: 'a1' }) }));
+    assert.ok(own.querySelector('[data-cancel-seat]').textContent.includes('admin.mailNode.seats.ownSeatHeld'));
+    const noId = await mount(React.createElement(MailboxDeletionNotice, { account: PENDING, ...held({ accountId: null }) }));
+    assert.ok(noId.querySelector('[data-cancel-seat]').textContent.includes('admin.mailNode.seats.ownSeatHeld'), 'no id on the entry: the address decides');
+  });
+
   test('the deactivated notice: who and why; "Activate" for administrators, off at 0 free', async () => {
     const OFF = { ...PENDING, delete_after: null, deactivated_at: '2026-10-07T10:00:00.000Z', deactivated_by_email: 'admin@example.com', deactivation_reason: 'On leave' };
     const host = await mount(React.createElement(MailboxDeactivatedNotice, { account: OFF, isAdmin: true, seats: { used: 1, held: 1, free: 0 }, onActivate: () => {} }));

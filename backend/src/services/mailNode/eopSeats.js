@@ -164,10 +164,10 @@ export async function seatCounts(db = { query }) {
 // The seats on hold, soonest free first: what the hover on "temporarily unavailable" lists.
 export async function heldSeats(db = { query }) {
   const { rows } = await db.query(`
-    SELECT seat_no, email, release_reason, released_at, free_from FROM (${LATEST}) latest
+    SELECT seat_no, account_id, email, release_reason, released_at, free_from FROM (${LATEST}) latest
      WHERE released_at IS NOT NULL AND free_from > NOW() ORDER BY free_from, seat_no`);
   return rows.map((row) => ({
-    seat: row.seat_no, email: row.email, reason: row.release_reason, releasedAt: row.released_at, freeFrom: row.free_from,
+    seat: row.seat_no, accountId: row.account_id ?? null, email: row.email, reason: row.release_reason, releasedAt: row.released_at, freeFrom: row.free_from,
   }));
 }
 

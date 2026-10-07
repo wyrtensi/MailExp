@@ -1048,7 +1048,7 @@ function demoSeats() {
     mode: 'manual', source: 'manual', checkedAt: null, stale: false, notReconciled: false, over: purchased != null && purchased < used,
     subscriptionMissing: false,
     error: null, holdDays: demoHoldDays,
-    heldSeats: held.map((a, i) => ({ seat: used + i + 1, email: a.email_address, reason: a.deactivated_at ? 'deactivated' : 'deletion_requested', freeFrom: a.demo_seat_free_from })),
+    heldSeats: held.map((a, i) => ({ seat: used + i + 1, accountId: a.id, email: a.email_address, reason: a.deactivated_at ? 'deactivated' : 'deletion_requested', freeFrom: a.demo_seat_free_from })),
     requests: demoSeatRequests.map(({ id, seats, requestedBy, requestedAt }) => ({ id, seats, requestedBy, requestedAt })),
   };
 }

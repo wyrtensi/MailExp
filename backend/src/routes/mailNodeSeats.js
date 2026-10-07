@@ -42,7 +42,7 @@ router.get('/seats', async (req, res) => {
     subscriptionMissing: seats.subscriptionMissing,
     error: seats.error ? { code: seats.error.code } : null,
     holdDays: seats.holdDays,
-    heldSeats: seats.heldSeats.map(({ seat, email, reason, freeFrom }) => ({ seat, email, reason, freeFrom })),
+    heldSeats: seats.heldSeats.map(({ seat, accountId, email, reason, freeFrom }) => ({ seat, accountId, email, reason, freeFrom })),
     requests: seats.requests.map(({ id, seats: count, requestedBy, requestedAt }) => ({ id, seats: count, requestedBy, requestedAt })),
   });
 });

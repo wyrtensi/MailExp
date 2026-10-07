@@ -58,7 +58,7 @@ describe('the counter', () => {
     expect(await seatCounts()).toEqual({ used: 1, held: 1 });
     const seats = await getSeats();
     expect(seats).toMatchObject({ purchased: 5, used: 1, held: 1, free: 3, over: false, holdDays: 90 });
-    expect(seats.heldSeats).toEqual([expect.objectContaining({ seat: 2, email: 'b@example.com', reason: 'deactivated' })]);
+    expect(seats.heldSeats).toEqual([expect.objectContaining({ seat: 2, accountId: B, email: 'b@example.com', reason: 'deactivated' })]);
   });
 
   it('shows over when purchased is below used, never a negative free', async () => {
