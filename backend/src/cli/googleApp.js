@@ -219,8 +219,8 @@ async function cmdShow(argv) {
 }
 
 // enable / close / disable: the same setGoogleAppStatus the panel calls. Disabling returns the
-// mailboxes it flagged; the panel also drops their live IMAP connections through its in-memory
-// connection manager, which a separate CLI process cannot reach.
+// mailboxes it flagged; the panel route also drops their live IMAP connections at once through its in-memory
+// connection manager, which a separate CLI process cannot reach: the panel's health check does it later.
 async function cmdStatus(status, argv) {
   const { args } = parseArgs(argv, { positionals: ['id'] });
   const id = parseId(args);
@@ -228,7 +228,7 @@ async function cmdStatus(status, argv) {
   console.log(`app ${id} is now ${status}`);
   if (status === 'disabled') {
     console.log(`${flagged.length} mailbox(es) flagged for reconnect through another app`);
-    if (flagged.length) console.log('note: the running panel keeps their open connections until it restarts; the CLI cannot drop them');
+    if (flagged.length) console.log('the running panel drops their open connections within about 90 seconds (its health check)');
   }
   return 0;
 }
