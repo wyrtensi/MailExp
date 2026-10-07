@@ -58,7 +58,10 @@ const json = (status, body, headers = {}) => new Response(body == null ? null : 
 // does not. requests: what was asked (no secrets kept).
 export function createFakeGraphFetch({ graph = {}, token = TENANT_FIXTURES.graph.token, model = null } = {}) {
   const requests = [];
-  const routes = { ...(model ? {} : { 'GET /domains': TENANT_FIXTURES.graph.domains }), ...graph };
+  const routes = {
+    ...(model ? {} : { 'GET /domains': TENANT_FIXTURES.graph.domains, 'GET /subscribedSkus': TENANT_FIXTURES.graph.subscribedSkus }),
+    ...graph,
+  };
   const accessToken = () => (typeof token === 'object' && token ? token.access_token : null);
   const fetchImpl = async (url, options = {}) => {
     const target = new URL(url);
@@ -132,6 +135,8 @@ export function createFakeTenantModel(options = {}) {
     released: [],
     traces: [],
     traceDetails: {},
+    // EOP seats: GET /subscribedSkus; null answers 400 (tests).
+    subscribedSkus: clone(TENANT_FIXTURES.graph.subscribedSkus),
   };
 
   // A recipient of another kind (a cloud mailbox, a group) holding an address: tests add them.
@@ -142,6 +147,10 @@ export function createFakeTenantModel(options = {}) {
   const records = (template, fill) => ({ ...clone(template), value: fill(clone(template.value)) });
 
   model.graph = (method, path, body, target = null) => {
+    if (method === 'GET' && path === '/subscribedSkus') {
+      // 400, not 500: the Graph client retries a 500 on GET with real sleeps.
+      return model.subscribedSkus ? { status: 200, body: clone(model.subscribedSkus) } : { status: 400, body: { error: { code: 'BadRequest', message: 'x' } } };
+    }
     if (method === 'GET' && path === '/admin/exchange/tracing/messageTraces') return model.listTraces(target);
     const detailsOf = /^\/admin\/exchange\/tracing\/messageTraces\/([^/]+)\/getDetailsByRecipient\(recipientAddress='(.*)'\)$/.exec(decodeURIComponent(path));
     if (method === 'GET' && detailsOf) {

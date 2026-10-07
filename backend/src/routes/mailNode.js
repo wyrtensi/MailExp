@@ -78,6 +78,7 @@ import {
 import { parsePostcat, postcatGone, summarizeQueue } from '../services/mailNode/mailQueue.js';
 import { readPostfixLog } from '../services/mailNode/postfixLog.js';
 import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from '../services/mailNode/terrl.js';
+import { closeFulfilledRequests, seatSupply } from '../services/mailNode/eopSeats.js';
 import {
   ALERT_DEFAULTS,
   checkAlertsNow,
@@ -507,6 +508,11 @@ router.put('/eop', requireAdmin, async (req, res) => {
   const conflict = eopSettingsConflict(merged);
   if (conflict) return refuse(res, conflict);
   await saveEopSettings(settings);
+  // EOP seats in manual mode: a larger Licenses number closes the seat requests it covers.
+  if (settings.licenses != null) {
+    const supply = await seatSupply();
+    if (supply.source === 'manual') await closeFulfilledRequests(supply.purchased);
+  }
   const changed = EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]);
   configAudit(req, 'eop', changed);
   // Applied right after the answer, as for the node settings.
