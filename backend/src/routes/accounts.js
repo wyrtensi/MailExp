@@ -73,6 +73,8 @@ const SAFE_FIELDS = [
   // A mail node mailbox someone asked to delete (migration 0081): when, by whom, when it goes for
   // good, and why the deletion job could not delete it yet.
   'deletion_requested_at', 'deletion_requested_by_email', 'deletion_reason', 'delete_after', 'deletion_last_error',
+  // A deactivated mail node mailbox (migration 0095): read-only, its seat on hold.
+  'deactivated_at', 'deactivated_by_email', 'deactivation_reason',
   // Stage 7b (R-32): the mailbox's domain is Authoritative and the tenant has no recipient for it
   // yet, so EOP still rejects mail to it; computed by GET /.
   'tenant_pending',
@@ -92,8 +94,9 @@ router.get('/', async (req, res) => {
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
             deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
+            deactivated_at, deactivated_by_email, deactivation_reason,
             last_received_at,
-            (mail_node AND tenant_recipient_at IS NULL AND EXISTS (
+            (mail_node AND delete_after IS NULL AND deactivated_at IS NULL AND tenant_recipient_at IS NULL AND EXISTS (
               SELECT 1 FROM mail_node_domains d
                WHERE d.domain = split_part(lower(email_address), '@', 2) AND d.state = 'authoritative')) AS tenant_pending
      FROM email_accounts

@@ -378,6 +378,16 @@ describe('Failures after the writer left', () => {
     expect(sendMail).toHaveBeenCalledTimes(1);
     expect((await job(body.jobId)).status).toBe('done');
   });
+
+  it('fails a queued letter of a node mailbox deactivated meanwhile, before SMTP', async () => {
+    await db.query('UPDATE email_accounts SET mail_node = true WHERE id = $1', [ACCOUNT]);
+    const { body } = await send();
+    await db.query('UPDATE email_accounts SET deactivated_at = NOW() WHERE id = $1', [ACCOUNT]);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'mailbox_read_only' });
+  });
 });
 
 describe('Review round', () => {

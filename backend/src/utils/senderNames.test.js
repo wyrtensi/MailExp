@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  SENDER_NAME_MAX, addSecondSenderName, fromHeaderAddress, isForeignNodeAliasAddress, normalizeAddress, parseSenderNames,
+  SENDER_NAME_MAX, addSecondSenderName, fromHeaderAddress, isForeignNodeAliasAddress, isReadOnlyNodeMailbox, normalizeAddress, parseSenderNames,
 } from './senderNames.js';
 
 describe('parseSenderNames', () => {
@@ -64,5 +64,15 @@ describe('isForeignNodeAliasAddress', () => {
     expect(isForeignNodeAliasAddress({ ...node, mail_node: false }, 'other@example.org')).toBe(false);
     expect(isForeignNodeAliasAddress({ ...node, mail_node: null }, 'other@example.org')).toBe(false);
     expect(isForeignNodeAliasAddress(null, 'other@example.org')).toBe(false);
+  });
+});
+
+describe('isReadOnlyNodeMailbox', () => {
+  it('is a node mailbox deactivated or pending deletion', () => {
+    expect(isReadOnlyNodeMailbox({ mail_node: true, delete_after: '2026-10-10T00:00:00Z' })).toBe(true);
+    expect(isReadOnlyNodeMailbox({ mail_node: true, deactivated_at: '2026-10-07T00:00:00Z' })).toBe(true);
+    expect(isReadOnlyNodeMailbox({ mail_node: true, delete_after: null, deactivated_at: null })).toBe(false);
+    expect(isReadOnlyNodeMailbox({ mail_node: false, deactivated_at: '2026-10-07T00:00:00Z' })).toBe(false);
+    expect(isReadOnlyNodeMailbox(null)).toBe(false);
   });
 });

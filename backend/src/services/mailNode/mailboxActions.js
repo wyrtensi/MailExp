@@ -330,9 +330,19 @@ export function parseDeletionReason(value) {
   return { reason };
 }
 
-// Asks to delete a mail node mailbox (owner decision D-14, 2026-10-01): it keeps working until
-// delete_after (now plus the days an administrator set), then the deletion job deletes it on the
-// node with all its mail and removes it here (services/mailNode/mailboxDeletion.js). email: the
+// The tenant recipient follows the mailbox's state (EOP seats design): removed while it is read-only,
+// made again when it works again, by the domain's next sync, a tenant job (tenant work never runs on
+// a request's path). Awaited: the CLI ends its database pool right after the answer.
+async function kickMailboxDomain(email, actor) {
+  await kickDomainSync(String(email).toLowerCase().split('@')[1], jobBy(actor));
+}
+
+// Asks to delete a mail node mailbox (owner decision D-14 as changed by the EOP seats design,
+// 2026-10-07): its seat goes on hold at once and it is read-only until delete_after (now plus the
+// days an administrator set): the tenant recipient is removed by the domain sync queued here,
+// sending is refused, the panel still reads it. Then the deletion job deletes it on the node with
+// all its mail and removes it here (services/mailNode/mailboxDeletion.js); the seat ledger row
+// stays. email: the
 // mailbox's address as typed in the confirmation; reason: why. Nothing is asked of the node now.
 // mayDelete(row): who may (the route's rule for the signed-in user); the CLI acts as an
 // administrator. Answers { account }.
@@ -357,6 +367,7 @@ export async function requestMailboxDeletion({ accountId, email, reason: rawReas
     accountId, action: 'mailbox.deletion_requested',
     details: { mailNode: true, deleteAfter: result.deleteAfter, days: result.days, reason, seat: result.seat },
   }));
+  await kickMailboxDomain(rows[0].email_address, actor);
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return { account: withoutSecrets(account) };
 }
@@ -373,5 +384,6 @@ export async function cancelMailboxDeletion({ accountId }, actor) {
     details: { mailNode: true, deleteAfter: result.deleteAfter, reason: result.reason, seat: result.seat },
   }));
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+  await kickMailboxDomain(account.email_address, actor);
   return { account: withoutSecrets(account) };
 }

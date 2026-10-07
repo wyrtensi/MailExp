@@ -13,7 +13,7 @@ import {
   JOB_KEPT_FAILED_MS, cancelJob, enqueueJob, getJob, registerJobKind, rescheduleJob, JobError,
 } from './jobQueue.js';
 import { deliverOutgoingMessage } from './sendDelivery.js';
-import { fromHeaderAddress, isForeignNodeAliasAddress } from '../utils/senderNames.js';
+import { fromHeaderAddress, isForeignNodeAliasAddress, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 
 export const SEND_JOB_KIND = 'send_message';
 // The undo window after Send: fixed by the owner at five seconds.
@@ -397,6 +397,13 @@ async function handleSendJob(job, ctx, imapManager) {
     ? await query('SELECT * FROM email_accounts WHERE id = $1', [job.account_id])
     : { rows: [] };
   if (!account) throw new JobError('The mailbox of this letter was deleted.', { outcome: 'fail', code: 'account_missing' });
+  // A letter queued (scheduled, or sent again) before its node mailbox became read-only (EOP seats
+  // design) fails before SMTP.
+  if (isReadOnlyNodeMailbox(account)) {
+    throw new JobError('This mailbox is read-only (deactivated or pending deletion): it cannot send.', {
+      outcome: 'fail', code: 'mailbox_read_only',
+    });
+  }
   // A mail node mailbox sends only from its own address (D-16). The route refuses such an alias, but a
   // letter queued before (scheduled, or sent again after a failure) carries its From already: the
   // node's SMTP would refuse it, so it fails here, before SMTP.

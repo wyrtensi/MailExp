@@ -455,6 +455,23 @@ describe('the recipient before the node mailbox (R-29 with R-33)', () => {
     await removeRecipientBeforeDelete({ email_address: 'a@example.com' });
   });
 
+  it('drops the contact of a read-only mailbox and makes it again when it works again (EOP seats design)', async () => {
+    await addDomain('dns_ok');
+    setMailboxes('a@example.com');
+    const id = await addAccount('a@example.com');
+    await sync();
+    expect(model.recipients.has('a@example.com')).toBe(true);
+    await db.query("UPDATE email_accounts SET delete_after = NOW() + interval '5 days', deletion_reason = 'r' WHERE id = $1", [id]);
+    await sync();
+    expect(model.recipients.has('a@example.com')).toBe(false);
+    await db.query('UPDATE email_accounts SET delete_after = NULL, deletion_reason = NULL, deactivated_at = NOW() WHERE id = $1', [id]);
+    await sync();
+    expect(model.recipients.has('a@example.com')).toBe(false);
+    await db.query('UPDATE email_accounts SET deactivated_at = NULL WHERE id = $1', [id]);
+    await sync();
+    expect(model.recipients.has('a@example.com')).toBe(true);
+  });
+
   it('keeps an Authoritative domain\'s mailbox pending while the tenant cannot be reached', async () => {
     await addDomain('authoritative');
     const id = await addAccount('a@example.com', { deletion: true });

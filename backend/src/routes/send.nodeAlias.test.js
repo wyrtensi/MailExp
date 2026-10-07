@@ -65,3 +65,16 @@ describe('sending from an alias of a mail node mailbox', () => {
     expect(enqueueOutgoingSend).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('sending from a read-only mail node mailbox (EOP seats design)', () => {
+  it('refuses before queueing a mailbox pending deletion or deactivated', async () => {
+    alias.email = 'me@example.com';
+    for (const state of [{ delete_after: '2026-10-10T00:00:00.000Z' }, { deactivated_at: '2026-10-07T00:00:00.000Z' }]) {
+      Object.assign(account, { delete_after: null, deactivated_at: null }, state);
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mailbox_read_only');
+    }
+    expect(enqueueOutgoingSend).not.toHaveBeenCalled();
+  });
+});
