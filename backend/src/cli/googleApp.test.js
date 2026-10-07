@@ -11,7 +11,7 @@ const registry = vi.hoisted(() => ({
   getEffectiveGoogleRedirectUri: vi.fn(async () => 'https://mail.example.com/oauth/google/callback'),
 }));
 const redis = vi.hoisted(() => ({
-  redisClient: { isOpen: false, connect: vi.fn(async () => {}), quit: vi.fn(async () => {}) },
+  redisClient: { isOpen: false, connect: vi.fn(async () => {}), quit: vi.fn(async () => {}), disconnect: vi.fn(async () => {}) },
   countGoogleReservations: vi.fn(),
 }));
 vi.mock('../services/redis.js', () => ({ redisClient: redis.redisClient }));
@@ -63,6 +63,7 @@ beforeEach(() => {
   redis.countGoogleReservations.mockReset().mockResolvedValue(2);
   redis.redisClient.connect.mockClear();
   redis.redisClient.quit.mockClear();
+  redis.redisClient.disconnect.mockClear();
   registry.getEffectiveGoogleRedirectUri.mockReset().mockResolvedValue('https://mail.example.com/oauth/google/callback');
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -88,14 +89,15 @@ describe('googleApp.js add', () => {
     for (const bad of ['0', '-1', 'abc', '1.5']) {
       registry.createGoogleApp.mockClear();
       const code = await run(['add', '--user-limit', bad], stdinOf(WEB_CLIENT_JSON));
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       expect(registry.createGoogleApp).not.toHaveBeenCalled();
     }
   });
 
   it('rejects an unknown flag or a flag missing its value', async () => {
-    expect(await run(['add', '--bogus', 'x'], stdinOf(WEB_CLIENT_JSON))).toBe(1);
-    expect(await run(['add', '--label'], stdinOf(WEB_CLIENT_JSON))).toBe(1);
+    expect(await run(['add', '--bogus', 'x'], stdinOf(WEB_CLIENT_JSON))).toBe(2);
+    expect(await run(['add', '--label'], stdinOf(WEB_CLIENT_JSON))).toBe(2);
+    expect(await run(['add', 'stray'], stdinOf(WEB_CLIENT_JSON))).toBe(2);
     expect(registry.createGoogleApp).not.toHaveBeenCalled();
   });
 
@@ -175,7 +177,7 @@ describe('googleApp.js show', () => {
     registry.getGoogleAppSummary.mockResolvedValue(SUMMARY_ROW);
     expect(await run(['show', APP_ID])).toBe(0);
     expect(redis.countGoogleReservations).toHaveBeenCalledWith(APP_ID);
-    expect(redis.redisClient.quit).toHaveBeenCalled();
+    expect(redis.redisClient.disconnect).toHaveBeenCalled();
     expect(out()).toMatch(/used seats:\s+2/);
     expect(out()).toMatch(/free seats:\s+1/);
     expect(out()).toMatch(/mailboxes:\s+3/);
@@ -296,6 +298,49 @@ describe('googleApp.js replace-secret', () => {
     registry.getGoogleAppSummary.mockResolvedValue(null);
     expect(await run(['replace-secret', APP_ID], stdinOf('s'))).toBe(1);
     expect(await run(['replace-secret', APP_ID, 'GOCSPX-argv'], stdinOf('s'))).toBe(2);
+  });
+});
+
+describe('googleApp.js exit codes and messages', () => {
+  it('exits 3 when the failure is not a registry refusal (database down)', async () => {
+    registry.listGoogleApps.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    expect(await run(['list'])).toBe(3);
+    expect(err()).toMatch(/ECONNREFUSED/);
+  });
+
+  it('keeps refusals at exit 1', async () => {
+    registry.deleteGoogleApp.mockRejectedValueOnce(new GoogleAppError('app_in_use'));
+    expect(await run(['delete', APP_ID, '--yes'])).toBe(1);
+  });
+
+  it('does not mention --user-limit when set-limit gets a bad value', async () => {
+    registry.updateGoogleApp.mockRejectedValueOnce(new GoogleAppError('user_limit_invalid'));
+    expect(await run(['set-limit', APP_ID, 'abc'])).toBe(1);
+    expect(err()).toMatch(/user limit must be a positive whole number/);
+    expect(err()).not.toMatch(/--user-limit/);
+  });
+
+  it('accepts -- so a label can start with a dash', async () => {
+    expect(await run(['set-label', APP_ID, '--', '-draft'])).toBe(0);
+    expect(registry.updateGoogleApp).toHaveBeenCalledWith(APP_ID, { label: '-draft' });
+    expect(await run(['set-label', APP_ID, '-draft'])).toBe(2);
+  });
+});
+
+describe('googleApp.js show with Redis that never answers', () => {
+  it('gives up after a short wait and disconnects the client', async () => {
+    vi.useFakeTimers();
+    try {
+      registry.getGoogleAppSummary.mockResolvedValue(SUMMARY_ROW);
+      redis.redisClient.connect.mockImplementationOnce(() => new Promise(() => {}));
+      const pending = run(['show', APP_ID]);
+      await vi.advanceTimersByTimeAsync(10000);
+      expect(await pending).toBe(0);
+      expect(out()).toMatch(/unavailable/);
+      expect(redis.redisClient.disconnect).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

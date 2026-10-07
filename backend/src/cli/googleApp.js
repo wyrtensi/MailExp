@@ -15,7 +15,7 @@
 // locates the compose project and pipes a local file in.
 import '../loadEnv.js';
 import { pathToFileURL } from 'node:url';
-import { UsageError, parseArgs } from './args.js';
+import { EXIT, UsageError, parseArgs } from './args.js';
 import { fmtDate, keyValues } from './output.js';
 import {
   GoogleAppError,
@@ -49,6 +49,8 @@ function usage() {
     'client -> Download JSON) on stdin, so the client secret never appears in argv or shell',
     'history. --label defaults to the JSON project_id; --user-limit defaults to 100.',
     'replace-secret reads only the new secret (plain text) on stdin, never as an argument.',
+    'Put -- before arguments that start with a dash (set-label <id> -- -label).',
+    'Exit codes: 0 done, 1 refused, 2 invalid input, 3 failed (database down, unexpected error).',
   ].join('\n');
 }
 
@@ -64,25 +66,12 @@ function readStream(stream) {
   });
 }
 
-// --flag value pairs only; add takes no positional arguments.
-function parseFlags(argv) {
-  const flags = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg !== '--label' && arg !== '--user-limit') throw new Error(`unknown argument: ${arg}`);
-    const key = arg.slice(2);
-    const value = argv[i + 1];
-    if (value === undefined) throw new Error(`${arg} needs a value`);
-    flags[key] = value;
-    i += 1;
-  }
-  return flags;
-}
-
 function parseUserLimit(raw) {
   if (raw === undefined) return 100;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value <= 0) throw new GoogleAppError('user_limit_invalid');
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
+    throw new UsageError('--user-limit must be a positive whole number');
+  }
   return value;
 }
 
@@ -99,7 +88,7 @@ function printWarnings(warnings) {
 }
 
 async function cmdAdd(argv, stdin) {
-  const flags = parseFlags(argv);
+  const { flags } = parseArgs(argv, { flags: { label: 'string', 'user-limit': 'string' } });
   const userLimit = parseUserLimit(flags['user-limit']);
   const text = await readStream(stdin);
   const parsed = parseGoogleClientJson(text);
@@ -162,18 +151,30 @@ function toApi(row, reservedCount) {
 
 // In-flight consent flows hold seats in Redis. The CLI process has no open Redis connection, so
 // `show` opens one and closes it again; a Redis outage must not break `show`.
+// node-redis retries a refused connection forever, so the wait is capped and the client is
+// disconnected on every path (which also stops those retries).
+const REDIS_WAIT_MS = 3000;
+
 async function countReservations(appId) {
+  let timer;
+  let redisClient = null;
   try {
-    const { redisClient } = await import('../services/redis.js');
+    ({ redisClient } = await import('../services/redis.js'));
     const { countGoogleReservations } = await import('../services/oauth/googleAppSelection.js');
-    if (!redisClient.isOpen) await redisClient.connect();
-    try {
-      return await countGoogleReservations(appId);
-    } finally {
-      await redisClient.quit().catch(() => {});
-    }
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('redis timeout')), REDIS_WAIT_MS);
+    });
+    const work = (async () => {
+      if (!redisClient.isOpen) await redisClient.connect();
+      return countGoogleReservations(appId);
+    })();
+    work.catch(() => {}); // a late failure after the deadline must not surface as unhandled
+    return await Promise.race([work, deadline]);
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
+    await Promise.resolve(redisClient?.disconnect()).catch(() => {});
   }
 }
 
@@ -281,7 +282,7 @@ const ERROR_MESSAGES = {
   client_json_incomplete: 'the file is missing a client ID or client secret',
   client_id_invalid: 'client ID is not a Google OAuth client ID',
   client_secret_required: 'client secret is required',
-  user_limit_invalid: '--user-limit must be a positive whole number',
+  user_limit_invalid: 'the user limit must be a positive whole number',
   app_exists: 'this client ID is already added',
   app_same_project: 'an app from this Google Cloud project is already added',
   app_status_invalid: 'unknown app status',
@@ -321,14 +322,15 @@ export async function run(argv, stdin = process.stdin) {
   } catch (err) {
     if (err instanceof UsageError) {
       console.error(`error: ${err.message}`);
-      return 2;
+      return EXIT.usage;
     }
     if (err instanceof GoogleAppError) {
       console.error(`error: ${ERROR_MESSAGES[err.code] || err.code}`);
-      return 1;
+      return EXIT.refused;
     }
+    // Anything else (database down, unexpected failure) is the panel's own problem, not a refusal.
     console.error(`error: ${err.message}`);
-    return 1;
+    return EXIT.failed;
   }
 }
 

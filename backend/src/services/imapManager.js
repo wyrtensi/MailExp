@@ -2581,6 +2581,7 @@ export class ImapManager {
             }
           }
         }
+        await this._dropReconnectFlaggedSessions();
       } catch (err) {
         console.error('Health check error:', err.message);
       }
@@ -3250,6 +3251,23 @@ export class ImapManager {
     } finally {
       // Always release the in-progress lock so future attempts (e.g. manual reconnect) can proceed
       this.connectingAccounts.delete(account.id);
+    }
+  }
+
+  // Accounts that hold a live session or a poll timer although oauth_reconnect_required is set: the
+  // flag was raised from another process (googleApp.js disable runs in its own CLI process and
+  // cannot call disconnectAccount). Their tokens came from a client that no longer refreshes, so
+  // the session is dropped here, within one health-check interval.
+  async _dropReconnectFlaggedSessions() {
+    const ids = [...new Set([...this.connections.keys(), ...this.syncIntervals.keys()])];
+    if (!ids.length) return;
+    const { rows } = await query(
+      'SELECT id FROM email_accounts WHERE oauth_reconnect_required = true AND id = ANY($1)',
+      [ids],
+    );
+    for (const row of rows) {
+      console.log(`Health check: dropping the session of ${row.id} (reconnect required)`);
+      await this.disconnectAccount(row.id).catch((err) => console.error(`Health check disconnect failed for ${row.id}:`, err.message));
     }
   }
 

@@ -263,6 +263,34 @@ describe('oauth_reconnect_required', () => {
     clearInterval(timer);
   });
 
+  it('health check drops live sessions of accounts flagged for reconnect after they connected', async () => {
+    const flagged = gmailAccount({ oauth_reconnect_required: true });
+    const healthy = gmailAccount();
+    const pollOnly = gmailAccount({ oauth_reconnect_required: true });
+    const mgr = newManager();
+    const healthCheck = intervalSpy.mock.calls.find(([, ms]) => ms === 90000)[0];
+    mgr.connections.set(flagged.id, { close: vi.fn(), logout: vi.fn(async () => {}) });
+    mgr.connections.set(healthy.id, { close: vi.fn(), logout: vi.fn(async () => {}) });
+    const timer = setInterval(() => {}, 60000);
+    mgr.syncIntervals.set(pollOnly.id, timer);
+    mgr._pollOnlyAccounts.add(pollOnly.id);
+    const disconnect = vi.spyOn(mgr, 'disconnectAccount').mockResolvedValue(undefined);
+    query.mockImplementation(async (sql, params = []) => {
+      if (/oauth_reconnect_required = true/.test(sql) && /ANY\(\$1\)/.test(sql)) {
+        return { rows: [flagged, pollOnly].filter((r) => params[0].includes(r.id)).map((r) => ({ id: r.id })) };
+      }
+      return { rows: [] };
+    });
+
+    await healthCheck();
+
+    expect(disconnect).toHaveBeenCalledTimes(2);
+    expect(disconnect).toHaveBeenCalledWith(flagged.id);
+    expect(disconnect).toHaveBeenCalledWith(pollOnly.id);
+    expect(disconnect).not.toHaveBeenCalledWith(healthy.id);
+    clearInterval(timer);
+  });
+
   it('skips flagged accounts in the health check and at startup', async () => {
     const flagged = gmailAccount({ oauth_reconnect_required: true });
     rows.set(flagged.id, flagged);

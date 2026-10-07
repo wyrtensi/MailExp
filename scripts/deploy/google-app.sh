@@ -16,7 +16,9 @@
 #   google-app.sh set-label <id> <label>
 #   google-app.sh replace-secret <id> <secret file | ->   new client secret from a file or stdin
 #
-# Exit codes: 0 done, 1 the container CLI reported a problem, 2 invalid input.
+# Exit codes: 0 done, 1 refused (unknown app, app still has mailboxes, invalid value), 2 invalid
+# input, 3 the CLI failed (database or Redis down). A label that starts with - goes after --:
+# google-app.sh set-label <id> -- -label.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
@@ -42,6 +44,7 @@ Usage: google-app.sh add <client JSON file> [--prefix /opt/mailexpert] [--label 
        google-app.sh set-limit <id> <N>
        google-app.sh set-label <id> <label>
        google-app.sh replace-secret <id> <secret file | ->
+       (add -- before arguments that start with -)
 
 The same operations as the panel's Settings -> Integrations -> "Google apps" screen. <id> is the
 app id printed by list. add reads the OAuth client JSON downloaded from Google Cloud Console
@@ -49,8 +52,10 @@ app id printed by list. add reads the OAuth client JSON downloaded from Google C
 --label defaults to the JSON project_id, --user-limit defaults to 100. disable flags the app's
 mailboxes for reconnect through another app; delete is refused while mailboxes are bound.
 replace-secret reads the new client secret (plain text) from a file, or from stdin with "-"; it is
-never an argument.
-Exit codes: 0 done, 1 the container CLI reported a problem, 2 invalid input.
+never an argument; on a terminal it is typed without echo.
+A label (or any argument) that starts with - goes after --, e.g. set-label <id> -- -label.
+Exit codes: 0 done, 1 refused (unknown app, app still has mailboxes, invalid value), 2 invalid
+input, 3 the CLI failed (database or Redis down).
 EOF
 }
 
@@ -62,8 +67,8 @@ is_command() {
 }
 
 main() {
-  local prefix=/opt/mailexpert command='' label='' user_limit='' json=0 yes=0
-  local -a positional=()
+  local prefix=/opt/mailexpert command='' label='' user_limit='' json=0 yes=0 dashdash=0
+  local -a positional=() pos_args=()
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
@@ -88,6 +93,21 @@ main() {
       --yes)
         yes=1
         shift
+        ;;
+      --)
+        dashdash=1
+        shift
+        # Everything after -- is an argument, never an option: the first word is the command
+        # when none came before it.
+        while [ $# -gt 0 ]; do
+          if [ -z "$command" ]; then
+            is_command "$1" || die "unknown command: $1 (see --help)" 2
+            command=$1
+          else
+            positional+=("$1")
+          fi
+          shift
+        done
         ;;
       -h | --help) usage && return 0 ;;
       -)
@@ -141,10 +161,10 @@ main() {
     list) ;;
     set-limit)
       [[ ${positional[1]} =~ ^[1-9][0-9]*$ ]] || die "set-limit needs a positive whole number" 2
-      cli_args+=("${positional[@]}")
+      pos_args=("${positional[@]}")
       ;;
     replace-secret)
-      cli_args+=("${positional[0]}")
+      pos_args=("${positional[0]}")
       if [ "${positional[1]}" = - ]; then
         stdin_source=stdin
       else
@@ -154,17 +174,32 @@ main() {
         stdin_source=file
       fi
       ;;
-    *) cli_args+=("${positional[@]}") ;;
+    *) pos_args=("${positional[@]}") ;;
   esac
   if [ "$json" = 1 ]; then cli_args+=(--json); fi
   if [ "$yes" = 1 ]; then cli_args+=(--yes); fi
+  if [ "$dashdash" = 1 ] && [ "${#pos_args[@]}" -gt 0 ]; then cli_args+=(--); fi
+  if [ "${#pos_args[@]}" -gt 0 ]; then cli_args+=("${pos_args[@]}"); fi
 
   [ "$(id -u)" = 0 ] || die "run google-app.sh as root"
   load_install "$prefix"
 
   case $stdin_source in
     file) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" <"$file" ;;
-    stdin) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" ;;
+    stdin)
+      if [ -t 0 ]; then
+        # A terminal: read the secret without echo and hand it over as stdin (a here-string is
+        # not an argument, so it stays out of the process list).
+        local secret=''
+        IFS= read -rsp "New client secret (input hidden): " secret || die "no secret was read" 2
+        printf '
+' >&2
+        [ -n "$secret" ] || die "the secret is empty" 2
+        app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" <<<"$secret"
+      else
+        app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}"
+      fi
+      ;;
     *) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" </dev/null ;;
   esac
 }
