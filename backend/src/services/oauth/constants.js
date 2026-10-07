@@ -23,6 +23,10 @@ export const OAUTH_SEND_FAILURES = Object.freeze({
   }),
 });
 
+// The only path the Gmail OAuth callback is served on (routes/oauthGoogle.js, mounted at
+// /oauth/google): the stored callback URL must name it exactly.
+export const GOOGLE_CALLBACK_PATH = '/oauth/google/callback';
+
 // Timeout of a single provider token-endpoint call (fetch AbortSignal) in googleOAuth.js and
 // microsoftOAuth.js.
 export const PROVIDER_FETCH_TIMEOUT_MS = 10000;

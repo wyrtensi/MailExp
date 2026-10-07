@@ -1,5 +1,7 @@
 // Helpers for the "Google apps" admin screen. Shapes mirror /api/admin/google-apps
 // (backend/src/routes/googleAppsAdmin.js). Pure: no DOM, no store, no network.
+import { GOOGLE_OAUTH_CALLBACK_PATH } from './googleOAuth.js';
+
 const CLIENT_ID_RE = /^(\d+)-([a-z0-9]+)\.apps\.googleusercontent\.com$/;
 const LABEL_MAX = 100;
 // user_limit is a Postgres INTEGER.
@@ -186,12 +188,14 @@ export function googleAppWarningKey(code) {
   return typeof code === 'string' && Object.hasOwn(WARNING_KEYS, code) ? WARNING_KEYS[code] : null;
 }
 
-// Same rule as the server: an absolute http(s) address.
+// Same rule as the server: an absolute http(s) address on the callback path, without a query or
+// fragment (Google would send the browser to a page that does not finish the flow).
 export function googleCallbackFormError(value) {
   const text = typeof value === 'string' ? value.trim() : '';
+  if (/[?#]/.test(text)) return ERROR_KEYS.redirect_uri_invalid;
   try {
     const url = new URL(text);
-    if (url.protocol === 'https:' || url.protocol === 'http:') return null;
+    if ((url.protocol === 'https:' || url.protocol === 'http:') && url.pathname === GOOGLE_OAUTH_CALLBACK_PATH) return null;
   } catch {
     // fall through
   }

@@ -1997,7 +1997,7 @@
         "errorSameProject": "An app from this Google Cloud project is already added. Clients of one project share its limit.",
         "errorInUse": "The app still has connected mailboxes.",
         "errorNotFound": "The app no longer exists. Reload the page.",
-        "errorCallbackInvalid": "Enter a full address starting with https:// or http://.",
+        "errorCallbackInvalid": "Enter a full address starting with https:// or http:// and ending in /oauth/google/callback, without ? or #.",
         "errorClientJsonInvalid": "This is not valid JSON, or not a Google OAuth client file.",
         "errorClientJsonServiceAccount": "This is a service account key, not an OAuth client. Download the OAuth client JSON instead (Credentials -> OAuth client -> Download JSON).",
         "errorClientJsonNotWeb": "This is a desktop (installed) OAuth client. Create a Web application client instead.",

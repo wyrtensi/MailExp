@@ -2039,7 +2039,7 @@
         "errorSameProject": "Приложение из этого проекта Google Cloud уже добавлено. Клиенты одного проекта делят его лимит.",
         "errorInUse": "К приложению ещё привязаны ящики.",
         "errorNotFound": "Приложения больше нет. Обновите страницу.",
-        "errorCallbackInvalid": "Введите полный адрес, начинающийся с https:// или http://.",
+        "errorCallbackInvalid": "Введите полный адрес, который начинается с https:// или http:// и заканчивается на /oauth/google/callback, без ? и #.",
         "errorClientJsonInvalid": "Это не корректный JSON или не файл OAuth-клиента Google.",
         "errorClientJsonServiceAccount": "Это ключ сервисного аккаунта, а не OAuth-клиент. Скачайте JSON OAuth-клиента (Credentials → OAuth client → Download JSON).",
         "errorClientJsonNotWeb": "Это десктопный (installed) OAuth-клиент. Создайте клиент типа Web application.",

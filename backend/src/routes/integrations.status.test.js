@@ -196,6 +196,12 @@ describe('Google integration settings (admin, callback URL only)', () => {
     ['/oauth/google/callback'],
     ['ftp://mail.example.com/oauth/google/callback'],
     ['javascript:alert(1)'],
+    ['https://mail.example.com/wrong'],
+    ['https://mail.example.com/'],
+    ['https://mail.example.com/oauth/google/callback/'],
+    ['https://mail.example.com/oauth/google/callback?x=1'],
+    ['https://mail.example.com/oauth/google/callback?'],
+    ['https://mail.example.com/oauth/google/callback#top'],
   ])('refuses the callback URL %j without touching integration_config', async (redirectUri) => {
     authState.admin = true;
     process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
@@ -204,6 +210,12 @@ describe('Google integration settings (admin, callback URL only)', () => {
     expect((await res.json()).code).toBe('redirect_uri_invalid');
     expect(query).not.toHaveBeenCalled();
     expect(process.env.GOOGLE_REDIRECT_URI).toBe(REDIRECT_URI);
+  });
+
+  it('accepts the callback path on a development host with a port', async () => {
+    authState.admin = true;
+    const res = await post({ redirectUri: 'http://localhost:5173/oauth/google/callback' });
+    expect(res.status).toBe(200);
   });
 
   it('refuses a body without a callback URL', async () => {
