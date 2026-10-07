@@ -923,3 +923,18 @@ and lets you prove it in a real `1 → 2` transaction.
 The decisive pre-production test is extremely simple: **register the US business, connect the existing Microsoft tenant, order exactly one `EOP_ENTERPRISE` seat, obtain a client API credential, execute an API-only `1 → 2` upsize, and verify the new entitlement through `GET https://graph.microsoft.com/v1.0/subscribedSkus`.** SoftwareOne's public documentation gives a credible path to completing that test; Insight's public documentation currently does not.
 
 **Primary official documentation:** [SoftwareOne Marketplace REST API](https://docs.platform.softwareone.com/developer-resources/rest-api), [SoftwareOne Commerce API](https://docs.platform.softwareone.com/developer-resources/rest-api/commerce-api), [SoftwareOne Order model](https://docs.platform.softwareone.com/developer-resources/rest-api/commerce-api/orders), [SoftwareOne API tokens](https://docs.platform.softwareone.com/modules-and-features/settings/api-tokens), [Insight Microsoft CSP features on CCx](https://www.insight.com/en_US/content-and-resources/knowledge-base/myinsight-faqs/e-commerce-guides/e-procurement-Microsoft-CSP-Product-Features-on-CCX.html), [Microsoft EOP licensing identifiers](https://learn.microsoft.com/en-us/entra/identity/users/licensing-service-plan-reference), [Microsoft Graph `assignLicense`](https://learn.microsoft.com/en-us/graph/api/user-assignlicense?view=graph-rest-1.0), [Microsoft Graph `subscribedSkus`](https://learn.microsoft.com/en-us/graph/api/subscribedsku-list?view=graph-rest-1.0), [Microsoft `New-MailUser`](https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-mailuser?view=exchange-ps), and [Microsoft Exchange app-only authentication](https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2?view=exchange-ps).
+## Addendum 2026-10-07: seat assignment question for the partner
+
+Our own follow-up, not part of the report above. Standalone EOP is licensed as a User SL; Product
+Terms for Online Services forbid reassigning most SLs within 90 days of the last assignment unless an
+exception applies, and no EOP-specific exemption was found. Our protected recipients are mail contacts,
+which cannot hold an Entra license assignment, so the panel keeps its own seat ledger (who, assigned,
+released) and holds a released seat for 90 days by default. Question to send with question 18:
+
+> We will use standalone Exchange Online Protection for self-hosted mailboxes. Protected recipients in
+> Microsoft will normally be represented as MailContacts and therefore won't have EOP licenses
+> technically assigned through Entra ID. Please confirm how EOP User SL assignment must be tracked for
+> licensing purposes in this configuration, whether the Microsoft 90-day Subscription License
+> reassignment rule applies to these EOP seats, what date constitutes the assignment date, and whether
+> termination of employment permits immediate reassignment under the terms applicable to our CSP
+> subscription. Please also state which NCE/CSP limits apply to reducing the paid quantity.
