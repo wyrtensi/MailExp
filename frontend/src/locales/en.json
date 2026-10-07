@@ -1145,6 +1145,7 @@
       "add": {
         "gmailTitle": "Personal Gmail",
         "gmailDescription": "Your own @gmail.com mailbox: sign in with Google, MailExpert never sees the password.",
+        "gmailOnlyKnown": "No Google app has room for a new Gmail address. An address that was connected before can still be added.",
         "manualTitle": "Other server (IMAP and SMTP by hand)",
         "manualDescription": "Enter the IMAP and SMTP settings yourself.",
         "emailLabel": "Gmail address",

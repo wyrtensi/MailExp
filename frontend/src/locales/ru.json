@@ -1179,6 +1179,7 @@
       "add": {
         "gmailTitle": "Личный Gmail",
         "gmailDescription": "Свой ящик @gmail.com: вход через Google, пароль MailExpert не видит.",
+        "gmailOnlyKnown": "Ни в одном Google-приложении нет места для нового адреса Gmail. Адрес, который уже подключался раньше, добавить можно.",
         "manualTitle": "Другой сервер (IMAP и SMTP вручную)",
         "manualDescription": "Настройки IMAP и SMTP вводятся вручную.",
         "emailLabel": "Адрес Gmail",

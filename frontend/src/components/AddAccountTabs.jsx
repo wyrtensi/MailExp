@@ -65,6 +65,9 @@ export default function AddAccountTabs({ options, active, onSelect, renderForm }
         {current && SECONDARY_KINDS.has(current.kind) && (
           <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 14 }}>{t(current.descriptionKey)}</div>
         )}
+        {current?.enabled && current.hintKey && (
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>{t(current.hintKey)}</div>
+        )}
         {current?.enabled
           ? renderForm(current.kind)
           : <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t(current?.hintKey || 'common.loading')}</div>}

@@ -106,7 +106,9 @@ router.get('/status', async (req, res) => {
     },
     google: {
       configured,
-      // Whether an active app still has a free seat: the Gmail option is offered only then.
+      // Whether an active app still has a free seat. Without one the Gmail form stays usable with
+      // a note: an address an app already counted goes back there without a seat, and the start
+      // route decides per address (no_app_capacity otherwise).
       available: await googleAvailable(configured),
     },
     // Whether the add-mailbox dialog offers a mailbox on the mail node.
