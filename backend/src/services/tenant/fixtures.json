@@ -1,5 +1,5 @@
 {
-  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6). Stage 7b: the shapes of the domain, connector, DKIM and recipient answers; the fake tenant (fakes.js createFakeTenantModel) answers in them. Shapes marked Inferred in eop-panel-requirements.md section 5.12 wait for a live tenant. Stage 7c: the quarantine (Get-QuarantineMessage summary and by Identity, with Learn's example Identity) and the message trace (Graph exchangeMessageTrace and exchangeMessageTraceDetail); the quarantine property values (Type, ReleaseStatus casing, RecipientAddress as an array) are Inferred.",
+  "_about": "Recorded answers of the tenant driver's fakes, one per operation, in the shapes of Microsoft Learn (cmdlet output as the worker's runner.ps1 selects it; Graph JSON as documented). Names are Learn's placeholders. Replace with answers saved from a live tenant (eop-panel-requirements.md, section 6). Stage 7b: the shapes of the domain, connector, DKIM and recipient answers; the fake tenant (fakes.js createFakeTenantModel) answers in them. Shapes marked Inferred in eop-panel-requirements.md section 5.12 wait for a live tenant. Stage 7c: the quarantine (Get-QuarantineMessage summary and by Identity, with Learn's example Identity) and the message trace (Graph exchangeMessageTrace and exchangeMessageTraceDetail); the quarantine property values (Type, ReleaseStatus casing, RecipientAddress as an array) are Inferred. EOP seats (2026-10-07): graph.subscribedSkus in the shape of Learn's subscribedSku; values Inferred until the live check in eop-panel-requirements.md section 6, row 26.",
   "worker": {
     "certificate": {
       "thumbprint": "3F2A9C4D5E6B7A8C9D0E1F2A3B4C5D6E7F8A9B0C",
@@ -293,6 +293,37 @@
           "action": "",
           "description": "Message sent to mx.example.org at 198.51.100.20 using TLS1.2 with AES256",
           "data": ""
+        }
+      ]
+    },
+    "subscribedSkus": {
+      "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#subscribedSkus",
+      "value": [
+        {
+          "accountId": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f",
+          "accountName": "Contoso",
+          "appliesTo": "User",
+          "capabilityStatus": "Enabled",
+          "consumedUnits": 0,
+          "id": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f_45a2423b-e884-448d-a831-d9e139c52d2f",
+          "prepaidUnits": { "enabled": 10, "suspended": 0, "warning": 0, "lockedOut": 0 },
+          "servicePlans": [],
+          "skuId": "45a2423b-e884-448d-a831-d9e139c52d2f",
+          "skuPartNumber": "EOP_ENTERPRISE",
+          "subscriptionIds": ["8c3a1f52-6e0b-4d7a-9b1e-2f4c5d6e7a8b"]
+        },
+        {
+          "accountId": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f",
+          "accountName": "Contoso",
+          "appliesTo": "User",
+          "capabilityStatus": "Enabled",
+          "consumedUnits": 1,
+          "id": "0b1c2d3e-4f50-4617-8829-3a4b5c6d7e8f_f30db892-07e9-47e9-837c-80727f46fd3d",
+          "prepaidUnits": { "enabled": 10000, "suspended": 0, "warning": 0, "lockedOut": 0 },
+          "servicePlans": [],
+          "skuId": "f30db892-07e9-47e9-837c-80727f46fd3d",
+          "skuPartNumber": "FLOW_FREE",
+          "subscriptionIds": []
         }
       ]
     }
