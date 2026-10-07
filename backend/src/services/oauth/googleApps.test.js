@@ -133,7 +133,7 @@ describe('resolveGoogleConfig', () => {
     process.env.GOOGLE_REDIRECT_URI = REDIRECT_URI;
     query.mockResolvedValue({ rows: [APP] });
     expect(await resolveGoogleConfig()).toEqual({
-      appId: 'app-1', clientId: CLIENT_ID, clientSecret: 'app-secret', redirectUri: REDIRECT_URI,
+      appId: 'app-1', projectNumber: '123456789012', clientId: CLIENT_ID, clientSecret: 'app-secret', redirectUri: REDIRECT_URI,
     });
     expect(query.mock.calls[0][0]).toMatch(/status <> 'disabled'/);
   });
@@ -172,19 +172,22 @@ describe('resolveGoogleConfig', () => {
 });
 
 describe('recordGoogleGrant', () => {
-  it('upserts one journal row per project of the app and lower-cased email, keeping a known subject', async () => {
+  it('upserts one journal row per project and lower-cased email, keeping a known subject', async () => {
     query.mockResolvedValue({ rows: [] });
-    await recordGoogleGrant({ appId: 'app-1', email: 'User@Gmail.com', sub: 'sub-1' });
+    await recordGoogleGrant({ projectNumber: '123456789012', email: 'User@Gmail.com', sub: 'sub-1' });
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(project_number, email, google_sub\)\s+SELECT project_number, lower\(\$2\), \$3 FROM google_oauth_apps WHERE id = \$1/);
+    // By the project itself, not through the app row: an app deleted during the code exchange
+    // must not lose a user Google already counted.
+    expect(sql).toMatch(/INSERT INTO google_oauth_grants \(project_number, email, google_sub\) VALUES \(\$1, lower\(\$2\), \$3\)/);
+    expect(sql).not.toMatch(/google_oauth_apps/);
     expect(sql).toMatch(/ON CONFLICT \(project_number, email\) DO UPDATE SET google_sub = COALESCE\(google_oauth_grants\.google_sub, EXCLUDED\.google_sub\)/);
-    expect(params).toEqual(['app-1', 'User@Gmail.com', 'sub-1']);
+    expect(params).toEqual(['123456789012', 'User@Gmail.com', 'sub-1']);
   });
 
   it('runs on a transaction client when one is passed', async () => {
     const { client } = scriptedClient([[/INSERT INTO google_oauth_grants/, { rows: [] }]]);
-    await recordGoogleGrant({ appId: 'app-1', email: 'u@gmail.com' }, client);
-    expect(client.query.mock.calls[0][1]).toEqual(['app-1', 'u@gmail.com', null]);
+    await recordGoogleGrant({ projectNumber: '123456789012', email: 'u@gmail.com' }, client);
+    expect(client.query.mock.calls[0][1]).toEqual(['123456789012', 'u@gmail.com', null]);
     expect(query).not.toHaveBeenCalled();
   });
 });

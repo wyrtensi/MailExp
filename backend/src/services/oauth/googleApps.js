@@ -74,19 +74,19 @@ export async function resolveGoogleConfig({ appId = null, origin = null } = {}) 
   if (!app || app.status === 'disabled') return null;
   const clientSecret = decrypt(app.client_secret);
   if (!clientSecret) return null;
-  return { appId: app.id, clientId: app.client_id, clientSecret, redirectUri };
+  return { appId: app.id, projectNumber: app.project_number, clientId: app.client_id, clientSecret, redirectUri };
 }
 
 // Journal the Google account an app issued tokens to. Google counts it against the user cap of
 // the app's Cloud project from that moment, so rows are kept when the mailbox is removed, and are
 // keyed by the project: they outlive the app row and count again for a client of that project
-// added later.
-export async function recordGoogleGrant({ appId, email, sub = null }, db = { query }) {
+// added later. Written by the project number the flow resolved at its start, not through the app
+// row, so an app deleted during the code exchange does not lose a user Google already counted.
+export async function recordGoogleGrant({ projectNumber, email, sub = null }, db = { query }) {
   await db.query(
-    `INSERT INTO google_oauth_grants (project_number, email, google_sub)
-     SELECT project_number, lower($2), $3 FROM google_oauth_apps WHERE id = $1
+    `INSERT INTO google_oauth_grants (project_number, email, google_sub) VALUES ($1, lower($2), $3)
      ON CONFLICT (project_number, email) DO UPDATE SET google_sub = COALESCE(google_oauth_grants.google_sub, EXCLUDED.google_sub)`,
-    [appId, email, sub],
+    [projectNumber, email, sub],
   );
 }
 

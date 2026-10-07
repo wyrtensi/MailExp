@@ -87,6 +87,7 @@ const MAIL_SCOPE = 'https://mail.google.com/';
 const ACCOUNT_ID = '22222222-2222-2222-2222-222222222222';
 // The id of the seat reservation the start route took for the flow.
 const RESERVATION = 'reservation-1';
+const PROJECT_NUMBER = '123456789012';
 
 function buildApp() {
   const app = express();
@@ -178,7 +179,7 @@ const errorLocation = (code) => `/?oauth_error=${code}&oauth_provider=google`;
 
 let logSpies;
 beforeEach(() => {
-  googleApps.config = { appId: APP_ID, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI };
+  googleApps.config = { appId: APP_ID, projectNumber: PROJECT_NUMBER, clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, redirectUri: REDIRECT_URI };
   googleApps.byId = { [APP_ID]: googleApps.config };
   recordGoogleGrant.mockClear();
   redisStore.clear();
@@ -338,7 +339,7 @@ describe('GET /oauth/google/callback', () => {
     // No sender name from the form: sender_name stays empty and the mailbox sends under its name.
     expect(insertParams.slice(7)).toEqual([APP_ID, 'sub-1', 'gmail', null]);
     expect(sqlCall(/^\s*INSERT INTO account_aliases/)).toBeUndefined();
-    expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
+    expect(recordGoogleGrant).toHaveBeenCalledWith({ projectNumber: PROJECT_NUMBER, email: 'user@gmail.com', sub: 'sub-1' });
 
     expect(imapManager.connectAccount).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-acc' }));
     expectCooldownClearedBeforeConnect('new-acc');
@@ -555,7 +556,7 @@ describe('GET /oauth/google/callback', () => {
     const { state } = await seedAddState();
     const res = await callback({ code: 'c', state });
     expect(res.headers.get('location')).toBe(errorLocation('scope_missing'));
-    expect(recordGoogleGrant).toHaveBeenCalledWith({ appId: APP_ID, email: 'user@gmail.com', sub: 'sub-1' });
+    expect(recordGoogleGrant).toHaveBeenCalledWith({ projectNumber: PROJECT_NUMBER, email: 'user@gmail.com', sub: 'sub-1' });
     expect(withTransaction).not.toHaveBeenCalled();
     expect(revokeGoogleToken).toHaveBeenCalledWith('refresh-tok');
   });

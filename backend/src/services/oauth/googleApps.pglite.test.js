@@ -22,6 +22,7 @@ vi.mock('../redis.js', () => ({
 
 const {
   createGoogleApp, deleteGoogleApp, findKnownGoogleEmails, importLegacyGoogleConfig, listGoogleApps, recordGoogleGrant,
+  resolveGoogleConfig,
 } = await import('./googleApps.js');
 const { selectGoogleApp } = await import('./googleAppSelection.js');
 
@@ -49,8 +50,8 @@ afterEach(() => {
 describe('Google grant journal across app delete and re-add', () => {
   it('keeps the seats Google counted when an app of the same project is added again', async () => {
     const first = await createGoogleApp({ label: 'Google 1', clientId: CLIENT_A, clientSecret: 's', userLimit: 2 });
-    await recordGoogleGrant({ appId: first.id, email: 'one@gmail.com', sub: 'sub-1' });
-    await recordGoogleGrant({ appId: first.id, email: 'two@gmail.com', sub: 'sub-2' });
+    await recordGoogleGrant({ projectNumber: PROJECT, email: 'one@gmail.com', sub: 'sub-1' });
+    await recordGoogleGrant({ projectNumber: PROJECT, email: 'two@gmail.com', sub: 'sub-2' });
     await deleteGoogleApp(first.id);
 
     // While no app of that project exists, its addresses are not offered as connected before.
@@ -66,10 +67,23 @@ describe('Google grant journal across app delete and re-add', () => {
     await expect(selectGoogleApp({ email: 'One@gmail.com' })).resolves.toEqual({ appId: again.id, reserved: false });
   });
 
+  it('keeps a user Google counted while the app was deleted during the code exchange', async () => {
+    const app = await createGoogleApp({ label: 'Google 1', clientId: CLIENT_A, clientSecret: 's' });
+    process.env.GOOGLE_REDIRECT_URI = 'https://mail.example.com/oauth/google/callback';
+    const config = await resolveGoogleConfig({ appId: app.id });
+    delete process.env.GOOGLE_REDIRECT_URI;
+    await deleteGoogleApp(app.id);
+    await recordGoogleGrant({ projectNumber: config.projectNumber, email: 'late@gmail.com' });
+
+    await createGoogleApp({ label: 'Google 1 again', clientId: CLIENT_B, clientSecret: 's' });
+    const [listed] = await listGoogleApps();
+    expect(listed.grants_count).toBe(1);
+  });
+
   it('records a grant once per project and address', async () => {
     const app = await createGoogleApp({ label: 'Google 1', clientId: CLIENT_A, clientSecret: 's' });
-    await recordGoogleGrant({ appId: app.id, email: 'One@gmail.com' });
-    await recordGoogleGrant({ appId: app.id, email: 'one@gmail.com', sub: 'sub-1' });
+    await recordGoogleGrant({ projectNumber: PROJECT, email: 'One@gmail.com' });
+    await recordGoogleGrant({ projectNumber: PROJECT, email: 'one@gmail.com', sub: 'sub-1' });
     const { rows } = await db.query('SELECT project_number, email, google_sub FROM google_oauth_grants');
     expect(rows).toEqual([{ project_number: PROJECT, email: 'one@gmail.com', google_sub: 'sub-1' }]);
   });

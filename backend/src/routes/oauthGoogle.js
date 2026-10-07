@@ -153,7 +153,7 @@ router.get('/callback', async (req, res) => {
     issued = { appId: config.appId, tokens, email: identity.email };
     // Google counts this account against the app's user cap once it issued tokens, even if
     // the consent is refused below.
-    await recordGoogleGrant({ appId: config.appId, email: identity.email, sub: identity.sub });
+    await recordGoogleGrant({ projectNumber: config.projectNumber, email: identity.email, sub: identity.sub });
     // Now that the journal has the email, the reservation can go. A brief double count
     // (reservation + grant) is intended: it is only more conservative than the alternative of
     // releasing before the exchange, which would let the seat look free while it is in flight.
