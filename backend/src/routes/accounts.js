@@ -23,7 +23,7 @@ import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
 import { getMailNodeConfig, listAliasesTo } from '../services/mailNode/mailcow.js';
 import {
-  MAILBOX_ERRORS, cancelMailboxDeletion, createNodeMailbox, requestMailboxDeletion,
+  MAILBOX_ERRORS, activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, requestMailboxDeletion,
 } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
@@ -278,11 +278,11 @@ router.put('/:id', async (req, res) => {
   if (stored.mail_node && changedConnectionFields(stored, updates).length) {
     return res.status(400).json({ error: 'The server settings of a mail node mailbox cannot be changed', code: 'mail_node_connection_locked' });
   }
-  // A mail node mailbox has no "Disable" (owner decision D-14): it is deleted, with its mail, or it
-  // stays. Only turning one off is refused, so a form resending the value and a mailbox paused
-  // before this rule (which may be resumed) still go through.
+  // A mail node mailbox has no panel pause: it is deactivated (POST /:id/deactivation, EOP seats
+  // design) or deleted. Only turning one off is refused, so a form resending the value and a mailbox
+  // paused before this rule (which may be resumed) still go through.
   if (stored.mail_node && 'enabled' in updates && !updates.enabled && stored.enabled !== false) {
-    return res.status(400).json({ error: 'A mail node mailbox cannot be disabled: delete it instead', code: 'mail_node_disable_unsupported' });
+    return res.status(400).json({ error: 'A mail node mailbox cannot be paused: deactivate it instead', code: 'mail_node_disable_unsupported' });
   }
 
   // Everyone may rename a mailbox, recolour it, edit its signature or folder mappings; only an
@@ -504,6 +504,21 @@ router.post('/:id/deletion', async (req, res) => {
 // Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel.
 router.delete('/:id/deletion', async (req, res) => {
   const result = await cancelMailboxDeletion({ accountId: req.params.id }, routeActor(req));
+  if (result.error) return refuseMailbox(res, result.error);
+  return res.json(safeAccount(result.account));
+});
+
+// Deactivates a mail node mailbox (EOP seats design; administrators): read-only, its EOP seat on
+// hold; the body says why ({ reason }). services/mailNode/mailboxActions.js.
+router.post('/:id/deactivation', requireAdmin, async (req, res) => {
+  const result = await deactivateNodeMailbox({ accountId: req.params.id, reason: req.body?.reason }, routeActor(req));
+  if (result.error) return refuseMailbox(res, result.error);
+  return res.json(safeAccount(result.account));
+});
+
+// Activates it again: its own seat while on hold, else a free one (refused at 0).
+router.delete('/:id/deactivation', requireAdmin, async (req, res) => {
+  const result = await activateNodeMailbox({ accountId: req.params.id }, routeActor(req));
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
 });

@@ -15,7 +15,9 @@ import {
 import { cancelDeletion, requestDeletion } from './mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from './domains.js';
 import { getEopSettings } from './eopSettings.js';
-import { confirmSeat, dropPendingSeat, getHoldDays, reserveSeat, seatSupply } from './eopSeats.js';
+import {
+  confirmSeat, dropPendingSeat, getHoldDays, lockSeats, releaseSeat, reserveSeat, returnSeat, seatSupply,
+} from './eopSeats.js';
 import { defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';
 import { MIRRORED_STATES, kickDomainSync } from '../tenant/tenantDomains.js';
 
@@ -35,6 +37,11 @@ export const MAILBOX_ERRORS = Object.freeze({
   name_required: [400, 'The mailbox name cannot be empty'],
   sender_name_invalid: [400, 'Sender names cannot contain control characters'],
   mailbox_pending_deletion: [409, 'This mailbox is pending deletion: cancel the deletion to keep it'],
+  already_deactivated: [409, 'This mailbox is deactivated already'],
+  not_deactivated: [409, 'This mailbox is not deactivated'],
+  deletion_pending: [409, 'This mailbox is pending deletion: cancel the deletion first'],
+  deactivation_reason_required: [400, 'Say why the mailbox is deactivated'],
+  deactivation_reason_too_long: [400, `The reason may be at most ${MAX_DELETION_REASON} characters`],
   mailbox_exists: [409, 'This mailbox is already in MailExpert'],
   domain_unknown: [400, 'The mail node has no such active domain'],
   mailbox_create_failed: [500, 'Failed to add account'],
@@ -385,5 +392,74 @@ export async function cancelMailboxDeletion({ accountId }, actor) {
   }));
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   await kickMailboxDomain(account.email_address, actor);
+  return { account: withoutSecrets(account) };
+}
+
+// --- deactivation ----------------------------------------------------------------------------------
+
+// Deactivates a mail node mailbox (EOP seats design, 2026-10-07; administrators): read-only like one
+// pending deletion (no sending, no incoming mail: the tenant recipient goes with the domain sync
+// queued here), its letters still read over IMAP, the mailcow mailbox untouched; its EOP seat goes on
+// hold. reason: why, required, kept on the row and in the journal. Answers { account }.
+export async function deactivateNodeMailbox({ accountId, reason: rawReason }, actor) {
+  const { rows: [row] } = await query('SELECT id, email_address, mail_node, imap_host FROM email_accounts WHERE id = $1', [accountId]);
+  if (!row) return { error: 'account_not_found' };
+  if (!row.mail_node) return { error: 'not_mail_node' };
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return { error: 'mail_node_not_configured' };
+  if (onOtherMailHost(row, cfg)) return { error: 'mail_node_host_mismatch' };
+  const parsed = parseDeletionReason(rawReason);
+  if (parsed.error) return { error: parsed.error === 'deletion_reason_required' ? 'deactivation_reason_required' : 'deactivation_reason_too_long' };
+  const holdDays = await getHoldDays();
+  const result = await withTransaction(async (client) => {
+    const { rows } = await client.query(`
+      UPDATE email_accounts
+         SET deactivated_at = NOW(), deactivated_by = $2, deactivation_reason = $3,
+             deactivated_by_email = (SELECT COALESCE(NULLIF(email, ''), username) FROM users WHERE id = $2)
+       WHERE id = $1 AND deactivated_at IS NULL AND delete_after IS NULL
+      RETURNING id`, [accountId, actor?.userId ?? null, parsed.reason]);
+    if (!rows.length) {
+      const { rows: [now] } = await client.query('SELECT deactivated_at, delete_after FROM email_accounts WHERE id = $1', [accountId]);
+      return { error: now?.deactivated_at ? 'already_deactivated' : 'mailbox_pending_deletion' };
+    }
+    return { seat: await releaseSeat(accountId, 'deactivated', holdDays, client) };
+  });
+  if (result.error) return result;
+  recordAudit(auditOf(actor, {
+    accountId, action: 'mailbox.deactivated',
+    details: { mailNode: true, reason: parsed.reason, seat: result.seat?.seat ?? null, freeFrom: result.seat?.freeFrom ?? null },
+  }));
+  await kickMailboxDomain(row.email_address, actor);
+  const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
+  return { account: withoutSecrets(account) };
+}
+
+// Activates a deactivated mailbox (administrators): it takes its own seat back while it is on hold,
+// else a free one (refused at 0), and works as before; the tenant recipient comes back with the
+// domain sync. A mailbox pending deletion is activated by cancelling the deletion first.
+export async function activateNodeMailbox({ accountId }, actor) {
+  const { purchased } = await seatSupply();
+  const result = await withTransaction(async (client) => {
+    await lockSeats(client);
+    const { rows: [row] } = await client.query(
+      'SELECT email_address, mail_node, deactivated_at, delete_after FROM email_accounts WHERE id = $1 FOR UPDATE', [accountId],
+    );
+    if (!row) return { error: 'account_not_found' };
+    if (!row.mail_node) return { error: 'not_mail_node' };
+    if (!row.deactivated_at) return { error: 'not_deactivated' };
+    if (row.delete_after) return { error: 'deletion_pending' };
+    const seat = await returnSeat({ accountId, email: row.email_address, purchased }, client);
+    if (seat.error) return { error: seat.error };
+    await client.query(`
+      UPDATE email_accounts SET deactivated_at = NULL, deactivated_by = NULL, deactivated_by_email = NULL, deactivation_reason = NULL
+       WHERE id = $1`, [accountId]);
+    return { seat, email: row.email_address };
+  });
+  if (result.error) return result;
+  recordAudit(auditOf(actor, {
+    accountId, action: 'mailbox.activated', details: { mailNode: true, seat: result.seat.seat, reclaimed: result.seat.reclaimed },
+  }));
+  await kickMailboxDomain(result.email, actor);
+  const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return { account: withoutSecrets(account) };
 }

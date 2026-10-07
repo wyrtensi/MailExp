@@ -28,7 +28,9 @@ const { provisionMailbox } = await import('./mailcow.js');
 const { saveEopSettings } = await import('./eopSettings.js');
 const { setTenantDriver } = await import('../tenant/driver.js');
 const { seatCounts } = await import('./eopSeats.js');
-const { cancelMailboxDeletion, createNodeMailbox, requestMailboxDeletion } = await import('./mailboxActions.js');
+const {
+  activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, requestMailboxDeletion,
+} = await import('./mailboxActions.js');
 
 const USER = '70000000-0000-4000-8000-000000000001';
 const ACTOR = { userId: USER };
@@ -103,5 +105,54 @@ describe('deletion request and cancel', () => {
     await create('b');
     expect(await cancelMailboxDeletion({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
     expect((await db.query('SELECT delete_after FROM email_accounts WHERE id = $1', [account.id])).rows[0].delete_after).not.toBeNull();
+  });
+});
+
+describe('deactivation and activation', () => {
+  it('deactivates with a reason: read-only, seat on hold, journaled; activation takes the same seat back', async () => {
+    const { recordAudit } = await import('../auditLog.js');
+    const { account } = await create('a');
+    const off = await deactivateNodeMailbox({ accountId: account.id, reason: 'Left on leave' }, ACTOR);
+    expect(off.account).toMatchObject({ deactivation_reason: 'Left on leave', deactivated_by_email: 'anna@example.com' });
+    expect(off.account.deactivated_at).not.toBeNull();
+    expect(await seatCounts()).toEqual({ used: 0, held: 1 });
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.deactivated', details: expect.objectContaining({ reason: 'Left on leave', seat: 1 }) }));
+    expect(await create('b')).toEqual({ error: 'no_free_seats' });
+    const on = await activateNodeMailbox({ accountId: account.id }, ACTOR);
+    expect(on.account.deactivated_at).toBeNull();
+    expect(await seatCounts()).toEqual({ used: 1, held: 0 });
+    expect(recordAudit).toHaveBeenCalledWith(expect.objectContaining({ action: 'mailbox.activated', details: expect.objectContaining({ seat: 1, reclaimed: true }) }));
+  });
+
+  it('refuses what makes no sense', async () => {
+    const { account } = await create('a');
+    expect(await deactivateNodeMailbox({ accountId: account.id, reason: ' ' }, ACTOR)).toEqual({ error: 'deactivation_reason_required' });
+    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'not_deactivated' });
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    expect(await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR)).toEqual({ error: 'already_deactivated' });
+  });
+
+  it('a deactivated mailbox may be asked for deletion; cancelling it leaves it deactivated; activation waits for the cancel', async () => {
+    const { account } = await create('a');
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'deletion_pending' });
+    const back = await cancelMailboxDeletion({ accountId: account.id }, ACTOR);
+    expect(back.account.deactivated_at).not.toBeNull();
+    expect(await seatCounts()).toEqual({ used: 0, held: 1 });
+  });
+
+  it('refuses to deactivate a mailbox pending deletion', async () => {
+    const { account } = await create('a');
+    await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    expect(await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR)).toEqual({ error: 'mailbox_pending_deletion' });
+  });
+
+  it('activation after the hold needs a free seat, refused at 0', async () => {
+    const { account } = await create('a');
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    await db.query("UPDATE mail_node_seat_assignments SET free_from = NOW() - interval '1 minute'");
+    await create('b');
+    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
   });
 });

@@ -17,10 +17,13 @@ import { query } from './db.js';
 // updater reports them (services/panelUpdate/reconcile.js), under that administrator. So is an
 // administrator switching a plugin on or off for the whole panel (routes/plugins.js), and an administrator
 // issuing, rotating or revoking the mail node agent's token or asking it for a job (routes/mailNodeAgent.js).
+// An administrator deactivating or activating a mail node mailbox, anyone asking for more EOP seats and an
+// administrator changing their hold period (EOP seats: services/mailNode/seatProvider.js, routes/mailNodeSeats.js).
 export const AUDIT_ACTIONS = Object.freeze([
   'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
   'mailbox.enabled', 'mailbox.disabled', 'mailbox.threading_changed', 'mailbox.password_restored',
   'mailbox.quota_changed', 'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled',
+  'mailbox.deactivated', 'mailbox.activated',
   'mailbox.oauth_subject_reset',
   'message.sent', 'message.deleted', 'message.move_reverted',
   'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
@@ -34,6 +37,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
   'mail_node.outage_deleted',
   'mail_node.agent_token_issued', 'mail_node.agent_token_revoked', 'mail_node.agent_job_requested',
+  'mail_node.seats_requested', 'mail_node.seat_hold_changed',
   'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
   'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
   'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced',

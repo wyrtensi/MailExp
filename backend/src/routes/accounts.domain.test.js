@@ -51,6 +51,13 @@ vi.mock('../services/mailNode/eopSeats.js', () => ({
   getHoldDays: vi.fn(async () => 90),
   seatSupply: vi.fn(async () => ({ purchased: 10 })),
 }));
+// Deactivation and activation (covered against PGlite in mailboxActions.seats.pglite.test.js): only
+// the routes' own checks are asserted here.
+vi.mock('../services/mailNode/mailboxActions.js', async (importActual) => ({
+  ...(await importActual()),
+  deactivateNodeMailbox: vi.fn(async () => ({ account: { id: '77777777-7777-4777-8777-777777777777', mail_node: true, deactivated_at: '2026-10-07T00:00:00.000Z' } })),
+  activateNodeMailbox: vi.fn(async () => ({ error: 'no_free_seats' })),
+}));
 // The send limit a new mailbox gets (services/mailNode/nodeApply.js, covered against PGlite there).
 vi.mock('../services/mailNode/nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })) }));
 // The panel's onboarding state of each domain: only ready (and authoritative) ones take mailboxes.
@@ -159,6 +166,14 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('no_free_seats');
     expect(provisionMailbox).not.toHaveBeenCalled();
+  });
+
+  it('lets only administrators deactivate and activate', async () => {
+    const res = await fetch(`${base}/api/accounts/${ID}/deactivation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: 'r' }),
+    });
+    expect(res.status).toBe(403);
+    expect((await fetch(`${base}/api/accounts/${ID}/deactivation`, { method: 'DELETE' })).status).toBe(403);
   });
 
   it('refuses a sender name that would add a header, before touching mailcow', async () => {
