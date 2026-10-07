@@ -1,4 +1,8 @@
-import { closeSync, openSync, rmSync, writeSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  closeSync, existsSync, fsyncSync, linkSync, openSync, rmSync, writeSync,
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { CliError, confirm, refusal } from '../common.js';
 import { EXIT, UsageError, parseCount } from '../args.js';
 import { fmtDate, keyValues, table } from '../output.js';
@@ -66,15 +70,33 @@ const jobs = {
   },
 };
 
-// Creates the token's file, only the owner reads it, before the token is issued: a file that exists
-// already or cannot be made is refused while the agent's token is still the one it has. Answers the
-// open file descriptor.
-function openTokenFile(file) {
+// Before the token is issued: the target must not exist, and a temporary file next to it, only the
+// owner reads it, must be possible; otherwise nothing is issued and the agent keeps its token.
+// Answers { tmp, fd }.
+function openTokenTemp(file) {
+  if (existsSync(file)) throw new CliError('out_file_exists', `${file} exists already: give a new file`, { exit: EXIT.refused });
+  const tmp = join(dirname(file), `.${basename(file)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
   try {
-    return openSync(file, 'wx', 0o600);
+    return { tmp, fd: openSync(tmp, 'wx', 0o600) };
   } catch (err) {
-    if (err?.code === 'EEXIST') throw new CliError('out_file_exists', `${file} exists already: give a new file`, { exit: EXIT.refused });
     throw new CliError('out_file_failed', `${file} could not be created (${err?.code ?? 'error'})`, { exit: EXIT.refused });
+  }
+}
+
+// The issued token into the temporary file, then linked to the target in one step (never over a
+// file that appeared meanwhile): the target is whole or absent, never partial.
+function publishToken({ tmp, fd }, file, token) {
+  let open = true;
+  try {
+    writeSync(fd, `${token}\n`);
+    fsyncSync(fd);
+    open = false;
+    closeSync(fd);
+    linkSync(tmp, file);
+  } catch (err) {
+    if (open) closeSync(fd);
+    throw new CliError('out_file_failed', `The token was issued (the old token no longer works) but ${file} could not be written `
+      + `(${err?.code ?? 'error'}): issue it again with another --out or with --out -`, { exit: EXIT.failed });
   }
 }
 
@@ -87,21 +109,22 @@ async function confirmAndIssue(ctx) {
   return agentAction(() => issueAgentToken(ctx.actor));
 }
 
-// The same into the file: it is made first, so nothing is issued when it cannot be, and a refused
-// or failed issue leaves no empty file behind.
+// The same into the file. The temporary file is gone afterwards whatever happened.
 async function issueIntoFile(ctx, file) {
-  const fd = openTokenFile(file);
-  let issued;
+  const temp = openTokenTemp(file);
   try {
-    issued = await confirmAndIssue(ctx);
-    writeSync(fd, `${issued.token}\n`);
-  } catch (err) {
-    closeSync(fd);
-    if (!issued) rmSync(file, { force: true });
-    throw err;
+    let issued;
+    try {
+      issued = await confirmAndIssue(ctx);
+    } catch (err) {
+      closeSync(temp.fd);
+      throw err;
+    }
+    publishToken(temp, file, issued.token);
+    return issued;
+  } finally {
+    rmSync(temp.tmp, { force: true });
   }
-  closeSync(fd);
-  return issued;
 }
 
 const token = {

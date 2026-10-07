@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -45,11 +45,11 @@ function sink() {
   return { write: (chunk) => { text += chunk; return true; }, get text() { return text; } };
 }
 
-async function cli(argv, { interactive = false, answers = [], stdin = '' } = {}) {
+async function cli(argv, { interactive = false, answers = [], stdin = '', ask = null } = {}) {
   const stdout = sink();
   const stderr = sink();
   const code = await run(argv, {
-    stdout, stderr, interactive, ask: async () => answers.shift() ?? '',
+    stdout, stderr, interactive, ask: ask ?? (async () => answers.shift() ?? ''),
     stdinIsTerminal: false, readStdin: async () => stdin,
     sleep: async () => {}, now: Date.now, pollMs: 0,
   });
@@ -267,6 +267,25 @@ describe('mailexpert agent', () => {
     expect(raw.out).toMatch(/^mxna_[A-Za-z0-9_-]+\n$/);
     expect(await storedHash()).toBe(sha(raw.out.trim()));
     expect((await cli(['agent', 'token', 'issue', '--out', '-', '--json', '--yes'])).code).toBe(2);
+  });
+
+  it('writes the token through a temporary file: the target is whole or absent, never partial', async () => {
+    await cli(['agent', 'token', 'issue', '--out', '-']);
+    const file = join(dir, 'agent-token');
+    // The target appears while the rotation is confirmed: the issued token cannot go there.
+    const late = await cli(['agent', 'token', 'issue', '--out', file], {
+      interactive: true, answers: [], ask: async () => { writeFileSync(file, 'someone else\n'); return 'y'; },
+    });
+    expect(late.code).toBe(3);
+    expect(late.err).toContain('(out_file_failed)');
+    expect(late.err).toContain('the old token no longer works');
+    expect(readFileSync(file, 'utf8')).toBe('someone else\n');
+    expect(readdirSync(dir)).toEqual(['agent-token']);
+    // A normal run leaves the target alone in the directory, whole.
+    rmSync(file);
+    expect((await cli(['agent', 'token', 'issue', '--out', file, '--yes'])).code).toBe(0);
+    expect(readdirSync(dir)).toEqual(['agent-token']);
+    expect(await storedHash()).toBe(sha(readFileSync(file, 'utf8').trim()));
   });
 
   it('queues jobs for the agent and lists them; revokes the token after confirmation', async () => {
