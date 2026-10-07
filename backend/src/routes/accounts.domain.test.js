@@ -317,9 +317,9 @@ describe('domain mailboxes in /api/accounts', () => {
     const cancel = () => fetch(`${base}/api/accounts/${ID}/deletion`, { method: 'DELETE' });
 
     const ROW = { id: ID, email_address: 'Info@example.com', mail_node: true, imap_host: 'mail.example.com' };
-    // extra: the row after the action; before: what the action finds when it locks the row.
+    // extra: the row after the action; before: what the action reads under the mailbox lock.
     const nodeRow = (extra = {}, before = {}) => query.mockImplementation(async (sql) => {
-      if (sql.includes('FOR UPDATE')) return { rows: [{ ...ROW, ...(extra.imap_host ? { imap_host: extra.imap_host } : {}), ...before }] };
+      if (sql.startsWith('SELECT email_address, mail_node, imap_host, delete_after, deactivated_at')) return { rows: [{ ...ROW, ...(extra.imap_host ? { imap_host: extra.imap_host } : {}), ...before }] };
       return sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts')
         ? { rows: [{ ...ROW, ...extra }] }
         : { rows: [] };

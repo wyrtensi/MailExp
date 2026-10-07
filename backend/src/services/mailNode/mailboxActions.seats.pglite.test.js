@@ -29,7 +29,7 @@ vi.mock('./nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ val
 vi.mock('../tenant/tenantDomains.js', async (importActual) => ({ ...(await importActual()), kickDomainSync: vi.fn(async () => null) }));
 
 const {
-  MailNodeError, addMailboxFilter, deleteMailbox, deleteMailboxFilters, listMailboxFilters, provisionMailbox,
+  MailNodeError, addMailboxFilter, deleteMailbox, deleteMailboxFilters, editMailboxFilter, listMailboxFilters, provisionMailbox,
 } = await import('./mailcow.js');
 const { saveEopSettings } = await import('./eopSettings.js');
 const { setTenantDriver } = await import('../tenant/driver.js');
@@ -241,17 +241,112 @@ describe('the read-only filter on the node', () => {
     expect(seen[0]).toMatch(/pg_advisory_xact_lock/);
   });
 
-  it('puts the filter back when an activation is refused for want of a seat', async () => {
+  it('refuses an activation for want of a seat without touching the node', async () => {
     const { account } = await create('a');
     await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
     await db.query("UPDATE mail_node_seat_assignments SET free_from = NOW() - interval '1 minute'");
     await create('b');
+    vi.clearAllMocks();
+    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
+    expect(listMailboxFilters).not.toHaveBeenCalled();
+    expect(addMailboxFilter).not.toHaveBeenCalled();
+    expect(deleteMailboxFilters).not.toHaveBeenCalled();
+  });
+
+  it('refuses a cancel for want of a seat without touching the node', async () => {
+    const { account } = await create('a');
+    await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    await db.query("UPDATE mail_node_seat_assignments SET free_from = NOW() - interval '1 minute'");
+    await create('b');
+    vi.clearAllMocks();
+    expect(await cancelMailboxDeletion({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
+    expect(listMailboxFilters).not.toHaveBeenCalled();
+    expect(addMailboxFilter).not.toHaveBeenCalled();
+  });
+
+  it('puts the filter back when the seat went to another mailbox while the node was asked', async () => {
+    const { account } = await create('a');
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    await db.query("UPDATE mail_node_seat_assignments SET free_from = NOW() - interval '1 minute'");
     addMailboxFilter.mockClear();
     deleteMailboxFilters.mockClear();
-    listMailboxFilters.mockResolvedValueOnce([{ id: 7, type: 'prefilter', desc: 'mailexpert-read-only', active: true }]);
-    expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
+    // The free seat is taken (another creation) after the check, while the node is asked: the
+    // other creation's row lands just before this action takes the seats lock.
+    let asked = false;
+    listMailboxFilters.mockImplementationOnce(async () => {
+      asked = true;
+      return [{ id: 7, type: 'prefilter', desc: 'mailexpert-read-only', active: true }];
+    });
+    const original = db.transaction.bind(db);
+    const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
+      query: async (sql, params) => {
+        if (asked && sql.includes('pg_advisory_xact_lock')) {
+          asked = false;
+          await tx.query("INSERT INTO mail_node_seat_assignments (seat_no, email) VALUES (2, 'b@example.com')");
+        }
+        return tx.query(sql, params);
+      },
+    })));
+    try {
+      expect(await activateNodeMailbox({ accountId: account.id }, ACTOR)).toEqual({ error: 'no_free_seats' });
+    } finally {
+      spy.mockRestore();
+    }
     expect(deleteMailboxFilters).toHaveBeenCalledWith(CFG, [7]);
     expect(addMailboxFilter).toHaveBeenCalledTimes(1);
+  });
+
+  // Every node call of an action happens before the global seats lock and without a row lock, so a
+  // slow node holds up neither the other mailboxes' seat changes nor this row's other writers.
+  const timeline = async (action) => {
+    const seen = [];
+    const mocks = [listMailboxFilters, addMailboxFilter, deleteMailboxFilters, editMailboxFilter];
+    const impls = mocks.map((mock) => mock.getMockImplementation());
+    const original = db.transaction.bind(db);
+    const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
+      query: (sql, params) => { seen.push(`sql:${sql}`); return tx.query(sql, params); },
+    })));
+    try {
+      mocks.forEach((mock, i) => mock.mockImplementation(async (...args) => { seen.push('node'); return impls[i]?.(...args); }));
+      expect((await action()).error).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+      mocks.forEach((mock, i) => mock.mockImplementation(impls[i]));
+    }
+    const lastNode = seen.lastIndexOf('node');
+    expect(lastNode).toBeGreaterThan(-1);
+    return { before: seen.slice(0, lastNode), after: seen.slice(lastNode + 1) };
+  };
+
+  it('takes the seats lock after the node calls of an activation and a cancel, and no row lock before them', async () => {
+    const runs = [];
+    const { account } = await create('a');
+    await deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR);
+    const ours = [{ id: 7, type: 'prefilter', desc: 'mailexpert-read-only', active: true }];
+    listMailboxFilters.mockImplementation(async () => ours);
+    const activation = await timeline(() => activateNodeMailbox({ accountId: account.id }, ACTOR));
+    runs.push(activation);
+    await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    const cancel = await timeline(() => cancelMailboxDeletion({ accountId: account.id }, ACTOR));
+    runs.push(cancel);
+    listMailboxFilters.mockImplementation(async () => []);
+    for (const { before, after } of runs) {
+      // Before the last node call: the mailbox lock only; no seats lock, no FOR UPDATE.
+      expect(before.filter((s) => s.includes('pg_advisory_xact_lock'))).toHaveLength(1);
+      expect(before.some((s) => /FOR UPDATE/i.test(s))).toBe(false);
+      // The seats lock comes after it.
+      expect(after.some((s) => s.includes('pg_advisory_xact_lock'))).toBe(true);
+    }
+  });
+
+  it('holds no row lock while a deactivation or a deletion request asks the node', async () => {
+    const { account } = await create('a');
+    const off = await timeline(() => deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR));
+    expect(off.before.some((s) => /FOR UPDATE/i.test(s))).toBe(false);
+    await saveEopSettings({ licenses: 2 });
+    const { account: other } = await create('b');
+    const asked = await timeline(() => requestMailboxDeletion({ accountId: other.id, email: 'b@example.com', reason: 'r' }, ACTOR));
+    expect(asked.before.some((s) => /FOR UPDATE/i.test(s))).toBe(false);
   });
 
   it('does not touch the node when the mailbox is not deactivated, or when a cancel leaves it deactivated', async () => {

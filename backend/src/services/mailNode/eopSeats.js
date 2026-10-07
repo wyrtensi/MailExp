@@ -271,6 +271,19 @@ export async function returnSeat({ accountId, email, purchased }, client) {
   return { seat: free.seat, reclaimed: false };
 }
 
+// Whether returnSeat would find a seat for the mailbox now, read without the lock: null, or the
+// error it would answer (seats_unknown | no_free_seats). Activation and the cancel of a deletion ask
+// it before they touch the node, so a refusal never opens the mailbox's local delivery for a moment
+// and the seats lock is never held across a node call; returnSeat under the lock stays the decision.
+export async function seatAvailableFor({ accountId, purchased }, db = { query }) {
+  const { rows: [own] } = await db.query(`
+    SELECT 1 FROM (${LATEST}) latest WHERE account_id = $1 AND released_at IS NOT NULL AND free_from > NOW()`, [accountId]);
+  if (own) return null;
+  if (purchased == null) return 'seats_unknown';
+  const { used, held } = await seatCounts(db);
+  return purchased - used - held < 1 ? 'no_free_seats' : null;
+}
+
 // Closes every open request the purchased number now covers. Returns the closed ids.
 export async function closeFulfilledRequests(purchased, db = { query }) {
   if (!Number.isInteger(purchased)) return [];

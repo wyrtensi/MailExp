@@ -18,7 +18,7 @@ import { cancelDeletion, requestDeletion } from './mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from './domains.js';
 import { getEopSettings } from './eopSettings.js';
 import {
-  confirmSeat, dropPendingSeat, getHoldDays, lockSeats, releaseSeat, reserveSeat, returnSeat, seatSupply,
+  confirmSeat, dropPendingSeat, getHoldDays, lockSeats, releaseSeat, reserveSeat, returnSeat, seatAvailableFor, seatSupply,
 } from './eopSeats.js';
 import { defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';
 import { MIRRORED_STATES, kickDomainSync } from '../tenant/tenantDomains.js';
@@ -352,15 +352,20 @@ async function kickMailboxDomain(email, actor) {
 
 // One action at a time per mailbox, across processes (the panel and the CLI): every action below runs
 // in one transaction that takes this lock first, does its node call and its row changes inside, and
-// commits together. Taken before the seats lock, never after.
+// commits together. Taken before the seats lock, never after. The node calls come before the seats
+// lock and hold no row lock: a slow node then holds up neither the other mailboxes' seat changes
+// (creations, cancels, the hold) nor this row's other writers (the sync), whose statements would
+// otherwise run into the statement timeout.
 async function lockMailbox(client, accountId) {
   await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mail_node:mailbox:${accountId}`]);
 }
 
-// The mailbox as the action sees it once it holds the lock.
+// The mailbox as the action sees it once it holds the lock. No row lock: only the actions under the
+// mailbox lock change delete_after and deactivated_at, and the deletion job removes only a row pending
+// deletion, which no action below changes past that check without the lock.
 async function readMailbox(client, accountId) {
   const { rows: [row] } = await client.query(
-    'SELECT email_address, mail_node, imap_host, delete_after, deactivated_at FROM email_accounts WHERE id = $1 FOR UPDATE', [accountId],
+    'SELECT email_address, mail_node, imap_host, delete_after, deactivated_at FROM email_accounts WHERE id = $1', [accountId],
   );
   return row ?? null;
 }
@@ -463,6 +468,9 @@ export async function cancelMailboxDeletion({ accountId }, actor) {
     if (!row?.mail_node || !row.delete_after || row.deactivated_at) return cancelDeletion({ accountId, purchased, client });
     if (!cfg) return { error: 'mail_node_not_configured' };
     if (onOtherMailHost(row, cfg)) return { error: 'mail_node_host_mismatch' };
+    // No seat for it: refused before the node is asked (cancelDeletion decides under the lock).
+    const short = await seatAvailableFor({ accountId, purchased }, client);
+    if (short) return { error: short };
     return openThen(cfg, row, () => cancelDeletion({ accountId, purchased, client }));
   });
   if (result.error) return { error: result.error };
@@ -500,11 +508,12 @@ export async function deactivateNodeMailbox({ accountId, reason: rawReason }, ac
     if (row.delete_after) return { error: 'mailbox_pending_deletion' };
     // The node first: when it cannot take the filter (a MailNodeError) nothing changes here.
     return closeThen(cfg, row, async () => {
-      await client.query(`
+      const { rowCount } = await client.query(`
         UPDATE email_accounts
            SET deactivated_at = NOW(), deactivated_by = $2, deactivation_reason = $3,
                deactivated_by_email = (SELECT COALESCE(NULLIF(email, ''), username) FROM users WHERE id = $2)
-         WHERE id = $1`, [accountId, actor?.userId ?? null, parsed.reason]);
+         WHERE id = $1 AND deactivated_at IS NULL AND delete_after IS NULL`, [accountId, actor?.userId ?? null, parsed.reason]);
+      if (!rowCount) return { error: 'account_not_found' };
       return { seat: await releaseSeat(accountId, 'deactivated', holdDays, client) };
     });
   });
@@ -527,7 +536,6 @@ export async function activateNodeMailbox({ accountId }, actor) {
   const cfg = await getMailNodeConfig();
   const result = await withTransaction(async (client) => {
     await lockMailbox(client, accountId);
-    await lockSeats(client);
     const row = await readMailbox(client, accountId);
     if (!row) return { error: 'account_not_found' };
     if (!row.mail_node) return { error: 'not_mail_node' };
@@ -535,12 +543,18 @@ export async function activateNodeMailbox({ accountId }, actor) {
     if (row.delete_after) return { error: 'deletion_pending' };
     if (!cfg) return { error: 'mail_node_not_configured' };
     if (onOtherMailHost(row, cfg)) return { error: 'mail_node_host_mismatch' };
+    // No seat for it: refused before the node is asked; returnSeat under the lock decides.
+    const short = await seatAvailableFor({ accountId, purchased }, client);
+    if (short) return { error: short };
     return openThen(cfg, row, async () => {
+      await lockSeats(client);
       const seat = await returnSeat({ accountId, email: row.email_address, purchased }, client);
       if (seat.error) return { error: seat.error };
-      await client.query(`
+      const { rowCount } = await client.query(`
         UPDATE email_accounts SET deactivated_at = NULL, deactivated_by = NULL, deactivated_by_email = NULL, deactivation_reason = NULL
-         WHERE id = $1`, [accountId]);
+         WHERE id = $1 AND deactivated_at IS NOT NULL AND delete_after IS NULL`, [accountId]);
+      // Gone meanwhile: the seat taken above rolls back with the transaction.
+      if (!rowCount) throw new Error('The mailbox changed while it was activated');
       return { seat, email: row.email_address };
     });
   });
