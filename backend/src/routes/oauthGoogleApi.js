@@ -39,13 +39,12 @@ router.post('/start', async (req, res) => {
     throw err;
   }
 
-  const config = await resolveGoogleConfig({ appId: selected.appId, origin: allowedRequestOrigin(req) });
-  if (!config) {
-    if (selected.reserved) await releaseGoogleSeat(selected.appId, email);
-    return res.status(409).json({ error: 'Gmail cannot be connected now', code: 'not_configured' });
-  }
-
   try {
+    const config = await resolveGoogleConfig({ appId: selected.appId, origin: allowedRequestOrigin(req) });
+    if (!config) {
+      if (selected.reserved) await releaseGoogleSeat(selected.appId, email);
+      return res.status(409).json({ error: 'Gmail cannot be connected now', code: 'not_configured' });
+    }
     const { state, codeChallenge } = await createOAuthState({
       provider: PROVIDER, userId: req.session.userId, loginHint: email, appId: config.appId, mode: 'add', email,
       senderName: names.senderName, senderNameAlt: names.senderNameAlt,
@@ -56,7 +55,8 @@ router.post('/start', async (req, res) => {
     const flow = await createGoogleLaunch({ userId: req.session.userId, url });
     res.json({ path: `/oauth/google/launch?flow=${flow}` });
   } catch (err) {
-    // A late failure here would otherwise leave the seat reserved for the full state TTL.
+    // Any failure after the reservation (reading the app, the state, the launch) would otherwise
+    // leave the seat reserved for the full state TTL.
     if (selected.reserved) await releaseGoogleSeat(selected.appId, email);
     throw err;
   }

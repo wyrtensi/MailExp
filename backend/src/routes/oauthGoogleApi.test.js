@@ -42,7 +42,7 @@ import express from 'express';
 import routes from './oauthGoogleApi.js';
 import { query } from '../services/db.js';
 import { selectGoogleApp, releaseGoogleSeat } from '../services/oauth/googleAppSelection.js';
-import { findKnownGoogleEmails } from '../services/oauth/googleApps.js';
+import { findKnownGoogleEmails, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { createOAuthState } from '../services/oauth/oauthState.js';
 import { createGoogleLaunch } from '../services/oauth/googleLaunch.js';
 
@@ -130,6 +130,13 @@ describe('POST /api/oauth/google/start', () => {
     const res = await start('a@gmail.com');
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ code: 'not_configured' });
+    expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
+  });
+
+  it('frees the reserved seat when reading the app configuration throws', async () => {
+    resolveGoogleConfig.mockRejectedValueOnce(new Error('db down'));
+    const res = await start('A@Gmail.com');
+    expect(res.status).toBe(500);
     expect(releaseGoogleSeat).toHaveBeenCalledWith('app-1', 'a@gmail.com');
   });
 
