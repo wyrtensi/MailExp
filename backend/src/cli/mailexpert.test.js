@@ -19,7 +19,9 @@ const actions = vi.hoisted(() => ({
 vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: vi.fn(), pool: { end: vi.fn(async () => {}) } }));
 vi.mock('../services/actor.js', () => ({ resolveCliActor: actions.resolveCliActor }));
 vi.mock('../services/accountAliases.js', async (importActual) => ({ ...(await importActual()), listAliases: actions.listAliases }));
-vi.mock('../services/mailNode/domainActions.js', () => ({ adminDomainList: actions.adminDomainList, restartDomain: actions.restartDomain }));
+vi.mock('../services/mailNode/domainActions.js', async (importActual) => ({
+  ...(await importActual()), adminDomainList: actions.adminDomainList, restartDomain: actions.restartDomain,
+}));
 vi.mock('../services/mailNode/mailboxActions.js', async (importActual) => ({
   ...(await importActual()),
   createNodeMailbox: actions.createNodeMailbox,
@@ -119,6 +121,15 @@ describe('help and usage', () => {
     expect((await cli(['jobs', 'list', '--status', 'bogus'])).code).toBe(2);
     expect((await cli(['jobs', 'list', '--limit', '0'])).code).toBe(2);
     expect((await cli(['mailbox', 'set-names', 'anna@example.com'])).code).toBe(2);
+    expect((await cli(['node', 'config', 'set'])).code).toBe(2);
+    expect((await cli(['node', 'apply', '--confirm-dkim-delete'])).code).toBe(2);
+    expect((await cli(['eop', 'set'])).code).toBe(2);
+    expect((await cli(['agent', 'token', 'bogus'])).code).toBe(2);
+    expect((await cli(['agent', 'token', 'revoke', '--out', 'x'])).code).toBe(2);
+    expect((await cli(['agent', 'jobs', '--limit', '0'])).code).toBe(2);
+    expect((await cli(['domain', 'dns-expected', 'example.com'])).code).toBe(2);
+    expect((await cli(['domain', 'add', 'not a domain'])).code).toBe(2);
+    expect((await cli(['mailbox', 'deactivate', 'anna@example.com'])).code).toBe(2);
   });
 });
 

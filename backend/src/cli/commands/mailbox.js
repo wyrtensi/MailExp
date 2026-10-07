@@ -1,10 +1,10 @@
-import { CliError, nodeAction, unwrap } from '../common.js';
+import { CliError, confirm, nodeAction, unwrap } from '../common.js';
 import { EXIT, UsageError } from '../args.js';
 import { fmtDate, keyValues, table } from '../output.js';
 import { getMailbox, getMailNodeConfig, parseHostName } from '../../services/mailNode/mailcow.js';
 import {
-  MAILBOX_ERRORS, cancelMailboxDeletion, createNodeMailbox, findNodeMailbox, listNodeMailboxes,
-  onOtherMailHost, requestMailboxDeletion, setNodeMailboxNames,
+  MAILBOX_ERRORS, activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, findNodeMailbox,
+  listNodeMailboxes, onOtherMailHost, requestMailboxDeletion, setNodeMailboxNames,
 } from '../../services/mailNode/mailboxActions.js';
 import { listAliases } from '../../services/accountAliases.js';
 
@@ -43,6 +43,11 @@ function accountView(account, aliases = []) {
       reason: account.deletion_reason ?? null,
       lastError: account.deletion_last_error ?? null,
     } : null,
+    deactivation: account.deactivated_at ? {
+      at: account.deactivated_at,
+      by: account.deactivated_by_email ?? null,
+      reason: account.deactivation_reason ?? null,
+    } : null,
   };
 }
 
@@ -56,6 +61,7 @@ function viewLines(view) {
     ['deletion', view.deletion ? `on ${fmtDate(view.deletion.deleteAfter)} (asked by ${view.deletion.requestedBy ?? '-'})` : 'none'],
     ['deletion reason', view.deletion ? view.deletion.reason : undefined],
     ['deletion error', view.deletion?.lastError ? view.deletion.lastError : undefined],
+    ['deactivated', view.deactivation ? `${fmtDate(view.deactivation.at)} by ${view.deactivation.by ?? '-'}: ${view.deactivation.reason ?? '-'}` : undefined],
   ]);
 }
 
@@ -219,8 +225,45 @@ const cancelDelete = {
   },
 };
 
+const deactivate = {
+  name: 'deactivate',
+  journal: 'mailbox.deactivated with the reason and the seat put on hold',
+  summary: 'deactivate a mailbox: read-only, no mail in or out, its EOP seat on hold',
+  usage: 'mailbox deactivate <address|id> --reason TEXT',
+  help: [
+    'As in the panel: the mailbox keeps its letters (still read over IMAP) and its mailcow mailbox,',
+    'but sends and receives nothing; its EOP seat is held for it for the hold period ("seats',
+    'status"). "mailbox reactivate" undoes it. The reason is required and stays in the journal.',
+  ],
+  flags: { reason: 'string' },
+  positionals: ['mailbox'],
+  async run(ctx) {
+    if (ctx.flags.reason === undefined) throw new UsageError('--reason is required: say why the mailbox is deactivated');
+    const account = await mailboxRef(ctx.args.mailbox);
+    await confirm(ctx, `Deactivate ${account.email_address}? It stops sending and receiving mail.`);
+    const result = unwrap(await nodeAction(() => deactivateNodeMailbox({ accountId: account.id, reason: ctx.flags.reason }, ctx.actor)), MAILBOX_ERRORS);
+    const view = accountView(result.account, await listAliases(account.id));
+    return { data: view, lines: [`deactivated ${view.email}`, ...viewLines(view)] };
+  },
+};
+
+const reactivate = {
+  name: 'reactivate',
+  journal: 'mailbox.activated with the seat it took',
+  summary: 'activate a deactivated mailbox again: its own seat while held, else a free one',
+  usage: 'mailbox reactivate <address|id>',
+  help: ['Refused at 0 free seats; a mailbox pending deletion needs "mailbox cancel-deletion" first.'],
+  positionals: ['mailbox'],
+  async run(ctx) {
+    const account = await mailboxRef(ctx.args.mailbox);
+    const result = unwrap(await nodeAction(() => activateNodeMailbox({ accountId: account.id }, ctx.actor)), MAILBOX_ERRORS);
+    const view = accountView(result.account, await listAliases(account.id));
+    return { data: view, lines: [`reactivated ${view.email}`] };
+  },
+};
+
 export default {
   name: 'mailbox',
-  summary: 'the mail node\'s mailboxes: list, show, create, names, deletion',
-  commands: [list, show, create, setNames, requestDelete, cancelDelete],
+  summary: 'the mail node\'s mailboxes: list, show, create, names, deletion, deactivation',
+  commands: [list, show, create, setNames, requestDelete, cancelDelete, deactivate, reactivate],
 };

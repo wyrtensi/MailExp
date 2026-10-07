@@ -5,7 +5,11 @@ import { UsageError } from '../args.js';
 import { fmtDate, fmtValue, keyValues, table } from '../output.js';
 import { parseHostName } from '../../services/mailNode/mailcow.js';
 import { MAIL_NODE_ERRORS } from '../../services/mailNode/errors.js';
-import { adminDomainList, restartDomain } from '../../services/mailNode/domainActions.js';
+import { MANUAL_STEPS } from '../../services/mailNode/domains.js';
+import {
+  acknowledgeDomainIdentity, addNodeDomain, adminDomainList, adoptNodeDomain, confirmDomainStep, markDomainReady,
+  restartDomain, setDomainDnsExpected,
+} from '../../services/mailNode/domainActions.js';
 import {
   TENANT_ERRORS, approveAliasContactsRemoval, approveInternalRelay, heldAliasContactsOf, setDomainHold, syncDomainNow,
 } from '../../services/tenant/tenantActions.js';
@@ -233,8 +237,132 @@ const approveAliasRemoval = {
   },
 };
 
+function applyResultLines(apply) {
+  if (!apply) return ['node settings were not applied: run "mailexpert node apply --domain" to see why'];
+  return (apply.items ?? []).filter((i) => i.status === 'failed').map((i) => `node settings: ${i.item} failed${i.code ? ` (${i.code})` : ''}`);
+}
+
+const add = {
+  name: 'add',
+  journal: 'mail_node.domain_added, and mail_node.applied for its node settings',
+  summary: 'create a domain on the node; its onboarding starts at node_created',
+  usage: 'domain add <domain> [--mailboxes N]',
+  help: [
+    '--mailboxes N   how many mailboxes the domain may hold on the node (default 500)',
+    'The DKIM key is made on the node only when mailcow signs (eop show: dkim mode). The domain\'s',
+    'node settings are applied at once; with the tenant driver, the domain goes into the tenant.',
+  ],
+  flags: { mailboxes: 'string' },
+  positionals: ['domain'],
+  async run(ctx) {
+    const result = unwrap(await nodeAction(() => addNodeDomain({ domain: domainArg(ctx), mailboxes: ctx.flags.mailboxes }, ctx.actor)), MAIL_NODE_ERRORS);
+    return { data: result, lines: [`${result.domain}: created on the node, state ${result.state}`, ...applyResultLines(result.apply)] };
+  },
+};
+
+const adopt = {
+  name: 'adopt',
+  journal: 'mail_node.domain_adopted, and mail_node.applied for its node settings',
+  summary: 'take in a domain made on the node by hand; its onboarding starts at node_created',
+  usage: 'domain adopt <domain>',
+  positionals: ['domain'],
+  async run(ctx) {
+    const result = unwrap(await nodeAction(() => adoptNodeDomain(domainArg(ctx), ctx.actor)), MAIL_NODE_ERRORS);
+    return { data: result, lines: [`${result.domain}: adopted, state ${result.state}`, ...applyResultLines(result.apply)] };
+  },
+};
+
+const step = {
+  name: 'step',
+  journal: 'mail_node.domain_state_changed (step_confirmed)',
+  summary: 'confirm the domain\'s next onboarding step ("Done")',
+  usage: 'domain step <domain> <step>',
+  help: [
+    `Steps, in order: ${MANUAL_STEPS.join(', ')}. Only the step after the current state is`,
+    'taken ("domain show" names it). With the tenant driver its steps are its own, not a person\'s.',
+  ],
+  positionals: ['domain', 'step'],
+  async run(ctx) {
+    const result = unwrap(await nodeAction(() => confirmDomainStep(domainArg(ctx), ctx.args.step, ctx.actor)), MAIL_NODE_ERRORS);
+    return { data: result, lines: [`${result.domain}: ${ctx.args.step} confirmed, state ${result.state}`] };
+  },
+};
+
+const ready = {
+  name: 'ready',
+  journal: 'mail_node.domain_state_changed (marked_ready)',
+  summary: 'mark a domain ready without the other steps (a pilot or a stand without a tenant)',
+  usage: 'domain ready <domain>',
+  help: ['The skipped steps stay unconfirmed. Refused with the tenant driver.'],
+  positionals: ['domain'],
+  async run(ctx) {
+    const domain = domainArg(ctx);
+    await confirm(ctx, `Mark ${domain} ready, skipping the steps not confirmed?`);
+    const result = unwrap(await nodeAction(() => markDomainReady(domain, ctx.actor)), MAIL_NODE_ERRORS);
+    return { data: result, lines: [`${result.domain}: state ${result.state}`] };
+  },
+};
+
+const ack = {
+  name: 'ack',
+  journal: 'mail_node.domain_identity_acknowledged with the old and new creation time',
+  summary: 'accept the creation time the node reports now for a domain (the "recreated" warning)',
+  usage: 'domain ack <domain> [--created TIME]',
+  help: [
+    'The node\'s time and the panel\'s are shown before the confirmation; if the node reports',
+    'another time by then, nothing is accepted. --created TIME names the time expected (for',
+    'scripts; it replaces the confirmation). The onboarding state stays as it is.',
+  ],
+  flags: { created: 'string' },
+  positionals: ['domain'],
+  async run(ctx) {
+    const domain = domainArg(ctx);
+    let seen = ctx.flags.created;
+    if (seen === undefined) {
+      const d = (await domainList()).domains.find((entry) => entry.domain === domain);
+      if (!d) throw new CliError('domain_not_found', MAIL_NODE_ERRORS.domain_not_found[1], { status: 404 });
+      if (!d.created) throw refusal(MAIL_NODE_ERRORS, 'domain_not_recreated');
+      ctx.note(`${domain}: the node reports ${d.created}; the panel is bound to ${d.nodeCreated ?? '-'}`);
+      await confirm(ctx, 'Accept the node\'s time?');
+      seen = d.created;
+    }
+    const result = unwrap(await nodeAction(() => acknowledgeDomainIdentity(domain, seen, ctx.actor)), MAIL_NODE_ERRORS);
+    return { data: result, lines: [`${domain}: the node's creation time ${seen} accepted`] };
+  },
+};
+
+const DNS_FLAGS = Object.freeze({ mx: 'expectedMx', 'tenant-txt': 'tenantTxt', 'dkim-cname1': 'dkimSelector1Cname', 'dkim-cname2': 'dkimSelector2Cname' });
+
+const dnsExpected = {
+  name: 'dns-expected',
+  journal: 'mail_node.config_changed (domain_dns) with the changed fields',
+  summary: 'set the DNS values a domain must publish that the panel cannot read yet',
+  usage: 'domain dns-expected <domain> [--mx HOSTS] [--tenant-txt TEXT] [--dkim-cname1 HOST] [--dkim-cname2 HOST]',
+  help: [
+    '--mx HOSTS          the expected MX hosts, separated by commas or spaces',
+    '--tenant-txt TEXT   the tenant\'s verification TXT, such as MS=ms12345678',
+    '--dkim-cname1 HOST  the target of the EOP DKIM selector1 CNAME',
+    '--dkim-cname2 HOST  the target of the EOP DKIM selector2 CNAME',
+    'Each option given replaces the stored value ("" clears it); the others stay. The domain\'s DNS',
+    'is checked again right away.',
+  ],
+  flags: Object.fromEntries(Object.keys(DNS_FLAGS).map((flag) => [flag, 'string'])),
+  positionals: ['domain'],
+  async run(ctx) {
+    const domain = domainArg(ctx);
+    const body = Object.fromEntries(Object.entries(DNS_FLAGS)
+      .filter(([flag]) => ctx.flags[flag] !== undefined)
+      .map(([flag, field]) => [field, ctx.flags[flag]]));
+    if (!Object.keys(body).length) throw new UsageError('nothing to change: give --mx, --tenant-txt, --dkim-cname1 or --dkim-cname2');
+    const result = unwrap(await setDomainDnsExpected(domain, body, ctx.actor), MAIL_NODE_ERRORS);
+    const lines = [`${domain}: ${result.fields.length ? `saved ${result.fields.join(', ')}` : 'nothing changed'}`];
+    if (result.dns) lines.push(`DNS check: ${result.dns.overall ?? '-'}`);
+    return { data: result, lines };
+  },
+};
+
 export default {
   name: 'domain',
   summary: 'the mail node\'s domains: onboarding and the tenant steps',
-  commands: [list, show, restart, sync, hold, allowAuthoritative, internalRelay, approveAliasRemoval],
+  commands: [list, show, add, adopt, step, ready, ack, dnsExpected, restart, sync, hold, allowAuthoritative, internalRelay, approveAliasRemoval],
 };

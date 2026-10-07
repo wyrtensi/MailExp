@@ -29,8 +29,12 @@ import tenant from './commands/tenant.js';
 import quarantine from './commands/quarantine.js';
 import jobs from './commands/jobs.js';
 import access from './commands/access.js';
+import node from './commands/node.js';
+import eop from './commands/eop.js';
+import seats from './commands/seats.js';
+import agent from './commands/agent.js';
 
-export const GROUPS = Object.freeze([mailbox, domain, tenant, quarantine, jobs, access]);
+export const GROUPS = Object.freeze([mailbox, domain, tenant, quarantine, jobs, access, node, eop, seats, agent]);
 
 const GLOBAL_HELP = [
   'Global options:',
