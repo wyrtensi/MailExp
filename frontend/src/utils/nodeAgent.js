@@ -34,9 +34,16 @@ export const AGENT_CONNECTION_KEYS = Object.freeze({
   connected: 'admin.nodeAgent.stateConnected',
 });
 
+const isActive = (job) => job?.state === 'queued' || job?.state === 'running';
+
 // The job of a kind still queued or running, or null.
 export function activeJob(jobs, kind) {
-  return (Array.isArray(jobs) ? jobs : []).find((job) => job?.kind === kind && (job.state === 'queued' || job.state === 'running')) ?? null;
+  return (Array.isArray(jobs) ? jobs : []).find((job) => job?.kind === kind && isActive(job)) ?? null;
+}
+
+// A backup or an update still queued or running: the server takes one of them at a time.
+export function nodeBusyJob(jobs) {
+  return activeJob(jobs, 'update') ?? activeJob(jobs, 'backup');
 }
 
 // The newest job of a kind, whatever its state.
@@ -58,7 +65,62 @@ export const JOB_ERROR_KEYS = Object.freeze({
   agent_token_rotated: 'admin.nodeAgent.errorRotated',
   agent_restarted: 'admin.nodeAgent.errorRestarted',
   agent_stopped: 'admin.nodeAgent.errorStopped',
+  // The update job (scripts/deploy/mail-node/node-update.sh); other codes show as they are, next to
+  // the node's own step text.
+  unknown_kind: 'admin.nodeAgent.errorUnknownKind',
+  not_in_main: 'admin.nodeAgent.errorNotInMain',
+  backup_not_configured: 'admin.nodeAgent.errorBackupNotConfigured',
+  backup_failed: 'admin.nodeAgent.errorBackupFailed',
+  rolled_back: 'admin.nodeAgent.errorRolledBack',
+  rollback_failed: 'admin.nodeAgent.errorRollbackFailed',
+  post_check_failed: 'admin.nodeAgent.errorPostCheckFailed',
+  update_interrupted: 'admin.nodeAgent.errorUpdateInterrupted',
+  update_silent: 'admin.nodeAgent.errorUpdateSilent',
+  node_standby: 'admin.nodeAgent.errorNodeStandby',
+  not_newer: 'admin.nodeAgent.errorNotNewer',
+  untrusted_origin: 'admin.nodeAgent.errorUntrustedOrigin',
+  local_changes: 'admin.nodeAgent.errorLocalChanges',
+  mailcow_update_failed: 'admin.nodeAgent.errorMailcowUpdateFailed',
 });
+
+// The node's scripts against the panel's commit: unknown (either is not a commit), current, behind
+// (the node runs another commit; "Update node now" brings it to the panel's), or newer (the node
+// refused the update to the panel's commit as older than its own: not_newer). The panel cannot
+// tell older from newer itself; the node's refusal is how it learns.
+export function scriptsState(nodeCommit, panelCommit, lastUpdateJob = null) {
+  const sha = /^[0-9a-f]{40}$/;
+  if (!sha.test(nodeCommit ?? '') || !sha.test(panelCommit ?? '')) return 'unknown';
+  if (nodeCommit === panelCommit) return 'current';
+  const job = lastUpdateJob;
+  if (job?.state === 'failed' && job.error === 'not_newer' && job.params?.sha === panelCommit) return 'newer';
+  return 'behind';
+}
+
+export const SCRIPTS_STATE_KEYS = Object.freeze({
+  unknown: 'admin.nodeAgent.scriptsUnknown',
+  current: 'admin.nodeAgent.scriptsCurrent',
+  behind: 'admin.nodeAgent.scriptsBehind',
+  newer: 'admin.nodeAgent.scriptsNewer',
+});
+
+// The node's part of a panel update (GET /api/admin/update -> node): null when no agent is set up
+// (the node is updated by hand); otherwise the last update job's state (queued, running,
+// succeeded, failed) when it was an update to the panel's commit, or current / behind / newer /
+// unknown from the commits when there is no such job (none yet, or one to an earlier commit).
+export function nodeUpdatePart(node) {
+  if (!node?.configured) return null;
+  const job = node.job ?? null;
+  if (job && JOB_STATE_KEYS[job.state] && job.params?.sha === node.panelCommit) {
+    return { state: job.state, step: job.step ?? null, error: job.error ?? null, at: job.finishedAt ?? job.startedAt ?? job.createdAt ?? null, target: job.params?.sha ?? null };
+  }
+  return { state: scriptsState(node.scriptsCommit, node.panelCommit, job), step: null, error: null, at: null, target: null };
+}
+
+// The node's part is still under way: the panel update view keeps following it.
+export function nodeUpdateActive(node) {
+  return isActive(node?.job);
+}
+
 
 // The node's last backup as the status report has it: none (no backup recorded), off (no restic
 // keys on the node), ok, or old (node-backup.sh --status found it too old, or the node never

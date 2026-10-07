@@ -16,7 +16,8 @@ runbook is [docs/operations/mail-node.md](../../../docs/operations/mail-node.md)
 | `node-backup.sh` | the nightly backup of the node into restic; installed to `/opt/mailexpert-node` once the restic keys are stored |
 | `node-restore.sh` | restores a node backup onto a fresh server (a move, a rebuilt node) |
 | `backup-lib.sh` | shared by the two and `setup.sh`; uses the panel's `lib/backup.sh` (restic in its pinned container) |
-| `node-agent.sh` | the node agent: long-polls the panel over HTTPS with its own token and runs only `status` and `backup` jobs; installed to `/opt/mailexpert-node` with `setup.sh --panel-url --agent-token-file` (runbook section 7a) |
+| `node-agent.sh` | the node agent: long-polls the panel over HTTPS with its own token and runs only `status`, `backup` and `update` jobs; installed to `/opt/mailexpert-node` with `setup.sh --panel-url --agent-token-file` (runbook section 7a) |
+| `node-update.sh` | the agent's `update` job, started detached from the agent (a transient systemd unit, or `setsid nohup`): the node's checkout checked (official `origin`, no local changes), the panel's commit checked to be in its `origin/main` and not older than the checkout's own, `node-backup.sh --tag pre-update` (the node backup is required), checkout and `setup.sh`, back to the previous commit when `setup.sh` fails, post-checks; state in `/var/lib/mailexpert-node/update-<id>.json` for the restarted agent (runbook section 7a, "Обновление узла") |
 | `extra-cf.sh` | edits one `key = value` line of Postfix's `extra.cf`; the local stand uses it too |
 | `dovecot-extra.conf` | the Dovecot settings `setup.sh` keeps as a block in `data/conf/dovecot/extra.conf` |
 | `systemd/`, `cron/`, `logrotate/` | the timers, the boot unit, the agent's service, and the cron and logrotate files for a host without systemd |

@@ -9,6 +9,19 @@
 #            whether it is too old);
 #   backup   node-backup.sh --tag manual (the panel's "Back up mail now"), bounded by
 #            NODE_AGENT_BACKUP_TIMEOUT seconds (6 hours); a status report follows.
+#   update   the node's scripts to the commit the panel runs (params.sha, 40 hex digits): run by
+#            node-update.sh (see there), detached from the agent, because setup.sh restarts the
+#            agent when its files change. The agent copies node-update.sh and its libraries to
+#            $NODE_STATE/update-run-<job id>/ and starts it as the transient systemd unit
+#            mailexpert-node-update-<job id> (systemd-run), or with setsid nohup on a host without
+#            systemd; neither is stopped with the agent. The update reports to the panel itself
+#            and keeps its state in $NODE_STATE/update-<job id>.json. While that file says the
+#            update runs and its process lives, the agent does not poll (the panel would take the
+#            agent's poll for a restart and fail the job it still runs) and sends no status report;
+#            it waits. An update whose process died is reported failed (update_interrupted, with
+#            the commit to go back to by hand); a final state the update could not deliver (the
+#            panel down) is delivered by the agent, which polls again only once the panel took
+#            it (until then it backs off as after any error).
 # Any other kind is reported failed. A status report goes out at the start and every 10 minutes.
 # Errors (the panel down, a refused token) back off up to 5 minutes.
 #
@@ -21,6 +34,7 @@
 #
 # Usage: node-agent.sh [--once]
 #   --once  one round (a status report when due, one poll, the job it brought) and exit
+# node-update.sh sources this file for its functions: main runs only when it is executed.
 # Run by the systemd unit mailexpert-node-agent (Restart=always), or on a host without systemd by
 # cron every minute under flock (a running agent keeps the lock).
 # Exit codes: 0 done (--once), 1 a failure, 2 invalid configuration.
@@ -42,6 +56,14 @@ AGENT_CONF=${MAILEXPERT_NODE_AGENT_CONF:-$(dirname "$NODE_CONF")/agent.env}
 POLL_WAIT=${MAILEXPERT_NODE_AGENT_POLL_WAIT:-50}
 STATUS_EVERY=${MAILEXPERT_NODE_AGENT_STATUS_EVERY:-600}
 PROGRESS_EVERY=${MAILEXPERT_NODE_AGENT_PROGRESS_EVERY:-15}
+# How long a round waits while an update runs, instead of polling.
+UPDATE_WAIT=${MAILEXPERT_NODE_AGENT_UPDATE_WAIT:-15}
+# A state file the update has not put its process id in yet is taken as starting this long.
+UPDATE_START_GRACE=120
+# The variables that move the node's paths (the tests): handed to an update started by systemd-run,
+# whose unit does not inherit the agent's environment.
+UPDATE_ENV_VARS=(MAILEXPERT_NODE_CONF MAILEXPERT_NODE_STATE MAILEXPERT_NODE_DIR MAILEXPERT_NODE_AGENT_CONF
+  MAILEXPERT_NODE_SRC MAILEXPERT_NODE_INIT MAILEXPERT_NODE_AGENT_PROGRESS_EVERY)
 BACKUP_TIMEOUT_DEFAULT=21600
 MAX_BACKOFF=300
 # The end of a job's output sent to the panel (the panel keeps 8000 characters).
@@ -181,6 +203,140 @@ send_status() {
 
 # --- Jobs ---------------------------------------------------------------------------------------
 
+is_sha() { [[ $1 =~ ^[0-9a-f]{40}$ ]]; }
+is_job_id() { [[ $1 =~ ^[0-9]{1,18}$ ]]; }
+update_state_file() { printf '%s/update-%s.json\n' "$NODE_STATE" "$1"; }
+update_run_dir() { printf '%s/update-run-%s\n' "$NODE_STATE" "$1"; }
+update_log_file() { printf '%s/update-%s.log\n' "$NODE_STATE" "$1"; }
+
+# write_update_state <job id> <state> <step> [<error>] [<pid>] [<previous commit>]: the update's
+# state file, replaced whole (written next to it, then moved), so a reader never sees half of it.
+write_update_state() {
+  local file tmp
+  file=$(update_state_file "$1")
+  tmp=$file.tmp
+  install -d "$NODE_STATE"
+  jq -cn --arg id "$1" --arg state "$2" --arg step "$3" --arg error "${4:-}" --arg pid "${5:-}" --arg previous "${6:-}" \
+    '{id: $id, state: $state, step: $step, error: (if $error == "" then null else $error end),
+      pid: (if $pid == "" then null else ($pid | tonumber) end),
+      previous: (if $previous == "" then null else $previous end)}' >"$tmp"
+  mv -f "$tmp" "$file"
+}
+
+# update_alive <state file>: the update's process still runs (or it is starting).
+update_alive() {
+  local file=$1 pid age
+  pid=$(jq -r '.pid // empty' "$file" 2>/dev/null) || pid=''
+  if [ -z "$pid" ]; then
+    age=$(($(date +%s) - $(stat -c %Y "$file" 2>/dev/null || echo 0)))
+    [ "$age" -lt "$UPDATE_START_GRACE" ]
+    return
+  fi
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  # The process id may have been reused by now: it must still be the update.
+  if [ -r "/proc/$pid/cmdline" ]; then tr '\0' ' ' <"/proc/$pid/cmdline" | grep -q 'node-update.sh'; fi
+}
+
+# deliver_update_state <state file>: a final state the update left undelivered, or the failure of
+# an update whose process died, reported to the panel; the files go once the panel took it (or
+# answered that the job is no longer running there).
+deliver_update_state() {
+  local file=$1 id state step error previous code body=$WORK/update-report.json tail=''
+  id=$(jq -r '.id // empty' "$file" 2>/dev/null) || id=''
+  if ! is_job_id "$id"; then rm -f "$file"; return 0; fi
+  state=$(jq -r '.state // empty' "$file")
+  step=$(jq -r '.step // ""' "$file")
+  error=$(jq -r '.error // ""' "$file")
+  previous=$(jq -r '.previous // ""' "$file")
+  is_sha "$previous" || previous=''
+  case $state in
+    succeeded | failed) ;;
+    *)
+      state=failed error=update_interrupted
+      step="the update stopped${previous:+ (it started from $previous: git checkout of it and setup.sh go back by hand)} at: $step"
+      ;;
+  esac
+  if [ -f "$(update_log_file "$id")" ]; then tail=$(tail -n "$LOG_LINES" "$(update_log_file "$id")" | tail -c "$LOG_BYTES"); fi
+  jq -cn --arg state "$state" --arg step "${step:0:200}" --arg log "$tail" --arg error "$error" \
+    '{state: $state, step: $step} + (if $log == "" then {} else {log: $log} end)
+     + (if $error == "" then {} else {error: $error} end)' >"$body"
+  code=$(panel POST "/api/node-agent/jobs/$id" "$body" "$WORK/post.out" 30)
+  case $code in
+    2?? | 404 | 409)
+      rm -f "$file"
+      rm -rf "$(update_run_dir "$id")"
+      log "job $id: update $state delivered to the panel"
+      ;;
+    *) warn "job $id: the update's result was not delivered (HTTP $code); tried again next round"; return 1 ;;
+  esac
+}
+
+# update_pending: 0 nothing pending (the agent may poll); 1 an update runs (the agent waits); 2 an
+# update ended and the panel did not take its result yet (the agent backs off and tries again).
+# Delivers what ended updates left behind.
+update_pending() {
+  local file pending=0
+  for file in "$NODE_STATE"/update-*.json; do
+    [ -f "$file" ] || continue
+    case $(jq -r '.state // empty' "$file" 2>/dev/null) in
+      succeeded | failed) ;;
+      *)
+        if update_alive "$file"; then pending=1 && continue; fi
+        ;;
+    esac
+    if ! deliver_update_state "$file" && [ "$pending" = 0 ]; then pending=2; fi
+  done
+  return "$pending"
+}
+
+# detach_mode: systemd (a transient unit) when systemd runs the host, setsid otherwise.
+detach_mode() {
+  case ${MAILEXPERT_NODE_INIT:-} in
+    systemd) echo systemd ;;
+    cron) echo setsid ;;
+    *) if command -v systemd-run >/dev/null && [ -d /run/systemd/system ]; then echo systemd; else echo setsid; fi ;;
+  esac
+}
+
+# start_update <job id> <sha>: node-update.sh started detached from the agent, from a copy that
+# setup.sh cannot replace under it (it installs new versions of the same files).
+start_update() {
+  local id=$1 sha=$2 dir file var
+  local -a env_args=()
+  dir=$(update_run_dir "$id")
+  if [ ! -f "$NODE_DIR/node-update.sh" ]; then
+    report "$id" failed "node-update.sh is not installed: run setup.sh on the node" '' update_not_installed || true
+    return 0
+  fi
+  rm -rf "$dir"
+  install -d -m 700 "$dir"
+  for file in node-update.sh node-agent.sh lib.sh common.sh env.sh; do
+    if ! cp "$NODE_DIR/$file" "$dir/$file" 2>/dev/null; then
+      rm -rf "$dir"
+      report "$id" failed "$file is missing in $NODE_DIR: run setup.sh on the node" '' update_not_installed || true
+      return 0
+    fi
+  done
+  write_update_state "$id" starting "starting the update"
+  report "$id" running "starting the update to ${sha:0:12}" || true
+  if [ "$(detach_mode)" = systemd ]; then
+    for var in "${UPDATE_ENV_VARS[@]}"; do
+      if [ -n "${!var:-}" ]; then env_args+=("--setenv=$var=${!var}"); fi
+    done
+    if ! systemd-run --quiet --collect --unit="mailexpert-node-update-$id" "${env_args[@]}" \
+      /bin/bash "$dir/node-update.sh" "$id" "$sha" >/dev/null 2>&1; then
+      rm -f "$(update_state_file "$id")"
+      rm -rf "$dir"
+      report "$id" failed "systemd-run could not start the update" '' update_not_started || true
+      return 0
+    fi
+  else
+    setsid nohup /bin/bash "$dir/node-update.sh" "$id" "$sha" </dev/null >/dev/null 2>&1 &
+  fi
+  log "job $id: update to ${sha:0:12} started ($(detach_mode))"
+}
+
 # report <job id> <state> <step> [<log file>] [<error>]
 report() {
   local id=$1 state=$2 step=$3 log=${4:-} error=${5:-} tail='' file=$WORK/report.json
@@ -241,7 +397,7 @@ run_backup() {
 
 # run_job <job json file>: the job the poll brought, if its kind is one the agent runs.
 run_job() {
-  local file=$1 id kind tag
+  local file=$1 id kind tag sha
   id=$(jq -r '.id // empty' "$file" 2>/dev/null) || id=''
   if ! [[ $id =~ ^[0-9]{1,18}$ ]]; then
     warn "the panel sent a job without a valid id; ignored"
@@ -262,6 +418,14 @@ run_job() {
       tag=$(jq -r '.params.tag // "manual"' "$file")
       run_backup "$id" "$tag"
       ;;
+    update)
+      sha=$(jq -r '.params.sha // empty' "$file" 2>/dev/null) || sha=''
+      if is_sha "$sha"; then
+        start_update "$id" "$sha"
+      else
+        report "$id" failed "the update's commit is not 40 hex digits" '' sha_invalid || true
+      fi
+      ;;
     *)
       warn "job $id: unknown kind; reported failed"
       report "$id" failed "unknown job kind" '' unknown_kind || true
@@ -280,6 +444,14 @@ backoff() {
 # round: a status report when due, one poll, and the job it brought. Status 1 after an error.
 round() {
   local now code out=$WORK/next.json
+  # The update runs on its own and reports itself: no poll meanwhile, nor before its result is
+  # delivered (see the header).
+  local pending=0
+  update_pending || pending=$?
+  case $pending in
+    1) sleep "$UPDATE_WAIT"; return 0 ;;
+    2) return 1 ;;
+  esac
   now=$(date +%s)
   if [ $((now - LAST_STATUS)) -ge "$STATUS_EVERY" ]; then
     # A refused report is tried again next round; the poll goes on regardless.
@@ -319,4 +491,4 @@ main() {
   done
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

@@ -10,7 +10,8 @@
 #      the number of mailboxes), and the vmail volume itself (read-only, file by file: no local copy
 #      of the mail, and restic deduplicates maildir files from night to night) go into one snapshot
 #      of this node's restic host (mailexpert-node-<hex>), tags mailcow and the run's tag;
-#   3. retention: 7 daily, 4 weekly and 6 monthly snapshots, and every move snapshot; the nightly
+#   3. retention: the last 5 pre-update snapshots (the node agent's update); otherwise 7 daily,
+#      4 weekly and 6 monthly snapshots, and every move and pre-update snapshot; the nightly
 #      run on Sunday also prunes;
 #   4. on Sundays (and with --verify), once the local dump is gone: a restic check reading back part
 #      of the data (NODE_BACKUP_READ_SUBSET, 5% by default) and a restore of the dump and one
@@ -194,12 +195,18 @@ add_node_files() {
   MAILCOW_REF=$describe
 }
 
-# forget_old <weekday> <tag>: this node's own snapshots only (--host), the ones of the mailcow tag.
+# forget_old <weekday> <tag>: this node's own snapshots only (--host), the ones of the mailcow tag:
+# the last 5 pre-update snapshots (the node agent's update, like the panel's backup.sh); otherwise
+# 7 daily, 4 weekly and 6 monthly, and every pre-update and move snapshot outside that policy.
 forget_old() {
   local -a prune=()
   if prune_today "$1" "$2"; then prune=(--prune); fi
+  # Thinning the pre-update snapshots is not worth failing the backup for: the next run tries again.
+  restic_run -t "$NODE_BACKUP_FORGET_TIMEOUT" -- forget --host "$RESTIC_HOST" --tag "$NODE_BACKUP_TAG,pre-update" \
+    --keep-last 5 >/dev/null ||
+    warn "restic forget of the old pre-update snapshots failed or ran past ${NODE_BACKUP_FORGET_TIMEOUT}s; the next backup tries again"
   restic_run -t "$NODE_BACKUP_FORGET_TIMEOUT" -- forget --host "$RESTIC_HOST" --tag "$NODE_BACKUP_TAG" \
-    --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-tag move "${prune[@]}" >/dev/null ||
+    --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-tag move --keep-tag pre-update "${prune[@]}" >/dev/null ||
     die "restic forget failed or ran past ${NODE_BACKUP_FORGET_TIMEOUT}s (the snapshot is stored; retention runs again next night)"
 }
 

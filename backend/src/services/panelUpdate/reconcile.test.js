@@ -24,6 +24,16 @@ beforeEach(() => { errorSpy = vi.spyOn(console, 'error').mockImplementation(() =
 afterEach(() => { errorSpy.mockRestore(); });
 
 describe('update audit reconciler', () => {
+  it('hands every pass the update results for the node update; its failure does not stop the journal', async () => {
+    const spool = { readResults: vi.fn(async () => [result({ state: 'succeeded', terminal: true, exitCode: 0 })]) };
+    const recordAudit = vi.fn(async () => {});
+    const afterResults = vi.fn(async () => { throw new Error('db down'); });
+    const reconcile = createReconciler({ getSpool: () => spool, query: vi.fn(async () => ({ rows: [requested()] })), recordAudit, afterResults });
+    await reconcile();
+    expect(afterResults).toHaveBeenCalledWith([expect.objectContaining({ id: ID1, state: 'succeeded' })]);
+    expect(recordAudit).toHaveBeenCalledTimes(1);
+  });
+
   it('records the start of an update under the admin who asked for it', async () => {
     const { query, recordAudit, reconcile } = setup([result()], [requested()]);
     await reconcile();
@@ -121,6 +131,20 @@ describe('update audit reconciler', () => {
       stop();
       await vi.advanceTimersByTimeAsync(60_000);
       expect(reconcile).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runs a first pass at once when asked (the backend start)', async () => {
+    vi.useFakeTimers();
+    try {
+      const reconcile = vi.fn(async () => {});
+      const stop = startUpdateAuditReconciler({ reconcile, intervalMs: 30_000, immediate: true });
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      stop();
     } finally {
       vi.useRealTimers();
     }

@@ -275,9 +275,12 @@ setupWebSocket(wss, sessionMiddleware);
 // Run pending schema migrations then start
 await runMigrations();
 
-// Journal the start and end of panel updates the host's updater reports in the update spool
-// (services/panelUpdate/reconcile.js); a pass every 30 s that never keeps the process alive.
-startUpdateAuditReconciler();
+// Journal the start and end of panel updates the host's updater reports in the update spool and,
+// once an update to this version succeeded, queue the node agent's update to the same commit
+// (services/panelUpdate/reconcile.js): a pass now (the panel just started, often after its own
+// update) and every 30 s, whether or not anyone opens the update page; it never keeps the process
+// alive.
+startUpdateAuditReconciler({ immediate: true });
 
 // Mail node domains that already hold panel mailboxes keep taking new ones: they are recorded as
 // ready before the server takes requests (services/mailNode/domains.js).

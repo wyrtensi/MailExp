@@ -9,6 +9,7 @@ import {
   requestErrorKey, rollbackCommand, rollbackInfo, safeGithubUrl, shouldOfferReload, stateInfo, textList,
   updateBlockReason, updateStatus, updateTarget,
 } from '../utils/panelUpdate.js';
+import { JOB_ERROR_KEYS, nodeUpdatePart } from '../utils/nodeAgent.js';
 
 export const RUNBOOK_DOCS_URL = 'https://github.com/wyrtensi/MailExpert/blob/main/docs/operations/README.md';
 
@@ -102,6 +103,46 @@ function CheckResult({ check, target, t }) {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+const NODE_PART_KEYS = {
+  queued: 'admin.panelUpdate.nodeQueued',
+  running: 'admin.panelUpdate.nodeRunning',
+  succeeded: 'admin.panelUpdate.nodeSucceeded',
+  failed: 'admin.panelUpdate.nodeFailed',
+  current: 'admin.panelUpdate.nodeCurrent',
+  behind: 'admin.panelUpdate.nodeBehind',
+  newer: 'admin.panelUpdate.nodeNewer',
+  unknown: 'admin.panelUpdate.nodeUnknown',
+};
+const NODE_PART_TONES = {
+  queued: 'neutral', running: 'warn', succeeded: 'good', failed: 'bad', current: 'good', behind: 'warn', newer: 'warn', unknown: 'neutral',
+};
+
+// The node's part of the update: the node agent's update job to the panel's commit, queued by the
+// panel once its own update succeeded (services/panelUpdate/reconcile.js). Shown only with an agent;
+// without one the node is updated by hand (the step in the update's next list).
+function NodePart({ node, t }) {
+  const part = nodeUpdatePart(node);
+  if (!part) return null;
+  return (
+    <div data-panel-update-node={part.state} style={{ ...cardStyle, marginTop: 12 }}>
+      <div style={rowStyle}>
+        <span style={labelStyle}>{t('admin.panelUpdate.nodePart')}</span>
+        <strong data-node-state style={{ color: TONE_COLORS[NODE_PART_TONES[part.state]] }}>{t(NODE_PART_KEYS[part.state])}</strong>
+        {part.target && <span style={noteStyle}>{t('admin.panelUpdate.nodeTarget', { commit: part.target.slice(0, 12) })}</span>}
+        {part.at && <span style={noteStyle}>{when(part.at)}</span>}
+      </div>
+      {part.step && <div data-node-step style={{ fontSize: 12, marginTop: 4 }}>{part.step}</div>}
+      {part.state === 'failed' && part.error && (
+        <div data-node-error style={{ fontSize: 12, marginTop: 4, color: 'var(--red)' }}>
+          {JOB_ERROR_KEYS[part.error] ? t(JOB_ERROR_KEYS[part.error]) : part.error}
+        </div>
+      )}
+      {!node.connected && part.state !== 'succeeded' && <div style={{ ...noteStyle, marginTop: 4 }}>{t('admin.panelUpdate.nodeNotConnected')}</div>}
+      <div style={{ ...noteStyle, marginTop: 4 }}>{t('admin.panelUpdate.nodeHint')}</div>
     </div>
   );
 }
@@ -381,6 +422,7 @@ export default function PanelUpdateSection() {
           )}
 
           {run && <RunResult run={{ ...run, links: data.links }} t={t} />}
+          {data.node && <NodePart node={data.node} t={t} />}
           {shouldOfferReload(run) && (
             <div data-panel-update-reload role="status" style={{ marginTop: 8, fontSize: 12 }}>
               <div>{t('admin.panelUpdate.reloadHint')}</div>

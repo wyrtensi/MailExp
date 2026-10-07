@@ -12,6 +12,7 @@ import { uuidParam } from '../utils/uuid.js';
 import { getLatestStatus } from '../services/panelUpdate/latest.js';
 import { SpoolError, TARGET_RE, getSpool as defaultGetSpool, isBusy } from '../services/panelUpdate/spool.js';
 import { reconcileUpdateAudit } from '../services/panelUpdate/reconcile.js';
+import { getNodeUpdateState } from '../services/mailNode/nodeAgent.js';
 
 export const UPDATE_LINKS = Object.freeze({
   runbook: 'https://github.com/wyrtensi/MailExpert/blob/main/docs/operations/deployment.md#откат-обновления',
@@ -22,6 +23,7 @@ export function createAdminUpdateRouter({
   getStatus = getLatestStatus,
   getSpool = defaultGetSpool,
   reconcile = reconcileUpdateAudit,
+  getNode = getNodeUpdateState,
   query = dbQuery,
   recordAudit = dbRecordAudit,
   now = () => Date.now(),
@@ -49,12 +51,23 @@ export function createAdminUpdateRouter({
     return String(rows[0]?.email || rows[0]?.username || userId || '').slice(0, 254);
   }
 
+  // The node's part of the update (the agent's update job); null when it cannot be read.
+  async function nodeState() {
+    try {
+      return await getNode();
+    } catch (err) {
+      console.error('[panel-update] Node update state unavailable:', err?.code || err?.name || 'Error');
+      return null;
+    }
+  }
+
   router.get('/', async (req, res) => {
     await reconcile();
     const spool = getSpool();
-    const [status, state] = await Promise.all([
+    const [status, state, node] = await Promise.all([
       getStatus({ refresh: req.query.refresh === '1' }),
       spoolState(spool),
+      nodeState(),
     ]);
     const latestVersion = status.latest?.version ?? null;
     res.json({
@@ -71,6 +84,7 @@ export function createAdminUpdateRouter({
       pending: state.requests.pending,
       check: (latestVersion && state.results.find((r) => r.action === 'check' && r.target === latestVersion)) || null,
       run: state.results.find((r) => r.action === 'update') || null,
+      node,
       links: UPDATE_LINKS,
     });
   });

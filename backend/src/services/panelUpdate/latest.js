@@ -21,7 +21,8 @@ export const versionOf = (sha) => `sha-${sha.slice(0, 12)}`;
 
 const isDisabled = (env) => /^(1|true|yes|on)$/i.test(env.UPDATE_CHECK_DISABLED || '');
 
-function currentOf(env) {
+// The commit this panel runs (BUILD_SHA, set by the image build), or nulls on a build without one.
+export function currentOf(env = process.env) {
   const sha = String(env.BUILD_SHA || '').trim().toLowerCase();
   return SHA_RE.test(sha) ? { sha, version: versionOf(sha) } : { sha: null, version: null };
 }

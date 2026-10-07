@@ -4,11 +4,14 @@
 // request that asked for the update. Instead the results the host's updater leaves in the spool are
 // read on each GET /api/admin/update and every 30 s, and any entry the journal does not hold yet
 // (by details->>'requestId' and action) is written under the administrator of the matching
-// panel.update_requested entry. One pass runs at a time; dedupe relies on that and on a single
+// panel.update_requested entry. The same pass queues the node's part of an update
+// (updateNodeAfterPanel below). One pass runs at a time; dedupe relies on that and on a single
 // backend process, there is no unique constraint in the table.
 import { query as dbQuery } from '../db.js';
 import { recordAudit as dbRecordAudit } from '../auditLog.js';
 import { getSpool as defaultGetSpool } from './spool.js';
+import { queueNodeUpdateIfBehind } from '../mailNode/nodeAgent.js';
+import { currentOf } from './latest.js';
 
 const REQUESTED = 'panel.update_requested';
 const STARTED = 'panel.update_started';
@@ -33,12 +36,44 @@ function entriesFor(result) {
 
 const keyOf = (requestId, action) => `${requestId}:${action}`;
 
-export function createReconciler({ getSpool = defaultGetSpool, query = dbQuery, recordAudit = dbRecordAudit } = {}) {
+// The node's part of an update (services/mailNode/nodeAgent.js): once the host's updater reports its
+// newest update (results come newest first) as succeeded to the version this panel now runs
+// (update.sh found the new panel healthy; an older result is not looked at, so a rollback never
+// takes the node back by itself),
+// the node agent gets an update job to the same commit. queueNodeUpdateIfBehind queues one job per
+// commit at most, so the pass every 30 s asks again harmlessly (and catches an agent that connects
+// later). Journaled as the panel's own action.
+export async function updateNodeAfterPanel(results, {
+  version = currentOf().version, queue = queueNodeUpdateIfBehind, recordAudit = dbRecordAudit,
+} = {}) {
+  const newest = results[0];
+  if (!version || newest?.state !== 'succeeded' || newest.target !== version) return null;
+  const job = await queue();
+  if (job) {
+    await recordAudit([{
+      action: 'mail_node.agent_job_requested',
+      actorUserId: null,
+      details: { kind: 'update', jobId: job.id, sha: job.params.sha, automatic: true },
+    }]);
+  }
+  return job;
+}
+
+export function createReconciler({
+  getSpool = defaultGetSpool, query = dbQuery, recordAudit = dbRecordAudit, afterResults = null,
+} = {}) {
   const journaled = new Set(); // keys the journal was seen to hold
   let running = null;
 
   async function pass() {
     const results = (await getSpool().readResults()).filter((r) => r.action === 'update');
+    if (afterResults) {
+      try {
+        await afterResults(results);
+      } catch (err) {
+        console.error('[panel-update] Node update after the panel failed:', err?.code || err?.name || 'Error');
+      }
+    }
     const wanted = results.flatMap((r) => entriesFor(r).map((e) => ({ ...e, result: r })))
       .filter((e) => !journaled.has(keyOf(e.result.id, e.action)));
     if (!wanted.length) return;
@@ -81,12 +116,16 @@ export function createReconciler({ getSpool = defaultGetSpool, query = dbQuery, 
 let defaultReconcile = null;
 
 export function reconcileUpdateAudit() {
-  defaultReconcile ??= createReconciler();
+  defaultReconcile ??= createReconciler({ afterResults: (results) => updateNodeAfterPanel(results) });
   return defaultReconcile();
 }
 
-// Runs the reconciler every 30 s without keeping the process alive. Returns a stop function.
-export function startUpdateAuditReconciler({ reconcile = reconcileUpdateAudit, intervalMs = 30_000 } = {}) {
+// Runs the reconciler every 30 s without keeping the process alive (and once at once with
+// immediate). The default reconciler also queues the node's update after a panel update
+// (updateNodeAfterPanel), so that runs on the server whether or not anyone opens the update page.
+// Returns a stop function.
+export function startUpdateAuditReconciler({ reconcile = reconcileUpdateAudit, intervalMs = 30_000, immediate = false } = {}) {
+  if (immediate) reconcile().catch(() => {});
   const timer = setInterval(() => { reconcile().catch(() => {}); }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);

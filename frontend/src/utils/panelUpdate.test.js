@@ -145,6 +145,9 @@ describe('polling', () => {
     assert.equal(needsPolling(base({ pending: { id: 'x', action: 'check' } }), NOW), true);
     assert.equal(needsPolling(base({ run: { state: 'updating', terminal: false, updatedAt: ago(5000) } }), NOW), true);
     assert.equal(needsPolling(base({ run: { state: 'succeeded', terminal: true, updatedAt: ago(5000) } }), NOW), false);
+    // The node's part after the panel's: followed while the agent's update job waits or runs.
+    assert.equal(needsPolling(base({ node: { configured: true, job: { state: 'running' } } }), NOW), true);
+    assert.equal(needsPolling(base({ node: { configured: true, job: { state: 'failed' } } }), NOW), false);
   });
 
   it('stops for a run the host abandoned (not touched for 30 minutes)', () => {

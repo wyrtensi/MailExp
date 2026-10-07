@@ -236,7 +236,9 @@ EOF
   calls | lacks '^mailcow backup.*vmail'
   restic_calls | grep -q '^unlock$'
   restic_calls | grep -qE '^backup --json --host mailexpert-node-[0-9a-f]{16} --tag mailcow --tag manual /backup /vmail$'
-  restic_calls | grep -qE '^forget --host mailexpert-node-[0-9a-f]{16} --tag mailcow --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-tag move$'
+  # The last 5 pre-update snapshots; the rest by age, keeping every move and pre-update one.
+  restic_calls | grep -qE '^forget --host mailexpert-node-[0-9a-f]{16} --tag mailcow,pre-update --keep-last 5$'
+  restic_calls | grep -qE '^forget --host mailexpert-node-[0-9a-f]{16} --tag mailcow --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-tag move --keep-tag pre-update$'
   restic_calls | lacks '^(check|restore)'
   SNAP=$(cat "$MOCK_DIR/repo/latest")
   [ -f "$SNAP/backup/backup_mariadb.tar.zst" ] && [ -f "$SNAP/backup/mailcow.conf" ]
@@ -979,4 +981,15 @@ keys() {
   [ "$status" -eq 2 ]
   [[ $output == *"run ln -s mailcow.conf .env && ./generate_config.sh in $MC first"* ]]
   [ ! -s "$MOCK_DIR/restic" ]
+}
+
+@test "a failed forget of the old pre-update snapshots warns; the backup still succeeds" {
+  configured
+  export MOCK_GIT_HEAD=0123456789abcdef0123456789abcdef01234567
+  export MOCK_RESTIC_FORGET_PRE_UPDATE=1
+  run bash "$BACKUP" --tag pre-update
+  [ "$status" -eq 0 ]
+  [[ $output == *"warning: restic forget of the old pre-update snapshots failed"* ]]
+  restic_calls | grep -qE '^backup --json --host mailexpert-node-[0-9a-f]{16} --tag mailcow --tag pre-update /backup /vmail$'
+  restic_calls | grep -qE -- '--keep-tag move --keep-tag pre-update$'
 }
