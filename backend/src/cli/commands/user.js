@@ -2,7 +2,6 @@ import { confirm, unwrap } from '../common.js';
 import { UsageError, parseCount } from '../args.js';
 import { fmtDate, keyValues, table } from '../output.js';
 import { queueEffects } from '../effects.js';
-import { mergeEffects } from '../../services/admin/adminEffects.js';
 import {
   ADMIN_USER_ERRORS, createUser, deleteUser, disableUserTotp, findUser, listUsers, updateUser,
 } from '../../services/admin/users.js';
@@ -81,13 +80,14 @@ const create = {
   async run(ctx) {
     const created = unwrap(await createUser(ctx.args.email, ctx.actor), ADMIN_USER_ERRORS);
     let { user } = created;
-    let { effects } = created;
+    // The approval's effects are queued at once: the user exists even if --admin is then refused.
+    const queued = await queueEffects(ctx, created.effects);
     if (ctx.flags.admin) {
       const updated = unwrap(await updateUser(user.id, { isAdmin: true }, ctx.actor), ADMIN_USER_ERRORS);
       user = updated.user;
-      effects = mergeEffects(effects, updated.effects);
+      const more = await queueEffects(ctx, updated.effects);
+      if (more.job) queued.lines.push(...more.lines);
     }
-    const queued = await queueEffects(ctx, effects);
     return {
       data: { user, created: created.created, job: queued.job },
       lines: [`${created.created ? 'created' : 'approved the existing user'} ${user.email}`, ...userLines(user), ...queued.lines],

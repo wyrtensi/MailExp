@@ -80,9 +80,10 @@ export function clearMicrosoftEnv() {
 }
 
 // Brings process.env in line with the stored row after a change made elsewhere (the CLI): the
-// row's values when one is stored, as a save does; none when it was removed, as a removal does.
+// row's values when one is stored (a field the row leaves empty is cleared, not kept from before);
+// none when it was removed, as a removal does.
 export async function reloadMicrosoftEnv() {
   const { rows } = await query('SELECT config FROM integration_config WHERE provider = $1', [MICROSOFT_PROVIDER]);
+  clearMicrosoftEnv();
   if (rows.length) applyMicrosoftEnv(rows[0].config);
-  else clearMicrosoftEnv();
 }

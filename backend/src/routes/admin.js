@@ -13,7 +13,7 @@ import { pluginRegistry } from '../plugins/registry.js';
 import { UUID_RE, uuidParam } from '../utils/uuid.js';
 import { AUDIT_ACTIONS } from '../services/auditLog.js';
 import { routeActor } from '../services/actor.js';
-import { applyAdminEffects } from '../services/admin/adminEffects.js';
+import { applyAdminEffects, registerAdminEffectsJobKind } from '../services/admin/adminEffects.js';
 import {
   ADMIN_USER_ERRORS, createUser, deleteUser, disableUserTotp, listUsers, updateUser,
 } from '../services/admin/users.js';
@@ -82,6 +82,11 @@ export const ADMIN_EFFECT_HOOKS = Object.freeze({
 });
 
 const applyEffects = (effects) => applyAdminEffects(effects, ADMIN_EFFECT_HOOKS);
+
+// Called once at startup (index.js): the backend's job worker applies what the CLI queued.
+export function registerAdminEffectsJob() {
+  registerAdminEffectsJobKind(ADMIN_EFFECT_HOOKS);
+}
 
 router.get('/users', async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit)  || 100, 200);
