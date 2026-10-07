@@ -71,13 +71,18 @@ export function seatSource(eop, driver) {
   return driver && driver.kind !== 'fake' && tenantConfigured(eop ?? {}) ? 'graph' : 'manual';
 }
 
-// The purchased number: { purchased, mode, source, at, stale, notReconciled, error }. mode: where it
-// should come from; source: where it came from. In graph mode before the first good read the manual
-// number stands in (notReconciled).
+// The purchased number: { purchased, mode, source, at, stale, notReconciled, error, subscriptionMissing }.
+// mode: where it should come from; source: where it came from. In graph mode before the first good
+// read the manual number stands in (notReconciled). subscriptionMissing: the last good read found no
+// EOP_ENTERPRISE subscription, so purchased is 0 for that reason and the screens say so instead of
+// only "no free seat".
 export function purchasedSeats({ eop, read, source, now = Date.now() }) {
   const manual = Number.isInteger(eop?.licenses) ? eop.licenses : null;
   if (source !== 'graph') {
-    return { purchased: manual, warning: 0, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null };
+    return {
+      purchased: manual, warning: 0, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null,
+      subscriptionMissing: false,
+    };
   }
   const at = Date.parse(read?.at ?? '');
   const error = read?.ok === false ? (read.error ?? null) : null;
@@ -85,11 +90,14 @@ export function purchasedSeats({ eop, read, source, now = Date.now() }) {
     // Never read: stale once the first failed try is older than 3 days (a missing permission, say).
     const first = Date.parse(read?.firstErrorAt ?? '');
     const never = Number.isFinite(first) && now - first > SEATS_STALE_MS;
-    return { purchased: manual, warning: 0, mode: 'graph', source: 'manual', at: null, stale: never, notReconciled: true, error };
+    return {
+      purchased: manual, warning: 0, mode: 'graph', source: 'manual', at: null, stale: never, notReconciled: true, error,
+      subscriptionMissing: false,
+    };
   }
   return {
     purchased: read.purchased, warning: whole(read.warning), mode: 'graph', source: 'graph', at: read.at,
-    stale: now - at > SEATS_STALE_MS, notReconciled: false, error,
+    stale: now - at > SEATS_STALE_MS, notReconciled: false, error, subscriptionMissing: read.found === false,
   };
 }
 

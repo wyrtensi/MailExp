@@ -86,8 +86,22 @@ describe('MailNodeSeats', () => {
     assert.ok([...none.querySelectorAll('button')].some((b) => b.textContent === 'admin.mailNode.seats.request'));
   });
 
-  test('says the number is unknown', async () => {
-    const host = await mount(React.createElement(MailNodeSeats, { seats: { ...SEATS, free: null, known: false } }));
-    assert.ok(host.textContent.includes('admin.mailNode.seats.unknown'));
+  test('says the number is unknown, and what to do: Licenses by hand, Reconcile with the tenant', async () => {
+    const manual = await mount(React.createElement(MailNodeSeats, { seats: { ...SEATS, mode: 'manual', source: 'manual', free: null, known: false }, compact: true }));
+    assert.ok(manual.textContent.includes('admin.mailNode.seats.unknown'));
+    assert.ok(!manual.textContent.includes('admin.mailNode.seats.unknownGraph'));
+    const graph = await mount(React.createElement(MailNodeSeats, {
+      seats: { ...SEATS, mode: 'graph', source: 'manual', notReconciled: true, free: null, known: false }, compact: true,
+    }));
+    assert.ok(graph.textContent.includes('admin.mailNode.seats.unknownGraph'));
+  });
+
+  test('says when the tenant has no EOP subscription, in the compact line too', async () => {
+    for (const compact of [false, true]) {
+      const host = await mount(React.createElement(MailNodeSeats, { seats: { ...SEATS, free: 0, subscriptionMissing: true }, compact }));
+      assert.ok(host.querySelector('[data-seats-no-subscription]'), `compact ${compact}`);
+    }
+    const fine = await mount(React.createElement(MailNodeSeats, { seats: SEATS }));
+    assert.equal(fine.querySelector('[data-seats-no-subscription]'), null);
   });
 });

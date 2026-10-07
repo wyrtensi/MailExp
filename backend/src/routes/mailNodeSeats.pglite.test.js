@@ -131,6 +131,19 @@ describe('the Graph read', () => {
     expect(await get()).toMatchObject({ free: 10, mode: 'graph', source: 'graph', stale: false, requests: [] });
   });
 
+  it('tells a tenant without an EOP_ENTERPRISE subscription from one with no free seat', async () => {
+    graphMode();
+    await saveEopSettings(TENANT);
+    driver.fake.model.subscribedSkus = { value: [] };
+    await send('POST', '/seats/check');
+    await runDue();
+    expect(await get()).toMatchObject({ free: 0, source: 'graph', subscriptionMissing: true });
+    driver.fake.model.subscribedSkus = structuredClone(TENANT_FIXTURES.graph.subscribedSkus);
+    await send('POST', '/seats/check');
+    await runDue();
+    expect(await get()).toMatchObject({ free: 10, subscriptionMissing: false });
+  });
+
   it('keeps the last number with the error beside it when Graph refuses', async () => {
     graphMode();
     await saveEopSettings(TENANT);

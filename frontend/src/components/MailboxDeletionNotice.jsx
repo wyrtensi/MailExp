@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import MailNodeSeats from './MailNodeSeats.jsx';
 import {
-  isDeactivated, mailNodeErrorKey, pendingDeletion, seatsView, tenantPending,
+  isDeactivated, mailNodeErrorKey, pendingDeletion, seatsUnknownKey, seatsView, tenantPending,
 } from '../utils/mailNode.js';
 import { formatDateTime } from '../utils/formatDate.js';
 
@@ -62,7 +62,8 @@ function SeatLine({ account, seats, onSeatsChanged, takes }) {
     <>
       <div data-cancel-seat style={{ color: blocked ? 'var(--red)' : 'var(--text-tertiary)' }}>
         {heldOwn && t('admin.mailNode.seats.ownSeatHeld')}
-        {!heldOwn && (blocked ? t('admin.mailNode.seats.cancelNoFree') : takes(view.free))}
+        {!heldOwn && !view.known && t(seatsUnknownKey(seats))}
+        {!heldOwn && view.known && (blocked ? t('admin.mailNode.seats.cancelNoFree') : takes(view.free))}
       </div>
       {blocked && <MailNodeSeats seats={seats} compact onChanged={onSeatsChanged} />}
     </>

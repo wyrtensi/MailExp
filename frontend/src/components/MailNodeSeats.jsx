@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { formatDateTime } from '../utils/formatDate.js';
 import {
-  heldSeatsTitle, holdDaysError, mailNodeErrorDetail, mailNodeErrorKey, seatRequestError, seatsView,
+  heldSeatsTitle, holdDaysError, mailNodeErrorDetail, mailNodeErrorKey, seatRequestError, seatsUnknownKey, seatsView,
 } from '../utils/mailNode.js';
 
 const noteStyle = { fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5 };
@@ -87,8 +87,11 @@ export default function MailNodeSeats({ seats, compact = false, isAdmin = false,
             </span>
             <span>{t('admin.mailNode.seats.free', { free: view.free })}</span>
           </>
-        ) : t('admin.mailNode.seats.unknown')}
+        ) : t(seatsUnknownKey(seats))}
       </div>
+      {seats.subscriptionMissing && (
+        <div data-seats-no-subscription role="alert" style={warnStyle}>{t('admin.mailNode.seats.subscriptionMissing')}</div>
+      )}
       {!compact && seats.source === 'graph' && seats.checkedAt && (
         <div style={noteStyle}>{t('admin.mailNode.seats.checkedAt', { at: formatDateTime(seats.checkedAt) })}</div>
       )}

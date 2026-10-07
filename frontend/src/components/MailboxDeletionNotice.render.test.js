@@ -119,6 +119,17 @@ describe('read-only mailboxes and EOP seats', () => {
     assert.ok([...host.querySelectorAll('button')].some((b) => b.textContent === 'admin.mailNode.seats.request'));
   });
 
+  test('while the purchased number is unknown, says so instead of "no free seat"', async () => {
+    const host = await mount(React.createElement(MailboxDeletionNotice, {
+      account: PENDING, seats: { used: 2, held: 0, free: null, mode: 'graph' }, onCancel: () => {},
+    }));
+    const line = host.querySelector('[data-cancel-seat]');
+    assert.ok(line.textContent.includes('admin.mailNode.seats.unknownGraph'));
+    assert.ok(!line.textContent.includes('admin.mailNode.seats.cancelNoFree'));
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'admin.accounts.deletion.cancel');
+    assert.equal(button.disabled, true);
+  });
+
   test('the deactivated notice: who and why; "Activate" for administrators, off at 0 free', async () => {
     const OFF = { ...PENDING, delete_after: null, deactivated_at: '2026-10-07T10:00:00.000Z', deactivated_by_email: 'admin@example.com', deactivation_reason: 'On leave' };
     const host = await mount(React.createElement(MailboxDeactivatedNotice, { account: OFF, isAdmin: true, seats: { used: 1, held: 1, free: 0 }, onActivate: () => {} }));

@@ -10,7 +10,8 @@ import { TENANT_JOB_KINDS, enqueueTenantJob } from '../services/tenant/tenantJob
 // EOP seats (EOP seats design, 2026-10-07), mounted at /api/mail-node next to routes/mailNode.js.
 //   GET  /seats            used, held ("temporarily unavailable", with each held seat and when it is
 //                          free) and free, never the purchased number; where the number comes from,
-//                          when Microsoft was last asked, the hold period, the open seat requests;
+//                          when Microsoft was last asked, whether it lists no EOP_ENTERPRISE
+//                          subscription (subscriptionMissing), the hold period, the open seat requests;
 //                          everyone signed in (the add form shows it)
 //   POST /seats/check      "Reconcile": queues the Graph read (202 { job }); administrators; refused
 //                          (seats_manual) while the number is entered by hand
@@ -38,6 +39,7 @@ router.get('/seats', async (req, res) => {
     stale: seats.stale,
     notReconciled: seats.notReconciled,
     over: seats.over,
+    subscriptionMissing: seats.subscriptionMissing,
     error: seats.error ? { code: seats.error.code } : null,
     holdDays: seats.holdDays,
     heldSeats: seats.heldSeats.map(({ seat, email, reason, freeFrom }) => ({ seat, email, reason, freeFrom })),

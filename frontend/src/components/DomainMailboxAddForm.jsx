@@ -11,6 +11,7 @@ import {
   selectableDomains,
   senderNameError,
   senderNamesPayload,
+  seatsUnknownKey,
   seatsView,
 } from '../utils/mailNode.js';
 
@@ -131,7 +132,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
       <MailNodeSeats seats={seats} compact onChanged={loadSeats} />
       {noSeat && (
         <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--red)' }}>
-          {t(seatsBlock.known ? 'admin.mailNode.seats.noFree' : 'admin.mailNode.seats.errorUnknown')}
+          {t(seatsBlock.known ? 'admin.mailNode.seats.noFree' : seatsUnknownKey(seats))}
         </div>
       )}
     </>

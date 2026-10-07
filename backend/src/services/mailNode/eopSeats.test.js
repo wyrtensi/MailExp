@@ -56,7 +56,7 @@ describe('seatSource', () => {
 describe('purchasedSeats', () => {
   it('takes the manual number in manual mode', () => {
     expect(purchasedSeats({ eop: { licenses: 4 }, read: null, source: 'manual', now: NOW })).toEqual({
-      purchased: 4, warning: 0, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null,
+      purchased: 4, warning: 0, mode: 'manual', source: 'manual', at: null, stale: false, notReconciled: false, error: null, subscriptionMissing: false,
     });
     expect(purchasedSeats({ eop: { licenses: null }, read: null, source: 'manual', now: NOW }).purchased).toBeNull();
   });
@@ -65,7 +65,7 @@ describe('purchasedSeats', () => {
     const at = new Date(NOW - SEATS_STALE_MS - 1000).toISOString();
     const read = { at, ok: false, purchased: 7, error: { code: 'graph_forbidden', message: 'x' } };
     expect(purchasedSeats({ eop: { licenses: 99 }, read, source: 'graph', now: NOW })).toEqual({
-      purchased: 7, warning: 0, mode: 'graph', source: 'graph', at, stale: true, notReconciled: false, error: { code: 'graph_forbidden', message: 'x' },
+      purchased: 7, warning: 0, mode: 'graph', source: 'graph', at, stale: true, notReconciled: false, error: { code: 'graph_forbidden', message: 'x' }, subscriptionMissing: false,
     });
     const fresh = { at: new Date(NOW - 1000).toISOString(), ok: true, purchased: 7 };
     expect(purchasedSeats({ eop: {}, read: fresh, source: 'graph', now: NOW }).stale).toBe(false);
@@ -87,9 +87,16 @@ describe('purchasedSeats', () => {
     expect(purchasedSeats({ eop: { licenses: 3 }, read: null, source: 'manual', now: NOW }).warning).toBe(0);
   });
 
+  it('says so when the tenant has no EOP_ENTERPRISE subscription: 0 seats, never a silent 0', () => {
+    const at = new Date(NOW - 1000).toISOString();
+    expect(purchasedSeats({ eop: { licenses: 5 }, read: { at, ok: true, found: false, purchased: 0 }, source: 'graph', now: NOW }))
+      .toMatchObject({ purchased: 0, source: 'graph', subscriptionMissing: true });
+    expect(purchasedSeats({ eop: {}, read: { at, ok: true, found: true, purchased: 3 }, source: 'graph', now: NOW }).subscriptionMissing).toBe(false);
+  });
+
   it('falls back to the manual number until Graph answered once', () => {
     expect(purchasedSeats({ eop: { licenses: 2 }, read: null, source: 'graph', now: NOW })).toEqual({
-      purchased: 2, warning: 0, mode: 'graph', source: 'manual', at: null, stale: false, notReconciled: true, error: null,
+      purchased: 2, warning: 0, mode: 'graph', source: 'manual', at: null, stale: false, notReconciled: true, error: null, subscriptionMissing: false,
     });
   });
 });

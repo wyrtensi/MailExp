@@ -1046,16 +1046,24 @@ function demoSeats() {
   return {
     used, held: held.length, free: purchased == null ? null : Math.max(0, purchased - used - held.length), known: purchased != null,
     mode: 'manual', source: 'manual', checkedAt: null, stale: false, notReconciled: false, over: purchased != null && purchased < used,
+    subscriptionMissing: false,
     error: null, holdDays: demoHoldDays,
     heldSeats: held.map((a, i) => ({ seat: used + i + 1, email: a.email_address, reason: a.deactivated_at ? 'deactivated' : 'deletion_requested', freeFrom: a.demo_seat_free_from })),
     requests: demoSeatRequests.map(({ id, seats, requestedBy, requestedAt }) => ({ id, seats, requestedBy, requestedAt })),
   };
 }
+// A seat from the free ones, refused as the server refuses (services/mailNode/eopSeats.js takeFree).
+function demoNeedFreeSeat() {
+  const { free } = demoSeats();
+  if (free == null) throw demoError(SEATS_UNKNOWN_TEXT, 'seats_unknown');
+  if (!free) throw demoError('No free EOP seat: ask for more seats first', 'no_free_seats');
+}
+const SEATS_UNKNOWN_TEXT = 'The number of purchased EOP seats is not known: enter it in the EOP settings (Licenses), or reconcile with Microsoft in Mail node';
 const demoHoldUntil = () => new Date(Date.now() + demoHoldDays * 86400000).toISOString();
 // Activation and the cancel of a deletion: the own held seat back, else a free one.
 function demoTakeSeatBack(account) {
   const ownHeld = account.demo_seat_free_from && Date.parse(account.demo_seat_free_from) > Date.now();
-  if (!ownHeld && !demoSeats().free) throw demoError('No free EOP seat: ask for more seats first', 'no_free_seats');
+  if (!ownHeld) demoNeedFreeSeat();
   account.demo_seat_free_from = null;
 }
 
@@ -1649,7 +1657,7 @@ function createDomainMailbox(body) {
   const domain = mailNodeDomains.find(d => d.domain === normalizeEmail(body.domain));
   if (!MAILBOX_READY_STATES.includes(domain?.state)) throw demoError('The domain is not ready for mailboxes', 'domain_not_ready');
   if (!domain.active) throw demoError('Unknown domain', 'domain_unknown');
-  if (!demoSeats().free) throw demoError('No free EOP seat: ask for more seats first', 'no_free_seats');
+  demoNeedFreeSeat();
   const senderName = String(body.senderName ?? '').trim() || null;
   const name = String(body.name ?? '').trim() || senderName || email;
   const account = {

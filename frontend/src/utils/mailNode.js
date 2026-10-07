@@ -252,6 +252,12 @@ export function seatsView(seats) {
   return { known, used: seats.used ?? 0, held: seats.held ?? 0, free: known ? seats.free : null, canTake: known && seats.free > 0 };
 }
 
+// What to say while the purchased number is unknown: entered by hand (Licenses), or, with the tenant
+// giving it, not read from Microsoft yet (Reconcile, the Graph permission) with Licenses standing in.
+export function seatsUnknownKey(seats) {
+  return seats?.mode === 'graph' ? 'admin.mailNode.seats.unknownGraph' : 'admin.mailNode.seats.unknown';
+}
+
 // The hover on "temporarily unavailable": one line per held seat with the date it becomes free.
 export function heldSeatsTitle(seats, { t, formatDate }) {
   return (seats?.heldSeats ?? [])
