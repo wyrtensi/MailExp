@@ -13,11 +13,14 @@
 | `backend/src/cli/args.js` | разбор параметров без зависимостей, `EXIT` |
 | `backend/src/cli/common.js` | `CliError`, отказ по каталогу кодов, сбой узла, подтверждение, `--wait` |
 | `backend/src/cli/output.js` | таблицы и пары «ключ: значение» |
-| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access` |
+| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access`, `node`, `eop`, `seats`, `agent` |
 | `backend/src/services/accessSync/actions.js` | синхронизация с Cloudflare Access: снимок настроек, сохранение настроек и токена с журналом, постановка и чтение задания `access_sync`, его обработчик |
 | `backend/src/services/actor.js` | кто действует: пользователь маршрута или CLI (`--as`) |
-| `backend/src/services/mailNode/mailboxActions.js` | список, создание, имена, запрос и отмена удаления ящика узла |
-| `backend/src/services/mailNode/domainActions.js` | список доменов администратора, перезапуск онбординга |
+| `backend/src/services/mailNode/mailboxActions.js` | список, создание, имена, запрос и отмена удаления, деактивация и активация ящика узла |
+| `backend/src/services/mailNode/domainActions.js` | список доменов администратора, добавление, приём (adopt), шаги онбординга, `ready`, перезапуск, применение настроек домена, ожидаемые значения DNS, принятие времени создания |
+| `backend/src/services/mailNode/settingsActions.js` | настройки узла и EOP: просмотр без ключа, сохранение с журналом и применением к узлу, бюджет TERRL |
+| `backend/src/services/mailNode/seatActions.js` | места EOP: сводка, сверка с Microsoft (задание), срок удержания |
+| `backend/src/services/mailNode/agentActions.js` | агент узла: состояние, выдача и отзыв токена, задания агента, каталог отказов `NODE_AGENT_ERRORS` |
 | `backend/src/services/mailNode/errors.js` | каталог отказов узла (бывший `ERRORS` маршрута) |
 | `backend/src/services/accountAliases.js` | алиасы ящика с правилом D-16 |
 | `backend/src/services/tenant/tenantActions.js` | действия тенанта: статус, задания кнопок, шаги домена, hold, Internal Relay, контакты псевдонимов, выпуск из карантина, задания |
@@ -60,6 +63,28 @@
 отбрасывается молча, как в форме добавления: иначе существующий алиас пропал бы. Пустое `--name` —
 `name_required`. ID ящика не с узла — `not_mail_node`, как у маршрута удаления. Имена журнал панели
 не ведёт, CLI тоже.
+
+## Почтовый узел из CLI
+
+Группы `node`, `eop`, `seats`, `agent` и команды онбординга `domain` (`add`, `adopt`, `step`,
+`ready`, `ack`, `dns-expected`) идут через `settingsActions.js`, `seatActions.js`, `agentActions.js` и
+`domainActions.js`; маршруты `routes/mailNode.js`, `mailNodeSeats.js` и `mailNodeAgent.js` теперь
+вызывают те же функции. Различия процесса передаются параметром, а не копией логики:
+
+- Сохранение настроек узла и EOP применяет настройки к узлу. Маршрут отвечает сразу и применяет
+  после ответа (`background: true`, как раньше); CLI закрывает пул сразу после ответа, поэтому ждёт
+  применения и проверки диска (`background: false`) и печатает, что изменилось.
+- Постановка синхронизации тенанта после добавления, приёма и шагов домена (`kickDomainSync`)
+  дожидается, как в перезапуске онбординга.
+- `applyNode` и `applyPrefilter` принимают `actor`, как `applyDomain`: записи `mail_node.applied` от
+  CLI несут `via: cli`. Маршрут его не передаёт, его записи прежние.
+- Сериализация применений (`serialized` в `nodeApply.js`) действует внутри процесса: применение из CLI
+  может совпасть с применением backend, как уже было у `domain restart`.
+- Шаги онбординга записывают адрес подтвердившего из строки `users`; без `--as` у CLI адреса нет, в
+  шаге остаётся только время, а исполнитель — в журнале (`cli`).
+- Токен агента — единственный секрет, который печатает CLI (`agent token issue`): он для этого и
+  выдаётся. `--out FILE` создаёт файл (0600, `wx`) до выдачи токена, поэтому занятый файл не ротирует
+  токен впустую; через обёртку `--out` указывает файл на хосте, обёртка запускает CLI с `--out -`.
 
 ## Синхронизация с Cloudflare Access из CLI
 
@@ -134,10 +159,13 @@ CLI проходят как есть.
   группы против PGlite со всеми миграциями, mailcow в памяти (`services/testing/fakeMailcow.js`) и
   фейкового драйвера тенанта (`TENANT_DRIVER=fake`, режим стенда и демо): записи в базу и журнал,
   отказы с кодами API, пароль ящика не печатается, задания выполняет воркер теста.
+- `cli/mailexpert.nodeOps.pglite.test.js` — группы `node`, `eop`, `seats`, `agent`, деактивация ящика
+  и команды онбординга `domain` на PGlite с mailcow в памяти: записи и журнал от `cli`, ключ mailcow
+  со stdin не печатается, применение к узлу до выхода, хеш выданного токена агента, файл `--out`.
 - `cli/mailexpert.access.pglite.test.js` — группа `access` на PGlite: токен со stdin хранится
   зашифрованным и нигде не печатается, частичные правки настроек, задание `access_sync` выполняет
   воркер теста против поддельного API Cloudflare (`fetch`), коды выхода итогов, журнал от `cli` и
   `--as`.
 - `scripts/deploy/test/mailexpert-cli.bats` — разбор параметров обёртки, а с `id` и `docker`,
   подменёнными в `PATH`, — вызов контейнера: `-T`, параметры без изменений, stdin целиком до CLI, коды
-  CLI, сбои docker.
+  CLI, сбои docker, файл токена агента на хосте (`agent token --out`).

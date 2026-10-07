@@ -15,7 +15,7 @@ setup() {
   run bash "$SCRIPT" --help
   [ "$status" -eq 0 ]
   [[ $output == *"Usage: mailexpert-cli.sh"* ]]
-  [[ $output == *"mailbox, domain"* && $output == *"jobs, access"* ]]
+  [[ $output == *"mailbox, domain"* && $output == *"jobs, access"* && $output == *"node, eop, seats, agent"* ]]
 }
 
 @test "no group is an error" {
@@ -129,6 +129,51 @@ STUB_EOF
   STUB_CLI_STATUS=126 run bash "$SCRIPT" --prefix "$P" domain list
   [ "$status" -eq 3 ]
   [[ $output == *"docker could not run the CLI"* ]]
+}
+
+@test "agent token --out FILE writes the token to a new 0600 file on the host, the CLI printing it with --out -" {
+  stub_root
+  local file=$BATS_TEST_TMPDIR/agent-token
+  run --separate-stderr bash "$SCRIPT" --prefix "$P" agent token issue --out "$file" --yes
+  [ "$status" -eq 0 ]
+  grep -q -- "exec -T backend node src/cli/mailexpert.js agent token issue --out - --yes" "$DOCKER_LOG"
+  [ "$(cat "$file")" = "cli says hi" ]
+  [ "$(stat -c %a "$file")" = 600 ]
+  [[ $output != *"cli says hi"* ]]
+  [[ $stderr == *"token written to $file"* ]]
+  rm -f "$file"
+  run bash "$SCRIPT" --prefix "$P" agent token issue --out="$file"
+  [ "$status" -eq 0 ]
+  grep -q -- "agent token issue --out=-" "$DOCKER_LOG"
+}
+
+@test "agent token --out never writes over a file, and removes its file when the CLI fails" {
+  stub_root
+  local file=$BATS_TEST_TMPDIR/taken
+  echo keep >"$file"
+  run bash "$SCRIPT" --prefix "$P" agent token issue --out "$file"
+  [ "$status" -eq 2 ]
+  [[ $output == *"exists already"* ]]
+  [ "$(cat "$file")" = keep ]
+  [ ! -e "$DOCKER_LOG" ] || [ "$(grep -c " node " "$DOCKER_LOG")" = 0 ]
+  STUB_CLI_STATUS=1 run bash "$SCRIPT" --prefix "$P" agent token issue --out "$BATS_TEST_TMPDIR/new"
+  [ "$status" -eq 1 ]
+  [ ! -e "$BATS_TEST_TMPDIR/new" ]
+}
+
+@test "only agent token takes --out as a host file; --out - and other commands pass through unchanged" {
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  [ "$(token_out_file agent token issue --out /root/t)" = /root/t ]
+  [ "$(token_out_file agent token issue --out=/root/t --yes)" = /root/t ]
+  run token_out_file agent token issue --out -
+  [ "$status" -ne 0 ]
+  run token_out_file agent token issue
+  [ "$status" -ne 0 ]
+  run token_out_file agent status --out /root/t
+  [ "$status" -ne 0 ]
+  run token_out_file mailbox list --out /root/t
+  [ "$status" -ne 0 ]
 }
 
 @test "the container gets a terminal only with one on both ends and without --json" {

@@ -8,6 +8,12 @@
 #   mailexpert-cli.sh [--prefix /opt/mailexpert] [--] <group> <command> [options]
 #   mailexpert-cli.sh domain list
 #   mailexpert-cli.sh mailbox show anna@example.com --json
+#   mailexpert-cli.sh agent token issue --out /root/agent-token --yes
+#
+# The one exception to "unchanged": `agent token ... --out FILE` names a file on this host, not in
+# the container. The wrapper creates FILE itself (0600, never over an existing one), runs the CLI
+# with --out - (the token alone on stdout) without a terminal and writes that into FILE; on any
+# failure the file is removed. A rotation then needs --yes, as in any script.
 #
 # --prefix is the wrapper's own option and comes before the group. In a terminal the container
 # gets one too (the CLI's confirmations can ask); in a pipe or a script it does not, and an action
@@ -39,8 +45,10 @@ usage() {
 Usage: mailexpert-cli.sh [--prefix /opt/mailexpert] [--] <group> <command> [options]
 
 Runs the panel CLI in the installed panel's backend container. Groups: mailbox, domain,
-tenant, quarantine, jobs, access. stdin reaches the CLI (access token reads the token from it). "mailexpert-cli.sh <group> --help" lists a group's commands (it
-needs the installed panel); options such as --json, --yes and --as go after the command.
+tenant, quarantine, jobs, access, node, eop, seats, agent. stdin reaches the CLI (access token
+and node config set --api-key-stdin read a secret from it). "mailexpert-cli.sh <group> --help"
+lists a group's commands (it needs the installed panel); options such as --json, --yes and --as
+go after the command. agent token issue --out FILE writes the token to FILE on this host (0600).
 --prefix is this wrapper's own option and comes first (default /opt/mailexpert).
 Exit codes: the CLI's (0 done, 1 refused, 2 usage or a missing confirmation, 3 a failure);
 2 for the wrapper's own input, root or installation problems; 3 when docker cannot run the CLI.
@@ -62,6 +70,30 @@ exec_tty_flag() {
   if [ "$stdin_tty" = 1 ] && [ "$stdout_tty" = 1 ]; then return 0; fi
   printf '%s\n' -T
 }
+
+# token_out_file <args...>: prints FILE of `agent token ... --out FILE` (or --out=FILE) when FILE is
+# a file on this host, not "-"; fails otherwise.
+token_out_file() {
+  [ "${1-}" = agent ] && [ "${2-}" = token ] || return 1
+  shift 2
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --out)
+        [ $# -ge 2 ] && [ -n "$2" ] && [ "$2" != - ] || return 1
+        printf '%s\n' "$2"
+        return 0
+        ;;
+      --out=*)
+        [ -n "${1#--out=}" ] && [ "${1#--out=}" != - ] || return 1
+        printf '%s\n' "${1#--out=}"
+        return 0
+        ;;
+    esac
+    shift
+  done
+  return 1
+}
+
 
 main() {
   exit_on_unexpected_failure
@@ -92,6 +124,30 @@ main() {
   [ "$(id -u)" = 0 ] || die "run mailexpert-cli.sh as root" 2
   load_install "$prefix"
 
+  # agent token --out FILE: FILE is on this host. The CLI prints the token alone (--out -) and the
+  # wrapper writes it there.
+  local out_file=""
+  if out_file=$(token_out_file "$@"); then
+    if [ -e "$out_file" ] || [ -L "$out_file" ]; then die "--out: $out_file exists already: give a new file" 2; fi
+    local -a cli_args=()
+    local next=0 arg
+    for arg in "$@"; do
+      if [ "$next" = 1 ]; then
+        cli_args+=(-)
+        next=0
+        continue
+      fi
+      case $arg in
+        --out) cli_args+=("$arg"); next=1 ;;
+        --out=*) cli_args+=(--out=-) ;;
+        *) cli_args+=("$arg") ;;
+      esac
+    done
+    set -- "${cli_args[@]}"
+  else
+    out_file=""
+  fi
+
   # Checked first, so that a failure of docker is never read as the CLI's own exit code.
   local running
   running=$(app_compose ps --status running --services 2>/dev/null) || die "docker compose failed for the panel in $prefix" 3
@@ -107,7 +163,18 @@ main() {
   local -a tty=()
   if [ -n "$flag" ]; then tty=("$flag"); fi
   local status=0
-  app_compose exec "${tty[@]}" backend node "$CLI_PATH" "$@" || status=$?
+  if [ -n "$out_file" ]; then
+    # Made here, only the owner reads it, never over a file that appeared meanwhile.
+    (umask 077 && set -o noclobber && : >"$out_file") 2>/dev/null || die "--out: $out_file could not be created" 2
+    app_compose exec -T backend node "$CLI_PATH" "$@" >"$out_file" || status=$?
+    if [ "$status" = 0 ]; then
+      printf 'token written to %s (0600): give it to setup.sh --agent-token-file on the node\n' "$out_file" >&2
+    else
+      rm -f -- "$out_file"
+    fi
+  else
+    app_compose exec "${tty[@]}" backend node "$CLI_PATH" "$@" || status=$?
+  fi
   # 125 to 127: docker or the container could not start the command at all.
   if [ "$status" -ge 125 ] && [ "$status" -le 127 ]; then
     die "docker could not run the CLI in the backend container (status $status)" 3
@@ -116,7 +183,7 @@ main() {
   exit "$status"
 }
 
-# Sourced by the tests for exec_tty_flag; run otherwise.
+# Sourced by the tests for exec_tty_flag and token_out_file; run otherwise.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   main "$@"
 fi
