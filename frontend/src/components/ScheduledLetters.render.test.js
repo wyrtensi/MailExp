@@ -251,3 +251,14 @@ test('a late list failure for the previous mailbox filter does not hide the curr
   assert.deepEqual([...document.querySelectorAll('[data-scheduled-letter]')].map(el => el.dataset.scheduledLetter), ['b-job']);
   await React.act(async () => { useStore.getState().setShowScheduled(false); });
 });
+
+test('a failed undo request keeps the job retryable; a send that already started does not', async () => {
+  const { undoSendOutcome } = await import('../utils/sendTracker.js');
+  api.scheduled.cancel = async () => { throw new Error('temporary outage'); };
+  assert.equal(await undoSendOutcome('job-1'), 'failed');
+  api.scheduled.cancel = async () => { throw Object.assign(new Error('started'), { code: 'send_started' }); };
+  assert.equal(await undoSendOutcome('job-1'), 'too_late');
+  assert.equal(await undoSend('job-1'), false);
+  api.scheduled.cancel = async () => ({ compose: null });
+  assert.equal(await undoSendOutcome('job-1'), 'undone');
+});
