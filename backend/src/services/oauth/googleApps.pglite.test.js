@@ -81,7 +81,7 @@ describe('Google grant journal across app delete and re-add', () => {
   });
 
   it('records a grant once per project and address', async () => {
-    const app = await createGoogleApp({ label: 'Google 1', clientId: CLIENT_A, clientSecret: 's' });
+    await createGoogleApp({ label: 'Google 1', clientId: CLIENT_A, clientSecret: 's' });
     await recordGoogleGrant({ projectNumber: PROJECT, email: 'One@gmail.com' });
     await recordGoogleGrant({ projectNumber: PROJECT, email: 'one@gmail.com', sub: 'sub-1' });
     const { rows } = await db.query('SELECT project_number, email, google_sub FROM google_oauth_grants');
