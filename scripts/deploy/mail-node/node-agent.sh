@@ -18,8 +18,10 @@
 #            and keeps its state in $NODE_STATE/update-<job id>.json. While that file says the
 #            update runs and its process lives, the agent does not poll (the panel would take the
 #            agent's poll for a restart and fail the job it still runs) and sends no status report;
-#            it waits. An update whose process died is reported failed (update_interrupted); a
-#            final state the update could not deliver (the panel down) is delivered by the agent.
+#            it waits. An update whose process died is reported failed (update_interrupted, with
+#            the commit to go back to by hand); a final state the update could not deliver (the
+#            panel down) is delivered by the agent, which polls again only once the panel took
+#            it (until then it backs off as after any error).
 # Any other kind is reported failed. A status report goes out at the start and every 10 minutes.
 # Errors (the panel down, a refused token) back off up to 5 minutes.
 #
@@ -207,16 +209,17 @@ update_state_file() { printf '%s/update-%s.json\n' "$NODE_STATE" "$1"; }
 update_run_dir() { printf '%s/update-run-%s\n' "$NODE_STATE" "$1"; }
 update_log_file() { printf '%s/update-%s.log\n' "$NODE_STATE" "$1"; }
 
-# write_update_state <job id> <state> <step> [<error>] [<pid>]: the update's state file, replaced
-# whole (written next to it, then moved), so a reader never sees half of it.
+# write_update_state <job id> <state> <step> [<error>] [<pid>] [<previous commit>]: the update's
+# state file, replaced whole (written next to it, then moved), so a reader never sees half of it.
 write_update_state() {
   local file tmp
   file=$(update_state_file "$1")
   tmp=$file.tmp
   install -d "$NODE_STATE"
-  jq -cn --arg id "$1" --arg state "$2" --arg step "$3" --arg error "${4:-}" --arg pid "${5:-}" \
+  jq -cn --arg id "$1" --arg state "$2" --arg step "$3" --arg error "${4:-}" --arg pid "${5:-}" --arg previous "${6:-}" \
     '{id: $id, state: $state, step: $step, error: (if $error == "" then null else $error end),
-      pid: (if $pid == "" then null else ($pid | tonumber) end)}' >"$tmp"
+      pid: (if $pid == "" then null else ($pid | tonumber) end),
+      previous: (if $previous == "" then null else $previous end)}' >"$tmp"
   mv -f "$tmp" "$file"
 }
 
@@ -239,18 +242,23 @@ update_alive() {
 # an update whose process died, reported to the panel; the files go once the panel took it (or
 # answered that the job is no longer running there).
 deliver_update_state() {
-  local file=$1 id state step error code body=$WORK/update-report.json tail=''
+  local file=$1 id state step error previous code body=$WORK/update-report.json tail=''
   id=$(jq -r '.id // empty' "$file" 2>/dev/null) || id=''
   if ! is_job_id "$id"; then rm -f "$file"; return 0; fi
   state=$(jq -r '.state // empty' "$file")
   step=$(jq -r '.step // ""' "$file")
   error=$(jq -r '.error // ""' "$file")
+  previous=$(jq -r '.previous // ""' "$file")
+  is_sha "$previous" || previous=''
   case $state in
     succeeded | failed) ;;
-    *) state=failed step="the update stopped before it ended: $step" error=update_interrupted ;;
+    *)
+      state=failed error=update_interrupted
+      step="the update stopped${previous:+ (it started from $previous: git checkout of it and setup.sh go back by hand)} at: $step"
+      ;;
   esac
   if [ -f "$(update_log_file "$id")" ]; then tail=$(tail -n "$LOG_LINES" "$(update_log_file "$id")" | tail -c "$LOG_BYTES"); fi
-  jq -cn --arg state "$state" --arg step "${step:0:180}" --arg log "$tail" --arg error "$error" \
+  jq -cn --arg state "$state" --arg step "${step:0:200}" --arg log "$tail" --arg error "$error" \
     '{state: $state, step: $step} + (if $log == "" then {} else {log: $log} end)
      + (if $error == "" then {} else {error: $error} end)' >"$body"
   code=$(panel POST "/api/node-agent/jobs/$id" "$body" "$WORK/post.out" 30)
@@ -264,19 +272,22 @@ deliver_update_state() {
   esac
 }
 
-# update_running: status 0 while an update runs; delivers what finished updates left behind.
-update_running() {
-  local file running=1
+# update_pending: 0 nothing pending (the agent may poll); 1 an update runs (the agent waits); 2 an
+# update ended and the panel did not take its result yet (the agent backs off and tries again).
+# Delivers what ended updates left behind.
+update_pending() {
+  local file pending=0
   for file in "$NODE_STATE"/update-*.json; do
     [ -f "$file" ] || continue
     case $(jq -r '.state // empty' "$file" 2>/dev/null) in
-      succeeded | failed) deliver_update_state "$file" || true ;;
+      succeeded | failed) ;;
       *)
-        if update_alive "$file"; then running=0; else deliver_update_state "$file" || true; fi
+        if update_alive "$file"; then pending=1 && continue; fi
         ;;
     esac
+    if ! deliver_update_state "$file" && [ "$pending" = 0 ]; then pending=2; fi
   done
-  return "$running"
+  return "$pending"
 }
 
 # detach_mode: systemd (a transient unit) when systemd runs the host, setsid otherwise.
@@ -433,11 +444,14 @@ backoff() {
 # round: a status report when due, one poll, and the job it brought. Status 1 after an error.
 round() {
   local now code out=$WORK/next.json
-  # The update runs on its own and reports itself: no poll meanwhile (see the header).
-  if update_running; then
-    sleep "$UPDATE_WAIT"
-    return 0
-  fi
+  # The update runs on its own and reports itself: no poll meanwhile, nor before its result is
+  # delivered (see the header).
+  local pending=0
+  update_pending || pending=$?
+  case $pending in
+    1) sleep "$UPDATE_WAIT"; return 0 ;;
+    2) return 1 ;;
+  esac
   now=$(date +%s)
   if [ $((now - LAST_STATUS)) -ge "$STATUS_EVERY" ]; then
     # A refused report is tried again next round; the poll goes on regardless.

@@ -4,7 +4,8 @@
 // request that asked for the update. Instead the results the host's updater leaves in the spool are
 // read on each GET /api/admin/update and every 30 s, and any entry the journal does not hold yet
 // (by details->>'requestId' and action) is written under the administrator of the matching
-// panel.update_requested entry. One pass runs at a time; dedupe relies on that and on a single
+// panel.update_requested entry. The same pass queues the node's part of an update
+// (updateNodeAfterPanel below). One pass runs at a time; dedupe relies on that and on a single
 // backend process, there is no unique constraint in the table.
 import { query as dbQuery } from '../db.js';
 import { recordAudit as dbRecordAudit } from '../auditLog.js';
@@ -119,8 +120,12 @@ export function reconcileUpdateAudit() {
   return defaultReconcile();
 }
 
-// Runs the reconciler every 30 s without keeping the process alive. Returns a stop function.
-export function startUpdateAuditReconciler({ reconcile = reconcileUpdateAudit, intervalMs = 30_000 } = {}) {
+// Runs the reconciler every 30 s without keeping the process alive (and once at once with
+// immediate). The default reconciler also queues the node's update after a panel update
+// (updateNodeAfterPanel), so that runs on the server whether or not anyone opens the update page.
+// Returns a stop function.
+export function startUpdateAuditReconciler({ reconcile = reconcileUpdateAudit, intervalMs = 30_000, immediate = false } = {}) {
+  if (immediate) reconcile().catch(() => {});
   const timer = setInterval(() => { reconcile().catch(() => {}); }, intervalMs);
   timer.unref?.();
   return () => clearInterval(timer);

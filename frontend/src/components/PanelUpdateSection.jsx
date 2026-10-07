@@ -114,9 +114,12 @@ const NODE_PART_KEYS = {
   failed: 'admin.panelUpdate.nodeFailed',
   current: 'admin.panelUpdate.nodeCurrent',
   behind: 'admin.panelUpdate.nodeBehind',
+  newer: 'admin.panelUpdate.nodeNewer',
   unknown: 'admin.panelUpdate.nodeUnknown',
 };
-const NODE_PART_TONES = { queued: 'neutral', running: 'warn', succeeded: 'good', failed: 'bad', current: 'good', behind: 'warn', unknown: 'neutral' };
+const NODE_PART_TONES = {
+  queued: 'neutral', running: 'warn', succeeded: 'good', failed: 'bad', current: 'good', behind: 'warn', newer: 'warn', unknown: 'neutral',
+};
 
 // The node's part of the update: the node agent's update job to the panel's commit, queued by the
 // panel once its own update succeeded (services/panelUpdate/reconcile.js). Shown only with an agent;

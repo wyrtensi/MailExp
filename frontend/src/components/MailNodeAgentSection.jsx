@@ -35,7 +35,7 @@ const codeStyle = {
 };
 const STATE_COLORS = { connected: 'var(--green)', waiting: 'var(--amber)', not_set_up: 'var(--text-tertiary)' };
 const BACKUP_COLORS = { ok: 'var(--green)', old: 'var(--red)', none: 'var(--amber)', off: 'var(--text-tertiary)' };
-const SCRIPTS_COLORS = { current: 'var(--green)', behind: 'var(--amber)', unknown: 'var(--text-tertiary)' };
+const SCRIPTS_COLORS = { current: 'var(--green)', behind: 'var(--amber)', newer: 'var(--amber)', unknown: 'var(--text-tertiary)' };
 // While a job runs the section follows it every few seconds.
 const FOLLOW_MS = 4000;
 
@@ -131,7 +131,7 @@ export default function MailNodeAgentSection() {
   const backup = backupSummary(status);
   const lastBackupJob = latestJob(jobs, 'backup');
   const lastUpdateJob = latestJob(jobs, 'update');
-  const scripts = scriptsState(status?.scriptsCommit, agent?.panelCommit);
+  const scripts = scriptsState(status?.scriptsCommit, agent?.panelCommit, lastUpdateJob);
   const size = (bytes) => {
     const p = sizeParts(bytes);
     return `${p.value} ${t(p.unitKey)}`;

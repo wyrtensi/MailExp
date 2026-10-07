@@ -982,3 +982,14 @@ keys() {
   [[ $output == *"run ln -s mailcow.conf .env && ./generate_config.sh in $MC first"* ]]
   [ ! -s "$MOCK_DIR/restic" ]
 }
+
+@test "a failed forget of the old pre-update snapshots warns; the backup still succeeds" {
+  configured
+  export MOCK_GIT_HEAD=0123456789abcdef0123456789abcdef01234567
+  export MOCK_RESTIC_FORGET_PRE_UPDATE=1
+  run bash "$BACKUP" --tag pre-update
+  [ "$status" -eq 0 ]
+  [[ $output == *"warning: restic forget of the old pre-update snapshots failed"* ]]
+  restic_calls | grep -qE '^backup --json --host mailexpert-node-[0-9a-f]{16} --tag mailcow --tag pre-update /backup /vmail$'
+  restic_calls | grep -qE -- '--keep-tag move --keep-tag pre-update$'
+}

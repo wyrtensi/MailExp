@@ -28,16 +28,33 @@ const POLL_RECHECK_MS = 5000;
 // A job queued this long was never picked up (the agent is offline); one running past its kind's
 // bound has lost its agent. Both are failed so the screen never waits for ever.
 export const QUEUED_TIMEOUT_MS = 30 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+// The bounds of the steps of an update on the node (scripts/deploy/mail-node/node-update.sh, which
+// applies the same numbers): the pre-update backup (node-backup.sh, bounded as a backup job) with
+// up to an hour waiting for another backup's lock, the fetch, setup.sh at the new commit and again
+// at the previous one on a rollback, mailcow's own update (PR D) and the checks after.
+export const UPDATE_STEP_BOUNDS_MS = Object.freeze({
+  fetch: 5 * MINUTE_MS,
+  backup: 6 * 60 * MINUTE_MS,
+  backupLockWait: 60 * MINUTE_MS,
+  setup: 30 * MINUTE_MS,
+  rollbackSetup: 30 * MINUTE_MS,
+  mailcow: 30 * MINUTE_MS,
+  checks: 10 * MINUTE_MS,
+});
+// The longest an update may run at all, whatever it reports: its steps' bounds added up.
+export const UPDATE_CEILING_MS = Object.values(UPDATE_STEP_BOUNDS_MS).reduce((a, b) => a + b, 0);
 export const RUNNING_TIMEOUT_MS = Object.freeze({
-  status: 15 * 60 * 1000,
-  backup: 6 * 60 * 60 * 1000,
-  // The pre-update backup, setup.sh, and setup.sh again on a rollback.
-  update: 2 * 60 * 60 * 1000,
+  status: 15 * MINUTE_MS,
+  backup: 6 * 60 * MINUTE_MS,
+  update: UPDATE_CEILING_MS,
 });
 // An update runs detached from the agent (node-update.sh), which may restart meanwhile (setup.sh
-// restarts it when its files change) and poll again. The update reports at least every 15 seconds;
-// one reported within this bound is still alive and is not failed as an orphan by that poll.
-export const UPDATE_HEARTBEAT_MS = 5 * 60 * 1000;
+// restarts it when its files change) and poll again. The update reports at least every 15 seconds:
+// one reported within this bound is alive. It is not failed as an orphan by the agent's poll, and
+// it is not failed for its length below UPDATE_CEILING_MS; one silent past this bound has died
+// (update_silent).
+export const UPDATE_HEARTBEAT_MS = 5 * MINUTE_MS;
 
 // What the server keeps of the agent's reports.
 export const MAX_LOG_TAIL = 8000;
@@ -211,6 +228,8 @@ export function resetExpiryThrottle() {
 }
 
 // Fails jobs past their bounds: queued and never picked up, or running without word from the agent.
+// An update is judged by its reports (UPDATE_HEARTBEAT_MS) under its ceiling, not by a fixed length:
+// its backup alone may take hours.
 export async function expireStaleJobs() {
   const now = Date.now();
   if (now - lastExpiry < EXPIRE_EVERY_MS) return;
@@ -219,6 +238,11 @@ export async function expireStaleJobs() {
     `UPDATE node_agent_jobs SET state = 'failed', error = 'not_picked_up', finished_at = now(), updated_at = now()
       WHERE state = 'queued' AND created_at < now() - ($1::double precision * interval '1 millisecond')`,
     [QUEUED_TIMEOUT_MS]
+  );
+  await query(
+    `UPDATE node_agent_jobs SET state = 'failed', error = 'update_silent', finished_at = now(), updated_at = now()
+      WHERE state = 'running' AND kind = 'update' AND updated_at < now() - ($1::double precision * interval '1 millisecond')`,
+    [UPDATE_HEARTBEAT_MS]
   );
   for (const [kind, ms] of Object.entries(RUNNING_TIMEOUT_MS)) {
     await query(

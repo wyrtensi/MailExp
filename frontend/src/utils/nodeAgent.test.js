@@ -72,6 +72,11 @@ describe('the node update', () => {
     assert.equal(scriptsState(A, B), 'behind');
     assert.equal(scriptsState('unknown', B), 'unknown');
     assert.equal(scriptsState(A, null), 'unknown');
+    // The node refused the panel's commit as older than its own.
+    const refused = { state: 'failed', error: 'not_newer', params: { sha: B } };
+    assert.equal(scriptsState(A, B, refused), 'newer');
+    assert.equal(scriptsState(A, B, { ...refused, params: { sha: A } }), 'behind');
+    assert.equal(scriptsState(A, B, { ...refused, error: 'rolled_back' }), 'behind');
   });
 
   it('takes a backup or an update as the one job that runs', () => {
@@ -86,11 +91,15 @@ describe('the node update', () => {
     assert.equal(nodeUpdatePart(null), null);
     assert.equal(nodeUpdatePart({ configured: false }), null);
     const job = { state: 'failed', step: 'setup.sh failed', error: 'rolled_back', params: { sha: B }, finishedAt: '2026-10-07T10:00:00Z' };
-    assert.deepEqual(nodeUpdatePart({ configured: true, job }), {
+    assert.deepEqual(nodeUpdatePart({ configured: true, job, scriptsCommit: A, panelCommit: B }), {
       state: 'failed', step: 'setup.sh failed', error: 'rolled_back', at: '2026-10-07T10:00:00Z', target: B,
     });
     assert.equal(nodeUpdatePart({ configured: true, job: null, scriptsCommit: A, panelCommit: A }).state, 'current');
     assert.equal(nodeUpdatePart({ configured: true, job: null, scriptsCommit: A, panelCommit: B }).state, 'behind');
+    // A job to an earlier commit is not this update: the commits tell.
+    const earlier = { state: 'succeeded', params: { sha: A }, finishedAt: '2026-10-01T10:00:00Z' };
+    assert.equal(nodeUpdatePart({ configured: true, job: earlier, scriptsCommit: A, panelCommit: B }).state, 'behind');
+    assert.equal(nodeUpdatePart({ configured: true, job: earlier, scriptsCommit: B, panelCommit: B }).state, 'current');
     assert.equal(nodeUpdateActive({ job: { state: 'queued' } }), true);
     assert.equal(nodeUpdateActive({ job: { state: 'succeeded' } }), false);
     assert.equal(nodeUpdateActive(null), false);

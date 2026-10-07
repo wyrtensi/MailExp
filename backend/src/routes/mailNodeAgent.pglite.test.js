@@ -31,6 +31,7 @@ const { default: adminRoutes, agentRouter } = await import('./mailNodeAgent.js')
 const { recordAudit } = await import('../services/auditLog.js');
 const {
   hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle, queueNodeUpdateIfBehind, getNodeUpdateState,
+  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS,
 } = await import('../services/mailNode/nodeAgent.js');
 const { updateNodeAfterPanel } = await import('../services/panelUpdate/reconcile.js');
 const { AGENT_AUTH_FAILURES } = await import('./mailNodeAgent.js');
@@ -476,11 +477,35 @@ describe('the node update', () => {
     expect((await updateJobs())[0]).toMatchObject({ state: 'failed', error: 'agent_restarted' });
   });
 
-  it('an update running past two hours fails', async () => {
+  it('an update is judged by its reports: alive after hours, failed when silent or past its ceiling', async () => {
     const token = await connectedAgent();
     const { body: { job } } = await admin('POST', '/agent/jobs', { kind: 'update' });
     await agent(token, 'GET', '/next?wait=0');
-    await db.query("UPDATE node_agent_jobs SET started_at = now() - interval '121 minutes' WHERE id = $1", [job.id]);
+    // A long pre-update backup: started 7 hours ago, reported a minute ago.
+    await db.query("UPDATE node_agent_jobs SET started_at = now() - interval '7 hours', updated_at = now() - interval '1 minute' WHERE id = $1", [job.id]);
+    resetExpiryThrottle();
+    await admin('GET', '/agent/jobs');
+    expect((await updateJobs())[0]).toMatchObject({ state: 'running' });
+    // Busy meanwhile: no backup and no second update.
+    expect((await admin('POST', '/agent/jobs', { kind: 'backup' })).status).toBe(409);
+    expect((await agent(token, 'POST', `/jobs/${job.id}`, { state: 'running', step: 'still here' })).status).toBe(200);
+    // Silent past the heartbeat bound: the node lost it.
+    await db.query("UPDATE node_agent_jobs SET updated_at = now() - interval '6 minutes' WHERE id = $1", [job.id]);
+    resetExpiryThrottle();
+    await admin('GET', '/agent/jobs');
+    expect((await updateJobs())[0]).toMatchObject({ state: 'failed', error: 'update_silent' });
+  });
+
+  it('an update past its ceiling fails even while it reports', async () => {
+    const token = await connectedAgent();
+    const { body: { job } } = await admin('POST', '/agent/jobs', { kind: 'update' });
+    await agent(token, 'GET', '/next?wait=0');
+    expect(UPDATE_CEILING_MS).toBe(Object.values(UPDATE_STEP_BOUNDS_MS).reduce((x, y) => x + y, 0));
+    expect(UPDATE_CEILING_MS).toBeGreaterThan(RUNNING_TIMEOUT_MS.backup + 60 * 60 * 1000);
+    await db.query(
+      "UPDATE node_agent_jobs SET started_at = now() - ($2::double precision * interval '1 millisecond') - interval '1 minute', updated_at = now() WHERE id = $1",
+      [job.id, UPDATE_CEILING_MS]
+    );
     resetExpiryThrottle();
     await admin('GET', '/agent/jobs');
     expect((await updateJobs())[0]).toMatchObject({ state: 'failed', error: 'timed_out' });

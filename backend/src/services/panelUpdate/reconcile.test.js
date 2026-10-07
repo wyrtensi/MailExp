@@ -135,4 +135,18 @@ describe('update audit reconciler', () => {
       vi.useRealTimers();
     }
   });
+
+  it('runs a first pass at once when asked (the backend start)', async () => {
+    vi.useFakeTimers();
+    try {
+      const reconcile = vi.fn(async () => {});
+      const stop = startUpdateAuditReconciler({ reconcile, intervalMs: 30_000, immediate: true });
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

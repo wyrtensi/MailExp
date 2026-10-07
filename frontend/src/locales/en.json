@@ -2143,7 +2143,8 @@
       "nodeUnknown": "Node scripts commit unknown",
       "nodeTarget": "to {{commit}}",
       "nodeNotConnected": "The node agent is not connected: the update waits for it.",
-      "nodeHint": "The node part runs through the node agent (Settings, Mail node, Node agent): a pre-update backup, setup.sh at the panel commit, a rollback when it fails. \"Update node now\" there tries again."
+      "nodeHint": "The node part runs through the node agent (Settings, Mail node, Node agent): a pre-update backup, setup.sh at the panel commit, a rollback when it fails. \"Update node now\" there tries again.",
+      "nodeNewer": "Node scripts newer than the panel"
     },
     "audit": {
       "description": "What users did with mailboxes, messages and users, newest first.",
@@ -3005,7 +3006,13 @@
       "errorRollbackFailed": "setup.sh failed and so did the return to the previous commit: check the node by hand",
       "errorPostCheckFailed": "The scripts are updated, but a check after setup.sh failed",
       "errorUpdateInterrupted": "The update stopped before it ended (a reboot of the node?)",
-      "errorNodeStandby": "The node is standby after a move: not updated"
+      "errorNodeStandby": "The node is standby after a move: not updated",
+      "scriptsNewer": "Newer than the panel (the node refused to go back)",
+      "errorUpdateSilent": "No word from the node for 5 minutes: the update was lost",
+      "errorNotNewer": "The node runs a newer commit than the panel: the update never takes it back",
+      "errorUntrustedOrigin": "The node checkout does not fetch from the official repository: refused (NODE_UPDATE_ORIGIN in node.env allows another)",
+      "errorLocalChanges": "The node checkout has local changes: refused, the node is unchanged",
+      "errorMailcowUpdateFailed": "The mailcow update failed: mailcow was started again and checked"
     },
     "quarantine": {
       "title": "Mail node quarantine",

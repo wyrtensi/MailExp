@@ -8,6 +8,7 @@
 #   MOCK_RESTIC_BACKUP    exit status of `backup` (3: saved, some files unreadable; else no snapshot)
 #   MOCK_RESTIC_CHECK     exit status of `check`
 #   MOCK_RESTIC_RESTORE   exit status of `restore`
+#   MOCK_RESTIC_FORGET_PRE_UPDATE  exit status of the forget of the pre-update snapshots
 set -u
 printf '%s\n' "$*" >>"$MOCK_DIR/restic"
 REPO=$MOCK_DIR/repo
@@ -35,7 +36,8 @@ shift
 case $cmd in
   cat) exit "${MOCK_RESTIC_CAT:-0}" ;;
   init) exit "${MOCK_RESTIC_INIT:-0}" ;;
-  forget | unlock) exit 0 ;;
+  forget) if [[ " $* " == *",pre-update "* ]]; then exit "${MOCK_RESTIC_FORGET_PRE_UPDATE:-0}"; fi; exit 0 ;;
+  unlock) exit 0 ;;
   check) exit "${MOCK_RESTIC_CHECK:-0}" ;;
   backup)
     status=${MOCK_RESTIC_BACKUP:-0}

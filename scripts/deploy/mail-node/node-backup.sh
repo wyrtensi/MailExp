@@ -201,9 +201,10 @@ add_node_files() {
 forget_old() {
   local -a prune=()
   if prune_today "$1" "$2"; then prune=(--prune); fi
+  # Thinning the pre-update snapshots is not worth failing the backup for: the next run tries again.
   restic_run -t "$NODE_BACKUP_FORGET_TIMEOUT" -- forget --host "$RESTIC_HOST" --tag "$NODE_BACKUP_TAG,pre-update" \
     --keep-last 5 >/dev/null ||
-    die "restic forget (pre-update) failed or ran past ${NODE_BACKUP_FORGET_TIMEOUT}s (the snapshot is stored; retention runs again next night)"
+    warn "restic forget of the old pre-update snapshots failed or ran past ${NODE_BACKUP_FORGET_TIMEOUT}s; the next backup tries again"
   restic_run -t "$NODE_BACKUP_FORGET_TIMEOUT" -- forget --host "$RESTIC_HOST" --tag "$NODE_BACKUP_TAG" \
     --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-tag move --keep-tag pre-update "${prune[@]}" >/dev/null ||
     die "restic forget failed or ran past ${NODE_BACKUP_FORGET_TIMEOUT}s (the snapshot is stored; retention runs again next night)"

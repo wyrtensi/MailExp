@@ -389,14 +389,22 @@ exit "${MOCK_EOP_RC:-0}"
 EOF
   cat >"$bin/git" <<'EOF'
 #!/usr/bin/env bash
-# The node's checkout: its commit in $MOCK_DIR/src-head, origin/main's history in main-history.
+# The node's checkout: its commit in $MOCK_DIR/src-head, origin/main's history in main-history
+# (oldest first), its origin MOCK_ORIGIN, its changed files MOCK_GIT_STATUS.
 if [ "${1:-}" = -C ] && [ "${2:-}" = "$MAILEXPERT_NODE_SRC" ]; then
   shift 2
   printf 'git %s\n' "$*" >>"$MOCK_DIR/git-calls"
+  line() { grep -nx "$1" "$MOCK_DIR/main-history" | cut -d: -f1; }
   case "$*" in
     "rev-parse --is-inside-work-tree") echo true ;;
+    "remote get-url origin") echo "${MOCK_ORIGIN:-https://github.com/wyrtensi/MailExpert.git}" ;;
+    "status --porcelain --untracked-files=no") printf '%s' "${MOCK_GIT_STATUS:-}" ;;
     "fetch --quiet origin") [ "${MOCK_FETCH_RC:-0}" = 0 ] || { echo 'fatal: unable to access' >&2; exit 128; } ;;
-    "merge-base --is-ancestor "*) grep -qx "$3" "$MOCK_DIR/main-history" ;;
+    "merge-base --is-ancestor "*" origin/main") grep -qx "$3" "$MOCK_DIR/main-history" ;;
+    "merge-base --is-ancestor "*)
+      a=$(line "$3") b=$(line "$4")
+      [ -n "$a" ] && [ -n "$b" ] && [ "$a" -le "$b" ]
+      ;;
     "rev-parse HEAD") cat "$MOCK_DIR/src-head" ;;
     "checkout --quiet --detach "*) printf '%s\n' "$4" >"$MOCK_DIR/src-head" ;;
     *) exit 1 ;;
@@ -554,13 +562,15 @@ src_head() { cat "$MOCK_DIR/src-head"; }
   printf '{"id":"42","state":"succeeded","step":"the node'"'"'s scripts are at 222222222222","error":null,"pid":1}\n' >"$MAILEXPERT_NODE_STATE/update-42.json"
   printf '[mailexpert] done\n' >"$MAILEXPERT_NODE_STATE/update-42.log"
   mkdir -p "$MAILEXPERT_NODE_STATE/update-run-42"
-  # An update whose process is gone (a reboot): failed, update_interrupted.
-  printf '{"id":"43","state":"running","step":"setup.sh at 222222222222","error":null,"pid":999999}\n' >"$MAILEXPERT_NODE_STATE/update-43.json"
+  # An update whose process is gone (a reboot): failed, update_interrupted, with the commit it
+  # started from for a rollback by hand.
+  printf '{"id":"43","state":"running","step":"setup.sh at 222222222222","error":null,"pid":999999,"previous":"%s"}\n' "$OLD_SHA" >"$MAILEXPERT_NODE_STATE/update-43.json"
   run bash "$AGENT" --once
   [ "$status" -eq 0 ]
   [ "$(jq -c '{state, log}' <<<"$(last_report)")" = '{"state":"succeeded","log":"[mailexpert] done"}' ]
   [ "$(job_reports 43 | jq -c '{state, error}')" = '{"state":"failed","error":"update_interrupted"}' ]
   [[ $(job_reports 43 | jq -r .step) == *"setup.sh at 222222222222"* ]]
+  [[ $(job_reports 43 | jq -r .step) == *"it started from $OLD_SHA: git checkout of it and setup.sh"* ]]
   [ ! -e "$MAILEXPERT_NODE_STATE/update-42.json" ]
   [ ! -e "$MAILEXPERT_NODE_STATE/update-43.json" ]
   [ ! -e "$MAILEXPERT_NODE_STATE/update-run-42" ]
@@ -579,11 +589,18 @@ src_head() { cat "$MOCK_DIR/src-head"; }
   [ "$status" -eq 0 ]
   [ -z "$(agent_requests)" ]
   [ -e "$MAILEXPERT_NODE_STATE/update-42.json" ]
-  # A result the panel did not take (it is down) stays for the next round.
+  # A result the panel did not take stays, and the agent does not poll before it is delivered:
+  # the round fails (the agent backs off).
   printf '{"id":"42","state":"failed","step":"x","error":"rolled_back","pid":1}\n' >"$MAILEXPERT_NODE_STATE/update-42.json"
+  export MOCK_POST_STATUS=503
+  run bash "$AGENT" --once
+  [ "$status" -eq 1 ]
+  [ -e "$MAILEXPERT_NODE_STATE/update-42.json" ]
+  agent_requests | lacks '^GET /api/node-agent/next'
   export MOCK_PANEL_DOWN=1
   run bash "$AGENT" --once
   unset MOCK_PANEL_DOWN
+  [ "$status" -eq 1 ]
   [ -e "$MAILEXPERT_NODE_STATE/update-42.json" ]
   # A panel that already failed the job (409) takes it as delivered.
   export MOCK_POST_STATUS=409
@@ -596,4 +613,93 @@ src_head() { cat "$MOCK_DIR/src-head"; }
   setup_with_agent --panel-url https://panel.example.com --agent-token-file "$BATS_TEST_TMPDIR/token"
   [ "$status" -eq 0 ]
   [ -x "$MAILEXPERT_NODE_DIR/node-update.sh" ]
+}
+
+@test "update: the state file keeps the commit the update started from" {
+  update_setup
+  write_backup_keys
+  queue_update
+  # The state file as it was while setup.sh ran: read by the setup.sh mock.
+  printf 'cp "$MAILEXPERT_NODE_STATE/update-42.json" "$MOCK_DIR/state-during-setup"\n' >>"$MAILEXPERT_NODE_SRC/scripts/deploy/mail-node/setup.sh"
+  run bash "$AGENT" --once
+  [ "$(jq -r .previous "$MOCK_DIR/state-during-setup")" = "$OLD_SHA" ]
+  [ "$(jq -r .state "$MOCK_DIR/state-during-setup")" = running ]
+}
+
+@test "update: a checkout whose origin is not the official repository is refused, unless node.env names it" {
+  update_setup
+  write_backup_keys
+  export MOCK_ORIGIN=https://example.com/someone/MailExpert.git
+  queue_update
+  run bash "$AGENT" --once
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"untrusted_origin"}' ]
+  lacks 'fetch' <"$MOCK_DIR/git-calls"
+  [ "$(src_head)" = "$OLD_SHA" ]
+  # A mirror the owner chose, in the root-only node.env.
+  printf 'NODE_UPDATE_ORIGIN=https://example.com/someone/MailExpert.git\n' >>"$MAILEXPERT_NODE_CONF"
+  queue_update
+  run bash "$AGENT" --once
+  [ "$(jq -r .state <<<"$(last_report)")" = succeeded ]
+}
+
+@test "update: local changes in the checkout are refused" {
+  update_setup
+  write_backup_keys
+  export MOCK_GIT_STATUS=' M scripts/deploy/mail-node/setup.sh'
+  queue_update
+  run bash "$AGENT" --once
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"local_changes"}' ]
+  [ "$(src_head)" = "$OLD_SHA" ]
+  lacks 'pre-update' <"$MOCK_DIR/backup-calls"
+}
+
+@test "update: never back to an older commit (not_newer), before any backup" {
+  update_setup
+  write_backup_keys
+  printf '%s\n' "$NEW_SHA" >"$MOCK_DIR/src-head"
+  queue_update "$OLD_SHA"
+  run bash "$AGENT" --once
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"not_newer"}' ]
+  [ "$(src_head)" = "$NEW_SHA" ]
+  lacks 'pre-update' <"$MOCK_DIR/backup-calls"
+  [ ! -e "$MOCK_DIR/setup-calls" ]
+}
+
+# run_update_with <shell code>: node-update.sh sourced, a step replaced by the code, then the update.
+run_update_with() {
+  mkdir -p "$MAILEXPERT_NODE_STATE"
+  run bash -c '. "$1"; eval "$2"; update_main 42 "$3"' _ "$MAILEXPERT_NODE_DIR/node-update.sh" "$1" "$NEW_SHA"
+}
+
+@test "update: a failed mailcow update starts mailcow again, still runs the checks and reports" {
+  update_setup
+  write_backup_keys
+  run_update_with 'mailcow_update_if_pinned() { echo "[mailexpert] error: mailcow update.sh failed"; return 1; }'
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"mailcow_update_failed"}' ]
+  [[ $(jq -r .step <<<"$(last_report)") == *"mailcow update.sh failed"* ]]
+  calls | grep -q "^docker compose up -d (in $MC)$"
+  grep -q 'eop-ranges.sh' "$MOCK_DIR/eop-calls"
+  # The status report after it names the new scripts commit.
+  [ "$(agent_requests | sed -n 's|^POST /api/node-agent/status ||p' | tail -n 1 | jq -r .scriptsCommit)" = "$NEW_SHA" ]
+}
+
+@test "update: a mailcow update past its bound is stopped" {
+  update_setup
+  write_backup_keys
+  export MAILEXPERT_NODE_UPDATE_MAILCOW_TIMEOUT=2
+  run_update_with 'mailcow_update_if_pinned() { sleep 30; }'
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"mailcow_update_failed"}' ]
+  grep -q 'ran past 2s; stopped' "$MAILEXPERT_NODE_STATE/update-42.log"
+}
+
+@test "update: a failed check sends the status report too" {
+  update_setup
+  write_backup_keys
+  export MOCK_EOP_RC=1
+  queue_update
+  run bash "$AGENT" --once
+  [ "$(jq -c '{state, error}' <<<"$(last_report)")" = '{"state":"failed","error":"post_check_failed"}' ]
+  [ "$(agent_requests | sed -n 's|^POST /api/node-agent/status ||p' | tail -n 1 | jq -r .scriptsCommit)" = "$NEW_SHA" ]
 }
