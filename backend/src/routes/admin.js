@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import crypto from 'crypto';
-import { query, withTransaction } from '../services/db.js';
+import { query } from '../services/db.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
@@ -11,19 +11,26 @@ import { invalidateGlobalCategorizationCache } from '../services/categorizer.js'
 import { imapManager } from '../index.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { UUID_RE, uuidParam } from '../utils/uuid.js';
-import { AUDIT_ACTIONS, recordAudit } from '../services/auditLog.js';
-import { getAuthSettings } from '../services/auth/authSettings.js';
-import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../services/auth/userIdentity.js';
-import { countsAsActiveAdmin, lockAdminGuard, otherActiveAdminExists } from '../services/auth/userStatus.js';
+import { AUDIT_ACTIONS } from '../services/auditLog.js';
+import { routeActor } from '../services/actor.js';
+import { applyAdminEffects } from '../services/admin/adminEffects.js';
+import {
+  ADMIN_USER_ERRORS, createUser, deleteUser, disableUserTotp, listUsers, updateUser,
+} from '../services/admin/users.js';
+import {
+  SYSTEM_SETTINGS_CODED, SYSTEM_SETTINGS_ERRORS, updateSystemSettings,
+} from '../services/admin/systemSettings.js';
+import {
+  OIDC_PROVIDER_ERRORS, createOidcProvider, deleteOidcProvider, listOidcProviders, updateOidcProvider,
+} from '../services/auth/oidcProviders.js';
+import { reloadMicrosoftEnv } from '../services/integrations/microsoft.js';
 import { closeUserSockets } from '../services/websocket.js';
 import { destroyUserSessions } from './auth.js';
 import accessSyncRoutes from './accessSync.js';
 import googleAppsAdminRoutes from './googleAppsAdmin.js';
 import adminUpdateRoutes from './adminUpdate.js';
 import { requestAccessSync } from '../services/accessSync/index.js';
-import {
-  FOLDER_SYNC_INTERVAL_KEY, SYNC_INTERVAL_KEY, loadSyncSettings, parseFolderSyncIntervalSec, parseSyncIntervalSec,
-} from '../services/syncSettings.js';
+import { loadSyncSettings } from '../services/syncSettings.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -36,40 +43,11 @@ router.use('/update', adminUpdateRoutes);
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
-class AdminUserError extends Error {
-  constructor(status, code, message) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
-
-const USER_LIST_COLUMNS = 'id, username, email, is_admin, totp_enabled, disabled_at, created_at';
-
-function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstrapAdminEmails) {
-  return {
-    id: row.id,
-    username: row.username,
-    email: row.email ?? null,
-    isAdmin: row.is_admin,
-    totpEnabled: !!row.totp_enabled,
-    disabledAt: row.disabled_at ?? null,
-    created_at: row.created_at,
-    isBootstrapAdmin: !!row.email && bootstrapAdminEmails.has(row.email.toLowerCase()),
-  };
-}
-
-const lockTargetUser = async (client, id) => {
-  const { rows } = await client.query('SELECT id, email, is_admin, disabled_at FROM users WHERE id = $1 FOR UPDATE', [id]);
-  if (!rows[0]) throw new AdminUserError(404, 'not_found', 'User not found');
-  return rows[0];
-};
-
-const isBootstrapEmail = (settings, email) => !!email && settings.bootstrapAdminEmails.has(email.toLowerCase());
-
-function sendAdminUserError(res, err) {
-  if (!(err instanceof AdminUserError)) throw err;
-  return res.status(err.status).json({ error: err.message, code: err.code });
+// A refusal of services/admin/users.js as the API answers it: the message and the code, or only the
+// message where these routes never answered a code.
+function sendUserRefusal(res, result, { withCode = true } = {}) {
+  const [status, message] = ADMIN_USER_ERRORS[result.error] ?? [500, result.error];
+  return res.status(status).json({ error: result.message ?? message, ...(withCode ? { code: result.error } : {}) });
 }
 
 // End every session and live socket of a user who just lost access.
@@ -78,182 +56,71 @@ async function signOutEverywhere(userId) {
   closeUserSockets(imapManager.wss, userId);
 }
 
-// Journal entry for an admin action on a user. The id is kept because service users may have no
-// email to name them by.
-const userAuditEntry = (req, action, user) => ({
-  actorUserId: req.session.userId,
-  action,
-  details: { userId: user.id, email: user.email ?? null, isAdmin: !!user.is_admin },
+// What an admin change still asks of this process (services/admin/adminEffects.js). The panel CLI
+// queues the same effects; the backend's job worker applies them with these hooks (index.js).
+export const ADMIN_EFFECT_HOOKS = Object.freeze({
+  signOutUser: signOutEverywhere,
+  // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
+  // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
+  // and after the delete; the hook swallows per-plugin errors.
+  onUserDelete: (userId) => pluginRegistry.runHook('onUserDelete', { userId }),
+  requestAccessSync: (trigger) => requestAccessSync(trigger),
+  reload: {
+    auth_limits: () => reloadAuthSettings(),
+    // Running mailboxes pick the new cadence up without reconnecting.
+    async sync_intervals() {
+      try {
+        await imapManager.applySyncSettings(await loadSyncSettings());
+      } catch (err) {
+        console.error('Applying mailbox sync intervals failed:', err.message);
+      }
+    },
+    categorization: () => invalidateGlobalCategorizationCache(),
+    connection_policy: () => invalidateConnectionPolicyCache(),
+    microsoft: () => reloadMicrosoftEnv(),
+  },
 });
+
+const applyEffects = (effects) => applyAdminEffects(effects, ADMIN_EFFECT_HOOKS);
 
 router.get('/users', async (req, res) => {
   const limit  = Math.min(parseInt(req.query.limit)  || 100, 200);
   const offset = Math.max(parseInt(req.query.offset) || 0,   0);
-  const [result, countResult] = await Promise.all([
-    query(
-      `SELECT ${USER_LIST_COLUMNS} FROM users ORDER BY created_at ASC LIMIT $1 OFFSET $2`,
-      [limit, offset],
-    ),
-    query('SELECT COUNT(*) AS total FROM users'),
-  ]);
-  const { bootstrapAdminEmails } = getAuthSettings();
-  res.json({
-    users: result.rows.map((row) => publicUser(row, bootstrapAdminEmails)),
-    total: parseInt(countResult.rows[0].total),
-  });
+  res.json(await listUsers({ limit, offset }));
 });
 
 // Approving an email is what lets a person sign in when AUTH_MODE=google.
 router.post('/users', async (req, res) => {
-  const email = normalizeEmail(req.body?.email);
-  if (!email) return res.status(400).json({ error: 'A valid email address is required', code: 'email_invalid' });
-  try {
-    const { user, created, claimed } = await withTransaction((client) => claimOrCreateUserByEmail(client, email));
-    if (!created && !claimed) {
-      return res.status(409).json({ error: 'A user with this email already exists', code: 'user_exists' });
-    }
-    recordAudit([userAuditEntry(req, 'user.added', user)]);
-    requestAccessSync('user_added');
-    console.log(`[admin] ${req.session.userId} approved user ${user.id}`);
-    return res.status(created ? 201 : 200).json({ user: publicUser(user) });
-  } catch (err) {
-    if (err instanceof UserIdentityError) {
-      return res.status(409).json({ error: 'Another user already has this address as a username', code: err.code });
-    }
-    throw err;
-  }
+  const result = await createUser(req.body?.email, routeActor(req));
+  if (result.error) return sendUserRefusal(res, result);
+  await applyEffects(result.effects);
+  console.log(`[admin] ${req.session.userId} approved user ${result.user.id}`);
+  return res.status(result.created ? 201 : 200).json({ user: result.user });
 });
 
 router.post('/users/:id/totp/disable', async (req, res) => {
   const { id } = req.params;
-  if (id === req.session.userId) {
-    return res.status(400).json({ error: 'Use your account settings to manage your own 2FA.' });
-  }
-  const target = await query('SELECT username FROM users WHERE id = $1', [id]);
-  if (!target.rows.length) return res.status(404).json({ error: 'User not found' });
-  await query('UPDATE users SET totp_secret = NULL, totp_enabled = false WHERE id = $1', [id]);
-  console.log(`[admin] ${req.session.username} disabled 2FA for user ${target.rows[0].username} (${id})`);
+  const result = await disableUserTotp(id, routeActor(req));
+  if (result.error) return sendUserRefusal(res, result, { withCode: false });
+  console.log(`[admin] ${req.session.username} disabled 2FA for user ${result.username} (${id})`);
   res.json({ ok: true });
 });
 
 router.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const body = req.body || {};
-  const { isAdmin, disabled } = body;
-  const emailGiven = Object.hasOwn(body, 'email');
-  const clearingEmail = emailGiven && (body.email === null || body.email === '');
-  const email = emailGiven && !clearingEmail ? normalizeEmail(body.email) : null;
-
-  if (isAdmin !== undefined && typeof isAdmin !== 'boolean') {
-    return res.status(400).json({ error: 'isAdmin must be a boolean', code: 'invalid_field' });
-  }
-  if (disabled !== undefined && typeof disabled !== 'boolean') {
-    return res.status(400).json({ error: 'disabled must be a boolean', code: 'invalid_field' });
-  }
-  if (emailGiven && !clearingEmail && !email) {
-    return res.status(400).json({ error: 'A valid email address is required', code: 'email_invalid' });
-  }
-  if (isAdmin === undefined && disabled === undefined && !emailGiven) {
-    return res.status(400).json({ error: 'No valid fields to update', code: 'no_fields' });
-  }
-  if (id === req.session.userId && isAdmin === false) {
-    return res.status(400).json({ error: 'Cannot remove your own admin status', code: 'self_change' });
-  }
-  if (id === req.session.userId && disabled === true) {
-    return res.status(400).json({ error: 'Cannot disable your own account', code: 'self_change' });
-  }
-
-  const settings = getAuthSettings();
-  const googleMode = settings.mode === 'google';
-  try {
-    const { row, lostAccess, previous } = await withTransaction(async (client) => {
-      await lockAdminGuard(client);
-      const current = await lockTargetUser(client, id);
-      const after = {
-        is_admin: isAdmin ?? current.is_admin,
-        disabled_at: disabled === undefined ? current.disabled_at : (disabled ? (current.disabled_at ?? new Date()) : null),
-        email: emailGiven ? email : current.email,
-      };
-
-      if (isBootstrapEmail(settings, current.email)
-        && (!after.is_admin || after.disabled_at || after.email !== current.email)) {
-        throw new AdminUserError(409, 'bootstrap_admin', 'Admins from BOOTSTRAP_ADMIN_EMAILS cannot be changed here');
-      }
-      if (countsAsActiveAdmin(current, googleMode) && !countsAsActiveAdmin(after, googleMode)
-        && !(await otherActiveAdminExists(client, id, googleMode))) {
-        throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
-      }
-      if (email && email !== current.email) {
-        const { rows: taken } = await client.query('SELECT id FROM users WHERE lower(email) = $1 AND id <> $2', [email, id]);
-        if (taken.length) throw new AdminUserError(409, 'email_taken', 'Another user already has this email');
-      }
-
-      const { rows: [updated] } = await client.query(
-        `UPDATE users
-            SET is_admin = $2, email = $3, disabled_at = $4,
-                disabled_by = CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE COALESCE(disabled_by, $5::uuid) END
-          WHERE id = $1
-          RETURNING ${USER_LIST_COLUMNS}`,
-        [id, after.is_admin, after.email, after.disabled_at, req.session.userId],
-      );
-      // Losing the way in: turned off, or left without the email the sessions were opened for.
-      // A replaced address counts too: the row may now stand for another person, and a session
-      // opened under the old address must not carry the row's access over to them.
-      const lost = (!current.disabled_at && !!after.disabled_at) || (!!current.email && after.email !== current.email);
-      return { row: updated, lostAccess: lost, previous: current };
-    });
-
-    if (lostAccess) await signOutEverywhere(id);
-    const auditEntries = [];
-    if (!!previous.disabled_at !== !!row.disabled_at) {
-      auditEntries.push(userAuditEntry(req, row.disabled_at ? 'user.disabled' : 'user.enabled', row));
-    }
-    if (!!previous.is_admin !== !!row.is_admin) auditEntries.push(userAuditEntry(req, 'user.admin_changed', row));
-    if (auditEntries.length) recordAudit(auditEntries);
-    // Who may sign in changed: the Access policy follows.
-    if (!!previous.disabled_at !== !!row.disabled_at || previous.email !== row.email) requestAccessSync('user_changed');
-    console.log(`[admin] ${req.session.userId} updated user ${id}`);
-    return res.json({ ok: true, user: publicUser(row, settings.bootstrapAdminEmails) });
-  } catch (err) {
-    return sendAdminUserError(res, err);
-  }
+  const result = await updateUser(id, req.body || {}, routeActor(req));
+  if (result.error) return sendUserRefusal(res, result);
+  await applyEffects(result.effects);
+  console.log(`[admin] ${req.session.userId} updated user ${id}`);
+  return res.json({ ok: true, user: result.user });
 });
 
 router.delete('/users/:id', async (req, res) => {
   const { id } = req.params;
-  if (id === req.session.userId) {
-    return res.status(400).json({ error: 'Cannot delete your own account' });
-  }
-  const settings = getAuthSettings();
-  const googleMode = settings.mode === 'google';
-  let deleted;
-  try {
-    deleted = await withTransaction(async (client) => {
-      await lockAdminGuard(client);
-      const current = await lockTargetUser(client, id);
-      if (isBootstrapEmail(settings, current.email)) {
-        throw new AdminUserError(409, 'bootstrap_admin', 'Admins from BOOTSTRAP_ADMIN_EMAILS cannot be deleted here');
-      }
-      if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
-        throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
-      }
-      // Delete while the admin-guard lock is held: two admins deleting each other at once would
-      // otherwise both pass the check above and leave no active admin.
-      await client.query('DELETE FROM users WHERE id = $1', [id]);
-      return current;
-    });
-  } catch (err) {
-    return sendAdminUserError(res, err);
-  }
-
-  await signOutEverywhere(id);
-  recordAudit([userAuditEntry(req, 'user.deleted', deleted)]);
-  requestAccessSync('user_deleted');
-  // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the
-  // imported pet, stored under a slug derived from the user id rather than an FK). Best-effort
-  // and after the delete: the user row is already gone, so a hook failure must not misreport a
-  // completed delete as a 500. The hook swallows per-plugin errors.
-  await pluginRegistry.runHook('onUserDelete', { userId: id });
+  const result = await deleteUser(id, routeActor(req));
+  // Refusing the actor's own account answered no code; the guard refusals do.
+  if (result.error) return sendUserRefusal(res, result, { withCode: result.error !== 'self_change' });
+  await applyEffects(result.effects);
   console.log(`[admin] ${req.session.userId} deleted user ${id}`);
   res.json({ ok: true });
 });
@@ -362,159 +229,15 @@ router.get('/audit', async (req, res) => {
 });
 
 router.patch('/settings', async (req, res) => {
-  const { registration_open, internal_auth_disabled, auth_max_attempts, auth_window_minutes,
-    allow_private_hosts, allow_insecure_tls, allow_nonstandard_ports,
-    mfa_enforcement, mfa_device_trust, custom_css,
-    sync_interval_sec, folder_sync_interval_sec, categorization_enabled } = req.body;
-  // Checked before anything is written, so a bad interval never leaves a half-applied update.
-  const syncIntervalSec = sync_interval_sec === undefined ? null : parseSyncIntervalSec(sync_interval_sec);
-  if (sync_interval_sec !== undefined && syncIntervalSec === null) {
-    return res.status(400).json({ error: 'sync_interval_sec must be 15, 30, 60 or 120', code: 'invalid_field' });
+  const result = await updateSystemSettings(req.body, routeActor(req));
+  await applyEffects(result.effects);
+  if (result.error) {
+    const [status, message] = SYSTEM_SETTINGS_ERRORS[result.error] ?? [500, result.error];
+    return res.status(status).json({
+      error: result.message ?? message,
+      ...(SYSTEM_SETTINGS_CODED.has(result.error) ? { code: result.error } : {}),
+    });
   }
-  const folderSyncIntervalSec = folder_sync_interval_sec === undefined ? null : parseFolderSyncIntervalSec(folder_sync_interval_sec);
-  if (folder_sync_interval_sec !== undefined && folderSyncIntervalSec === null) {
-    return res.status(400).json({ error: 'folder_sync_interval_sec must be 0, 900, 1800 or 3600', code: 'invalid_field' });
-  }
-  if (categorization_enabled !== undefined && typeof categorization_enabled !== 'boolean') {
-    return res.status(400).json({ error: 'categorization_enabled must be a boolean', code: 'invalid_field' });
-  }
-  if (typeof registration_open === 'boolean') {
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at)
-       VALUES ('registration_open', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [registration_open ? 'true' : 'false']
-    );
-  }
-  if (typeof internal_auth_disabled === 'boolean') {
-    if (internal_auth_disabled) {
-      // Safety: at least one enabled OIDC provider must exist so users have a
-      // way to sign in after password login is blocked.
-      const provCheck = await query(
-        'SELECT COUNT(*) AS count FROM oidc_providers WHERE enabled = true'
-      );
-      if (parseInt(provCheck.rows[0].count) === 0) {
-        return res.status(400).json({
-          error: 'Cannot disable password login: no enabled SSO providers are configured.',
-        });
-      }
-      // Safety: the requesting admin must have a linked SSO identity so they
-      // can still sign in after their current session expires.
-      const idCheck = await query(
-        'SELECT COUNT(*) AS count FROM user_identities WHERE user_id = $1',
-        [req.session.userId]
-      );
-      if (parseInt(idCheck.rows[0].count) === 0) {
-        return res.status(400).json({
-          error: 'Cannot disable password login: link your account to an SSO provider first so you can still sign in.',
-        });
-      }
-    }
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at)
-       VALUES ('internal_auth_disabled', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [internal_auth_disabled ? 'true' : 'false']
-    );
-    console.log(`[admin] ${req.session.username} set internal_auth_disabled=${internal_auth_disabled}`);
-  }
-  if (auth_max_attempts != null) {
-    const val = parseInt(auth_max_attempts);
-    if (!Number.isInteger(val) || val < 1 || val > 100)
-      return res.status(400).json({ error: 'auth_max_attempts must be between 1 and 100' });
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('auth_max_attempts', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [String(val)]
-    );
-  }
-  if (auth_window_minutes != null) {
-    const val = parseInt(auth_window_minutes);
-    if (!Number.isInteger(val) || val < 1 || val > 1440)
-      return res.status(400).json({ error: 'auth_window_minutes must be between 1 and 1440' });
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('auth_window_minutes', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [String(val)]
-    );
-  }
-  if (auth_max_attempts != null || auth_window_minutes != null) {
-    await reloadAuthSettings();
-  }
-  for (const [key, val] of [
-    ['allow_private_hosts', allow_private_hosts],
-    ['allow_insecure_tls', allow_insecure_tls],
-    ['allow_nonstandard_ports', allow_nonstandard_ports],
-  ]) {
-    if (typeof val === 'boolean') {
-      await query(
-        `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-        [key, val ? 'true' : 'false']
-      );
-      console.log(`[admin] ${req.session.username} set ${key}=${val}`);
-    }
-  }
-  if (mfa_enforcement != null) {
-    if (!['off', 'required'].includes(mfa_enforcement)) {
-      return res.status(400).json({ error: 'mfa_enforcement must be "off" or "required"' });
-    }
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('mfa_enforcement', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [mfa_enforcement]
-    );
-    console.log(`[admin] ${req.session.username} set mfa_enforcement=${mfa_enforcement}`);
-  }
-  if (mfa_device_trust != null) {
-    if (!['never', '7d', '30d', 'permanent'].includes(mfa_device_trust)) {
-      return res.status(400).json({ error: 'mfa_device_trust must be "never", "7d", "30d", or "permanent"' });
-    }
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('mfa_device_trust', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [mfa_device_trust]
-    );
-    console.log(`[admin] ${req.session.username} set mfa_device_trust=${mfa_device_trust}`);
-  }
-  if (custom_css !== undefined) {
-    if (typeof custom_css !== 'string') return res.status(400).json({ error: 'custom_css must be a string' });
-    if (custom_css.length > 50000) return res.status(400).json({ error: 'custom_css must not exceed 50,000 characters' });
-    const sanitized = custom_css.replace(/\0/g, '');
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ('custom_css', $1, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
-      [sanitized]
-    );
-    console.log(`[admin] ${req.session.username} updated custom_css (${sanitized.length} chars)`);
-  }
-  if (syncIntervalSec !== null || folderSyncIntervalSec !== null) {
-    for (const [key, seconds] of [[SYNC_INTERVAL_KEY, syncIntervalSec], [FOLDER_SYNC_INTERVAL_KEY, folderSyncIntervalSec]]) {
-      if (seconds === null) continue;
-      await query(
-        `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-        [key, String(seconds)]
-      );
-    }
-    // Running mailboxes pick the new cadence up without reconnecting.
-    try {
-      await imapManager.applySyncSettings(await loadSyncSettings());
-    } catch (err) {
-      console.error('Applying mailbox sync intervals failed:', err.message);
-    }
-    console.log(`[admin] ${req.session.userId} changed mailbox sync intervals`);
-  }
-  if (typeof categorization_enabled === 'boolean') {
-    await query(
-      `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-      ['categorization_enabled', categorization_enabled ? 'true' : 'false']
-    );
-    invalidateGlobalCategorizationCache();
-    console.log(`[admin] ${req.session.userId} set categorization_enabled=${categorization_enabled}`);
-  }
-  invalidateConnectionPolicyCache();
   res.json({ ok: true });
 });
 
@@ -742,200 +465,31 @@ router.delete('/system-email', async (req, res) => {
 
 // ── OIDC providers ─────────────────────────────────────────────────────────────
 
-// login_match_claim is the OIDC claim name (from the verified id_token) used to match an SSO
-// login to an existing MailExpert account (matched against users.username). Restrict to a safe
-// claim-name charset. Returns the trimmed value, or null if it is not a valid claim name.
-function validateMatchClaim(v) {
-  const c = String(v).trim();
-  if (!/^[a-zA-Z0-9_.:-]{1,64}$/.test(c)) return null;
-  // Reject object-prototype key names: as a claim they can't name a real IdP claim, and
-  // `payload["__proto__"]` from JSON.parse is a string own-property that would otherwise slip
-  // past resolveLoginMatchValue's type guard. Defense-in-depth (also guarded at the sink).
-  if (c === '__proto__' || c === 'constructor' || c === 'prototype') return null;
-  return c;
+// services/auth/oidcProviders.js holds the checks; these routes answer a refusal by its message.
+function sendOidcRefusal(res, result) {
+  const [status, message] = OIDC_PROVIDER_ERRORS[result.error] ?? [500, result.error];
+  return res.status(status).json({ error: result.message ?? message });
 }
 
 router.get('/oidc', async (req, res) => {
-  const result = await query(
-    `SELECT id, name, slug, issuer_url, client_id, scopes, provisioning_mode,
-            allowed_domains, enabled, require_email_verified, allow_insecure,
-            admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim,
-            created_at, updated_at
-     FROM oidc_providers ORDER BY name ASC`
-  );
-  res.json({ providers: result.rows });
+  res.json(await listOidcProviders());
 });
 
 router.post('/oidc', async (req, res) => {
-  const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim } = req.body;
-  if (!name || !slug || !issuer_url || !client_id || !client_secret) {
-    return res.status(400).json({ error: 'name, slug, issuer_url, client_id and client_secret are required' });
-  }
-  if (!/^[a-z0-9-]+$/.test(slug)) {
-    return res.status(400).json({ error: 'Slug must contain only lowercase letters, numbers and hyphens' });
-  }
-  let loginMatchClaim = 'email';
-  if (login_match_claim !== undefined && login_match_claim !== null && String(login_match_claim).trim() !== '') {
-    const c = validateMatchClaim(login_match_claim);
-    if (!c) return res.status(400).json({ error: 'login_match_claim must be a valid claim name (letters, digits, . _ : -)' });
-    loginMatchClaim = c;
-  }
-  try {
-    const parsed = new URL(issuer_url.trim());
-    if (!allow_insecure && parsed.protocol !== 'https:') {
-      return res.status(400).json({ error: 'Issuer URL must use HTTPS' });
-    }
-    if (!allow_insecure) {
-      // Honor the "Allow private / local hosts" policy like POST /system-email does: a LAN
-      // issuer with a valid public certificate was refused even with the policy on, and the
-      // only way around it, allow_insecure, also turns certificate checks off.
-      const policy = await getConnectionPolicy();
-      const hostErr = await validateHost(parsed.hostname, { allowPrivate: policy.allowPrivateHosts });
-      if (hostErr) return res.status(400).json({ error: `Issuer URL: ${hostErr}` });
-    }
-  } catch {
-    return res.status(400).json({ error: 'Issuer URL is not a valid URL' });
-  }
-  try {
-    const result = await query(
-      `INSERT INTO oidc_providers (name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim`,
-      [
-        name.trim(), slug.trim(), issuer_url.trim(), client_id.trim(),
-        encrypt(client_secret),
-        (scopes || 'openid email profile').trim(),
-        provisioning_mode || 'login_existing_only',
-        allowed_domains?.trim() || null,
-        enabled !== false,
-        require_email_verified !== false,
-        allow_insecure === true,
-        admin_group_claim?.trim() || null,
-        admin_group_value?.trim() || null,
-        rp_initiated_logout === true,
-        loginMatchClaim,
-      ]
-    );
-    res.json({ provider: result.rows[0] });
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'A provider with this slug already exists' });
-    throw err;
-  }
+  const result = await createOidcProvider(req.body);
+  if (result.error) return sendOidcRefusal(res, result);
+  res.json({ provider: result.provider });
 });
 
-// Guard against locking everyone out: if password login is disabled, refuse to
-// disable/delete the last enabled OIDC provider. Returns an error string or null.
-async function wouldLockOut(providerId) {
-  const s = await query("SELECT value FROM system_settings WHERE key = 'internal_auth_disabled'");
-  if (s.rows[0]?.value !== 'true') return null; // password login still available
-  const others = await query(
-    'SELECT COUNT(*) AS count FROM oidc_providers WHERE enabled = true AND id <> $1',
-    [providerId]
-  );
-  if (parseInt(others.rows[0].count) === 0) {
-    return 'Cannot disable or delete the last enabled SSO provider while password login is off. Re-enable password login first.';
-  }
-  return null;
-}
-
 router.patch('/oidc/:id', async (req, res) => {
-  const { id } = req.params;
-  const { name, slug, issuer_url, client_id, client_secret, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim } = req.body;
-
-  const existingResult = await query('SELECT allow_insecure FROM oidc_providers WHERE id = $1', [id]);
-  if (!existingResult.rows.length) return res.status(404).json({ error: 'Provider not found' });
-  const existing = existingResult.rows[0];
-
-  // null = keep existing (column is NOT NULL, so we COALESCE rather than allow a blank reset).
-  let loginMatchClaimParam = null;
-  if (login_match_claim !== undefined && login_match_claim !== null && String(login_match_claim).trim() !== '') {
-    const c = validateMatchClaim(login_match_claim);
-    if (!c) return res.status(400).json({ error: 'login_match_claim must be a valid claim name (letters, digits, . _ : -)' });
-    loginMatchClaimParam = c;
-  }
-
-  // Block disabling the last usable auth method.
-  if (enabled === false) {
-    const lockout = await wouldLockOut(id);
-    if (lockout) return res.status(400).json({ error: lockout });
-  }
-
-  if (slug && !/^[a-z0-9-]+$/.test(slug)) {
-    return res.status(400).json({ error: 'Slug must contain only lowercase letters, numbers and hyphens' });
-  }
-  if (issuer_url) {
-    try {
-      const parsed = new URL(issuer_url.trim());
-      const effectiveAllowInsecure = allow_insecure !== undefined ? allow_insecure : existing.allow_insecure;
-      if (!effectiveAllowInsecure && parsed.protocol !== 'https:') {
-        return res.status(400).json({ error: 'Issuer URL must use HTTPS' });
-      }
-      if (!effectiveAllowInsecure) {
-        // Same policy as the create route.
-        const policy = await getConnectionPolicy();
-        const hostErr = await validateHost(parsed.hostname, { allowPrivate: policy.allowPrivateHosts });
-        if (hostErr) return res.status(400).json({ error: `Issuer URL: ${hostErr}` });
-      }
-    } catch {
-      return res.status(400).json({ error: 'Issuer URL is not a valid URL' });
-    }
-  }
-  // Only encrypt a new secret if one was provided (non-placeholder)
-  const secretUpdate = client_secret && client_secret !== '••••••••'
-    ? encrypt(client_secret)
-    : undefined;
-  try {
-    const result = await query(
-      `UPDATE oidc_providers SET
-        name = COALESCE($2, name),
-        slug = COALESCE($3, slug),
-        issuer_url = COALESCE($4, issuer_url),
-        client_id = COALESCE($5, client_id),
-        client_secret = COALESCE($6, client_secret),
-        scopes = COALESCE($7, scopes),
-        provisioning_mode = COALESCE($8, provisioning_mode),
-        allowed_domains = CASE WHEN $9::text IS DISTINCT FROM '__keep__' THEN $9::text ELSE allowed_domains END,
-        enabled = COALESCE($10, enabled),
-        require_email_verified = COALESCE($11, require_email_verified),
-        allow_insecure = COALESCE($12, allow_insecure),
-        admin_group_claim = CASE WHEN $13::text IS DISTINCT FROM '__keep__' THEN $13::text ELSE admin_group_claim END,
-        admin_group_value = CASE WHEN $14::text IS DISTINCT FROM '__keep__' THEN $14::text ELSE admin_group_value END,
-        rp_initiated_logout = COALESCE($15, rp_initiated_logout),
-        login_match_claim = COALESCE($16, login_match_claim),
-        updated_at = NOW()
-       WHERE id = $1
-       RETURNING id, name, slug, issuer_url, client_id, scopes, provisioning_mode, allowed_domains, enabled, require_email_verified, allow_insecure, admin_group_claim, admin_group_value, rp_initiated_logout, login_match_claim`,
-      [
-        id,
-        name?.trim() || null,
-        slug?.trim() || null,
-        issuer_url?.trim() || null,
-        client_id?.trim() || null,
-        secretUpdate || null,
-        scopes?.trim() || null,
-        provisioning_mode || null,
-        allowed_domains !== undefined ? (allowed_domains?.trim() || null) : '__keep__',
-        enabled !== undefined ? enabled : null,
-        require_email_verified !== undefined ? require_email_verified : null,
-        allow_insecure !== undefined ? allow_insecure : null,
-        admin_group_claim !== undefined ? (admin_group_claim?.trim() || null) : '__keep__',
-        admin_group_value !== undefined ? (admin_group_value?.trim() || null) : '__keep__',
-        rp_initiated_logout !== undefined ? rp_initiated_logout : null,
-        loginMatchClaimParam,
-      ]
-    );
-    if (!result.rows.length) return res.status(404).json({ error: 'Provider not found' });
-    res.json({ provider: result.rows[0] });
-  } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'A provider with this slug already exists' });
-    throw err;
-  }
+  const result = await updateOidcProvider(req.params.id, req.body);
+  if (result.error) return sendOidcRefusal(res, result);
+  res.json({ provider: result.provider });
 });
 
 router.delete('/oidc/:id', async (req, res) => {
-  const lockout = await wouldLockOut(req.params.id);
-  if (lockout) return res.status(400).json({ error: lockout });
-  await query('DELETE FROM oidc_providers WHERE id = $1', [req.params.id]);
+  const result = await deleteOidcProvider(req.params.id);
+  if (result.error) return sendOidcRefusal(res, result);
   res.json({ ok: true });
 });
 

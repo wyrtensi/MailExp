@@ -196,6 +196,10 @@ ufw, `cloudflare access`), and what is left to the human: recovery key, Google a
 mailboxes (`docs/operations/google-oauth.md`), the mail node, and with `cf`/`both` the optional
 user sync into the Access policy (`docs/operations/cloudflare.md`, section 8: the token goes in
 through `mailexpert-cli.sh access token < file`, stdin only, run by the human).
+Access recovery over SSH without the web panel (the human runs these; secrets stdin only):
+`mailexpert-cli.sh user list`, `user set <ADMIN_EMAIL> --enable --admin`, `user totp-reset <USER_EMAIL>
+--yes`, `settings set internal_auth_disabled false` (password login back on), `sso list|add|set|remove`,
+`integration microsoft show|set|remove` (`docs/operations/cli.md`, sections 3.7-3.10).
 
 Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sections 2-6е (as in quickstart.md, section 8). mailcow's
 `generate_config.sh` is interactive: the human runs it. The node's MailExpert scripts are cloned

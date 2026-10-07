@@ -4,8 +4,9 @@
 когда экран неудобен: массовые действия, скрипты, работа по SSH. CLI не имеет своей бизнес-логики:
 команды вызывают те же сервисы backend, что и HTTP-маршруты, с теми же проверками, кодами отказов и
 записями журнала. Мимо панели (напрямую в mailcow, тенант или Cloudflare) CLI ничего не делает, а
-работу для тенанта и прогон синхронизации с Cloudflare Access только ставит в очередь заданий:
-выполняет её воркер backend.
+работу для тенанта, прогон синхронизации с Cloudflare Access и то, что после изменения пользователей и
+настроек должен сделать процесс backend (разлогинить, перечитать настройки), только ставит в очередь
+заданий: выполняет её воркер backend.
 
 Это полный справочник. Устройство и причины решений — в [panel-cli.md](../architecture/panel-cli.md);
 краткая сводка для владельца и остальные операции — в
@@ -14,7 +15,8 @@
 Плейсхолдеры: `<PREFIX>` — каталог установки панели (по умолчанию `/opt/mailexpert`), `<DOMAIN>` —
 домен почтового узла, `<LOCAL>@<DOMAIN>` — адрес ящика, `<ADMIN_EMAIL>` — адрес администратора панели,
 `<ACCOUNT_ID>`, `<APP_ID>`, `<POLICY_ID>` — ID аккаунта, приложения и политики Cloudflare Access
-([cloudflare.md](cloudflare.md)).
+([cloudflare.md](cloudflare.md)), `<USER_EMAIL>` — адрес пользователя панели, `<IDP_NAME>`, `<SLUG>`,
+`<IDP_HOST>` — имя, slug и хост SSO-провайдера, `<CLIENT_ID>` — ID OAuth-клиента.
 
 ## 1. Как запускать
 
@@ -41,7 +43,8 @@ src/cli/mailexpert.js ...`, передавая все остальные арг�
   `--json`. Иначе `docker compose exec -T`: с терминалом stderr слился бы со stdout и сломал JSON. Значит,
   в конвейере, скрипте и с `--json` CLI не может задать вопрос: действие, которое просит подтверждения,
   требует `--yes` (удаление ящика — `--confirm-address`).
-- stdin обёртки доходит до CLI целиком: `access token < файл` читает токен оттуда. Свои проверки
+- stdin обёртки доходит до CLI целиком: `access token < файл`, `sso add`, `sso set --secret` и
+  `integration microsoft set --secret` читают секрет оттуда. Свои проверки
   перед запуском CLI обёртка делает без stdin.
 
 Параметры CLI (`--json`, `--yes`, `--as`, `--wait`) идут после команды, а не перед группой: перед ней
@@ -290,6 +293,89 @@ sudo $M access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID>
 sudo $M access sync --json | jq '.job.result'
 ```
 
+### Административные группы: что доделывает backend
+
+Группы `user`, `settings`, `sso` и `integration` — разделы «Пользователи», «Настройки», «SSO» и
+«Интеграции» экрана администратора, через те же сервисы (`services/admin/users.js`,
+`services/admin/systemSettings.js`, `services/auth/oidcProviders.js`,
+`services/integrations/microsoft.js`). Часть последствий изменения живёт только в процессе backend:
+разлогинить пользователя во всех сессиях и закрыть его сокеты, вызвать очистку данных плагинов после
+удаления, попросить прогон синхронизации с Access, перечитать то, что backend держит в памяти (лимиты
+входа, интервалы синхронизации ящиков, кэши категоризации и политики подключений, клиент Microsoft в
+`process.env`). Экран делает это сразу; CLI ставит задание `admin_effects`, которое воркер backend
+выполняет теми же функциями (`services/admin/adminEffects.js`). В ответе команды — строка
+`backend: job <ID> queued (...)` (в `--json` — поле `job`). Пока backend остановлен, задание ждёт в
+очереди; изменение в базе уже сделано, а отключённого или удалённого пользователя `requireAuth` не
+пускает и без задания.
+
+### 3.7. `user`: пользователи панели
+
+Пользователь называется адресом (или именем пользователя, если адреса нет); регистр не важен.
+Проверки те же, что у экрана: последний активный администратор остаётся (`last_admin`; в
+`AUTH_MODE=google` без адреса администратор не считается активным), адреса из `BOOTSTRAP_ADMIN_EMAILS`
+здесь не меняются и не удаляются (`bootstrap_admin`), адрес не может быть у двух пользователей
+(`email_taken`), администратор из `--as` не снимает с себя права, не отключает и не удаляет себя и не
+сбрасывает себе 2FA (`self_change`). Все проверки идут под той же блокировкой (`lockAdminGuard`), что у
+экрана, удаление — внутри неё.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `user list [--limit N] [--offset N]` | Пользователи, старые первыми (по 100, не больше 200): адрес, имя, администратор (`bootstrap` для адресов из `BOOTSTRAP_ADMIN_EMAILS`), 2FA, отключён ли, создан. | нет |
+| `user show <email>` | Один пользователь. | нет |
+| `user create <email> [--admin]` | Одобряет адрес: новый пользователь или существующий, у которого это имя пользователя. В `AUTH_MODE=google` именно это пускает человека войти. С `--admin` — сразу администратор. Backend просит прогон синхронизации с Access. | `user.added`; с `--admin` ещё `user.admin_changed` |
+| `user set <email> [--admin \| --no-admin] [--disable \| --enable] [--email NEW]` | Делает администратором или нет, отключает или включает, меняет адрес (`--email ""` убирает его). Кто потерял вход (отключён или сменился адрес, под которым открыты сессии) — backend разлогинивает его везде. Без параметров или с противоречащими — код 2. | `user.admin_changed`, `user.disabled`, `user.enabled` — что изменилось |
+| `user delete <email>` | Удаляет пользователя и всё его (просит подтверждения, `--yes`). Backend разлогинивает его, плагины удаляют свои данные, просится прогон синхронизации с Access. | `user.deleted` |
+| `user totp-reset <email>` | Выключает 2FA пользователя, потерявшего устройство (просит подтверждения). Он входит по паролю и заново подключает 2FA, где она обязательна. | нет (как и у кнопки экрана) |
+
+### 3.8. `settings`: настройки установки
+
+Те же ключи и проверки, что `PATCH /api/admin/settings`. Читаются и пишутся только они; остальные
+системные настройки (SMTP, ИИ, синхронизация с Access — в них секреты) здесь не видны.
+
+| Ключ | Значения |
+|---|---|
+| `registration_open`, `allow_private_hosts`, `allow_insecure_tls`, `allow_nonstandard_ports`, `categorization_enabled` | `true` / `false` |
+| `internal_auth_disabled` | `true` — вход по паролю выключен, `false` — включён |
+| `auth_max_attempts` | 1-100 |
+| `auth_window_minutes` | 1-1440 |
+| `mfa_enforcement` | `off`, `required` |
+| `mfa_device_trust` | `never`, `7d`, `30d`, `permanent` |
+| `sync_interval_sec` | 15, 30, 60, 120 |
+| `folder_sync_interval_sec` | 0, 900, 1800, 3600 |
+| `custom_css` | текст до 50 000 символов; `-` читает его со stdin |
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `settings get [key]` | Все ключи (`(not set)` — панель берёт значение по умолчанию) или значение одного. Неизвестный ключ — код 2. | нет |
+| `settings set <key> <value>` | Меняет один ключ. Булево — `true`/`false` (также `on`/`off`, `yes`/`no`), число — целое, иначе код 2. Выключить вход по паролю (`internal_auth_disabled true`) можно, только если есть включённый SSO-провайдер (`no_sso_provider`) и у администратора из `--as` есть SSO-учётка (`sso_identity_required`): иначе он сам не войдёт. Без `--as` такой администратор не найдётся, и запрос будет отклонён. Включить вход по паролю обратно (`false`) можно всегда — это путь назад. Backend перечитывает лимиты входа, интервалы и кэши. | нет (как и у экрана) |
+
+Сбросить блокировки входа по лимиту попыток (счётчики `auth:*` в Redis) ни экран, ни CLI не умеют:
+такой функции в панели нет. Блокировка снимается сама через `auth_window_minutes`.
+
+### 3.9. `sso`: SSO-провайдеры (OIDC)
+
+Те же проверки, что у экрана (`/api/admin/oidc`). Провайдер называется ID или slug. Секрет клиента
+читается **только со stdin** (файл или конвейер; в терминале — вставить и нажать Ctrl-D), хранится
+зашифрованным и никогда не печатается.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `sso list` | Провайдеры: slug, имя, включён ли, issuer, client ID, ID. Секретов нет. | нет |
+| `sso add --name TEXT --slug SLUG --issuer URL --client-id ID [параметры] < файл-с-секретом` | Добавляет провайдера. Slug — строчные латинские буквы, цифры, дефисы (`slug_invalid`), не занят (`slug_taken`); issuer — HTTPS (`issuer_not_https`) и разрешённый политикой хост (`issuer_host_refused`), если не `--allow-insecure`. Пустой stdin — `fields_required`. Параметры: `--scopes`, `--provisioning`, `--allowed-domains`, `--admin-group-claim`/`--admin-group-value`, `--login-match-claim`, `--disable`, `--no-require-email-verified`, `--allow-insecure`, `--rp-logout`. | нет (как и у экрана) |
+| `sso set <id\|slug> [параметры] [--secret < файл-с-секретом]` | Меняет названные поля, остальные остаются; `--allowed-domains ""` и `--admin-group-claim ""` с `--admin-group-value ""` очищают. Секрет меняется только с `--secret`. Включение и выключение: `--enable`/`--disable`, переключатели — `--[no-]require-email-verified`, `--[no-]allow-insecure`, `--[no-]rp-logout`. Выключить последний включённый провайдер при выключенном входе по паролю нельзя (`last_provider`). | нет |
+| `sso remove <id\|slug>` | Удаляет провайдера и привязанные через него учётки SSO (просит подтверждения). `last_provider` — как у `set`: сначала `settings set internal_auth_disabled false`. | нет |
+
+### 3.10. `integration`: клиент Microsoft OAuth
+
+Клиент, через который подключаются ящики Outlook (`/api/integrations/microsoft`). Приложения Google —
+своим CLI (`src/cli/googleApp.js`).
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `integration microsoft show` | Client ID, tenant ID, redirect URI, задан ли секрет (значение никогда), когда изменён. | нет |
+| `integration microsoft set [--client-id ID] [--tenant-id ID] [--redirect-uri URL] [--secret]` | Меняет названные поля, остальные и сохранённый секрет остаются. С `--secret` новый секрет читается **только со stdin** и хранится зашифрованным; строка с символом `•` отклоняется (`client_secret_redacted`). Backend перечитывает клиента. Без параметров — код 2. | нет (как и у экрана) |
+| `integration microsoft remove` | Удаляет клиента (просит подтверждения): подключать и переподключать ящики Outlook нельзя, пока его не зададут снова. | нет |
+
 ## 4. Коды выхода
 
 ### CLI
@@ -401,6 +487,16 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 `{ "job": { "id", "status", "result", "errorCode", "error" } }`, где `result` — итог прогона
 (`outcome`, `added`, `removed`, `disabled`, `wouldDisable`, `error`, `trigger`, `startedAt`, `finishedAt`).
 
+`user list` — то же, что `GET /api/admin/users`: `{ "users": [ { "id", "username", "email", "isAdmin",
+"totpEnabled", "disabledAt", "created_at", "isBootstrapAdmin" } ], "total" }`; `user show` — `{ "user" }`;
+`user create` — `{ "user", "created", "job" }`, `user set` — `{ "user", "job" }`, `user delete` —
+`{ "ok": true, "job" }`, где `job` — `{ "id", "kind": "admin_effects", "status" }` или `null`.
+`settings get` — `{ "settings": { ключ: значение } }` (только заданные ключи), `settings get <key>` и
+`settings set` — `{ "key", "value" }` (у `set` ещё `job`). `sso list` — `{ "providers": [...] }` в полях API
+(`issuer_url`, `client_id`, `enabled`, ...; без секрета), `sso add`/`set` — `{ "provider" }`.
+`integration microsoft show` — `{ "config": { "clientId", "tenantId", "redirectUri", "clientSecret":
+"••••••••", "updated_at" } }` или `{ "config": null }`; `set` — то же плюс `job`.
+
 ## 6. Коды ошибок, которые встретятся
 
 Печатаются как `error: <текст> (<код>)`; в скобках HTTP-статус, с которым тот же отказ отвечает API панели
@@ -511,6 +607,53 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 Итоги прогона (`not_configured`, `aborted`, `policy_not_allow` и другие) и их коды выхода — в
 разделе 3.6.
 
+### Пользователи (`ADMIN_USER_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `not_found` | 404 | Нет пользователя с таким адресом или именем. |
+| `email_invalid` | 400 | Адрес не похож на адрес. |
+| `user_exists` | 409 | Адрес уже одобрен. |
+| `username_taken` | 409 | Этот адрес — имя пользователя у другого пользователя. |
+| `email_taken` | 409 | Этот адрес уже у другого пользователя. |
+| `last_admin` | 409 | Не осталось бы ни одного активного администратора. |
+| `bootstrap_admin` | 409 | Адрес из `BOOTSTRAP_ADMIN_EMAILS`: меняется только в окружении. |
+| `self_change` | 400 | Администратор из `--as` меняет себе права, отключает, удаляет себя или сбрасывает себе 2FA. |
+| `no_fields`, `invalid_field` | 400 | Нечего менять или поле не того типа (для CLI — внутренняя проверка). |
+
+### Настройки (`SYSTEM_SETTINGS_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `invalid_field` | 400 | Недопустимый интервал синхронизации или `categorization_enabled` не булево. |
+| `auth_max_attempts_invalid`, `auth_window_minutes_invalid` | 400 | Вне 1-100 или 1-1440. |
+| `mfa_enforcement_invalid`, `mfa_device_trust_invalid` | 400 | Значение не из списка. |
+| `custom_css_invalid`, `custom_css_too_long` | 400 | Не текст или длиннее 50 000 символов. |
+| `no_sso_provider` | 400 | Выключить вход по паролю нельзя: нет включённого SSO-провайдера. |
+| `sso_identity_required` | 400 | Выключить вход по паролю нельзя: у администратора (`--as`) нет SSO-учётки. |
+
+Как и у экрана, ключи проверяются по очереди: при отказе записанное до него остаётся, а backend всё равно
+перечитывает то, что перечитал бы экран.
+
+### SSO-провайдеры (`OIDC_PROVIDER_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `fields_required` | 400 | Нужны имя, slug, issuer, client ID и секрет (stdin пуст). |
+| `slug_invalid`, `slug_taken` | 400, 409 | Slug не из строчных букв, цифр и дефисов, или уже занят. |
+| `issuer_invalid`, `issuer_not_https`, `issuer_host_refused` | 400 | Issuer не URL, не HTTPS или хост запрещён политикой (`allow_private_hosts`). |
+| `login_match_claim_invalid` | 400 | Имя claim — буквы, цифры и `. _ : -`. |
+| `last_provider` | 400 | Последний включённый провайдер при выключенном входе по паролю. |
+| `not_found` | 404 | Нет провайдера с таким ID или slug. |
+| `secret_missing` | 1 | `--secret`, а stdin пуст (код CLI). |
+
+### Клиент Microsoft (`MICROSOFT_INTEGRATION_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `client_secret_redacted` | 400 | В секрете символ `•`: это заглушка экрана, а не секрет. |
+| `secret_missing` | 1 | `--secret`, а stdin пуст (код CLI). |
+
 ## 7. Практические примеры
 
 ```bash
@@ -556,6 +699,22 @@ sudo $cli access token < /root/access-sync-token.txt && shred -u /root/access-sy
 sudo $cli access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID> --enable --as <ADMIN_EMAIL>
 sudo $cli access sync
 sudo $cli access status
+
+# Доступ: восстановить администратора, отключить сотрудника, сбросить 2FA
+sudo $cli user list
+sudo $cli user set <ADMIN_EMAIL> --enable --admin
+sudo $cli user set <USER_EMAIL> --disable
+sudo $cli user totp-reset <USER_EMAIL> --yes
+
+# Вход по паролю обратно, если SSO сломался
+sudo $cli settings set internal_auth_disabled false
+sudo $cli settings get
+
+# SSO и клиент Microsoft: секреты — только stdin
+sudo $cli sso add --name "<IDP_NAME>" --slug <SLUG> --issuer https://<IDP_HOST> --client-id <CLIENT_ID> < /root/oidc-secret.txt
+sudo $cli sso set <SLUG> --secret < /root/oidc-secret.txt && shred -u /root/oidc-secret.txt
+sudo $cli integration microsoft set --client-id <CLIENT_ID> --tenant-id common --secret < /root/ms-secret.txt
+sudo $cli integration microsoft show
 
 # Скрипты: JSON и код выхода
 sudo $cli jobs list --status problems --json | jq -r '.jobs[].id'

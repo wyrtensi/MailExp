@@ -13,7 +13,13 @@
 | `backend/src/cli/args.js` | разбор параметров без зависимостей, `EXIT` |
 | `backend/src/cli/common.js` | `CliError`, отказ по каталогу кодов, сбой узла, подтверждение, `--wait` |
 | `backend/src/cli/output.js` | таблицы и пары «ключ: значение» |
-| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access` |
+| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access`, `user`, `settings`, `sso`, `integration` |
+| `backend/src/cli/effects.js` | постановка задания `admin_effects` для административных групп, чтение секрета со stdin |
+| `backend/src/services/admin/users.js` | пользователи: список, поиск по адресу, одобрение, правка, удаление, сброс 2FA (бывшие обработчики `/api/admin/users`) |
+| `backend/src/services/admin/systemSettings.js` | ключи и проверки `PATCH /api/admin/settings` |
+| `backend/src/services/auth/oidcProviders.js` | SSO-провайдеры (бывшие обработчики `/api/admin/oidc`) |
+| `backend/src/services/integrations/microsoft.js` | клиент Microsoft OAuth: хранение, маскирование секрета, `process.env` |
+| `backend/src/services/admin/adminEffects.js` | последствия админских изменений в процессе backend и задание `admin_effects` |
 | `backend/src/services/accessSync/actions.js` | синхронизация с Cloudflare Access: снимок настроек, сохранение настроек и токена с журналом, постановка и чтение задания `access_sync`, его обработчик |
 | `backend/src/services/actor.js` | кто действует: пользователь маршрута или CLI (`--as`) |
 | `backend/src/services/mailNode/mailboxActions.js` | список, создание, имена, запрос и отмена удаления ящика узла |
@@ -87,6 +93,33 @@ backend: планировщик (`services/accessSync/index.js`) один на �
 Токен CLI читает только со stdin (`io.readStdin`), поэтому обёртка выполняет свою проверку `test -f`
 с `</dev/null`: `docker compose exec` пересылает stdin, и проверка съела бы токен.
 
+## Пользователи, настройки, SSO и клиент Microsoft из CLI
+
+Обработчики `/api/admin/users`, `PATCH /api/admin/settings`, `/api/admin/oidc` и
+`/api/integrations/microsoft` вынесены в сервисы (таблица выше); маршруты только читают запрос и
+отвечают. Ответы маршрутов не изменились: отказы, у которых не было кода (сброс 2FA, удаление себя,
+большинство отказов настроек и все отказы SSO), маршрут отдаёт по-прежнему только текстом; коды у них
+есть внутри сервиса и в CLI. Последний активный администратор защищён так же: проверки и удаление идут
+под `lockAdminGuard` в одной транзакции.
+
+Часть последствий живёт только в процессе backend: разлогинить пользователя (`destroyUserSessions`
+работает с Redis, к которому CLI не подключается, `closeUserSockets` — с сокетами процесса), хук
+плагинов `onUserDelete`, планировщик синхронизации с Access (`requestAccessSync`), а также то, что
+процесс держит в памяти: лимиты входа (`reloadAuthSettings`), интервалы синхронизации ящиков
+(`imapManager.applySyncSettings`), кэши категоризации и политики подключений, клиент Microsoft в
+`process.env`. Сервис отвечает их списком (`effects`: `signOut`, `userDeleted`, `accessSync`,
+`reload`), не выполняя. Маршрут выполняет их сразу (`applyAdminEffects` с `ADMIN_EFFECT_HOOKS` из
+`routes/admin.js`); CLI ставит задание `admin_effects` (`max_attempts` 3, все хуки можно повторить),
+которое воркер backend выполняет с теми же хуками (`registerAdminEffectsJobKind` в `index.js`).
+Порядок: разлогинить, перечитать, очистка плагинов, синхронизация с Access. Отказ настроек на
+середине тоже несёт `effects` — то, что маршрут успел бы перечитать до отказа.
+
+Чего здесь нет. Выключить вход по паролю (`internal_auth_disabled true`) экран разрешает, только если у
+самого администратора есть SSO-учётка; у CLI без `--as` администратора нет, и такой запрос отклоняется
+(`sso_identity_required`) — нужен `--as`. Сброс 2FA, настройки, SSO и клиент Microsoft журнал не пишут:
+экран их тоже не журналирует, а новые действия журнала (`AUDIT_ACTIONS`) в эту работу не входили.
+Сбросить блокировки входа по лимиту попыток панель не умеет, поэтому и CLI тоже.
+
 ## Кто в журнале
 
 `actor = { userId, via }` (`services/actor.js`). Маршрут передаёт `{ userId }` — записи журнала те же,
@@ -138,6 +171,11 @@ CLI проходят как есть.
   зашифрованным и нигде не печатается, частичные правки настроек, задание `access_sync` выполняет
   воркер теста против поддельного API Cloudflare (`fetch`), коды выхода итогов, журнал от `cli` и
   `--as`.
+- `cli/mailexpert.admin.pglite.test.js` — группы `user`, `settings`, `sso`, `integration` на PGlite:
+  последний администратор, bootstrap-адреса, занятый адрес, `--as` и `self_change`, журнал от `cli`,
+  секреты со stdin хранятся зашифрованными и не печатаются, задание `admin_effects` выполняет воркер
+  теста с записывающими хуками (разлогин, перечитывание, очистка, синхронизация).
+- `services/admin/adminEffects.test.js` — слияние и порядок выполнения последствий.
 - `scripts/deploy/test/mailexpert-cli.bats` — разбор параметров обёртки, а с `id` и `docker`,
   подменёнными в `PATH`, — вызов контейнера: `-T`, параметры без изменений, stdin целиком до CLI, коды
   CLI, сбои docker.

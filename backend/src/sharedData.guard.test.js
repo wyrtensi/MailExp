@@ -14,6 +14,8 @@ const PERSONAL_DATA_FILES = new Set([
   'routes/auth.js',
   'routes/oidc.js',
   'routes/todoist.js',
+  // Turning password login off checks the administrator's SSO identities (user_identities).
+  'services/admin/systemSettings.js',
   'services/authEvents.js',
   'services/pushNotifications.js',
 ]);

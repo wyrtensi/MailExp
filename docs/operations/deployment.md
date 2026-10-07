@@ -273,6 +273,10 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
 | `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]` — синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
+| `user` | `list`, `show <EMAIL>`, `create <EMAIL> [--admin]`, `set <EMAIL> [--admin\|--no-admin] [--disable\|--enable] [--email <NEW>]`, `delete <EMAIL>`, `totp-reset <EMAIL>` — пользователи панели, с защитой последнего администратора |
+| `settings` | `get [<KEY>]`, `set <KEY> <VALUE>` — настройки экрана администратора (вход по паролю, регистрация, 2FA, лимиты входа, интервалы синхронизации, сетевые разрешения) |
+| `sso` | `list`, `add ...`, `set <ID\|SLUG> ...`, `remove <ID\|SLUG>` — SSO-провайдеры; секрет клиента только со stdin |
+| `integration` | `microsoft show\|set\|remove` — клиент Microsoft OAuth для ящиков Outlook; секрет только со stdin (`--secret`) |
 
 Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
 (`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`

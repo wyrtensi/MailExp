@@ -39,8 +39,10 @@ usage() {
 Usage: mailexpert-cli.sh [--prefix /opt/mailexpert] [--] <group> <command> [options]
 
 Runs the panel CLI in the installed panel's backend container. Groups: mailbox, domain,
-tenant, quarantine, jobs, access. stdin reaches the CLI (access token reads the token from it). "mailexpert-cli.sh <group> --help" lists a group's commands (it
-needs the installed panel); options such as --json, --yes and --as go after the command.
+tenant, quarantine, jobs, access, user, settings, sso, integration. stdin reaches the CLI
+(access token, sso add, sso set --secret and integration microsoft set --secret read their
+secret from it). "mailexpert-cli.sh <group> --help" lists a group's commands (it needs the
+installed panel); options such as --json, --yes and --as go after the command.
 --prefix is this wrapper's own option and comes first (default /opt/mailexpert).
 Exit codes: the CLI's (0 done, 1 refused, 2 usage or a missing confirmation, 3 a failure);
 2 for the wrapper's own input, root or installation problems; 3 when docker cannot run the CLI.
@@ -96,7 +98,8 @@ main() {
   local running
   running=$(app_compose ps --status running --services 2>/dev/null) || die "docker compose failed for the panel in $prefix" 3
   grep -qx backend <<<"$running" || die "the panel's backend container is not running (start it: docker compose up -d)" 3
-  # stdin stays for the CLI itself (`access token` reads the token from it): exec would forward it.
+  # stdin stays for the CLI itself (`access token` and the sso and integration secrets are read
+  # from it): exec would forward it.
   app_compose exec -T backend test -f "$CLI_PATH" </dev/null ||
     die "the installed panel's image has no CLI ($CLI_PATH): update the panel first" 3
 

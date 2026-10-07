@@ -39,7 +39,7 @@ import { BEFORE_NODE_DELETE, startMailboxDeletionJob } from './services/mailNode
 import { adoptDomainsWithMailboxes } from './services/mailNode/domains.js';
 import mailRoutes from './routes/mail.js';
 import searchRoutes from './routes/search.js';
-import adminRoutes from './routes/admin.js';
+import adminRoutes, { ADMIN_EFFECT_HOOKS } from './routes/admin.js';
 import totpRoutes from './routes/totp.js';
 import oidcApiRouter, { oidcBrowserRouter } from './routes/oidc.js';
 import rulesRoutes from './routes/rules.js';
@@ -69,6 +69,7 @@ import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
 import { authSettingsError, getAuthSettings } from './services/auth/authSettings.js';
 import { startAccessSync } from './services/accessSync/index.js';
 import { registerAccessSyncJobKind } from './services/accessSync/actions.js';
+import { registerAdminEffectsJobKind } from './services/admin/adminEffects.js';
 import { identityGate } from './middleware/identityGate.js';
 import { providerThreadIndexState } from './services/threading/providerThreadIndex.js';
 
@@ -308,6 +309,10 @@ registerTenantDomainJobKind({ beforeNodeDelete: BEFORE_NODE_DELETE });
 // A Cloudflare Access sync the panel CLI asked for: run here, where the sync signs disabled users
 // out and is serialised with its other runs (services/accessSync/actions.js).
 registerAccessSyncJobKind();
+// What an administrator's change made through the panel CLI asks of this process: sign-outs, the
+// plugins' clean-up of a deleted user, the Access sync and the settings kept in memory
+// (services/admin/adminEffects.js); the admin routes apply the same hooks at once.
+registerAdminEffectsJobKind(ADMIN_EFFECT_HOOKS);
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.

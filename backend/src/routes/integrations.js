@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { encrypt, decrypt, isEncrypted } from '../services/encryption.js';
+import {
+  MICROSOFT_INTEGRATION_ERRORS, MICROSOFT_PROVIDER, applyMicrosoftEnv, clearMicrosoftEnv, redactConfig,
+  removeMicrosoftIntegration, saveMicrosoftIntegration,
+} from '../services/integrations/microsoft.js';
 import { importLegacyGoogleConfig, resolveGoogleConfig } from '../services/oauth/googleApps.js';
 import { googleHasCapacity } from '../services/oauth/googleAppSelection.js';
 import { MAIL_NODE_PROVIDER, getMailNodeConfig } from '../services/mailNode/mailcow.js';
@@ -13,9 +16,6 @@ const router = Router();
 // 'mail_node_*' row (EOP settings, DNS check, apply result, alert settings and state, and what later
 // stages add).
 const isMailNodeRow = (provider) => provider === MAIL_NODE_PROVIDER || String(provider).startsWith(`${MAIL_NODE_PROVIDER}_`);
-
-// Placeholder sent instead of a stored client secret; posting it back keeps the stored value.
-const REDACTED_SECRET = '••••••••';
 
 // GOOGLE_REDIRECT_URI as the process started with it (docker-compose.yml passes it through).
 // Captured once: applyGoogleEnv overwrites process.env, and the startup value must stay the
@@ -62,9 +62,7 @@ router.get('/', requireAdmin, async (req, res) => {
   const configs = {};
   for (const row of result.rows) {
     if (isMailNodeRow(row.provider)) continue;
-    const cfg = { ...row.config };
-    if (cfg.clientSecret) cfg.clientSecret = REDACTED_SECRET;
-    configs[row.provider] = { ...cfg, updated_at: row.updated_at };
+    configs[row.provider] = { ...redactConfig(row.config), updated_at: row.updated_at };
   }
   // Google clients live in google_oauth_apps (/api/admin/google-apps); only the shared
   // callback URL is a setting here. Legacy client fields left in the row are never returned.
@@ -124,10 +122,6 @@ router.post('/:provider', requireAdmin, async (req, res) => {
   const allowed = ['microsoft', 'google'];
   if (!allowed.includes(provider)) return res.status(400).json({ error: 'Unknown provider' });
 
-  const isRedactionMix = (secret) => typeof secret === 'string'
-    && secret !== REDACTED_SECRET
-    && secret.includes('•');
-
   if (provider === 'google') {
     // Only the shared callback URL is stored here: apps are managed at /api/admin/google-apps,
     // so any client ID or secret in the body is ignored.
@@ -146,50 +140,15 @@ router.post('/:provider', requireAdmin, async (req, res) => {
     return res.json({ ok: true });
   }
 
-  const config = req.body;
-
-  // A secret that contains the redaction bullet but is not exactly the placeholder was typed into
-  // (or around) the redacted field; storing it would silently replace the real secret with junk.
-  if (isRedactionMix(config.clientSecret)) {
-    return res.status(400).json({
-      error: 'Client secret contains the redaction placeholder; enter the full secret',
-      code: 'client_secret_redacted',
-    });
+  // Microsoft: services/integrations/microsoft.js keeps or encrypts the secret and refuses one
+  // typed into the redacted field.
+  const result = await saveMicrosoftIntegration(req.body);
+  if (result.error) {
+    const [status, message] = MICROSOFT_INTEGRATION_ERRORS[result.error];
+    return res.status(status).json({ error: message, code: result.error });
   }
-
-  // If clientSecret is redacted, keep the existing stored value (already encrypted or legacy plaintext)
-  if (config.clientSecret === REDACTED_SECRET) {
-    const existing = await query(
-      'SELECT config FROM integration_config WHERE provider = $1',
-      [provider]
-    );
-    if (existing.rows.length) {
-      config.clientSecret = existing.rows[0].config.clientSecret;
-    } else {
-      delete config.clientSecret;
-    }
-  }
-
-  // Encrypt clientSecret at rest — handles both new writes and migration of legacy plaintext values
-  if (config.clientSecret && !isEncrypted(config.clientSecret)) {
-    config.clientSecret = encrypt(config.clientSecret);
-  }
-
-  await query(`
-    INSERT INTO integration_config (provider, config)
-    VALUES ($1, $2)
-    ON CONFLICT (provider) DO UPDATE
-    SET config = EXCLUDED.config, updated_at = NOW()
-  `, [provider, config]);
-
   // Write plaintext values to process.env so oauth routes pick them up immediately
-  if (provider === 'microsoft') {
-    if (config.clientId) process.env.MS_CLIENT_ID = config.clientId;
-    if (config.clientSecret) process.env.MS_CLIENT_SECRET = decrypt(config.clientSecret);
-    if (config.tenantId) process.env.MS_TENANT_ID = config.tenantId;
-    if (config.redirectUri) process.env.MS_REDIRECT_URI = config.redirectUri;
-  }
-
+  applyMicrosoftEnv(result.config);
   res.json({ ok: true });
 });
 
@@ -197,14 +156,8 @@ router.post('/:provider', requireAdmin, async (req, res) => {
 // are disabled or removed at /api/admin/google-apps, and the callback URL is only replaced.
 router.delete('/:provider', requireAdmin, async (req, res) => {
   if (req.params.provider !== 'microsoft') return res.status(400).json({ error: 'Unknown provider' });
-  await query(
-    'DELETE FROM integration_config WHERE provider = $1',
-    [req.params.provider]
-  );
-  delete process.env.MS_CLIENT_ID;
-  delete process.env.MS_CLIENT_SECRET;
-  delete process.env.MS_TENANT_ID;
-  delete process.env.MS_REDIRECT_URI;
+  await removeMicrosoftIntegration();
+  clearMicrosoftEnv();
   res.json({ ok: true });
 });
 
@@ -213,13 +166,8 @@ export async function loadIntegrationConfigs() {
   try {
     const result = await query('SELECT provider, config FROM integration_config');
     for (const row of result.rows) {
-      if (row.provider === 'microsoft') {
-        const c = row.config;
-        if (c.clientId) process.env.MS_CLIENT_ID = c.clientId;
-        // decrypt() returns value unchanged for plaintext (migration fallback)
-        if (c.clientSecret) process.env.MS_CLIENT_SECRET = decrypt(c.clientSecret);
-        if (c.tenantId) process.env.MS_TENANT_ID = c.tenantId;
-        if (c.redirectUri) process.env.MS_REDIRECT_URI = c.redirectUri;
+      if (row.provider === MICROSOFT_PROVIDER) {
+        applyMicrosoftEnv(row.config);
       } else if (row.provider === 'google') {
         applyGoogleEnv(row.config);
       }
