@@ -230,4 +230,23 @@ describe('Microsoft refresh racing a reconnect', () => {
     expect(decrypt(stored.oauth_access_token)).toBe('refreshed-access');
     expect(decrypt(stored.oauth_refresh_token)).toBe('rotated-refresh');
   });
+
+  it('hands back the rotated refresh token as stored, so a later compare-and-set finds the row', async () => {
+    const account = await insertMicrosoftAccount();
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      json: async () => ({ access_token: 'refreshed-access', refresh_token: 'rotated-refresh', expires_in: 3600 }),
+    }));
+    const result = await refreshMicrosoftToken(account);
+    expect(result.oauth_refresh_token).toBe((await readAccount()).oauth_refresh_token);
+    expect(result.oauth_refresh_token).not.toBe(account.oauth_refresh_token);
+  });
+
+  it('keeps the stored refresh token on the account when Microsoft does not rotate it', async () => {
+    const account = await insertMicrosoftAccount();
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => ({ access_token: 'refreshed-access', expires_in: 3600 }) }));
+    const result = await refreshMicrosoftToken(account);
+    expect(result.oauth_refresh_token).toBe(account.oauth_refresh_token);
+    expect((await readAccount()).oauth_refresh_token).toBe(account.oauth_refresh_token);
+  });
 });
