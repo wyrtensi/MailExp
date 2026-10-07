@@ -1670,7 +1670,7 @@ mailcow узла с версией, закреплённой выпуском п
 после бэкапа узла (`node-backup.sh --tag pre-update`):
 
 ```bash
-sudo bash -c '. /opt/mailexpert-node/node-update.sh; SRC=/opt/mailexpert-node-src; mailcow_update_if_pinned'
+sudo bash -c '. /opt/mailexpert-node-src/scripts/deploy/mail-node/node-update.sh; SRC=/opt/mailexpert-node-src; mailcow_update_if_pinned'
 ```
 
 Код 0 — обновлено или пропущено (причина в выводе), 1 — сбой (mailcow тогда может быть остановлен:

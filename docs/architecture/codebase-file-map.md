@@ -271,7 +271,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 `setup.sh` (настройки хоста, файрвол, Dovecot, таймеры, служба узла; `--dry-run`), `eop-ranges.sh` (диапазоны EOP
 и файрвол раз в час), `node-backup.sh` и `node-restore.sh` (бэкап узла в свой репозиторий restic и
-восстановление на чистый сервер), `node-agent.sh` (служба узла: задания панели `status`, `backup` и `update`), `node-update.sh` (задание `update`: отдельно от службы, бэкап `pre-update`, `setup.sh` с откатом), `lib.sh`, `backup-lib.sh`, `extra-cf.sh`, `dovecot-extra.conf`,
+восстановление на чистый сервер), `node-agent.sh` (служба узла: задания панели `status`, `backup` и `update`), `node-update.sh` (задание `update`: отдельно от службы, бэкап `pre-update`, `setup.sh` с откатом, mailcow до версии из `deploy/mailcow-version`), `lib.sh`, `backup-lib.sh`, `extra-cf.sh`, `dovecot-extra.conf`,
 юниты `systemd/`, варианты `cron/` и `logrotate/` для хостов без systemd. Описание —
 [README](../../scripts/deploy/mail-node/README.md).
 

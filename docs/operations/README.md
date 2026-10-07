@@ -261,8 +261,10 @@ mailexpert-updater.path`. За один запуск исполнитель бе
    `sudo $D/status.sh` — `running` равен новой версии, проблем нет; `sudo $D/healthcheck.sh` — код 0;
    затем вход и статус ящиков.
 
-**mailcow** обновляется отдельно и не в одном окне с панелью: `./update.sh` mailcow, затем `setup.sh`
-без параметров ([mail-node.md, разделы 3-4](mail-node.md)).
+**mailcow** обновляется только до версии, закреплённой выпуском (`deploy/mailcow-version`): со
+службой узла — тем же заданием `update`, что и скрипты узла, после обновления панели; без службы —
+`./update.sh` mailcow руками, пока голова `master` mailcow — закреплённый коммит, затем `setup.sh`
+без параметров ([mail-node.md, разделы 3 и 7а](mail-node.md)).
 
 Раскатка агентом (Claude Code и т. п.) идёт по тем же шагам — скилл
 [`mailexpert-rollout`](../../.claude/skills/mailexpert-rollout/SKILL.md).
