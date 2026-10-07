@@ -74,18 +74,22 @@ exec_tty_flag() {
 # token_out_file <args...>: prints FILE of `agent token ... --out FILE` (or --out=FILE) when FILE is
 # a file on this host, not "-"; fails otherwise.
 token_out_file() {
-  [ "${1-}" = agent ] && [ "${2-}" = token ] || return 1
+  [ "${1-}" = agent ] || return 1
+  [ "${2-}" = token ] || return 1
   shift 2
+  local value
   while [ $# -gt 0 ]; do
     case $1 in
       --out)
-        [ $# -ge 2 ] && [ -n "$2" ] && [ "$2" != - ] || return 1
-        printf '%s\n' "$2"
+        value=${2-}
+        if [ -z "$value" ] || [ "$value" = - ]; then return 1; fi
+        printf '%s\n' "$value"
         return 0
         ;;
       --out=*)
-        [ -n "${1#--out=}" ] && [ "${1#--out=}" != - ] || return 1
-        printf '%s\n' "${1#--out=}"
+        value=${1#--out=}
+        if [ -z "$value" ] || [ "$value" = - ]; then return 1; fi
+        printf '%s\n' "$value"
         return 0
         ;;
     esac
