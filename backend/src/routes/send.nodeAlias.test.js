@@ -66,6 +66,19 @@ describe('sending from an alias of a mail node mailbox', () => {
   });
 });
 
+describe('sending from a disabled mailbox', () => {
+  it('refuses before queueing, whatever the kind of mailbox', async () => {
+    alias.email = 'me@example.com';
+    for (const mailNode of [false, true]) {
+      Object.assign(account, { mail_node: mailNode, enabled: false });
+      const res = await post();
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('mailbox_disabled');
+    }
+    expect(enqueueOutgoingSend).not.toHaveBeenCalled();
+  });
+});
+
 describe('sending from a read-only mail node mailbox (EOP seats design)', () => {
   it('refuses before queueing a mailbox pending deletion or deactivated', async () => {
     alias.email = 'me@example.com';

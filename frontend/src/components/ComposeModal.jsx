@@ -3,7 +3,7 @@ import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
-import { isForeignNodeAlias, isReadOnlyMailbox } from '../utils/mailNode.js';
+import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
 import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -23,7 +23,7 @@ import { TableHeader } from '@tiptap/extension-table-header';
 import { TableCell } from '@tiptap/extension-table-cell';
 import { ComposerLink } from '../utils/editorLink.js';
 import { copyToClipboard } from '../utils/clipboard.js';
-import { resolveInitialFrom } from '../utils/defaultSender.js';
+import { fromBlockedKey, resolveInitialFrom } from '../utils/defaultSender.js';
 import { threadCacheKey } from '../utils/threadKey.js';
 import { clampComposePosition, clampComposeSize } from '../utils/composeWindow.js';
 import { SmileIcon } from './UiIcons.jsx';
@@ -1467,19 +1467,19 @@ export default function ComposeModal() {
                 const displayName = a.sender_name || a.name;
                 if (!aliases.length) {
                   return (
-                    <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
-                      {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
+                    <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={!!fromBlockedKey(a)}>
+                      {displayName} &lt;{a.email_address}&gt;{fromBlockedKey(a) ? ` (${t(fromBlockedKey(a))})` : ''}
                     </option>
                   );
                 }
                 return (
                   <optgroup key={a.id} label={a.name} style={{ background: 'var(--bg-tertiary)' }}>
-                    <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
-                      {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
+                    <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={!!fromBlockedKey(a)}>
+                      {displayName} &lt;{a.email_address}&gt;{fromBlockedKey(a) ? ` (${t(fromBlockedKey(a))})` : ''}
                     </option>
                     {aliases.map(alias => (
                       <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}
-                        disabled={isForeignNodeAlias(a, alias) || isReadOnlyMailbox(a)}>
+                        disabled={isForeignNodeAlias(a, alias) || !!fromBlockedKey(a)}>
                         {alias.name} &lt;{alias.email}&gt;{isForeignNodeAlias(a, alias) ? ` (${t('compose.nodeAliasStaleOption')})` : ''}
                       </option>
                     ))}
@@ -2117,19 +2117,19 @@ export default function ComposeModal() {
               const displayName = a.sender_name || a.name;
               if (!aliases.length) {
                 return (
-                  <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
-                    {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
+                  <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={!!fromBlockedKey(a)}>
+                    {displayName} &lt;{a.email_address}&gt;{fromBlockedKey(a) ? ` (${t(fromBlockedKey(a))})` : ''}
                   </option>
                 );
               }
               return (
                 <optgroup key={a.id} label={a.name} style={{ background: 'var(--bg-tertiary)' }}>
-                  <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
-                    {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
+                  <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={!!fromBlockedKey(a)}>
+                    {displayName} &lt;{a.email_address}&gt;{fromBlockedKey(a) ? ` (${t(fromBlockedKey(a))})` : ''}
                   </option>
                   {aliases.map(alias => (
                     <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}
-                      disabled={isForeignNodeAlias(a, alias) || isReadOnlyMailbox(a)}>
+                      disabled={isForeignNodeAlias(a, alias) || !!fromBlockedKey(a)}>
                       {alias.name} &lt;{alias.email}&gt;{isForeignNodeAlias(a, alias) ? ` (${t('compose.nodeAliasStaleOption')})` : ''}
                     </option>
                   ))}

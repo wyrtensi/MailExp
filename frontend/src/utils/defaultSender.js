@@ -11,8 +11,21 @@
 // in localStorage it also never followed the user to another device, unlike the rest of
 // their settings.
 
+import { isReadOnlyMailbox } from './mailNode.js';
+
 const ACCOUNT_PREFIX = 'account:';
 const ALIAS_PREFIX = 'alias:';
+
+/**
+ * Why a mailbox cannot be picked as From: the i18n key of the note its option carries, or null.
+ * A turned-off mailbox (any kind) and a read-only mail node mailbox both refuse to send, and the
+ * server refuses them too (mailbox_disabled, mailbox_read_only).
+ */
+export function fromBlockedKey(account) {
+  if (account?.enabled === false) return 'compose.disabledOption';
+  if (isReadOnlyMailbox(account)) return 'compose.readOnlyOption';
+  return null;
+}
 
 /**
  * Does this From value still name an account (and alias) the user actually has?

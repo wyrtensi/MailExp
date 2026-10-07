@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveInitialFrom, isValidFromValue } from './defaultSender.js';
+import { resolveInitialFrom, isValidFromValue, fromBlockedKey } from './defaultSender.js';
 
 const accounts = [
   { id: 'acc-work', aliases: [{ id: 'al-sales' }, { id: 'al-support' }] },
@@ -143,5 +143,21 @@ describe('resolveInitialFrom: degenerate input', () => {
     // that can actually send than to sit on a From that cannot.
     const from = resolveInitialFrom({ composeData: { accountId: 'acc-deleted' }, accounts });
     assert.equal(from, 'account:acc-work');
+  });
+});
+
+describe('fromBlockedKey', () => {
+  test('marks a turned-off mailbox of any kind', () => {
+    assert.equal(fromBlockedKey({ id: 'a', enabled: false }), 'compose.disabledOption');
+    assert.equal(fromBlockedKey({ id: 'a', enabled: false, mail_node: true }), 'compose.disabledOption');
+  });
+
+  test('marks a read-only mail node mailbox', () => {
+    assert.equal(fromBlockedKey({ id: 'a', enabled: true, mail_node: true, deactivated_at: '2026-10-07T00:00:00Z' }), 'compose.readOnlyOption');
+  });
+
+  test('leaves a working mailbox selectable, an unknown enabled state included', () => {
+    assert.equal(fromBlockedKey({ id: 'a', enabled: true }), null);
+    assert.equal(fromBlockedKey({ id: 'a' }), null);
   });
 });
