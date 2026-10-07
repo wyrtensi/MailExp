@@ -1,7 +1,7 @@
 // The Google grant journal against PGlite with every migration: Google counts an unverified app's
 // users for the whole life of its Cloud project, so deleting an app and adding a client of the same
 // project again must find the seats already taken there.
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRealSchemaDb } from '../testing/realSchema.js';
 
 const dbState = { db: null };
@@ -39,12 +39,6 @@ afterAll(async () => { await db?.close(); });
 beforeEach(async () => {
   await db.exec(`DELETE FROM google_oauth_grants; DELETE FROM google_oauth_apps; DELETE FROM integration_config;
     DELETE FROM system_settings WHERE key LIKE 'google%';`);
-  delete process.env.GOOGLE_CLIENT_ID;
-  delete process.env.GOOGLE_CLIENT_SECRET;
-});
-afterEach(() => {
-  delete process.env.GOOGLE_CLIENT_ID;
-  delete process.env.GOOGLE_CLIENT_SECRET;
 });
 
 describe('Google grant journal across app delete and re-add', () => {
@@ -89,15 +83,18 @@ describe('Google grant journal across app delete and re-add', () => {
   });
 });
 
-// The single-app client from GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET is imported once. An app the
-// administrator deleted afterwards must not come back from those variables on the next start.
+// The single-app client stored in integration_config is imported once. An app the
+// administrator deleted afterwards must not come back on the next start.
 describe('legacy Google client import', () => {
   const quiet = () => vi.spyOn(console, 'log').mockImplementation(() => {});
+  const storeLegacyClient = () => db.query(
+    `INSERT INTO integration_config (provider, config) VALUES ('google', $1::jsonb)`,
+    [JSON.stringify({ clientId: CLIENT_A, clientSecret: 'enc(stored-secret)' })],
+  );
 
-  it('does not import the environment client again after its app was deleted', async () => {
+  it('does not import the stored client again after its app was deleted', async () => {
     const log = quiet();
-    process.env.GOOGLE_CLIENT_ID = CLIENT_A;
-    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    await storeLegacyClient();
     const appId = await importLegacyGoogleConfig();
     expect(appId).toEqual(expect.any(String));
     await deleteGoogleApp(appId);
@@ -108,10 +105,8 @@ describe('legacy Google client import', () => {
   });
 
   it('does not import it after the app imported by an earlier version was deleted', async () => {
-    // An install upgraded with its imported app in place: the first start records the import.
     const app = await createGoogleApp({ label: 'Google 1', clientId: CLIENT_A, clientSecret: 's' });
-    process.env.GOOGLE_CLIENT_ID = CLIENT_A;
-    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    await storeLegacyClient();
     await expect(importLegacyGoogleConfig()).resolves.toBeNull();
     await deleteGoogleApp(app.id);
 
@@ -119,11 +114,10 @@ describe('legacy Google client import', () => {
     await expect(listGoogleApps()).resolves.toEqual([]);
   });
 
-  it('still imports a client set before any app existed', async () => {
+  it('still imports a client stored before any app existed', async () => {
     const log = quiet();
     await expect(importLegacyGoogleConfig()).resolves.toBeNull();
-    process.env.GOOGLE_CLIENT_ID = CLIENT_A;
-    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    await storeLegacyClient();
     await expect(importLegacyGoogleConfig()).resolves.toEqual(expect.any(String));
     log.mockRestore();
   });

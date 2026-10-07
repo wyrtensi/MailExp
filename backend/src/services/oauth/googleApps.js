@@ -250,12 +250,10 @@ async function markLegacyImportDone(client) {
   );
 }
 
-// One-time import of the single-app settings (Settings → Integrations, or the
-// GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment) as the first app. Runs at every
-// startup. Once an app exists, or an import ran, it is recorded and never runs again: an app the
-// administrator deleted must not come back from environment variables still passed to the backend.
-// While no app ever existed and there is nothing to import, nothing is recorded, so a client set
-// later is still imported.
+// One-time import of the single-app settings stored in integration_config (Settings →
+// Integrations of older versions) as the first app. Runs at every startup. Once an app exists,
+// or an import ran, it is recorded and never runs again. While no app ever existed and there is
+// nothing to import, nothing is recorded.
 export async function importLegacyGoogleConfig() {
   return withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-import'))");
@@ -269,13 +267,8 @@ export async function importLegacyGoogleConfig() {
 
     const stored = await client.query("SELECT config FROM integration_config WHERE provider = 'google'");
     const config = stored.rows[0]?.config || {};
-    let source = null;
-    if (config.clientId && config.clientSecret) {
-      source = { from: 'the stored integration settings', clientId: config.clientId, clientSecret: decrypt(config.clientSecret) };
-    } else if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-      source = { from: 'the environment', clientId: process.env.GOOGLE_CLIENT_ID, clientSecret: process.env.GOOGLE_CLIENT_SECRET };
-    }
-    if (!source) return null;
+    if (!config.clientId || !config.clientSecret) return null;
+    const source = { from: 'the stored integration settings', clientId: config.clientId, clientSecret: decrypt(config.clientSecret) };
 
     const projectNumber = parseGoogleClientId(source.clientId);
     if (!projectNumber) {

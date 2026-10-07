@@ -286,13 +286,12 @@ describe('Google integration settings (admin, callback URL only)', () => {
   });
 
   it('loads only the callback URL on startup and imports the single-app client', async () => {
-    process.env.GOOGLE_CLIENT_ID = 'env-client';
     query.mockResolvedValue({ rows: [{ provider: 'google', config: { clientId: CLIENT_ID, clientSecret: 'enc:loaded-secret', redirectUri: 'https://x/cb' } }] });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await loadIntegrationConfigs();
     logSpy.mockRestore();
     expect(process.env.GOOGLE_REDIRECT_URI).toBe('https://x/cb');
-    expect(process.env.GOOGLE_CLIENT_ID).toBe('env-client');
+    expect(process.env.GOOGLE_CLIENT_ID).toBeUndefined();
     expect(process.env.GOOGLE_CLIENT_SECRET).toBeUndefined();
     expect(importLegacyGoogleConfig).toHaveBeenCalledTimes(1);
   });
