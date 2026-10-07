@@ -154,7 +154,7 @@ main() {
       file=${positional[0]}
       [ -f "$file" ] || die "no such file: $file" 2
       [ -r "$file" ] || die "cannot read $file" 2
-      stdin_source=file
+      stdin_source='file'
       if [ -n "$label" ]; then cli_args+=(--label "$label"); fi
       if [ -n "$user_limit" ]; then cli_args+=(--user-limit "$user_limit"); fi
       ;;
@@ -166,12 +166,12 @@ main() {
     replace-secret)
       pos_args=("${positional[0]}")
       if [ "${positional[1]}" = - ]; then
-        stdin_source=stdin
+        stdin_source='stdin'
       else
         file=${positional[1]}
         [ -f "$file" ] || die "no such file: $file" 2
         [ -r "$file" ] || die "cannot read $file" 2
-        stdin_source=file
+        stdin_source='file'
       fi
       ;;
     *) pos_args=("${positional[@]}") ;;
@@ -184,25 +184,29 @@ main() {
   [ "$(id -u)" = 0 ] || die "run google-app.sh as root"
   load_install "$prefix"
 
+  # The CLI's own status (1 refused, 2 invalid input, 3 failed) is the script's: capture it, since
+  # the ERR trap would otherwise turn every nonzero status into 1.
+  local status=0
   case $stdin_source in
-    file) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" <"$file" ;;
+    file) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" <"$file" || status=$? ;;
     stdin)
       if [ -t 0 ]; then
         # A terminal: read the secret without echo and hand it over as stdin (a here-string is
         # not an argument, so it stays out of the process list).
         local secret=''
         IFS= read -rsp "New client secret (input hidden): " secret || die "no secret was read" 2
-        printf '
-' >&2
+        printf '\n' >&2
         [ -n "$secret" ] || die "the secret is empty" 2
-        app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" <<<"$secret"
+        app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" <<<"$secret" || status=$?
       else
-        app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}"
+        app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" || status=$?
       fi
       ;;
-    *) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" </dev/null ;;
+    *) app_compose exec -T backend node src/cli/googleApp.js "${cli_args[@]}" </dev/null || status=$? ;;
   esac
+  return "$status"
 }
 
-main "$@"
-exit $?
+status=0
+main "$@" || status=$?
+exit "$status"
