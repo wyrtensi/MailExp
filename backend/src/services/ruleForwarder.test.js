@@ -478,7 +478,7 @@ describe('forwardRuleMessage', () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(forwardRuleMessage(input))
-      .rejects.toThrow('Total attachment size exceeds 25 MB');
+      .rejects.toThrow('Total attachment size exceeds 25 MiB');
     expect(createAccountSmtpTransport).not.toHaveBeenCalled();
     expect(transport.sendMail).not.toHaveBeenCalled();
     expect(query.mock.calls.at(-1)[0]).toContain('DELETE FROM inbox_rule_forwards');
@@ -500,7 +500,7 @@ describe('forwardRuleMessage', () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(forwardRuleMessage(input))
-      .rejects.toThrow('Total attachment size exceeds 25 MB');
+      .rejects.toThrow('Total attachment size exceeds 25 MiB');
     expect(imapManager.fetchMultipleAttachments).not.toHaveBeenCalled();
     expect(createAccountSmtpTransport).not.toHaveBeenCalled();
     expect(query.mock.calls.at(-1)[0]).toContain('DELETE FROM inbox_rule_forwards');

@@ -153,7 +153,7 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'same-origin');
   next();
 });
-// 25 MB attachment limit as base64 plus the body (middleware/composeBody.js).
+// 25 MiB attachment limit as base64 plus the body (middleware/composeBody.js).
 app.use('/api/mail/send', composeJson());
 app.use('/api/mail/draft', composeJson());
 // A pet-import body carries a base64 spritesheet (~33% larger than the 5 MB sheet cap
@@ -165,7 +165,7 @@ app.use(defaultEmptyBody);
 // Return a clean JSON error when the body parser rejects an oversized payload.
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'Request too large. Total attachment size must not exceed 25 MB.' });
+    return res.status(413).json({ error: 'Request too large. Total attachment size must not exceed 25 MiB.' });
   }
   next(err);
 });

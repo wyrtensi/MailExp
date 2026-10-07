@@ -7,12 +7,12 @@ import MailComposer from 'nodemailer/lib/mail-composer';
 // smtpTransport.js, so it can be unit-tested against a mocked `fetch` alone.
 
 // The "upload" variant of users.messages.send, needed (rather than the plain resource endpoint)
-// for two reasons: it accepts a raw message up to 35 MB (our own attachment cap is 25 MB of
-// attachment bytes — see routes/send.js's 26_214_400 check — which the raw MIME message, headers
-// and all, comfortably stays under), and — using uploadType=multipart — it lets a JSON metadata
+// for two reasons: it accepts a raw message up to 35 MB (our own attachment cap is 25 MiB of
+// attachment bytes — MAX_ATTACHMENT_BYTES in utils/attachmentLimit.js — which the raw MIME
+// message, headers and all, comfortably stays under), and — using uploadType=multipart — it lets a JSON metadata
 // part (threadId) travel alongside the message/rfc822 part in one request. The plain JSON
 // {raw: base64} form would need the whole message base64-encoded first (roughly +37% over the
-// raw byte count), pushing a message already near our 25 MB cap uncomfortably close to Gmail's
+// raw byte count), pushing a message already near our 25 MiB cap uncomfortably close to Gmail's
 // 35 MB limit and into territory where Google's general request-size limits for non-upload JSON
 // bodies (much smaller than 35 MB) could reject it outright. The single-part media upload
 // (uploadType=media) sends the raw bytes directly (no base64 tax) but has no room for threadId.

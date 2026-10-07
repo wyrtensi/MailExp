@@ -4,8 +4,8 @@ import { sanitizeEmail } from './emailSanitizer.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { sendFailureIsDefinite } from './smtpErrors.js';
 import { isReadOnlyNodeMailbox } from '../utils/senderNames.js';
+import { ATTACHMENT_LIMIT_ERROR, MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
 
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -145,7 +145,7 @@ function ensureAttachmentLimit(attachments) {
     0
   );
   if (totalBytes > MAX_ATTACHMENT_BYTES) {
-    throw new Error('Total attachment size exceeds 25 MB');
+    throw new Error(ATTACHMENT_LIMIT_ERROR);
   }
 }
 
@@ -200,7 +200,7 @@ async function loadForwardContent({ row, account, imapManager }) {
     0
   );
   if (knownBytes > MAX_ATTACHMENT_BYTES) {
-    throw new Error('Total attachment size exceeds 25 MB');
+    throw new Error(ATTACHMENT_LIMIT_ERROR);
   }
 
   let fetchedAttachments = [];
