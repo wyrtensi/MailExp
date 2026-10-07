@@ -63,9 +63,38 @@ describe('classifyGmailApiResponseError', () => {
     expect(c).toMatchObject({ kind: 'fallback', disableApi: true, reason: 'accessNotConfigured' });
   });
 
-  it('treats a daily sending limit as terminal, not a fallback', () => {
-    const c = classifyGmailApiResponseError(429, { error: { message: 'User-rate limit exceeded... dailyLimitExceeded', errors: [{ reason: 'dailyLimitExceeded' }] } });
-    expect(c).toMatchObject({ kind: 'terminal', code: 'gmail_quota_exceeded' });
+  // Gmail API "Resolve errors" guide, "403: Daily limit exceeded": the Cloud project's API quota,
+  // not the mailbox's sending limit. SMTP does not count against it, so the send falls back.
+  const PROJECT_DAILY_LIMIT = {
+    error: {
+      errors: [{ domain: 'usageLimits', reason: 'dailyLimitExceeded', message: 'Daily Limit Exceeded' }],
+      code: 403,
+      message: 'Daily Limit Exceeded',
+    },
+  };
+  // The mailbox's own sending limit through the API: a 429 whose text ends in "(Mail sending)"
+  // (the guide's "429: Too many requests", per-user mail sending limits), reason rateLimitExceeded.
+  const MAIL_SENDING_LIMIT = {
+    error: {
+      code: 429,
+      message: 'User-rate limit exceeded.  Retry after 2026-10-08T18:00:00.000Z (Mail sending)',
+      errors: [{
+        message: 'User-rate limit exceeded.  Retry after 2026-10-08T18:00:00.000Z (Mail sending)',
+        domain: 'usageLimits',
+        reason: 'rateLimitExceeded',
+      }],
+      status: 'RESOURCE_EXHAUSTED',
+    },
+  };
+
+  it('treats the project API quota (dailyLimitExceeded) as a fallback, not the mailbox limit', () => {
+    const c = classifyGmailApiResponseError(403, PROJECT_DAILY_LIMIT);
+    expect(c).toMatchObject({ kind: 'fallback', reason: 'project_quota', disableApi: false, status: 403 });
+  });
+
+  it('treats the mailbox sending limit as terminal, not a fallback', () => {
+    const c = classifyGmailApiResponseError(429, MAIL_SENDING_LIMIT);
+    expect(c).toMatchObject({ kind: 'terminal', code: 'gmail_quota_exceeded', status: 429, responseStatus: 429 });
   });
 
   it('treats plain API rate limiting as a fallback (a different quota than the mailbox limit)', () => {
@@ -91,11 +120,11 @@ describe('classifyGmailApiResponseError', () => {
   });
 
   it('keeps Google\'s real HTTP status separate from the status shown to our own caller', () => {
-    // A daily-limit 403 from Google is reported to our caller as 429 (Too Many Requests), but the
-    // real Google status (403) is what mailSendTransport.js's threadId-retry logic must see.
-    const c = classifyGmailApiResponseError(403, { error: { message: 'dailyLimitExceeded', errors: [{ reason: 'dailyLimitExceeded' }] } });
+    // An unanticipated 403 refusal is reported to our caller as 502, but the real Google status
+    // (403) is what mailSendTransport.js's threadId-retry logic must see.
+    const c = classifyGmailApiResponseError(403, { error: { message: 'Delegation denied', errors: [{ reason: 'forbidden' }] } });
     expect(c.status).toBe(403);
-    expect(c.responseStatus).toBe(429);
+    expect(c.responseStatus).toBe(502);
   });
 
   it('treats a 5xx as uncertain, not a fallback — Google may have accepted it before failing', () => {
