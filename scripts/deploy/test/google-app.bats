@@ -91,3 +91,61 @@ setup() {
   run bash "$SCRIPT" list
   [[ $output != *"see --help"* ]]
 }
+
+@test "show, enable, close, disable and delete need exactly one app id" {
+  for cmd in show enable close disable delete; do
+    run bash "$SCRIPT" "$cmd"
+    [ "$status" -eq 2 ]
+    [[ $output == *"$cmd needs its arguments"* ]]
+    run bash "$SCRIPT" "$cmd" an-id extra
+    [ "$status" -eq 2 ]
+    [[ $output == *"unknown argument: extra"* ]]
+  done
+}
+
+@test "set-limit needs an id and a positive whole number" {
+  run bash "$SCRIPT" set-limit an-id
+  [ "$status" -eq 2 ]
+  for bad in 0 1.5 abc; do
+    run bash "$SCRIPT" set-limit an-id "$bad"
+    [ "$status" -eq 2 ]
+    [[ $output == *"set-limit needs a positive whole number"* ]]
+  done
+}
+
+@test "set-label needs an id and a label, and a label may be named like a command" {
+  run bash "$SCRIPT" set-label an-id
+  [ "$status" -eq 2 ]
+  run bash "$SCRIPT" set-label an-id list
+  [[ $output != *"one command only"* && $output != *"needs its arguments"* ]]
+}
+
+@test "replace-secret needs an id and a readable secret file or -" {
+  run bash "$SCRIPT" replace-secret an-id
+  [ "$status" -eq 2 ]
+  run bash "$SCRIPT" replace-secret an-id "$BATS_TEST_TMPDIR/missing.txt"
+  [ "$status" -eq 2 ]
+  [[ $output == *"no such file"* ]]
+  run bash "$SCRIPT" replace-secret an-id -
+  [[ $output != *"needs its arguments"* && $output != *"no such file"* ]]
+}
+
+@test "options are only accepted by the commands that use them" {
+  run bash "$SCRIPT" list --yes
+  [ "$status" -eq 2 ]
+  [[ $output == *"--yes applies to delete only"* ]]
+  run bash "$SCRIPT" disable an-id --json
+  [ "$status" -eq 2 ]
+  [[ $output == *"--json applies to list and show only"* ]]
+  run bash "$SCRIPT" show an-id --user-limit 5
+  [ "$status" -eq 2 ]
+  [[ $output == *"apply to add only"* ]]
+}
+
+@test "--help lists every command" {
+  run bash "$SCRIPT" --help
+  [ "$status" -eq 0 ]
+  for cmd in show enable close disable delete set-limit set-label replace-secret; do
+    [[ $output == *"$cmd"* ]]
+  done
+}

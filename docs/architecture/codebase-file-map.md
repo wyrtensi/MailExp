@@ -257,7 +257,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 | `backup.sh`, `restore.sh` | бэкап в restic (S3) и восстановление на новом сервере | 0, 1, 2 |
 | `healthcheck.sh` | проверка по таймеру (готовность, контейнеры, место, возраст бэкапа, сертификат) с пингом | 0, 1 проблемы, 2 |
 | `mailexpert-cli.sh` | обёртка CLI панели в контейнере `backend` ([cli.md](../operations/cli.md)) | коды CLI; свои 2, 3 |
-| `google-app.sh` | добавить Google-приложение из JSON клиента или показать список (`src/cli/googleApp.js`) | 0, 1, 2 |
+| `google-app.sh` | управление Google-приложениями как на экране панели: add, list, show, enable/close/disable, delete, set-limit, set-label, replace-secret (`src/cli/googleApp.js`) | 0, 1, 2 |
 
 `lib/`: `common.sh` (общие помощники), `env.sh` (разбор `KEY=VALUE` без `source`), `config.sh`
 (флаги, `install.conf`, проверка, производное от режима входа), `app.sh` (пути, compose, образы

@@ -90,15 +90,30 @@ OAuth-клиент для входа в сам MailExpert (`AUTH_GOOGLE_CLIENT_I
 идентификатора или секрета клиента; `client_json_conflict` — указаны одновременно и файл, и
 идентификатор/секрет вручную.
 
-### Добавление из командной строки
+### Управление из командной строки
 
-Для установленной панели, без браузера — скрипт на хосте, рядом с `backup.sh` и `update.sh`:
+Для установленной панели, без браузера — скрипт на хосте, рядом с `backup.sh` и `update.sh`. Он
+умеет всё, что экран «Google-приложения»:
 
 ```bash
-sudo /opt/mailexpert/app/scripts/deploy/google-app.sh add client_secret_<id>.apps.googleusercontent.com.json \
-  [--label "Google 3"] [--user-limit 100]
-sudo /opt/mailexpert/app/scripts/deploy/google-app.sh list
+G=/opt/mailexpert/app/scripts/deploy/google-app.sh
+sudo $G add client_secret_<id>.apps.googleusercontent.com.json [--label "Google 3"] [--user-limit 100]
+sudo $G list [--json]                   # id, состояние, название, client ID, лимит
+sudo $G show <id> [--json]              # занятые и свободные места, брони, число ящиков
+sudo $G enable|close|disable <id>       # состояния active / closed / disabled
+sudo $G delete <id> --yes               # отказ, пока к приложению привязаны ящики
+sudo $G set-limit <id> <N>
+sudo $G set-label <id> "<название>"
+sudo $G replace-secret <id> <файл с секретом | ->   # новый секрет клиента из файла или stdin
 ```
+
+`<id>` берётся из `list`. Каждая команда вызывает ту же функцию сервиса, что и маршрут
+`/api/admin/google-apps`, поэтому отказы совпадают с экраном (`app_in_use`, `app_not_found`,
+`user_limit_invalid` и т. д.). `disable` так же помечает ящики приложения на переподключение через
+другое приложение, но открытые IMAP-соединения работающей панели CLI закрыть не может: они
+держатся до перезапуска backend. `show` считает брони текущих потоков в Redis; если Redis недоступен,
+печатает `unavailable`, а свободные места — `unknown`. Новый секрет для `replace-secret` читается
+только из файла или stdin, никогда из аргумента.
 
 Файл читается с хоста и передаётся в контейнер backend через
 `docker compose ... exec -T backend node src/cli/googleApp.js add < файл` — секрет клиента не
