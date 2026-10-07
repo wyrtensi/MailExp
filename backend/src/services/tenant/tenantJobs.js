@@ -13,6 +13,7 @@ import {
   QUARANTINE_RELEASE_KIND, RELEASE_JOB_MAX_ATTEMPTS, enqueueReleaseSlot, registerQuarantineReleaseKind,
 } from './quarantineRelease.js';
 import { pruneMessageTraces, registerMessageTraceKind } from './messageTrace.js';
+import { closeFulfilledRequests, getSeatRead, parseSubscribedSkus, saveSeatRead, seatSource } from '../mailNode/eopSeats.js';
 
 // The tenant's jobs (stage 7a). They run on the durable job queue (services/jobQueue.js,
 // docs/architecture/job-queue.md) instead of a table of their own (R-22 planned `tenant_jobs`):
@@ -34,6 +35,9 @@ import { pruneMessageTraces, registerMessageTraceKind } from './messageTrace.js'
 //   tenant_antispam_read    the Default anti-spam policy (R-28) read and, since section 5.14, its
 //                           spam, high confidence spam and phishing actions set to MoveToJmf
 //                           (syncAntispam), on demand
+//   tenant_seats_read       the purchased EOP seats (GET /subscribedSkus, services/mailNode/eopSeats.js):
+//                           "Reconcile" and after a seat request; the poll reads them every
+//                           SEATS_MAX_AGE_MS. Kept in integration_config 'mail_node_eop_seats'.
 //
 // Stage 7c adds tenant_quarantine_release (R-42, services/tenant/quarantineRelease.js), queued in
 // the same slot, and tenant_message_trace (R-30, services/tenant/messageTrace.js), on request.
@@ -50,9 +54,11 @@ export const TENANT_JOB_KINDS = Object.freeze({
   test: 'tenant_test_connection',
   poll: 'tenant_poll',
   antispam: 'tenant_antispam_read',
+  seats: 'tenant_seats_read',
 });
 export const POLL_INTERVAL_MS = 10 * 60 * 1000;
 export const ANTISPAM_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+export const SEATS_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 // Polls failed in a row before the alerts warn that the tenant poll is failing.
 export const TENANT_FAILING_POLLS = 3;
 const FIRST_POLL_DELAY_MS = 60 * 1000;
@@ -154,6 +160,38 @@ export async function readAntispam(session, now = Date.now()) {
   } catch (err) {
     return { at, ok: false, ...failureOf(err) };
   }
+}
+
+// The purchased EOP seats (services/mailNode/eopSeats.js): EOP_ENTERPRISE's prepaidUnits.enabled. A
+// failed read keeps the last good number and its time with the error beside it.
+export async function readSeats(session, previous = null, now = Date.now()) {
+  const at = new Date(now).toISOString();
+  try {
+    return { at, ok: true, ...parseSubscribedSkus(await session.graph.request('GET', '/subscribedSkus')) };
+  } catch (err) {
+    // firstErrorAt: when it began to fail while it never answered, so a missing permission alerts
+    // after 3 days (eopSeats.js purchasedSeats).
+    const never = !Number.isInteger(previous?.purchased);
+    return {
+      ...(previous ?? {}), ok: false, error: failureOf(err), errorAt: at,
+      ...(never ? { firstErrorAt: previous?.firstErrorAt ?? at } : {}),
+    };
+  }
+}
+
+async function storeSeats(read, tx) {
+  await saveSeatRead(read, tx);
+  if (read.ok) await closeFulfilledRequests(read.purchased, tx);
+}
+
+// The poll's read of the seats, once SEATS_MAX_AGE_MS passed since the last try; null when not due or
+// when the tenant does not give the number (manual mode).
+async function dueSeatRead(context, now = Date.now()) {
+  if (seatSource(context.settings, context.driver) !== 'graph') return null;
+  const previous = await getSeatRead();
+  const tried = Math.max(Date.parse(previous?.at ?? '') || 0, Date.parse(previous?.errorAt ?? '') || 0);
+  if (tried && now - tried < SEATS_MAX_AGE_MS) return null;
+  return readSeats(context.session, previous, now);
 }
 
 // Section 5.14 (the owner's decision after stage 7): the Default policy's spam, high confidence
@@ -278,6 +316,7 @@ export const TENANT_JOB_MAX_ATTEMPTS = Object.freeze({
   [TENANT_JOB_KINDS.test]: 1,
   [TENANT_JOB_KINDS.poll]: 1,
   [TENANT_JOB_KINDS.antispam]: 1,
+  [TENANT_JOB_KINDS.seats]: 1,
 });
 // A function, not a table entry: quarantineRelease.js imports this module, so its constants may not
 // be set yet while this one is evaluated.
@@ -320,7 +359,11 @@ export function registerTenantJobKinds() {
     handler: async (job, ctx) => {
       const context = await tenantContext();
       const patch = await poll(context, { previous: await getTenantState() });
-      await ctx.complete((tx) => saveTenantState(patch, tx));
+      const seats = await dueSeatRead(context);
+      await ctx.complete(async (tx) => {
+        await saveTenantState(patch, tx);
+        if (seats) await storeSeats(seats, tx);
+      });
     },
   });
   registerJobKind(TENANT_JOB_KINDS.antispam, {
@@ -333,6 +376,16 @@ export function registerTenantJobKinds() {
       // Another run is setting the policy: it keeps its own result.
       if (!antispam) return;
       await ctx.complete((tx) => saveTenantState({ antispam }, tx));
+    },
+  });
+  registerJobKind(TENANT_JOB_KINDS.seats, {
+    maxAttempts: TENANT_JOB_MAX_ATTEMPTS[TENANT_JOB_KINDS.seats],
+    handler: async (job, ctx) => {
+      const context = await tenantContext();
+      // Manual mode since the job was queued: nothing to read.
+      if (seatSource(context.settings, context.driver) !== 'graph') return;
+      const seats = await readSeats(context.session, await getSeatRead());
+      await ctx.complete((tx) => storeSeats(seats, tx));
     },
   });
   // Stage 7c: R-42 (the phishing EOP quarantined, released to the node) and R-30 (a letter's trace).

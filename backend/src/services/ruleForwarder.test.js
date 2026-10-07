@@ -171,6 +171,17 @@ describe('forwardRuleMessage', () => {
     };
   });
 
+  it('skips a forward from a read-only mail node mailbox: it cannot send', async () => {
+    query.mockReset();
+    query.mockResolvedValueOnce({ rows: [{ mail_node: true, delete_after: null, deactivated_at: new Date() }] });
+    const result = await forwardRuleMessage({
+      ruleId: 'r1', message: { id: 'm1' }, account: { id: 'a1', mail_node: true, email_address: 'me@example.com' },
+      imapManager: {}, recipient: 'you@example.com',
+    });
+    expect(result).toBe('read_only');
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
   it('reserves, sends once, and marks the delivery sent', async () => {
     query
       .mockResolvedValueOnce({ rows: [{ id: 'delivery-1' }] })

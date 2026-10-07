@@ -235,6 +235,19 @@ test('the demo audit log shows a stopped Access sync', async () => {
   assert.ok(entries[0].details.candidates.length > 0);
 });
 
+test('the demo refuses a node mailbox as the server does while the purchased seats are unknown', async () => {
+  const { licenses } = await demoRequest('GET', '/mail-node/eop');
+  await demoRequest('PUT', '/mail-node/eop', { licenses: null });
+  try {
+    await assert.rejects(
+      () => demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'unknownseats', domain: 'demo.mailexpert.local', name: '' }),
+      (err) => err.code === 'seats_unknown',
+    );
+  } finally {
+    await demoRequest('PUT', '/mail-node/eop', { licenses });
+  }
+});
+
 test('the demo mail node creates a domain mailbox and lists it with its quota', async () => {
   assert.deepEqual((await demoRequest('GET', '/integrations/status')).domainMail, { configured: true });
   const account = await demoRequest('POST', '/accounts', { kind: 'domain', localPart: 'Info', domain: 'demo.mailexpert.local', name: '' });

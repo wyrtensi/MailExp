@@ -33,6 +33,10 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
     deleteMailbox: vi.fn(async () => ({ warnings: [] })),
     listAliasesTo: vi.fn(async () => []),
     getMailbox: vi.fn(async () => null),
+    // The read-only filter of a mailbox pending deletion (mailboxActions.js closeLocalDelivery).
+    listMailboxFilters: vi.fn(async () => []),
+    addMailboxFilter: vi.fn(async () => {}),
+    deleteMailboxFilters: vi.fn(async () => {}),
   };
 });
 // The pending deletion of a node mailbox (services/mailNode/mailboxDeletion.js, covered against
@@ -40,6 +44,23 @@ vi.mock('../services/mailNode/mailcow.js', async (importActual) => {
 vi.mock('../services/mailNode/mailboxDeletion.js', () => ({
   requestDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', days: 5 })),
   cancelDeletion: vi.fn(async () => ({ deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' })),
+}));
+// The EOP seats (services/mailNode/eopSeats.js, covered against PGlite there): a seat is free
+// unless a test says otherwise.
+const seats = vi.hoisted(() => ({ free: true }));
+vi.mock('../services/mailNode/eopSeats.js', () => ({
+  reserveSeat: vi.fn(async () => (seats.free ? { assignmentId: 1, seat: 1 } : { error: 'no_free_seats' })),
+  confirmSeat: vi.fn(async () => true),
+  dropPendingSeat: vi.fn(async () => {}),
+  getHoldDays: vi.fn(async () => 90),
+  seatSupply: vi.fn(async () => ({ purchased: 10 })),
+}));
+// Deactivation and activation (covered against PGlite in mailboxActions.seats.pglite.test.js): only
+// the routes' own checks are asserted here.
+vi.mock('../services/mailNode/mailboxActions.js', async (importActual) => ({
+  ...(await importActual()),
+  deactivateNodeMailbox: vi.fn(async () => ({ account: { id: '77777777-7777-4777-8777-777777777777', mail_node: true, deactivated_at: '2026-10-07T00:00:00.000Z' } })),
+  activateNodeMailbox: vi.fn(async () => ({ error: 'no_free_seats' })),
 }));
 // The send limit a new mailbox gets (services/mailNode/nodeApply.js, covered against PGlite there).
 vi.mock('../services/mailNode/nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })) }));
@@ -79,6 +100,7 @@ describe('domain mailboxes in /api/accounts', () => {
   let aliasInserted;
   beforeEach(() => {
     vi.clearAllMocks();
+    seats.free = true;
     node.cfg = CFG;
     domainStates.clear();
     domainStates.set('example.com', 'ready').set('off.example', 'ready').set('dbeb.example', 'authoritative').set('pending.example', 'connector_ready');
@@ -140,6 +162,22 @@ describe('domain mailboxes in /api/accounts', () => {
     expect(aliasInserted).toEqual([ID, 'Ivan Petrov', 'sales@example.com']);
     expect(body.sender_name).toBe('Иван Петров');
     expect(body.aliases).toEqual([expect.objectContaining({ name: 'Ivan Petrov', email: 'sales@example.com' })]);
+  });
+
+  it('refuses with no_free_seats (409) without asking the node', async () => {
+    seats.free = false;
+    const res = await post({ kind: 'domain', localPart: 'info', domain: 'example.com', senderName: 'Info' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('no_free_seats');
+    expect(provisionMailbox).not.toHaveBeenCalled();
+  });
+
+  it('lets only administrators deactivate and activate', async () => {
+    const res = await fetch(`${base}/api/accounts/${ID}/deactivation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: 'r' }),
+    });
+    expect(res.status).toBe(403);
+    expect((await fetch(`${base}/api/accounts/${ID}/deactivation`, { method: 'DELETE' })).status).toBe(403);
   });
 
   it('refuses a sender name that would add a header, before touching mailcow', async () => {
@@ -279,11 +317,13 @@ describe('domain mailboxes in /api/accounts', () => {
     const cancel = () => fetch(`${base}/api/accounts/${ID}/deletion`, { method: 'DELETE' });
 
     const ROW = { id: ID, email_address: 'Info@example.com', mail_node: true, imap_host: 'mail.example.com' };
-    const nodeRow = (extra = {}) => query.mockImplementation(async (sql) => (
-      sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts')
+    // extra: the row after the action; before: what the action reads under the mailbox lock.
+    const nodeRow = (extra = {}, before = {}) => query.mockImplementation(async (sql) => {
+      if (sql.startsWith('SELECT email_address, mail_node, imap_host, delete_after, deactivated_at')) return { rows: [{ ...ROW, ...(extra.imap_host ? { imap_host: extra.imap_host } : {}), ...before }] };
+      return sql.startsWith('SELECT id, email_address, mail_node') || sql.startsWith('SELECT * FROM email_accounts')
         ? { rows: [{ ...ROW, ...extra }] }
-        : { rows: [] }
-    ));
+        : { rows: [] };
+    });
     const rowDeleted = () => query.mock.calls.some(([sql]) => sql.startsWith('DELETE'));
 
     it('never removes a node mailbox at once: its deletion has to be asked for', async () => {
@@ -302,7 +342,7 @@ describe('domain mailboxes in /api/accounts', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body).toMatchObject({ id: ID, delete_after: '2026-10-06T10:00:00.000Z', deletion_reason: 'Left the company' });
-      expect(requestDeletion).toHaveBeenCalledWith({ accountId: ID, userId: 'user-1', reason: 'Left the company' });
+      expect(requestDeletion).toHaveBeenCalledWith(expect.objectContaining({ accountId: ID, userId: 'user-1', reason: 'Left the company', holdDays: 90 }));
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_requested',
         details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', days: 5, reason: 'Left the company' },
@@ -370,7 +410,7 @@ describe('domain mailboxes in /api/accounts', () => {
       nodeRow();
       const res = await cancel();
       expect(res.status).toBe(200);
-      expect(cancelDeletion).toHaveBeenCalledWith({ accountId: ID });
+      expect(cancelDeletion).toHaveBeenCalledWith(expect.objectContaining({ accountId: ID, purchased: 10 }));
       expect(recordAudit).toHaveBeenCalledWith({
         actorUserId: 'user-1', accountId: ID, action: 'mailbox.deletion_cancelled',
         details: { mailNode: true, deleteAfter: '2026-10-06T10:00:00.000Z', reason: 'Left the company' },

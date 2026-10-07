@@ -3,6 +3,7 @@ import { query } from './db.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { sendFailureIsDefinite } from './smtpErrors.js';
+import { isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
@@ -246,6 +247,16 @@ export async function forwardRuleMessage({
   imapManager,
   recipient,
 }) {
+  // A read-only mail node mailbox (EOP seats design) does not forward. Read fresh: the account object
+  // a rule runs with may predate the change. Only node mailboxes are asked, so other mailboxes'
+  // paths are unchanged.
+  if (account?.mail_node) {
+    const { rows: [state] } = await query('SELECT mail_node, delete_after, deactivated_at FROM email_accounts WHERE id = $1', [account.id]);
+    if (isReadOnlyNodeMailbox(state)) {
+      console.warn(`ruleForwarder: rule ${ruleId} not forwarded: the mailbox is read-only`);
+      return 'read_only';
+    }
+  }
   const reserved = await query(
     `INSERT INTO inbox_rule_forwards (rule_id, message_id)
      VALUES ($1, $2)

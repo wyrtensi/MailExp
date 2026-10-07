@@ -187,6 +187,18 @@ const ERROR_KEYS = {
   trace_not_connected: 'message.delivery.eop.notConnected',
   trace_sent_at_unknown: 'message.delivery.eop.sentAtUnknown',
   trace_too_old: 'message.delivery.eop.tooOld',
+  // EOP seats and deactivation (backend services/mailNode/eopSeats.js, mailboxActions.js).
+  no_free_seats: 'admin.mailNode.seats.errorNoFree',
+  seats_unknown: 'admin.mailNode.seats.errorUnknown',
+  seat_count_invalid: 'admin.mailNode.seats.errorCount',
+  seats_manual: 'admin.mailNode.seats.errorManual',
+  hold_days_invalid: 'admin.mailNode.seats.errorHoldDays',
+  mailbox_read_only: 'admin.mailNode.seats.errorReadOnly',
+  already_deactivated: 'admin.accounts.deactivation.errorAlready',
+  not_deactivated: 'admin.accounts.deactivation.errorNot',
+  deletion_pending: 'admin.accounts.deactivation.errorDeletionPending',
+  deactivation_reason_required: 'admin.accounts.deletion.errorReasonRequired',
+  deactivation_reason_too_long: 'admin.accounts.deletion.errorReasonTooLong',
 };
 const ERROR_FALLBACK_KEY = 'admin.mailNode.errorFailed';
 
@@ -204,6 +216,64 @@ export function isMailNodeErrorCode(code) {
 // separate, billed mailbox. Gmail and IMAP mailboxes keep aliases with any address.
 export function isNodeMailbox(account) {
   return account?.mail_node === true;
+}
+
+// A mail node mailbox an administrator deactivated (EOP seats design, 2026-10-07).
+export function isDeactivated(account) {
+  return isNodeMailbox(account) && !!account?.deactivated_at;
+}
+
+// A deactivated mail node mailbox, or one pending deletion, is read-only: its EOP seat is on hold,
+// incoming mail is refused and it cannot send; its letters stay readable.
+export function isReadOnlyMailbox(account) {
+  return isNodeMailbox(account) && (!!account?.delete_after || !!account?.deactivated_at);
+}
+
+// "Deactivate" is an administrator's, for a node mailbox that works.
+export function canDeactivate(account, { isAdmin }) {
+  return !!isAdmin && isNodeMailbox(account) && !isReadOnlyMailbox(account);
+}
+
+export function nodeMailboxDeactivateDialog({ t, account }) {
+  return {
+    title: t('admin.accounts.deactivation.title'),
+    message: t('admin.accounts.deactivation.message', { email: account.email_address }),
+    requireReason: true,
+    reasonLabel: t('admin.accounts.deactivation.reasonLabel'),
+    confirmLabel: t('admin.accounts.deactivation.confirm'),
+  };
+}
+
+// The EOP seats counter as a screen uses it, from GET /api/mail-node/seats (used, held and free;
+// free is null while the purchased number is unknown).
+export function seatsView(seats) {
+  if (!seats) return null;
+  const known = seats.free != null;
+  return { known, used: seats.used ?? 0, held: seats.held ?? 0, free: known ? seats.free : null, canTake: known && seats.free > 0 };
+}
+
+// What to say while the purchased number is unknown: entered by hand (Licenses), or, with the tenant
+// giving it, not read from Microsoft yet (Reconcile, the Graph permission) with Licenses standing in.
+export function seatsUnknownKey(seats) {
+  return seats?.mode === 'graph' ? 'admin.mailNode.seats.unknownGraph' : 'admin.mailNode.seats.unknown';
+}
+
+// The hover on "temporarily unavailable": one line per held seat with the date it becomes free.
+export function heldSeatsTitle(seats, { t, formatDate }) {
+  return (seats?.heldSeats ?? [])
+    .map((s) => t('admin.mailNode.seats.heldItem', { seat: s.seat, email: s.email, date: formatDate(s.freeFrom) }))
+    .join('\n');
+}
+
+export const MAX_SEAT_REQUEST = 1000;
+export const MAX_HOLD_DAYS = 3650;
+
+export function seatRequestError(value) {
+  return parseWholeNumber(value, 1, MAX_SEAT_REQUEST) == null ? 'admin.mailNode.seats.errorCount' : null;
+}
+
+export function holdDaysError(value) {
+  return parseWholeNumber(value, 0, MAX_HOLD_DAYS) == null ? 'admin.mailNode.seats.errorHoldDays' : null;
 }
 
 const sameAddress = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -975,6 +1045,10 @@ const ALERT_TITLE_KEYS = {
   tenant_phish_held: 'admin.nodeOps.alertTenantPhishHeld',
   tenant_alias_contacts_held: 'admin.nodeOps.alertTenantAliasContactsHeld',
   tenant_antispam_not_enforced: 'admin.nodeOps.alertTenantAntispamNotEnforced',
+  eop_seats_over: 'admin.nodeOps.alertEopSeatsOver',
+  eop_seats_stale: 'admin.nodeOps.alertEopSeatsStale',
+  eop_seats_warning: 'admin.nodeOps.alertEopSeatsWarning',
+  eop_seats_requested: 'admin.nodeOps.alertEopSeatsRequested',
   eop_host_missing: 'admin.nodeOps.alertEopHostMissing',
 };
 export const ALERT_KEYS = Object.keys(ALERT_TITLE_KEYS);
@@ -999,6 +1073,7 @@ const ALERT_SOURCE_KEYS = {
   tenant_domains: 'admin.nodeOps.sourceTenant',
   tenant_quarantine: 'admin.nodeOps.sourceTenant',
   spam_rule: 'admin.nodeOps.sourceSpamRule',
+  seats: 'admin.nodeOps.sourceSeats',
 };
 export function alertSourceKey(source) {
   return ALERT_SOURCE_KEYS[source] ?? 'admin.nodeOps.sourceLog';
@@ -1076,6 +1151,15 @@ export function alertDetail(alert) {
         key: d.state === 'missing' ? 'admin.nodeOps.alertDetailSpamRuleMissing' : 'admin.nodeOps.alertDetailSpamRuleOutdated',
         values: {}, at: d.checkedAt ?? null,
       };
+    // EOP seats (backend services/mailNode/eopSeats.js).
+    case 'eop_seats_over':
+      return { key: 'admin.nodeOps.alertDetailEopSeatsOver', values: { used: d.used ?? 0 } };
+    case 'eop_seats_stale':
+      return { key: 'admin.nodeOps.alertDetailEopSeatsStale', values: { code: d.code ?? '—' }, at: d.at ?? null };
+    case 'eop_seats_warning':
+      return { key: 'admin.nodeOps.alertDetailEopSeatsWarning', values: { warning: d.warning ?? 0 } };
+    case 'eop_seats_requested':
+      return { key: 'admin.nodeOps.alertDetailEopSeatsRequested', values: { count: d.count ?? 0, seats: d.seats ?? 0 }, at: d.since ?? null };
     // Alias contacts kept on an Authoritative domain for an administrator (section 5.14).
     case 'tenant_alias_contacts_held':
       return {

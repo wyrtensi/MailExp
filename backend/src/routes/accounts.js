@@ -23,7 +23,7 @@ import { previewRecompute } from '../services/threading/recompute.js';
 import { providerThreadIndexState } from '../services/threading/providerThreadIndex.js';
 import { getMailNodeConfig, listAliasesTo } from '../services/mailNode/mailcow.js';
 import {
-  MAILBOX_ERRORS, cancelMailboxDeletion, createNodeMailbox, requestMailboxDeletion,
+  MAILBOX_ERRORS, activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, requestMailboxDeletion,
 } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
@@ -73,6 +73,8 @@ const SAFE_FIELDS = [
   // A mail node mailbox someone asked to delete (migration 0081): when, by whom, when it goes for
   // good, and why the deletion job could not delete it yet.
   'deletion_requested_at', 'deletion_requested_by_email', 'deletion_reason', 'delete_after', 'deletion_last_error',
+  // A deactivated mail node mailbox (migration 0095): read-only, its seat on hold.
+  'deactivated_at', 'deactivated_by_email', 'deactivation_reason',
   // Stage 7b (R-32): the mailbox's domain is Authoritative and the tenant has no recipient for it
   // yet, so EOP still rejects mail to it; computed by GET /.
   'tenant_pending',
@@ -92,8 +94,9 @@ router.get('/', async (req, res) => {
             last_sync, sync_error, sort_order, folder_mappings, signature, created_at,
             categorization_enabled, thread_mode, mail_node,
             deletion_requested_at, deletion_requested_by_email, deletion_reason, delete_after, deletion_last_error,
+            deactivated_at, deactivated_by_email, deactivation_reason,
             last_received_at,
-            (mail_node AND tenant_recipient_at IS NULL AND EXISTS (
+            (mail_node AND delete_after IS NULL AND deactivated_at IS NULL AND tenant_recipient_at IS NULL AND EXISTS (
               SELECT 1 FROM mail_node_domains d
                WHERE d.domain = split_part(lower(email_address), '@', 2) AND d.state = 'authoritative')) AS tenant_pending
      FROM email_accounts
@@ -275,11 +278,11 @@ router.put('/:id', async (req, res) => {
   if (stored.mail_node && changedConnectionFields(stored, updates).length) {
     return res.status(400).json({ error: 'The server settings of a mail node mailbox cannot be changed', code: 'mail_node_connection_locked' });
   }
-  // A mail node mailbox has no "Disable" (owner decision D-14): it is deleted, with its mail, or it
-  // stays. Only turning one off is refused, so a form resending the value and a mailbox paused
-  // before this rule (which may be resumed) still go through.
+  // A mail node mailbox has no panel pause: it is deactivated (POST /:id/deactivation, EOP seats
+  // design) or deleted. Only turning one off is refused, so a form resending the value and a mailbox
+  // paused before this rule (which may be resumed) still go through.
   if (stored.mail_node && 'enabled' in updates && !updates.enabled && stored.enabled !== false) {
-    return res.status(400).json({ error: 'A mail node mailbox cannot be disabled: delete it instead', code: 'mail_node_disable_unsupported' });
+    return res.status(400).json({ error: 'A mail node mailbox cannot be paused: deactivate it instead', code: 'mail_node_disable_unsupported' });
   }
 
   // Everyone may rename a mailbox, recolour it, edit its signature or folder mappings; only an
@@ -488,11 +491,16 @@ router.get('/:id/node-aliases', async (req, res) => {
 // repeats the mailbox's address, as typed in the confirmation, and says why ({ email, reason }).
 // Nothing is asked of the node now. services/mailNode/mailboxActions.js, shared with the panel CLI.
 router.post('/:id/deletion', async (req, res) => {
-  const result = await requestMailboxDeletion(
-    { accountId: req.params.id, email: req.body?.email, reason: req.body?.reason },
-    routeActor(req),
-    { mayDelete: (row) => mayDeleteAccount(req, row) },
-  );
+  let result;
+  try {
+    result = await requestMailboxDeletion(
+      { accountId: req.params.id, email: req.body?.email, reason: req.body?.reason },
+      routeActor(req),
+      { mayDelete: (row) => mayDeleteAccount(req, row) },
+    );
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
   if (result.error === 'admin_required') return res.status(403).json({ error: 'Admin access required' });
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
@@ -500,7 +508,37 @@ router.post('/:id/deletion', async (req, res) => {
 
 // Cancels a pending deletion: the mailbox stays as it is. Anyone signed in may cancel.
 router.delete('/:id/deletion', async (req, res) => {
-  const result = await cancelMailboxDeletion({ accountId: req.params.id }, routeActor(req));
+  let result;
+  try {
+    result = await cancelMailboxDeletion({ accountId: req.params.id }, routeActor(req));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  if (result.error) return refuseMailbox(res, result.error);
+  return res.json(safeAccount(result.account));
+});
+
+// Deactivates a mail node mailbox (EOP seats design; administrators): read-only, its EOP seat on
+// hold; the body says why ({ reason }). services/mailNode/mailboxActions.js.
+router.post('/:id/deactivation', requireAdmin, async (req, res) => {
+  let result;
+  try {
+    result = await deactivateNodeMailbox({ accountId: req.params.id, reason: req.body?.reason }, routeActor(req));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  if (result.error) return refuseMailbox(res, result.error);
+  return res.json(safeAccount(result.account));
+});
+
+// Activates it again: its own seat while on hold, else a free one (refused at 0).
+router.delete('/:id/deactivation', requireAdmin, async (req, res) => {
+  let result;
+  try {
+    result = await activateNodeMailbox({ accountId: req.params.id }, routeActor(req));
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
   if (result.error) return refuseMailbox(res, result.error);
   return res.json(safeAccount(result.account));
 });

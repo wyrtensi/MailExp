@@ -205,7 +205,8 @@
     },
     "signatureLabel": "Signature",
     "signatureHint": "Added at the end of the letter. In the plain-text copy a \"-- \" line goes before it, so mail programs recognise the signature and leave it out of quotes in replies.",
-    "priorityHint": "Marks the letter as important or unimportant (X-Priority and Importance headers). Outlook and Thunderbird show the mark; Gmail does not."
+    "priorityHint": "Marks the letter as important or unimportant (X-Priority and Importance headers). Outlook and Thunderbird show the mark; Gmail does not.",
+    "readOnlyOption": "read-only"
   },
   "message": {
     "find": {
@@ -771,7 +772,9 @@
     "unreadStale": "Last observed unread count; awaiting server refresh",
     "unreadStaleAt": "Last observed unread count ({{time}}); awaiting server refresh",
     "favorites": "Favorites",
-    "reorderFolder": "Drag to reorder folder"
+    "reorderFolder": "Drag to reorder folder",
+    "readOnly": "read-only",
+    "deactivated": "Deactivated"
   },
   "contextMenu": {
     "find": "Find",
@@ -1244,7 +1247,7 @@
       "oauthReconnectRequired": "Google authorization expired or was revoked. Reconnect Gmail to resume syncing.",
       "deleteTitle": "Remove mailbox?",
       "deleteMessage": "The mailbox and all its synced messages will be removed for every user. This cannot be undone.",
-      "deleteMailNodeMessage": "The mailbox {{email}} keeps working until {{date}}. Then it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Mail sent to the address afterwards is refused. Anyone can cancel the deletion until then.",
+      "deleteMailNodeMessage": "The mailbox {{email}} becomes read-only now: incoming mail is refused, sending is off, its letters stay readable, and its EOP seat goes on hold. On {{date}} it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Anyone can cancel the deletion until then.",
       "mailNodeServerNote": "This mailbox lives on the mail node: its server and password come from the node settings and cannot be changed here.",
       "serverAdminOnlyNote": "The server settings of this mailbox (servers, ports, encryption, sign-in) are managed by an administrator.",
       "oauthSubjectReset": "Reset OAuth binding",
@@ -1254,10 +1257,10 @@
       "mailNodeBadge": "Mail node",
       "deleteMailNodeTypeLabel": "Type {{email}} to confirm.",
       "deleteMailNodeConfirm": "Schedule deletion",
-      "mailNodeDisableUnsupported": "A mailbox on the mail node cannot be disabled: delete it instead.",
+      "mailNodeDisableUnsupported": "A mailbox on the mail node cannot be paused: deactivate it instead.",
       "deleteMailNodeAliasesDeleted": "Aliases deleted with it: {{list}}.",
       "deleteMailNodeAliasesChanged": "Aliases that stop delivering to it: {{list}}.",
-      "deleteMailNodeMessageNoDate": "The mailbox {{email}} keeps working for the days an administrator set. Then it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Mail sent to the address afterwards is refused. Anyone can cancel the deletion until then.",
+      "deleteMailNodeMessageNoDate": "The mailbox {{email}} becomes read-only now: incoming mail is refused, sending is off, its letters stay readable, and its EOP seat goes on hold. After the days an administrator set it is deleted for good with all its mail from MailExpert and from the mail server (and later from EOP): aliases that deliver only to it are deleted with it, it is taken out of other aliases, and its send-as rights, sync jobs and filters go too. Anyone can cancel the deletion until then.",
       "deletion": {
         "reasonLabel": "Why is it deleted? (required, kept in the journal)",
         "pendingBadge": "Pending deletion: deleted on {{date}}",
@@ -1276,6 +1279,20 @@
         "errorStepFailed": "a step before the deletion on the mail node failed",
         "errorRowKept": "the mailbox was deleted on the mail node, but its entry here was kept: ask an administrator",
         "errorTenantRecipient": "its recipient could not be removed from the Microsoft tenant"
+      },
+      "deactivation": {
+        "action": "Deactivate",
+        "title": "Deactivate the mailbox?",
+        "message": "{{email}} becomes read-only: incoming mail is refused, sending is off, the letters stay. Its EOP seat goes on hold and can be taken back by activating it.",
+        "reasonLabel": "Why is it deactivated? (required, kept in the journal)",
+        "confirm": "Deactivate",
+        "badge": "Deactivated",
+        "why": "Why: {{reason}} ({{by}}, {{at}})",
+        "activate": "Activate",
+        "activateFailed": "Could not activate the mailbox",
+        "errorAlready": "This mailbox is deactivated already.",
+        "errorNot": "This mailbox is not deactivated.",
+        "errorDeletionPending": "This mailbox is pending deletion: cancel the deletion first."
       }
     },
     "folderMappings": {
@@ -2361,7 +2378,14 @@
       "detailTenantPhishReleaseOn": "Turned on",
       "detailTenantPhishReleaseOff": "Paused",
       "detailTenantMessageTraced": "Letter {{messageId}}",
-      "detailSendDeliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent"
+      "detailSendDeliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent",
+      "actionMailboxDeactivated": "Mailbox deactivated",
+      "actionMailboxActivated": "Mailbox activated",
+      "actionMailNodeSeatsRequested": "EOP seats requested",
+      "actionMailNodeSeatHoldChanged": "EOP seat hold changed",
+      "detailDeactivated": "Why: {{reason}}",
+      "detailSeatsRequested": "Seats: {{seats}}",
+      "detailSeatHoldChanged": "{{from}} -> {{to}} days"
     },
     "accessSync": {
       "tab": "Access policy sync",
@@ -2398,7 +2422,7 @@
     },
     "mailNode": {
       "title": "Mail node",
-      "description": "The mailcow server where MailExpert creates mailboxes on your domains. Deleting such a mailbox is scheduled: it keeps working for the days set below, then MailExpert deletes it on the node for good, with its mail.",
+      "description": "The mailcow server where MailExpert creates mailboxes on your domains. Deleting such a mailbox is scheduled: it is read-only for the days set below, then MailExpert deletes it on the node for good, with its mail.",
       "hostLabel": "Mail node host",
       "hostPh": "mail.example.com",
       "hostNote": "A host name, never an IP: mailboxes connect to it by IMAP and SMTP and the API is at https://<host>/api/v1, so moving the node is a DNS change.",
@@ -2506,7 +2530,7 @@
       "errorDomainNodeChanged": "The node reports another creation time than the one shown: reload the list and check again.",
       "errorNothingToRestart": "The domain is at the first step with nothing to clear.",
       "errorHostMismatch": "This mailbox is on another mail host than the one in the mail node settings: nothing was changed.",
-      "deleteAfterLabel": "Days a mailbox keeps working after its deletion is asked for",
+      "deleteAfterLabel": "Days a mailbox stays read-only after its deletion is asked for",
       "deleteAfterNote": "From 1 to {{max}}. A change applies to deletions asked for from then on; dates already set stay.",
       "errorDeleteAfterDays": "Enter a whole number of days from 1 to 90.",
       "errorPanelIps": "Panel addresses must be up to 10 IP addresses or networks no wider than /24 (IPv4) or /48 (IPv6), such as 203.0.113.10 or 203.0.113.0/28.",
@@ -2732,7 +2756,46 @@
       "errorHoldInvalid": "The hold must be on or off.",
       "errorDomainAuthoritative": "The domain is Authoritative already: it cannot be held on Internal Relay.",
       "errorInternalRelayNotNeeded": "The domain does not wait for this decision.",
-      "errorAliasContactsNotHeld": "The domain holds no alias contacts for a decision."
+      "errorAliasContactsNotHeld": "The domain holds no alias contacts for a decision.",
+      "seats": {
+        "title": "EOP licenses",
+        "used": "Used {{used}}",
+        "held": "temporarily unavailable {{held}}",
+        "free": "free {{free}}",
+        "heldItem": "Seat {{seat}} ({{email}}): free from {{date}}",
+        "unknown": "The number of purchased seats is not known: an administrator enters it in the EOP settings (Licenses).",
+        "unknownGraph": "The number of purchased seats has not been read from Microsoft yet: an administrator presses Reconcile in Mail node (the app needs the Graph permission LicenseAssignment.Read.All), or enters it in the EOP settings (Licenses) meanwhile.",
+        "subscriptionMissing": "Microsoft lists no EOP subscription (EOP_ENTERPRISE) in the tenant, so 0 seats are counted as purchased: check the subscription with the reseller.",
+        "checkedAt": "Reconciled with Microsoft {{at}}",
+        "manual": "Purchased seats are entered by hand in the EOP settings (Licenses).",
+        "notReconciled": "Not reconciled with Microsoft yet: the number from the EOP settings is used.",
+        "stale": "The number of seats was last read from Microsoft {{at}}, more than 3 days ago: check the Graph permission LicenseAssignment.Read.All.",
+        "over": "Fewer seats are purchased than used: existing mailboxes keep working, new ones cannot be created.",
+        "openRequests": "Open seat requests:",
+        "openRequest": "{{seats}} seats, asked by {{by}}, {{at}}",
+        "check": "Reconcile",
+        "checking": "Reconciling…",
+        "checkQueued": "Asked Microsoft; the counter changes within a minute.",
+        "holdLabel": "Seat hold, days",
+        "holdHint": "A released seat waits this long before another mailbox may take it (0: no wait). Applies to seats already waiting.",
+        "holdSaved": "Hold period saved.",
+        "request": "Request seats",
+        "requestCount": "How many",
+        "requestSend": "Send request",
+        "requestSent": "Request sent: an administrator buys the seats; the request closes by itself when they appear.",
+        "noFree": "No free seat: a new mailbox can be created once more seats are bought or a held one becomes free.",
+        "cancelNoFree": "No free seat: the mailbox can be taken back once a seat is free.",
+        "cancelTakesSeat": "Cancelling takes one seat (free: {{free}}).",
+        "activateTakesSeat": "Activating takes one seat (free: {{free}}).",
+        "ownSeatHeld": "Its own seat is still on hold: it gets it back.",
+        "readOnlyNotice": "Read-only: incoming mail is refused, sending is off, the letters stay readable.",
+        "errorNoFree": "No free EOP seat: ask for more seats first.",
+        "errorUnknown": "The number of purchased EOP seats is not known: enter it in the EOP settings (Licenses), or, with the tenant connected, press Reconcile in Mail node.",
+        "errorCount": "Ask for a whole number of seats from 1 to 1000.",
+        "errorHoldDays": "The hold period must be a whole number of days from 0 to 3650.",
+        "errorManual": "The tenant does not give the number of seats: it is entered in the EOP settings (Licenses).",
+        "errorReadOnly": "This mailbox is read-only (deactivated or pending deletion): it cannot send."
+      }
     },
     "eop": {
       "title": "Mail through EOP",
@@ -2938,7 +3001,16 @@
       "alertDetailTenantAntispamUnconfirmed": "The policy could not be read after the change ({{fields}}, {{code}}), checked {{at}}: the state is unknown, the change may have gone through. The next check reads it again.",
       "alertTenantAntispamNotEnforced": "Anti-spam actions not set to Junk",
       "alertDetailTenantAntispamNotEnforced": "Not set to MoveToJmf: {{fields}} ({{code}}), checked {{at}}. Such letters may stay in Microsoft's quarantine.",
-      "alertDetailTenantPhishHeld": "Messages MailExpert did not release: {{count}}. Their recipients do not see them; see \"Microsoft tenant\" in the EOP settings."
+      "alertDetailTenantPhishHeld": "Messages MailExpert did not release: {{count}}. Their recipients do not see them; see \"Microsoft tenant\" in the EOP settings.",
+      "alertEopSeatsOver": "Fewer EOP seats purchased than used",
+      "alertEopSeatsStale": "EOP seats not reconciled with Microsoft for over 3 days",
+      "alertEopSeatsRequested": "EOP seats requested",
+      "alertDetailEopSeatsOver": "Used: {{used}}. New mailboxes are refused.",
+      "alertDetailEopSeatsStale": "Last good read below; error: {{code}}",
+      "alertDetailEopSeatsRequested": "Open requests: {{count}}, seats: {{seats}}",
+      "sourceSeats": "EOP seats",
+      "alertEopSeatsWarning": "Some EOP seats are in warning",
+      "alertDetailEopSeatsWarning": "{{warning}} seats are in warning: they still work and count as purchased, but the subscription needs attention."
     },
     "nodeAgent": {
       "title": "Node agent",

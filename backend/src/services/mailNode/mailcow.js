@@ -585,6 +585,47 @@ export async function listDomainAliases(cfg, domain) {
     .sort((a, b) => a.address.localeCompare(b.address));
 }
 
+// The Sieve filters of one mailbox (mailcow's per-user prefilter and postfilter, run on delivery
+// only): { id, type, desc, active }. The panel makes one: the read-only filter of a deactivated
+// mailbox or one pending deletion (services/mailNode/mailboxActions.js closeLocalDelivery).
+export async function listMailboxFilters(cfg, email) {
+  return asList(await request(cfg, 'GET', `get/filters/${encodeURIComponent(String(email).toLowerCase())}`))
+    .map((f) => ({ id: Number(f.id), type: f.filter_type, desc: f.script_desc ?? '', active: Number(f.active_int ?? f.active ?? 0) === 1 }))
+    .filter((f) => Number.isInteger(f.id));
+}
+
+// Adds an active filter. mailcow keeps one active filter of a type per mailbox: it deactivates the
+// mailbox's other active filters of that type.
+export async function addMailboxFilter(cfg, { email, type, desc, script }) {
+  await request(cfg, 'POST', 'add/filter', {
+    active: '1', username: String(email).toLowerCase(), filter_type: type, script_desc: desc, script_data: script,
+  });
+}
+
+// Every mailbox's filters in one read (get/filters/all): { id, username, type, desc, active }.
+export async function listAllMailboxFilters(cfg) {
+  return asList(await request(cfg, 'GET', 'get/filters/all'))
+    .map((f) => ({
+      id: Number(f.id),
+      username: String(f.username ?? '').toLowerCase(),
+      type: f.filter_type,
+      desc: f.script_desc ?? '',
+      active: Number(f.active_int ?? f.active ?? 0) === 1,
+    }))
+    .filter((f) => Number.isInteger(f.id) && f.username);
+}
+
+// Changes one filter (edit/filter): attr { active: '1' } turns it on and, as mailcow does, turns the
+// mailbox's other filters of its type off.
+export async function editMailboxFilter(cfg, id, attr) {
+  await request(cfg, 'POST', 'edit/filter', { items: [String(id)], attr });
+}
+
+export async function deleteMailboxFilters(cfg, ids) {
+  if (!ids.length) return;
+  await request(cfg, 'POST', 'delete/filter', ids.map(String));
+}
+
 // Deletes the mailbox on the node with its mail. delete/mailbox takes a JSON array of addresses;
 // mailcow drops the mailbox and everything tied to it from its database (aliases that deliver only
 // to it, its place in other aliases' targets, its send-as rights, sync jobs and filters) and moves

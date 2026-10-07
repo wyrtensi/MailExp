@@ -50,10 +50,10 @@ import GmailAddForm from './GmailAddForm.jsx';
 import { addAccountOptions, defaultAddKind } from '../utils/addAccount.js';
 import { accountUpdateFromForm } from '../utils/accountUpdate.js';
 import {
-  canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, mailNodeErrorKey, nodeMailboxDeleteDialog,
-  pendingDeletion,
+  canDeactivate, canDeleteAccount, isForeignNodeAlias, isMailNodeErrorCode, isNodeMailbox, isReadOnlyMailbox, mailNodeErrorKey,
+  nodeMailboxDeactivateDialog, nodeMailboxDeleteDialog, pendingDeletion,
 } from '../utils/mailNode.js';
-import MailboxDeletionNotice, { TenantPendingLine } from './MailboxDeletionNotice.jsx';
+import MailboxDeletionNotice, { MailboxDeactivatedNotice, TenantPendingLine } from './MailboxDeletionNotice.jsx';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { MICROSOFT_OAUTH_PATH, reconnectUrlFor } from '../utils/accountHealth.js';
 import { isGoogleReconnectRequired } from '../utils/googleOAuth.js';
@@ -628,6 +628,7 @@ export function AccountsTab() {
         try {
           const updated = await api.requestMailboxDeletion(id, { email: typed, reason });
           updateAccount(id, updated);
+          loadNodeSeats();
         } catch (err) {
           throw explain(err);
         }
@@ -654,6 +655,57 @@ export function AccountsTab() {
       });
     } finally {
       setCancellingDeletion(null);
+      loadNodeSeats();
+    }
+  };
+
+  // The EOP seats counter (backend services/mailNode/eopSeats.js) the read-only notices need: taking
+  // a mailbox back costs a seat. Loaded once a read-only mailbox is on the list.
+  const [nodeSeats, setNodeSeats] = useState(null);
+  const loadNodeSeats = () => api.mailNode.getSeats().then(setNodeSeats).catch(() => setNodeSeats(null));
+  const hasReadOnly = accounts.some(isReadOnlyMailbox);
+  useEffect(() => {
+    if (hasReadOnly) loadNodeSeats();
+  }, [hasReadOnly]);
+
+  // Administrators deactivate a node mailbox that works: read-only, its seat on hold (EOP seats design).
+  const handleDeactivate = (id) => {
+    const account = accounts.find(a => a.id === id);
+    if (!account) return;
+    const explain = (err) => (isMailNodeErrorCode(err?.code) ? new Error(t(mailNodeErrorKey(err.code)), { cause: err }) : err);
+    setConfirmDialog({
+      ...nodeMailboxDeactivateDialog({ t, account }),
+      onConfirm: async ({ reason }) => {
+        try {
+          const updated = await api.deactivateMailbox(id, { reason });
+          updateAccount(id, updated);
+          loadNodeSeats();
+        } catch (err) {
+          throw explain(err);
+        }
+      },
+    });
+  };
+
+  // "Activate": the mailbox takes its own seat back while it is on hold, else a free one.
+  const [activating, setActivating] = useState(null);
+  const handleActivate = async (id) => {
+    if (activating) return;
+    setActivating(id);
+    try {
+      const updated = await api.activateMailbox(id);
+      updateAccount(id, updated);
+    } catch (err) {
+      if (err?.code === 'account_not_found') {
+        setAccounts(useStore.getState().accounts.filter(a => a.id !== id));
+      }
+      addNotification({
+        type: 'error', title: t('admin.accounts.deactivation.activateFailed'),
+        body: isMailNodeErrorCode(err?.code) ? t(mailNodeErrorKey(err.code)) : err.message,
+      });
+    } finally {
+      setActivating(null);
+      loadNodeSeats();
     }
   };
 
@@ -1359,6 +1411,13 @@ export function AccountsTab() {
                   <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
                 </svg>
               </IconBtn>
+              {canDeactivate(account, { isAdmin }) && (
+                <IconBtn onClick={() => handleDeactivate(account.id)} title={t('admin.accounts.deactivation.action')}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10"/><line x1="10" y1="15" x2="10" y2="9"/><line x1="14" y1="15" x2="14" y2="9"/>
+                  </svg>
+                </IconBtn>
+              )}
               {canDeleteAccount(account, { isAdmin }) && !pendingDeletion(account) && (
                 <IconBtn onClick={() => handleDelete(account.id)} title={t('common.remove')} danger>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1370,7 +1429,8 @@ export function AccountsTab() {
             </div>
           </div>
 
-          <MailboxDeletionNotice account={account} onCancel={handleCancelDeletion} busy={cancellingDeletion === account.id} />
+          <MailboxDeletionNotice account={account} onCancel={handleCancelDeletion} busy={cancellingDeletion === account.id} seats={nodeSeats} onSeatsChanged={loadNodeSeats} />
+          <MailboxDeactivatedNotice account={account} seats={nodeSeats} isAdmin={isAdmin} onActivate={handleActivate} busy={activating === account.id} onSeatsChanged={loadNodeSeats} />
           <TenantPendingLine account={account} style={{ padding: '6px 14px', borderTop: '1px solid var(--border-subtle)', whiteSpace: 'normal', fontSize: 12 }} />
 
           {/* Connection details bar */}

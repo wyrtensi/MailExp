@@ -656,7 +656,7 @@ describe('/api/mail-node', () => {
     query.mockResolvedValueOnce({
       rows: [
         { id: ID, email_address: 'Info@example.com', node_rl_value: 200, node_rl_frame: 'd' },
-        { id: 'other', email_address: 'gone@example.com', node_rl_value: null, node_rl_frame: null },
+        { id: 'other', email_address: 'gone@example.com', node_rl_value: null, node_rl_frame: null, deactivated_at: '2026-10-07T10:00:00.000Z' },
       ],
     });
     const body = await (await call('GET', '/mailboxes')).json();
@@ -664,11 +664,11 @@ describe('/api/mail-node', () => {
     expect(body.mailboxes).toEqual([
       {
         accountId: ID, email: 'Info@example.com', onNode: true, active: true, quotaMb: 5120, usedBytes: 2048,
-        rateLimit: null, rateLimitOverride: { value: 200, frame: 'd' }, rateLimitDefault: { value: 50, frame: 'h' },
+        rateLimit: null, rateLimitOverride: { value: 200, frame: 'd' }, rateLimitDefault: { value: 50, frame: 'h' }, deactivatedAt: null,
       },
       {
         accountId: 'other', email: 'gone@example.com', onNode: false, active: false, quotaMb: null, usedBytes: null,
-        rateLimit: null, rateLimitOverride: null, rateLimitDefault: { value: 50, frame: 'h' },
+        rateLimit: null, rateLimitOverride: null, rateLimitDefault: { value: 50, frame: 'h' }, deactivatedAt: '2026-10-07T10:00:00.000Z',
       },
     ]);
   });

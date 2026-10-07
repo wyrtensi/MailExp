@@ -16,6 +16,11 @@ import {
   addDkim,
   addDomain,
   addTlsPolicy,
+  addMailboxFilter,
+  editMailboxFilter,
+  listAllMailboxFilters,
+  deleteMailboxFilters,
+  listMailboxFilters,
   deleteDkim,
   deleteMailbox,
   editTlsPolicy,
@@ -525,5 +530,57 @@ describe('node settings requests', () => {
     expect(calls()[2].body).toEqual({ items: ['203.0.113.10'], attr: { action: 'whitelist' } });
     safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['network_host_invalid', 'x'] }]));
     await expect(whitelistFail2ban(CFG, ['x'])).rejects.toMatchObject({ code: 'mail_node_refused' });
+  });
+});
+
+describe('per-mailbox Sieve filters (EOP seats: read-only mailbox)', () => {
+  it('lists, adds and deletes the filters of one mailbox', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { id: 7, username: 'a@example.com', filter_type: 'prefilter', script_desc: 'mailexpert-read-only', script_data: 'x', active: 1 },
+      { id: 8, username: 'a@example.com', filter_type: 'postfilter', script_desc: 'other', script_data: 'y', active: 0 },
+    ]));
+    expect(await listMailboxFilters(CFG, 'A@example.com')).toEqual([
+      { id: 7, type: 'prefilter', desc: 'mailexpert-read-only', active: true },
+      { id: 8, type: 'postfilter', desc: 'other', active: false },
+    ]);
+    expect(calls()[0]).toMatchObject({ method: 'GET', url: 'https://mail.example.com/api/v1/get/filters/a%40example.com' });
+
+    safeFetch.mockResolvedValueOnce(answer([]));
+    expect(await listMailboxFilters(CFG, 'b@example.com')).toEqual([]);
+
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['add_filter', 'a@example.com'] }]));
+    await addMailboxFilter(CFG, { email: 'A@example.com', type: 'prefilter', desc: 'mailexpert-read-only', script: 'x' });
+    expect(calls()[2]).toMatchObject({
+      method: 'POST',
+      url: 'https://mail.example.com/api/v1/add/filter',
+      body: { active: '1', username: 'a@example.com', filter_type: 'prefilter', script_desc: 'mailexpert-read-only', script_data: 'x' },
+    });
+
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['delete_filter', '7'] }]));
+    await deleteMailboxFilters(CFG, [7]);
+    expect(calls()[3]).toMatchObject({ method: 'POST', url: 'https://mail.example.com/api/v1/delete/filter', body: ['7'] });
+    await deleteMailboxFilters(CFG, []);
+    expect(calls()).toHaveLength(4);
+  });
+
+  it('reads every filter at once and edits one', async () => {
+    safeFetch.mockResolvedValueOnce(answer([
+      { id: 7, username: 'A@example.com', filter_type: 'prefilter', script_desc: 'x', active: 1 },
+      { id: 8, username: 'b@example.com', filter_type: 'postfilter', script_desc: 'y', active: 0 },
+    ]));
+    expect(await listAllMailboxFilters(CFG)).toEqual([
+      { id: 7, username: 'a@example.com', type: 'prefilter', desc: 'x', active: true },
+      { id: 8, username: 'b@example.com', type: 'postfilter', desc: 'y', active: false },
+    ]);
+    expect(calls()[0]).toMatchObject({ method: 'GET', url: 'https://mail.example.com/api/v1/get/filters/all' });
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'success', msg: ['mailbox_modified', 'a@example.com'] }]));
+    await editMailboxFilter(CFG, 7, { active: '1' });
+    expect(calls()[1]).toMatchObject({ method: 'POST', url: 'https://mail.example.com/api/v1/edit/filter', body: { items: ['7'], attr: { active: '1' } } });
+  });
+
+  it('throws when mailcow refuses the filter', async () => {
+    safeFetch.mockResolvedValueOnce(answer([{ type: 'danger', msg: ['sieve_error', 'bad'] }]));
+    await expect(addMailboxFilter(CFG, { email: 'a@example.com', type: 'prefilter', desc: 'd', script: 'x' }))
+      .rejects.toMatchObject({ code: 'mail_node_refused' });
   });
 });

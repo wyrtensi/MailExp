@@ -26,6 +26,12 @@ export const MAIL_NODE_ERRORS = Object.freeze({
   node_created_required: [400, 'The creation time shown for the domain is required'],
   domain_nothing_to_restart: [409, 'The domain is at the first step with nothing to clear'],
   mail_node_host_mismatch: [409, 'The mailbox is on another mail host than the one in the mail node settings'],
+  // EOP seats (services/mailNode/eopSeats.js).
+  no_free_seats: [409, 'No free EOP seat: ask for more seats first'],
+  seats_unknown: [409, 'The number of purchased EOP seats is not known: enter it in the EOP settings (Licenses), or reconcile with Microsoft in Mail node'],
+  seat_count_invalid: [400, 'Ask for a whole number of seats from 1 to 1000'],
+  seats_manual: [409, 'The tenant does not give the number of seats: it is entered in the EOP settings (Licenses)'],
+  hold_days_invalid: [400, 'The hold period must be a whole number of days from 0 to 3650'],
   step_invalid: [400, 'No such onboarding step'],
   step_out_of_order: [409, 'Only the next onboarding step can be confirmed'],
   step_by_tenant_driver: [409, 'MailExpert confirms this step itself through the tenant driver'],

@@ -12,7 +12,7 @@ import { htmlToText } from '../utils/htmlToText.js';
 import { buildRawMessage } from '../services/gmailApiSender.js';
 import { imapManager } from '../index.js';
 import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
-import { isForeignNodeAliasAddress } from '../utils/senderNames.js';
+import { isForeignNodeAliasAddress, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 import { smtpFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
 import {
   enqueueOutgoingSend, existingSendJob, parseSendAt, pickComposeContext, sendJobResponse, sendRetryConflict,
@@ -172,6 +172,13 @@ router.post('/send', async (req, res) => {
   if (account.oauth_reconnect_required) {
     const failure = OAUTH_SEND_FAILURES.oauth_reconnect_required;
     return res.status(failure.status).json({ error: failure.error, code: 'oauth_reconnect_required' });
+  }
+  // A deactivated mail node mailbox, or one pending deletion, is read-only (EOP seats design): say so
+  // now, not after the undo window.
+  if (isReadOnlyNodeMailbox(account)) {
+    return res.status(409).json({
+      error: 'This mailbox is read-only (deactivated or pending deletion): it cannot send.', code: 'mailbox_read_only',
+    });
   }
 
   // Resolve the From identity — account by default, alias if requested

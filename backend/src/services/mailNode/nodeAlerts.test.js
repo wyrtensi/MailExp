@@ -44,6 +44,17 @@ vi.mock('./mailcow.js', async (importActual) => {
   };
 });
 vi.mock('./eopSettings.js', () => ({ getEopSettings: vi.fn(async () => node.eop) }));
+// The node's read-only filters follow the rows (covered in readOnlyFilter.pglite.test.js): only what
+// the run hands it and what comes back.
+const filters = vi.hoisted(() => ({ result: { closed: 0, opened: 0, failed: 0 } }));
+vi.mock('./readOnlyFilter.js', () => ({ reconcileLocalDelivery: vi.fn(async () => fail(filters.result)) }));
+// The EOP seats (covered against PGlite in eopSeats.pglite.test.js): the numbers a test sets.
+const seatState = vi.hoisted(() => ({ seats: null }));
+vi.mock('./eopSeats.js', async (importActual) => ({
+  ...(await importActual()),
+  getSeats: vi.fn(async () => fail(seatState.seats)),
+  withSeatLicenses: vi.fn(async (eop) => eop),
+}));
 vi.mock('./dnsCheckJob.js', () => ({ getNodeDnsCheck: vi.fn(async () => fail(node.nodeDns)) }));
 vi.mock('./terrl.js', async (importActual) => ({
   ...(await importActual()),
@@ -71,6 +82,7 @@ vi.mock('./traceSource.js', async (importActual) => ({
 }));
 
 import { recordAudit } from '../auditLog.js';
+import { reconcileLocalDelivery } from './readOnlyFilter.js';
 import { captureFromLog } from '../deliveryStatus.js';
 import { recordCheck, updateEvidence } from './outages.js';
 import { runOutageTrace } from './outageTrace.js';
@@ -84,7 +96,7 @@ import {
 import {
   ALERTS_PROVIDER, ALERT_STATE_PROVIDER, certificateSignal, containerSignal, eopHostSignal, getAlertSettings, logSignals,
   mergeAlerts, parseAlertSettings, pingOf, queueSignal, runAlertCheck, startNodeAlertJob, stopNodeAlertJob, terrlSignal,
-  TENANT_STALE_MS, tenantSignals,
+  TENANT_STALE_MS, seatSignals, tenantSignals,
 } from './nodeAlerts.js';
 import { createFakeTenantDriver, setTenantDriver } from '../tenant/driver.js';
 
@@ -108,6 +120,9 @@ beforeEach(() => {
   node.budget = { warn: false, used: 0, limit: null };
   node.eop = { eopHost: 'eop.test.local' };
   node.prefilter = undefined;
+  filters.result = { closed: 0, opened: 0, failed: 0 };
+  reconcileLocalDelivery.mockClear();
+  seatState.seats = { purchased: 5, used: 3, over: false, stale: false, at: null, error: null, requests: [] };
   recordAudit.mockClear();
   safeFetch.mockClear();
   outage.record = null;
@@ -253,6 +268,26 @@ describe('runAlertCheck', () => {
     node.cfg = null;
     expect(await runAlertCheck({ now: NOW })).toBeNull();
     expect(safeFetch).not.toHaveBeenCalled();
+  });
+
+  it('raises the seat alerts from the seat count, and withholds the ping when the count cannot be read', async () => {
+    seatState.seats = { ...seatState.seats, purchased: 2, over: true, requests: [{ seats: 1, requestedAt: '2026-10-06T10:00:00.000Z' }] };
+    let state = await runAlertCheck({ now: NOW });
+    expect(state.alerts.find((a) => a.key === 'eop_seats_over')).toMatchObject({ severity: 'warning', details: { used: 3 } });
+    expect(JSON.stringify(state)).not.toContain('"purchased"');
+    expect(keys(state.alerts)).toContain('eop_seats_requested');
+    seatState.seats = new Error('database gone');
+    state = await runAlertCheck({ now: NOW + 60000 });
+    expect(state.errors.map((e) => e.source ?? e)).toContain('seats');
+    expect(keys(state.alerts)).toContain('eop_seats_over');
+  });
+
+  it("makes the node's read-only filters match the rows on every run, and keeps a failure with the other source errors", async () => {
+    await runAlertCheck({ now: NOW });
+    expect(reconcileLocalDelivery).toHaveBeenCalledWith(node.cfg);
+    filters.result = Object.assign(new Error('down'), { code: 'mail_node_unreachable' });
+    const state = await runAlertCheck({ now: NOW + 60000 });
+    expect(state.errors.map((e) => e.source)).toContain('filters');
   });
 
   it('keeps the state, journals a raised alert once, and pings /fail on every run', async () => {
@@ -667,5 +702,39 @@ describe('the tenant alerts (R-27, the application certificate)', () => {
       expect(keys(state.alerts)).toEqual([]);
       expect(state.errors).toEqual([]);
     });
+  });
+});
+
+describe('seatSignals (EOP seats)', () => {
+  const base = { purchased: 5, used: 3, over: false, stale: false, at: '2026-10-01T00:00:00.000Z', error: null, requests: [] };
+
+  it('says nothing while the count is fine', () => {
+    expect(seatSignals(base)).toEqual([]);
+  });
+
+  it('warns when fewer seats are purchased than used, without the purchased number', () => {
+    expect(seatSignals({ ...base, purchased: 2, over: true })).toEqual([
+      { key: 'eop_seats_over', severity: 'warning', details: { used: 3 } },
+    ]);
+  });
+
+  it('warns while some purchased units are in warning, naming how many', () => {
+    expect(seatSignals({ ...base, warning: 2 })).toEqual([
+      { key: 'eop_seats_warning', severity: 'warning', details: { warning: 2 } },
+    ]);
+    expect(seatSignals({ ...base, warning: 0 })).toEqual([]);
+  });
+
+  it('warns when the purchased number is older than 3 days', () => {
+    expect(seatSignals({ ...base, stale: true, error: { code: 'graph_forbidden' } })).toEqual([
+      { key: 'eop_seats_stale', severity: 'warning', details: { at: base.at, code: 'graph_forbidden' } },
+    ]);
+  });
+
+  it('keeps an open seat request in front of the administrators', () => {
+    const requests = [{ seats: 2, requestedAt: '2026-10-06T10:00:00.000Z' }, { seats: 1, requestedAt: '2026-10-07T10:00:00.000Z' }];
+    expect(seatSignals({ ...base, requests })).toEqual([
+      { key: 'eop_seats_requested', severity: 'warning', details: { count: 2, seats: 3, since: '2026-10-06T10:00:00.000Z' } },
+    ]);
   });
 });

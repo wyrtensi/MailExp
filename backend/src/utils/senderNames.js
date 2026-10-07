@@ -30,6 +30,14 @@ export function isForeignNodeAliasAddress(account, email) {
   return normalizeAddress(email) !== normalizeAddress(account.email_address);
 }
 
+// A mail node mailbox deactivated or pending deletion is read-only (EOP seats design, 2026-10-07):
+// its EOP seat is on hold, its tenant recipient removed so EOP refuses mail to it, and it cannot
+// send; the panel still reads its letters over IMAP. `account` needs mail_node, delete_after and
+// deactivated_at.
+export function isReadOnlyNodeMailbox(account) {
+  return account?.mail_node === true && (account?.delete_after != null || account?.deactivated_at != null);
+}
+
 // An address compared the way node mailboxes are made: lowercase, the domain in its ASCII (punycode)
 // form, which is the only form a node mailbox has (services/mailNode/mailcow.js parseHostName), so
 // `sales@пример.рф` and `sales@xn--e1afmkfd.xn--p1ai` are one address.

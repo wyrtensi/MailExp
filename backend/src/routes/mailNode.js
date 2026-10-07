@@ -78,6 +78,7 @@ import {
 import { parsePostcat, postcatGone, summarizeQueue } from '../services/mailNode/mailQueue.js';
 import { readPostfixLog } from '../services/mailNode/postfixLog.js';
 import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from '../services/mailNode/terrl.js';
+import { closeFulfilledRequests, seatSupply, withSeatLicenses } from '../services/mailNode/eopSeats.js';
 import {
   ALERT_DEFAULTS,
   checkAlertsNow,
@@ -507,6 +508,11 @@ router.put('/eop', requireAdmin, async (req, res) => {
   const conflict = eopSettingsConflict(merged);
   if (conflict) return refuse(res, conflict);
   await saveEopSettings(settings);
+  // EOP seats in manual mode: a larger Licenses number closes the seat requests it covers.
+  if (settings.licenses != null) {
+    const supply = await seatSupply();
+    if (supply.source === 'manual') await closeFulfilledRequests(supply.purchased);
+  }
   const changed = EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]);
   configAudit(req, 'eop', changed);
   // Applied right after the answer, as for the node settings.
@@ -716,7 +722,8 @@ router.put('/alerts/settings', requireAdmin, async (req, res) => {
 // (services/mailNode/terrl.js). The node's log is read for what the journal does not see, through
 // the shared read of the alert job (a minute's cache, one read at a time), so opening the EOP
 // screen does not ask the node for 10000 lines each time; when the node does not answer, the
-// journal alone counts (log.read: false).
+// journal alone counts (log.read: false). The licenses are the purchased EOP seats
+// (services/mailNode/eopSeats.js): Graph's number when the tenant gives it, else the Licenses field.
 router.get('/eop/budget', requireAdmin, async (req, res) => {
   const now = Date.now();
   const [eop, cfg] = await Promise.all([getEopSettings(), getMailNodeConfig()]);
@@ -727,7 +734,7 @@ router.get('/eop/budget', requireAdmin, async (req, res) => {
     })
     : null;
   const aliasDomains = cfg ? await aliasDomainsOf(cfg) : [];
-  res.json(await computeTerrlBudget({ eop, log, aliasDomains, now }));
+  res.json(await computeTerrlBudget({ eop: await withSeatLicenses(eop), log, aliasDomains, now }));
 });
 
 export default router;

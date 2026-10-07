@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
+import MailNodeSeats from './MailNodeSeats.jsx';
 import {
   domainMailboxFormError,
   domainMailboxTaken,
@@ -10,6 +11,8 @@ import {
   selectableDomains,
   senderNameError,
   senderNamesPayload,
+  seatsUnknownKey,
+  seatsView,
 } from '../utils/mailNode.js';
 
 const inputStyle = {
@@ -49,9 +52,13 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // The EOP seats counter (backend services/mailNode/eopSeats.js): a mailbox needs a free seat.
+  const [seats, setSeats] = useState(null);
+  const loadSeats = () => api.mailNode.getSeats().then(setSeats).catch(() => setSeats(null));
 
   useEffect(() => {
     let live = true;
+    loadSeats();
     api.mailNode.listDomains()
       .then((data) => {
         if (!live) return;
@@ -78,7 +85,10 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
   const taken = domainMailboxTaken({ localPart, domain }, accounts);
   const addressError = domainMailboxFormError({ localPart, domain }) ?? (taken ? 'admin.accounts.add.domainErrorExists' : null);
   const formError = addressError ?? senderNameError(senderName);
-  const canContinue = !busy && !formError;
+  // A counter that could not be read leaves it to the server to decide.
+  const seatsBlock = seatsView(seats);
+  const noSeat = !!seatsBlock && !seatsBlock.canTake;
+  const canContinue = !busy && !formError && !noSeat;
   const email = `${normalizeLocalPart(localPart)}@${domain}`;
   const names = senderNamesPayload({ senderName, senderNameAlt });
   // The mailbox list shows the sender name unless another name is given.
@@ -100,6 +110,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
       onCreated(account);
     } catch (err) {
       setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
+      if (err?.code === 'no_free_seats' || err?.code === 'seats_unknown') loadSeats();
       setConfirming(false);
     } finally {
       setBusy(false);
@@ -115,6 +126,17 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
   if (loadError) return errorLine(loadError);
   if (!domains) return <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('common.loading')}</div>;
   if (!domains.length) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('admin.accounts.add.domainNoDomains')}</div>;
+
+  const seatsLine = (
+    <>
+      <MailNodeSeats seats={seats} compact onChanged={loadSeats} />
+      {noSeat && (
+        <div role="alert" style={{ marginTop: 8, fontSize: 12, color: 'var(--red)' }}>
+          {t(seatsBlock.known ? 'admin.mailNode.seats.noFree' : seatsUnknownKey(seats))}
+        </div>
+      )}
+    </>
+  );
 
   if (confirming) {
     const row = (labelKey, value, strong = false) => (
@@ -139,6 +161,7 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
         </div>
         {/* The account list can change while this step is open: say why Create went inactive. */}
         {formError && <div role="alert" style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>{t(formError)}</div>}
+        {seatsLine}
         <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
           <button type="button" onClick={create} disabled={!canContinue} style={buttonStyle(true, canContinue)}>
             {busy ? t('admin.accounts.add.domainCreating') : t('admin.accounts.add.domainCreate')}
@@ -214,6 +237,8 @@ export default function DomainMailboxAddForm({ accounts = [], onCreated, initial
         onChange={edit(setName)}
         style={inputStyle}
       />
+
+      {seatsLine}
 
       <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
         <button type="submit" disabled={!canContinue} style={buttonStyle(true, canContinue)}>

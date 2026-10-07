@@ -2,6 +2,16 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canMarkReady,
+  MAX_HOLD_DAYS,
+  MAX_SEAT_REQUEST,
+  canDeactivate,
+  heldSeatsTitle,
+  holdDaysError,
+  isDeactivated,
+  isReadOnlyMailbox,
+  nodeMailboxDeactivateDialog,
+  seatRequestError,
+  seatsView,
   domainStateKey,
   eopSettingsError,
   normalizeEopSettings,
@@ -672,5 +682,63 @@ describe('mailboxWithAddress', () => {
     assert.equal(mailboxWithAddress(accounts, ' orders@example.COM')?.id, 'a');
     assert.equal(mailboxWithAddress(accounts, 'none@example.com'), null);
     assert.equal(mailboxWithAddress(undefined, 'x@example.com'), null);
+  });
+});
+
+describe('EOP seats and deactivation', () => {
+  it('a node mailbox deactivated or pending deletion is read-only', () => {
+    assert.equal(isReadOnlyMailbox({ mail_node: true, delete_after: '2026-10-10T00:00:00Z' }), true);
+    assert.equal(isReadOnlyMailbox({ mail_node: true, deactivated_at: '2026-10-07T00:00:00Z' }), true);
+    assert.equal(isDeactivated({ mail_node: true, deactivated_at: '2026-10-07T00:00:00Z' }), true);
+    assert.equal(isReadOnlyMailbox({ mail_node: true, delete_after: null, deactivated_at: null }), false);
+    assert.equal(isReadOnlyMailbox({ mail_node: false, deactivated_at: '2026-10-07T00:00:00Z' }), false);
+  });
+
+  it('only an administrator deactivates, a node mailbox that works', () => {
+    const live = { mail_node: true };
+    assert.equal(canDeactivate(live, { isAdmin: true }), true);
+    assert.equal(canDeactivate(live, { isAdmin: false }), false);
+    assert.equal(canDeactivate({ ...live, deactivated_at: 'x' }, { isAdmin: true }), false);
+    assert.equal(canDeactivate({ ...live, delete_after: 'x' }, { isAdmin: true }), false);
+    assert.equal(canDeactivate({ mail_node: false }, { isAdmin: true }), false);
+  });
+
+  it('tells whether a seat can be taken', () => {
+    assert.equal(seatsView(null), null);
+    assert.deepEqual(seatsView({ used: 3, held: 1, free: 2 }), { known: true, used: 3, held: 1, free: 2, canTake: true });
+    assert.deepEqual(seatsView({ used: 3, held: 0, free: 0 }), { known: true, used: 3, held: 0, free: 0, canTake: false });
+    assert.deepEqual(seatsView({ used: 3, free: null }), { known: false, used: 3, held: 0, free: null, canTake: false });
+  });
+
+  it('lists the held seats for the hover', () => {
+    const t = (k, v) => `${k} ${JSON.stringify(v)}`;
+    const title = heldSeatsTitle({ heldSeats: [{ seat: 2, email: 'b@example.com', freeFrom: '2027-01-05T00:00:00.000Z' }] }, { t, formatDate: (d) => d.slice(0, 10) });
+    assert.equal(title, 'admin.mailNode.seats.heldItem {"seat":2,"email":"b@example.com","date":"2027-01-05"}');
+    assert.equal(heldSeatsTitle({ heldSeats: [] }, { t, formatDate: (d) => d }), '');
+  });
+
+  it('checks the number of seats and the hold days', () => {
+    assert.equal(seatRequestError('2'), null);
+    assert.equal(seatRequestError('0'), 'admin.mailNode.seats.errorCount');
+    assert.equal(seatRequestError(String(MAX_SEAT_REQUEST + 1)), 'admin.mailNode.seats.errorCount');
+    assert.equal(holdDaysError('0'), null);
+    assert.equal(holdDaysError(String(MAX_HOLD_DAYS + 1)), 'admin.mailNode.seats.errorHoldDays');
+    assert.equal(mailNodeErrorKey('no_free_seats'), 'admin.mailNode.seats.errorNoFree');
+  });
+
+  it('asks for a reason to deactivate', () => {
+    const dialog = nodeMailboxDeactivateDialog({ t: (k) => k, account: { email_address: 'a@example.com' } });
+    assert.equal(dialog.requireReason, true);
+    assert.equal(dialog.requireTyped, undefined);
+    assert.equal(dialog.confirmLabel, 'admin.accounts.deactivation.confirm');
+  });
+
+  it('names the seat alerts', () => {
+    assert.equal(alertTitleKey('eop_seats_over'), 'admin.nodeOps.alertEopSeatsOver');
+    assert.equal(alertTitleKey('eop_seats_warning'), 'admin.nodeOps.alertEopSeatsWarning');
+    assert.deepEqual(alertDetail({ key: 'eop_seats_warning', details: { warning: 2 } }),
+      { key: 'admin.nodeOps.alertDetailEopSeatsWarning', values: { warning: 2 } });
+    assert.deepEqual(alertDetail({ key: 'eop_seats_requested', details: { count: 2, seats: 3, since: '2026-10-06T10:00:00.000Z' } }),
+      { key: 'admin.nodeOps.alertDetailEopSeatsRequested', values: { count: 2, seats: 3 }, at: '2026-10-06T10:00:00.000Z' });
   });
 });

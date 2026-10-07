@@ -342,8 +342,9 @@ export function externalOf(address, externalDomain) {
 export function planMirror({ domain, mailboxes, aliases, panel, recipients, externalDomain = null }) {
   const deleting = new Set(panel.filter((p) => p.deleting).map((p) => p.email));
   const desired = new Set();
-  // Every mailbox that takes mail (active, or receiving without login), except a mailbox being
-  // deleted: its contact goes first (BEFORE_NODE_DELETE).
+  // Every mailbox that takes mail (active, or receiving without login), except a read-only one
+  // (deactivated or pending deletion, EOP seats design): its contact goes with the next sync;
+  // BEFORE_NODE_DELETE removes it again before the node mailbox if it is still there.
   for (const m of mailboxes) if (m.state !== 0 && domainOf(m.email) === domain && !deleting.has(m.email)) desired.add(m.email);
   // An active catch-all only: a disabled one takes no mail (D-6).
   const catchAll = aliases.find((a) => a.active && a.address.startsWith('@'))?.address ?? null;
@@ -416,7 +417,7 @@ async function nodeView(domain) {
 
 async function panelView(domain) {
   const { rows } = await query(`
-    SELECT id, lower(email_address) AS email, deletion_started_at IS NOT NULL AS deleting
+    SELECT id, lower(email_address) AS email, (delete_after IS NOT NULL OR deactivated_at IS NOT NULL) AS deleting
       FROM email_accounts
      WHERE mail_node AND split_part(lower(email_address), '@', 2) = $1`, [domain]);
   return rows;
@@ -787,7 +788,9 @@ async function runLocked(context, job, domain, row, now) {
 // A contact already gone counts as removed. On an Authoritative domain the deletion waits while the
 // tenant cannot be reached (deletionCode shown on the row); on an Internal Relay domain the
 // contact changes nothing EOP accepts, so the deletion goes on and the mirror removes the contact
-// later.
+// later. Since the EOP seats design the mirror removes the contact when the mailbox becomes
+// read-only (the action queues the domain sync); this step is the guard for a tenant that was down
+// meanwhile, and usually finds the contact gone.
 export async function removeRecipientBeforeDelete(row) {
   const address = lower(row.email_address);
   const domain = domainOf(address);

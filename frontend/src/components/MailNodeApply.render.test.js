@@ -304,6 +304,17 @@ describe('MailNodeSection — send limits and panel addresses', () => {
     assert.deepEqual(calls.find((c) => c.path === '/api/mail-node/mailboxes/a1/rate-limit').body, { value: null });
   });
 
+  test('marks a deactivated mailbox in the mailbox list', async () => {
+    answers['GET /api/mail-node/mailboxes'] = {
+      disk: { usedPercent: 10, used: '4G', total: '40G', warn: false },
+      mailboxes: [{ ...MAILBOXES[0], deactivatedAt: '2026-10-07T10:00:00.000Z' }, { ...MAILBOXES[1], deactivatedAt: null }],
+    };
+    const host = await mount(React.createElement(MailNodeSection));
+    const flagged = [...host.querySelectorAll('[data-mailbox-deactivated]')].map((el) => el.getAttribute('data-mailbox-deactivated'));
+    assert.deepEqual(flagged, ['a@ready.example']);
+    assert.ok(host.querySelector('[data-mailbox-deactivated]').textContent.includes('admin.accounts.deactivation.badge'));
+  });
+
   test('refuses a bad limit before sending it', async () => {
     const host = await mount(React.createElement(MailNodeSection));
     const second = host.querySelector('[data-send-limit="b@ready.example"]');

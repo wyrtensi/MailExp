@@ -7,7 +7,7 @@ describe('AUDIT_ACTIONS', () => {
     assert.deepEqual(AUDIT_ACTIONS, [
       'mailbox.added', 'mailbox.reconnected', 'mailbox.deleted', 'mailbox.connection_changed',
       'mailbox.enabled', 'mailbox.disabled', 'mailbox.password_restored', 'mailbox.quota_changed',
-      'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'mailbox.oauth_subject_reset',
+      'mailbox.rate_limit_changed', 'mailbox.deletion_requested', 'mailbox.deletion_cancelled', 'mailbox.deactivated', 'mailbox.activated', 'mailbox.oauth_subject_reset',
       'message.sent', 'message.deleted',
       'message.move_reverted', 'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
@@ -19,7 +19,7 @@ describe('AUDIT_ACTIONS', () => {
       'mail_node.quarantine_settings_applied',
       'mail_node.outage_opened', 'mail_node.outage_closed', 'mail_node.outage_added', 'mail_node.outage_changed',
       'mail_node.outage_deleted',
-      'mail_node.agent_token_issued', 'mail_node.agent_token_revoked', 'mail_node.agent_job_requested',
+      'mail_node.agent_token_issued', 'mail_node.agent_token_revoked', 'mail_node.agent_job_requested', 'mail_node.seats_requested', 'mail_node.seat_hold_changed',
       'tenant.connection_tested', 'tenant.recipients_synced', 'tenant.connector_reference_taken',
       'tenant.domain_hold_changed', 'tenant.internal_relay_approved',
       'tenant.quarantine_released', 'tenant.phish_release_changed', 'tenant.message_traced', 'tenant.antispam_enforced',
@@ -361,6 +361,15 @@ describe('auditDetail', () => {
         values: { domain: 'a.example', from: '2026-09-01 10:00:00', to: '2026-09-30 12:00:00' },
       },
     );
+  });
+
+  it('says why a mailbox was deactivated, how many seats were asked for and the hold change', () => {
+    assert.deepEqual(auditDetail({ action: 'mailbox.deactivated', details: { mailNode: true, reason: 'On leave' } }),
+      { key: 'admin.audit.detailDeactivated', values: { reason: 'On leave' } });
+    assert.deepEqual(auditDetail({ action: 'mail_node.seats_requested', details: { seats: 2, provider: 'manual' } }),
+      { key: 'admin.audit.detailSeatsRequested', values: { seats: 2 } });
+    assert.deepEqual(auditDetail({ action: 'mail_node.seat_hold_changed', details: { from: 90, to: 30 } }),
+      { key: 'admin.audit.detailSeatHoldChanged', values: { from: 90, to: 30 } });
   });
 
   it('keeps the reason of a node mailbox deletion through request, cancel and the final delete', () => {

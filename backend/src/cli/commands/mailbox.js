@@ -65,7 +65,7 @@ async function mailboxRef(ref) {
 
 const list = {
   name: 'list',
-  summary: 'list the node mailboxes, with quota, usage and pending deletions',
+  summary: 'list the node mailboxes, with quota, usage, deactivation and pending deletions',
   usage: 'mailbox list [--domain DOMAIN]',
   flags: { domain: 'string' },
   async run(ctx) {
@@ -85,6 +85,7 @@ const list = {
       { header: 'QUOTA MB', value: (m) => m.quotaMb },
       { header: 'USED MB', value: (m) => (m.usedBytes == null ? null : Math.round(m.usedBytes / MB)) },
       { header: 'SEND LIMIT', value: (m) => { const l = m.rateLimitOverride ?? m.rateLimitDefault; return l ? `${l.value}/${l.frame}${m.rateLimitOverride ? ' (own)' : ''}` : null; } },
+      { header: 'DEACTIVATED', value: (m) => (m.deactivatedAt ? fmtDate(m.deactivatedAt) : null) },
       { header: 'DELETION', value: (m) => (m.deleteAfter ? fmtDate(m.deleteAfter) : null) },
       { header: 'SENDER NAME', value: (m) => m.senderName },
     ], { empty: domain ? `no node mailboxes on ${domain}` : 'no node mailboxes' });
@@ -198,7 +199,7 @@ const requestDelete = {
       }
       typed = await ctx.ask(`The mailbox ${account.email_address} and all its mail will be deleted after the waiting days.\nType its full address to confirm: `);
     }
-    const result = unwrap(await requestMailboxDeletion({ accountId: account.id, email: typed, reason: ctx.flags.reason }, ctx.actor), MAILBOX_ERRORS);
+    const result = unwrap(await nodeAction(() => requestMailboxDeletion({ accountId: account.id, email: typed, reason: ctx.flags.reason }, ctx.actor)), MAILBOX_ERRORS);
     const view = accountView(result.account, await listAliases(account.id));
     return { data: view, lines: [`deletion of ${view.email} asked for: it goes on ${fmtDate(view.deletion?.deleteAfter)}`] };
   },
@@ -212,7 +213,7 @@ const cancelDelete = {
   positionals: ['mailbox'],
   async run(ctx) {
     const account = await mailboxRef(ctx.args.mailbox);
-    const result = unwrap(await cancelMailboxDeletion({ accountId: account.id }, ctx.actor), MAILBOX_ERRORS);
+    const result = unwrap(await nodeAction(() => cancelMailboxDeletion({ accountId: account.id }, ctx.actor)), MAILBOX_ERRORS);
     const view = accountView(result.account, await listAliases(account.id));
     return { data: view, lines: [`deletion of ${view.email} cancelled`] };
   },
