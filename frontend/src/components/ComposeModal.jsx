@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback, forwardRef } from 'react';
 import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
+import { onComposeCloseRequest } from '../utils/composeCloseRequest.js';
+import { shouldCommitPendingInput } from '../utils/pendingRecipient.js';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
@@ -234,6 +236,9 @@ export default function ComposeModal() {
   // Set once the letter is sent or discarded: a save answering after that only reports where its
   // copy went, so it can be deleted; it no longer notifies or closes anything.
   const closedRef = useRef(false);
+  // The recipient inputs as they are now, for code that resumes after an await.
+  const liveInputsRef = useRef({ to: '', cc: '', bcc: '' });
+  liveInputsRef.current = { to: toInput, cc: ccInput, bcc: bccInput };
   // A letter given back by an undo or an edit (utils/sendTracker.js) brings its attachments along.
   const [attachments, setAttachments] = useState(() => composeData?.attachments || []);
   const [fwdAttachments, setFwdAttachments] = useState(() => composeData?.forwardedAttachments || []);
@@ -1082,12 +1087,18 @@ export default function ComposeModal() {
       } else {
         // Commit any pending recipient inputs — they were included in the API call,
         // so promote them to chips and clear the inputs to keep UI in sync.
+        // Only an input that still holds what was sent becomes a chip: text typed while the
+        // request was in flight is newer than the saved draft and stays in the field.
+        const live = liveInputsRef.current;
         const pendingTo = toInput.trim();
         const pendingCc = ccInput.trim();
         const pendingBcc = bccInput.trim();
-        if (pendingTo) { setToChips(prev => [...prev, pendingTo]); setToInput(''); }
-        if (pendingCc) { setCcChips(prev => [...prev, pendingCc]); setCcInput(''); }
-        if (pendingBcc) { setBccChips(prev => [...prev, pendingBcc]); setBccInput(''); }
+        const commitTo = shouldCommitPendingInput(pendingTo, live.to);
+        const commitCc = shouldCommitPendingInput(pendingCc, live.cc);
+        const commitBcc = shouldCommitPendingInput(pendingBcc, live.bcc);
+        if (commitTo) { setToChips(prev => [...prev, pendingTo]); setToInput(''); }
+        if (commitCc) { setCcChips(prev => [...prev, pendingCc]); setCcInput(''); }
+        if (commitBcc) { setBccChips(prev => [...prev, pendingBcc]); setBccInput(''); }
 
         // Track the submitted snapshot so edits made during the request stay dirty.
         // bodyToSend already normalizes an empty TipTap editor to ''.
@@ -1095,9 +1106,9 @@ export default function ComposeModal() {
         savedMetadataRef.current = submittedMetadata;
         initialBodyRef.current = bodyToSend;
         initialSubjectRef.current = subject;
-        initialToRef.current = normalizeTo([...toChips, ...(pendingTo ? [pendingTo] : [])]);
-        initialCcRef.current = normalizeTo([...ccChips, ...(pendingCc ? [pendingCc] : [])]);
-        initialBccRef.current = normalizeTo([...bccChips, ...(pendingBcc ? [pendingBcc] : [])]);
+        initialToRef.current = normalizeTo([...toChips, ...(commitTo ? [pendingTo] : [])]);
+        initialCcRef.current = normalizeTo([...ccChips, ...(commitCc ? [pendingCc] : [])]);
+        initialBccRef.current = normalizeTo([...bccChips, ...(commitBcc ? [pendingBcc] : [])]);
         savedAttachmentCountRef.current = attachments.length + fwdAttachments.length;
         // Autosave passes silent: a toast every interval would be noise, not information.
         if (!silent) addNotification({ title: t('compose.draftSaved'), body: subject || t('common.noSubject') });
@@ -1232,6 +1243,11 @@ export default function ComposeModal() {
       closeCompose();
     }
   };
+
+  // The Android Back button closes the composer through the same check as the close button.
+  const handleCloseRef = useRef(handleClose);
+  handleCloseRef.current = handleClose;
+  useEffect(() => onComposeCloseRequest(() => handleCloseRef.current()), []);
 
   const renderSignatureEditor = () => plaintextEmail ? (
     <textarea
