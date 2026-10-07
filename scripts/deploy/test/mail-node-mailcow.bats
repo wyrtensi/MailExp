@@ -21,6 +21,7 @@ setup() {
   export MAILEXPERT_MAILCOW_UPSTREAM=$BATS_TEST_TMPDIR/upstream.git
   export MAILEXPERT_NODE_UPDATE_MAILCOW_HEALTH_WAIT=0
   export MAILEXPERT_NODE_UPDATE_MAILCOW_HEALTH_POLL=1
+  export MAILEXPERT_NODE_UPDATE_KILL_GRACE=2
   export MAILEXPERT_NODE_SRC=$BATS_TEST_TMPDIR/src
   export MOCK_CONTAINERS='postfix-mailcow\trunning\thealthy\ndovecot-mailcow\trunning\thealthy\nnginx-mailcow\trunning\t\n'
   local bin=$BATS_TEST_TMPDIR/mailcow-bin
@@ -56,6 +57,12 @@ echo "$n" >"$MOCK_DIR/update-count"
 if [ "$n" -le "${MOCK_UPDATE_EXIT2:-0}" ]; then echo '_modules have been updated. Please restart the update script.'; exit 2; fi
 [ "${MOCK_UPDATE_RC:-0}" = 0 ] || exit "$MOCK_UPDATE_RC"
 [ "${MOCK_UPDATE_NOOP:-0}" = 0 ] || exit 0
+if [ "${MOCK_UPDATE_HANG:-0}" = 1 ]; then
+  sleep 60 &
+  echo "$!" >"$MOCK_DIR/grandchild"
+  sleep 60
+fi
+if [ -n "${MOCK_UPDATE_BEFORE:-}" ]; then eval "$MOCK_UPDATE_BEFORE"; fi
 git rev-parse --abbrev-ref HEAD >"$MOCK_DIR/update-branch"
 git add -u
 git commit -qam "Before update" >/dev/null || true
@@ -139,6 +146,7 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   grep -qx 'ENABLE_IPV6=false' "$MC/mailcow.conf"
   calls | grep -q "^docker compose up -d --remove-orphans (in $MC)$"
   [[ $output == *"stopped and started again within "*" UTC"* ]]
+  [[ $output == *"local changes update.sh commits before its merge: local.cf"* ]]
   [[ $output == *"mailcow updated to 2026-09a"* ]]
   lacks 'not-a-real-password' <<<"$output"
 }
@@ -242,6 +250,47 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   [ "$(base)" = "$(commit_of 2026-09a)" ]
 }
 
+@test "mailcow: update.sh past its bound is stopped with everything it started" {
+  export MOCK_UPDATE_HANG=1 MAILEXPERT_NODE_UPDATE_MAILCOW_SH_TIMEOUT=2
+  run_hook
+  [ "$status" -eq 1 ]
+  [[ $output == *"update.sh failed (exit 124)"* ]]
+  run kill -0 "$(cat "$MOCK_DIR/grandchild")"
+  [ "$status" -ne 0 ]
+}
+
+@test "mailcow: a newer mailcow released while update.sh ran is reported apart (mailcow_past_pin)" {
+  local work=$BATS_TEST_TMPDIR/upstream-work
+  export MOCK_UPDATE_BEFORE="printf 'v3\\n' >'$work/version' && git -C '$work' commit -qam 2026-10 && git -C '$work' push -q origin master"
+  run_hook
+  [ "$status" -eq 3 ]
+  [[ $output == *"mailcow_past_pin: update.sh took mailcow to"*"past 2026-09a"* ]]
+}
+
+@test "mailcow: a mailcow.conf with SYSCTL_IPV6_DISABLED=1 stops before update.sh" {
+  printf 'SYSCTL_IPV6_DISABLED=1\n' >>"$MC/mailcow.conf"
+  run_hook
+  [ "$status" -eq 1 ]
+  [[ $output == *"SYSCTL_IPV6_DISABLED=1"* ]]
+  [ -z "$(update_calls)" ]
+}
+
+@test "mailcow: the official origin with or without .git is the same repository" {
+  run bash -c '. "$1"; same_repository https://github.com/mailcow/mailcow-dockerized.git https://github.com/mailcow/mailcow-dockerized/ && ! same_repository https://example.com/fork.git https://github.com/mailcow/mailcow-dockerized' _ "$NODE_SCRIPTS/node-update.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "a step past its bound stops its whole process group, grandchildren too" {
+  local log=$BATS_TEST_TMPDIR/update.log
+  run bash -c '. "$1"; step() { :; }; UPDATE_LOG=$2; GC=$3
+    kids() { bash -c "sleep 60 & echo \$! >$GC; wait"; }
+    run_step --timeout 2 "kids" kids' _ "$NODE_SCRIPTS/node-update.sh" "$log" "$MOCK_DIR/grandchild"
+  [ "$status" -eq 124 ]
+  grep -q 'kids ran past 2s; stopped' "$log"
+  run kill -0 "$(cat "$MOCK_DIR/grandchild")"
+  [ "$status" -ne 0 ]
+}
+
 @test "status: mailcow's release, tag, the pin and master's head, and how they compare" {
   run mailcow_json_now
   [ "$status" -eq 0 ]
@@ -263,6 +312,10 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   git -C "$MC" fetch -q origin
   run mailcow_json_now
   [ "$(jq -c '{tag, relation}' <<<"$output")" = '{"tag":"2026-10","relation":"newer"}' ]
+  # A newer release checked out by hand, origin/master never fetched since: still newer.
+  git -C "$MC" update-ref refs/remotes/origin/master "$(commit_of 2026-09a)"
+  run mailcow_json_now
+  [ "$(jq -c '{relation}' <<<"$output")" = '{"relation":"newer"}' ]
   rm -rf "$MC/.git"
   run mailcow_json_now
   [ "$(jq -c '{commit, tag, relation}' <<<"$output")" = '{"commit":null,"tag":null,"relation":"unknown"}' ]

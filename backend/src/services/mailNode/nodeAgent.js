@@ -35,8 +35,10 @@ const MINUTE_MS = 60 * 1000;
 // The bounds of the steps of an update on the node (scripts/deploy/mail-node/node-update.sh, which
 // applies the same numbers): the pre-update backup (node-backup.sh, bounded as a backup job) with
 // up to an hour waiting for another backup's lock, the fetch, setup.sh at the new commit and again
-// at the previous one on a rollback, mailcow's own update (update.sh, setup.sh again, the start and
-// the wait for healthy containers) and the checks after.
+// at the previous one on a rollback (or after a failed mailcow update: one or the other runs),
+// mailcow's own update (update.sh, setup.sh again, the start and the wait for healthy containers,
+// each bounded by what is left of these 30 minutes), mailcow started again after a failed update,
+// and the checks after.
 export const UPDATE_STEP_BOUNDS_MS = Object.freeze({
   fetch: 5 * MINUTE_MS,
   backup: 6 * 60 * MINUTE_MS,
@@ -44,6 +46,7 @@ export const UPDATE_STEP_BOUNDS_MS = Object.freeze({
   setup: 30 * MINUTE_MS,
   rollbackSetup: 30 * MINUTE_MS,
   mailcow: 30 * MINUTE_MS,
+  mailcowRestart: 10 * MINUTE_MS,
   checks: 10 * MINUTE_MS,
 });
 // The longest an update may run at all, whatever it reports: its steps' bounds added up.

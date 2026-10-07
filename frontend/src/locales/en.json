@@ -3022,7 +3022,8 @@
       "errorNotNewer": "The node runs a newer commit than the panel: the update never takes it back",
       "errorUntrustedOrigin": "The node checkout does not fetch from the official repository: refused (NODE_UPDATE_ORIGIN in node.env allows another)",
       "errorLocalChanges": "The node checkout has local changes: refused, the node is unchanged",
-      "errorMailcowUpdateFailed": "The mailcow update failed: mailcow was started again and checked"
+      "errorMailcowUpdateFailed": "The mailcow update failed: mailcow was started again and checked",
+      "errorMailcowPastPin": "mailcow released a newer version while the node updated it: mailcow went past the version this release confirms and is untested. It was started again and checked; the update never takes it back"
     },
     "quarantine": {
       "title": "Mail node quarantine",

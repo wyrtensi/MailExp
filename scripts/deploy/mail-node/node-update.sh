@@ -19,8 +19,10 @@
 #    again: failed, rolled_back (rollback_failed when that fails too).
 # 4. mailcow_update_if_pinned: mailcow brought to the version deploy/mailcow-version of that
 #    commit pins, by mailcow's own update.sh, when the node is behind it and it is the head of
-#    mailcow's master (see the function), bounded like a step. When it fails, mailcow is started
-#    again (docker compose up -d) and the checks still run: mailcow_update_failed.
+#    mailcow's master (see the function), bounded like a step. When it fails, setup.sh runs again
+#    (update.sh may have left ENABLE_IPV6=true), mailcow is started again (docker compose up -d) and
+#    the checks still run: mailcow_update_failed, or mailcow_past_pin when update.sh took mailcow
+#    past the pin (a newer mailcow was released while it ran).
 # 5. Checks: postfix-mailcow, dovecot-mailcow and nginx-mailcow run, eop-ranges.sh passes (the
 #    firewall and the ports); otherwise post_check_failed. Then a status report (the new scripts
 #    commit) and succeeded.
@@ -48,11 +50,18 @@ FETCH_TIMEOUT=300
 # node-backup.sh waits up to an hour for another backup's lock, on top of the backup's own bound.
 BACKUP_LOCK_WAIT=3600
 MAILCOW_TIMEOUT=${MAILEXPERT_NODE_UPDATE_MAILCOW_TIMEOUT:-1800}
-# Within MAILCOW_TIMEOUT: one run of mailcow's update.sh, and the wait for its containers after.
+# Caps of the parts of mailcow's update: a run of update.sh, the wait for healthy containers. Each
+# part also gets no more than what is left of MAILCOW_TIMEOUT less MAILCOW_RESERVE (mailcow_budget),
+# so all of them end before the step's own bound.
 MAILCOW_UPDATE_SH_TIMEOUT=${MAILEXPERT_NODE_UPDATE_MAILCOW_SH_TIMEOUT:-1200}
 MAILCOW_HEALTH_WAIT=${MAILEXPERT_NODE_UPDATE_MAILCOW_HEALTH_WAIT:-300}
 MAILCOW_HEALTH_POLL=${MAILEXPERT_NODE_UPDATE_MAILCOW_HEALTH_POLL:-5}
+MAILCOW_RESERVE=60
+MAILCOW_DEADLINE=0
 CHECK_TIMEOUT=600
+# A process group stopped past its bound gets TERM, then KILL this many seconds later.
+KILL_GRACE=${MAILEXPERT_NODE_UPDATE_KILL_GRACE:-30}
+GROUP_PID=''
 KEEP_LOGS=5
 UPDATE_ID=''
 UPDATE_LOG=''
@@ -79,8 +88,51 @@ finish() {
   exit 0
 }
 
-# run_step [--timeout <seconds>] <text> <command...>: the command with its output in the log,
-# reported while it runs; its exit status (124 when it ran past the timeout and was stopped).
+# start_group <command...>: the command (a function too) started in the background in a process
+# group of its own (job control on just for the start), its process id in GROUP_PID: a stop reaches
+# everything it started (docker compose under update.sh, setup.sh's children), not only itself.
+start_group() {
+  set -m
+  "$@" &
+  GROUP_PID=$!
+  set +m
+}
+
+# kill_group <pid>: the process group of start_group stopped: TERM, KILL after KILL_GRACE seconds.
+kill_group() {
+  local pid=$1 waited=0
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$KILL_GRACE" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
+# run_group <seconds> <command...>: the command in its own process group, stopped whole past the
+# bound; its exit status, 124 past the bound.
+run_group() {
+  local limit=$1 pid rc=0 waited=0
+  shift
+  start_group "$@"
+  pid=$GROUP_PID
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$limit" ]; then
+      printf '[mailexpert] error: %s ran past %ss; stopped\n' "$1" "$limit" >&2
+      kill_group "$pid"
+      return 124
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
+# run_step [--timeout <seconds>] <text> <command...>: the command with its output in the log, in
+# its own process group, reported while it runs; its exit status (124 when it ran past the timeout:
+# the whole group is stopped).
 run_step() {
   local limit=0 text pid rc=0 waited=0 elapsed=0
   if [ "$1" = --timeout ]; then limit=$2 && shift 2; fi
@@ -88,17 +140,15 @@ run_step() {
   shift
   step "$text"
   printf '\n== %s\n' "$text" >>"$UPDATE_LOG"
-  "$@" >>"$UPDATE_LOG" 2>&1 </dev/null &
-  pid=$!
+  start_group "$@" >>"$UPDATE_LOG" 2>&1 </dev/null
+  pid=$GROUP_PID
   while kill -0 "$pid" 2>/dev/null; do
     sleep 1
     waited=$((waited + 1))
     elapsed=$((elapsed + 1))
     if [ "$limit" -gt 0 ] && [ "$elapsed" -ge "$limit" ]; then
       printf '[mailexpert] error: %s ran past %ss; stopped\n' "$text" "$limit" >>"$UPDATE_LOG"
-      pkill -TERM -P "$pid" 2>/dev/null || true
-      kill -TERM "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
+      kill_group "$pid"
       return 124
     fi
     if [ "$waited" -ge "$PROGRESS_EVERY" ]; then
@@ -111,9 +161,10 @@ run_step() {
 }
 
 # shellcheck disable=SC2317,SC2329 # invoked through run_step
-# run_setup: setup.sh of the checkout as it is now, without options.
+# run_setup [<seconds>]: setup.sh of the checkout as it is now, without options, bounded
+# (SETUP_TIMEOUT by default).
 run_setup() {
-  timeout -k 60 "$SETUP_TIMEOUT" "$SRC/scripts/deploy/mail-node/setup.sh"
+  run_group "${1:-$SETUP_TIMEOUT}" "$SRC/scripts/deploy/mail-node/setup.sh"
 }
 
 # checkout <sha>: the node's checkout at the commit, detached.
@@ -121,16 +172,16 @@ checkout() {
   git -C "$SRC" checkout --quiet --detach "$1"
 }
 
-# mailcow_wait_healthy: every container of mailcow runs and none is unhealthy or still starting,
-# within MAILCOW_HEALTH_WAIT seconds. Prints what is not, and fails, past it.
+# mailcow_wait_healthy <seconds>: every container of mailcow runs and none is unhealthy or still
+# starting, within the seconds. Prints what is not, and fails, past them.
 mailcow_wait_healthy() {
-  local waited=0 lines bad
+  local limit=$1 waited=0 lines bad
   while :; do
     lines=$(mailcow_containers) || lines=''
     bad=$(printf '%s\n' "$lines" | awk -F'\t' 'NF && ($2 != "running" || $3 == "unhealthy" || $3 == "starting") {
       printf "%s%s: %s", (n++ ? ", " : ""), $1, ($2 != "running" ? $2 : $3) }')
     if [ -n "$lines" ] && [ -z "$bad" ]; then return 0; fi
-    if [ "$waited" -ge "$MAILCOW_HEALTH_WAIT" ]; then
+    if [ "$waited" -ge "$limit" ]; then
       echo "${bad:-no containers}"
       return 1
     fi
@@ -139,21 +190,41 @@ mailcow_wait_healthy() {
   done
 }
 
-# mailcow_update_sh <mailcow dir>: mailcow's own update.sh, unattended: --force answers its
-# questions, --skip-ping-check (the node may block ICMP), --skip-start (setup.sh puts our settings
-# back into mailcow.conf before mailcow starts: one stop instead of two). stdin is /dev/null and
-# setsid leaves it no terminal, so a question it still asks (it reads /dev/tty for a
-# SYSCTL_IPV6_DISABLED=1 line) ends instead of waiting. It exits 2 once when its own _modules
-# changed ("restart the update script"): run again once.
+# mailcow_budget <cap seconds>: the seconds a part of mailcow's update may take: the cap, or what
+# is left before MAILCOW_DEADLINE when that is less (at least 1).
+mailcow_budget() {
+  local left=$((MAILCOW_DEADLINE - $(date +%s)))
+  if [ "$left" -lt 1 ]; then left=1; fi
+  if [ "$1" -lt "$left" ]; then echo "$1"; else echo "$left"; fi
+}
+
+# shellcheck disable=SC2317,SC2329 # invoked through run_group
+# update_sh_in <mailcow dir>: mailcow's update.sh run from its directory (it refuses another),
+# unattended: --force answers its questions, --skip-ping-check (the node may block ICMP),
+# --skip-start (setup.sh puts our settings back into mailcow.conf before mailcow starts: one stop
+# instead of two); stdin is /dev/null.
+update_sh_in() {
+  cd "$1" && ./update.sh --force --skip-ping-check --skip-start </dev/null
+}
+
+# mailcow_update_sh <mailcow dir>: update.sh in a process group of its own, bounded (a stop past
+# the bound reaches docker compose and whatever else it started). It exits 2 once when its own
+# _modules changed ("restart the update script"): run again once.
 mailcow_update_sh() {
   local rc=0 run
   for run in 1 2; do
     rc=0
-    (cd "$1" && timeout -k 30 "$MAILCOW_UPDATE_SH_TIMEOUT" setsid ./update.sh --force --skip-ping-check --skip-start </dev/null) || rc=$?
+    run_group "$(mailcow_budget "$MAILCOW_UPDATE_SH_TIMEOUT")" update_sh_in "$1" || rc=$?
     if [ "$rc" != 2 ] || [ "$run" = 2 ]; then break; fi
     log "mailcow: update.sh updated its own modules (exit 2); running it again"
   done
   return "$rc"
+}
+
+# same_repository <url> <url>: the same repository, with or without .git and a trailing slash.
+same_repository() {
+  local a=${1%/} b=${2%/}
+  [ "${a%.git}" = "${b%.git}" ]
 }
 
 # shellcheck disable=SC2317,SC2329 # invoked through run_step
@@ -173,11 +244,14 @@ mailcow_update_sh() {
 #   - setup.sh again (update.sh turns ENABLE_IPV6 on by itself when the host has IPv6 and adds new
 #     keys), docker compose up -d, every container healthy, mailcow at the pin.
 # Mail is not accepted from update.sh's stop to the start (minutes; EOP queues and retries for
-# 24 hours): the log names that window. mailcow.conf values are never printed. Status 1 on a
-# failure; mailcow may be stopped then, and the caller starts it again.
+# 24 hours): the log names that window. mailcow.conf values are never printed. Every part is
+# bounded by what is left of MAILCOW_TIMEOUT (mailcow_budget). Status 1 on a failure, 3 when
+# update.sh took mailcow past the pin (a newer mailcow was released while it ran:
+# mailcow_past_pin); mailcow may be stopped then, and the caller starts it again.
 # Run by hand: SRC=<checkout> and node-update.sh sourced (docs/operations/mail-node.md, 7a).
 mailcow_update_if_pinned() {
-  local src dir tag pin base relation branch hostname origin started stopped problem
+  local src dir tag pin base relation branch hostname origin started stopped problem changed limit
+  MAILCOW_DEADLINE=$(($(date +%s) + MAILCOW_TIMEOUT - MAILCOW_RESERVE))
   SRC=${SRC:-$(scripts_src)}
   src=$SRC
   dir=$(mailcow_dir)
@@ -194,13 +268,13 @@ mailcow_update_if_pinned() {
     return 1
   }
   base=$(mailcow_base "$dir") || base=''
-  if [ "$base" = "$pin" ]; then
+  if [ "$base" = "$pin" ] && [ "$(mailcow_relation "$dir" "$base" "$pin")" = match ]; then
     log "mailcow already at $tag"
     return 0
   fi
 
   origin=$(git -C "$dir" remote get-url origin 2>/dev/null) || origin=''
-  if [ "$origin" != "$MAILCOW_UPSTREAM" ]; then
+  if ! same_repository "$origin" "$MAILCOW_UPSTREAM"; then
     log "mailcow: origin set to the official repository $MAILCOW_UPSTREAM (update.sh --force does the same)"
     if [ -n "$origin" ]; then
       git -C "$dir" remote set-url origin "$MAILCOW_UPSTREAM"
@@ -231,7 +305,13 @@ mailcow_update_if_pinned() {
     return 0
   fi
 
-  # update.sh asks about a host name without a subdomain and ends before it stops anything.
+  # update.sh asks about a host name without a subdomain and ends before it stops anything; it
+  # reads /dev/tty for a SYSCTL_IPV6_DISABLED=1 line (an option mailcow dropped), and waits there
+  # when a terminal runs it.
+  if grep -q 'SYSCTL_IPV6_DISABLED=1' "$dir/mailcow.conf" 2>/dev/null; then
+    warn "mailcow: mailcow.conf has SYSCTL_IPV6_DISABLED=1, which mailcow no longer uses and update.sh stops to ask about: remove the line, then update again"
+    return 1
+  fi
   hostname=$(env_get "$dir/mailcow.conf" MAILCOW_HOSTNAME 2>/dev/null) || hostname=''
   hostname=${hostname//[^.]/}
   if [ "${#hostname}" -lt 2 ]; then
@@ -263,6 +343,10 @@ mailcow_update_if_pinned() {
     return 1
   }
 
+  # The tracked files update.sh commits before its merge ("Before update on ..."): names only.
+  changed=$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null | cut -c4- | head -n 20 | paste -sd' ' -) || changed=''
+  if [ -n "$changed" ]; then log "mailcow: local changes update.sh commits before its merge: $changed"; fi
+
   started=$(date -u +%H:%M:%S)
   log "mailcow: update.sh to $tag; mail is not accepted from its stop until the start below (EOP queues it and retries)"
   mailcow_update_sh "$dir" || {
@@ -270,20 +354,31 @@ mailcow_update_if_pinned() {
     return 1
   }
   log "mailcow: setup.sh again (mailcow.conf: our settings back)"
-  run_setup || { warn "mailcow: setup.sh after update.sh failed"; return 1; }
-  (cd "$dir" && timeout -k 30 "$CHECK_TIMEOUT" docker compose up -d --remove-orphans) || {
+  run_setup "$(mailcow_budget "$SETUP_TIMEOUT")" || { warn "mailcow: setup.sh after update.sh failed"; return 1; }
+  (cd "$dir" && run_group "$(mailcow_budget "$CHECK_TIMEOUT")" docker compose up -d --remove-orphans) || {
     warn "mailcow: docker compose up -d failed"
     return 1
   }
   stopped=$(date -u +%H:%M:%S)
   log "mailcow: stopped and started again within $started-$stopped UTC (update.sh stops it after fetching the images)"
-  problem=$(mailcow_wait_healthy) || { warn "mailcow: containers not healthy after ${MAILCOW_HEALTH_WAIT}s: $problem"; return 1; }
+  limit=$(mailcow_budget "$MAILCOW_HEALTH_WAIT")
+  problem=$(mailcow_wait_healthy "$limit") || { warn "mailcow: containers not healthy after ${limit}s: $problem"; return 1; }
   base=$(mailcow_base "$dir") || base=''
-  if [ "$base" != "$pin" ]; then
+  relation=$(mailcow_relation "$dir" "$base" "$pin")
+  if [ "$relation" = newer ]; then
+    warn "mailcow_past_pin: update.sh took mailcow to ${base:0:12}, past $tag: mailcow released a newer version while it ran, not tested with this release"
+    return 3
+  fi
+  if [ "$relation" != match ]; then
     warn "mailcow: after update.sh it is at ${base:0:12}, not $tag (${pin:0:12})"
     return 1
   fi
   log "mailcow updated to $tag"
+}
+
+# mailcow_ipv6_off: mailcow.conf says ENABLE_IPV6=false (decision D-13).
+mailcow_ipv6_off() {
+  [ "$(env_get "$(mailcow_dir)/mailcow.conf" ENABLE_IPV6 2>/dev/null)" = false ]
 }
 
 # shellcheck disable=SC2317,SC2329 # invoked through run_step
@@ -337,7 +432,7 @@ trusted_origin() {
 }
 
 update_main() {
-  local sha=${2:-} problem checks_problem=''
+  local sha=${2:-} problem checks_problem='' rc error
   UPDATE_ID=${1:-}
   is_job_id "$UPDATE_ID" || die "usage: node-update.sh <job id> <sha>" 2
   is_sha "$sha" || die "the commit must be 40 hex digits" 2
@@ -392,12 +487,19 @@ update_main() {
     finish failed "setup.sh failed ($problem) and so did the rollback to ${PREVIOUS:0:12}: see $UPDATE_LOG" rollback_failed
   fi
 
-  if ! run_step --timeout "$MAILCOW_TIMEOUT" "mailcow: the version the release pins" mailcow_update_if_pinned; then
+  rc=0
+  run_step --timeout "$MAILCOW_TIMEOUT" "mailcow: the version the release pins" mailcow_update_if_pinned || rc=$?
+  if [ "$rc" != 0 ]; then
     problem=$(last_step "$UPDATE_LOG")
+    error=mailcow_update_failed
+    if [ "$rc" = 3 ]; then error=mailcow_past_pin; fi
+    # update.sh may have left its own mailcow.conf (ENABLE_IPV6=true, D-13): ours back before the start.
+    run_step "mailcow: setup.sh after the failed update" run_setup || true
+    mailcow_ipv6_off || warn "mailcow.conf has ENABLE_IPV6 other than false after setup.sh: mailcow listens on IPv6 past the firewall (D-13); run setup.sh by hand"
     run_step --timeout "$CHECK_TIMEOUT" "mailcow: docker compose up -d after the failed update" mailcow_up || true
     checks_problem=$(post_checks) || true
     send_status || true
-    finish failed "mailcow's update failed ($problem)${checks_problem:+; $checks_problem}; the scripts are at ${sha:0:12}" mailcow_update_failed
+    finish failed "mailcow's update failed ($problem)${checks_problem:+; $checks_problem}; the scripts are at ${sha:0:12}" "$error"
   fi
 
   step "checks: mailcow's services, the firewall"

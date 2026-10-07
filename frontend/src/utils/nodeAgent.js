@@ -81,6 +81,7 @@ export const JOB_ERROR_KEYS = Object.freeze({
   untrusted_origin: 'admin.nodeAgent.errorUntrustedOrigin',
   local_changes: 'admin.nodeAgent.errorLocalChanges',
   mailcow_update_failed: 'admin.nodeAgent.errorMailcowUpdateFailed',
+  mailcow_past_pin: 'admin.nodeAgent.errorMailcowPastPin',
 });
 
 // The node's scripts against the panel's commit: unknown (either is not a commit), current, behind

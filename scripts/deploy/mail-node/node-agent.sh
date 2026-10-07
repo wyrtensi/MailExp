@@ -203,8 +203,15 @@ mailcow_base() {
 # update by hand, untested) or diverged (neither holds the other). A pin the node has not fetched
 # yet is newer than anything it has: behind.
 mailcow_relation() {
-  local dir=$1 base=$2 pin=$3
-  if [ "$base" = "$pin" ]; then echo match && return 0; fi
+  local dir=$1 base=$2 pin=$3 newer_tag
+  if [ "$base" = "$pin" ]; then
+    # A newer release checked out by hand while origin/master still names the pin: HEAD holds a
+    # tag past the pin.
+    newer_tag=$(git -C "$dir" tag --merged HEAD --contains "$pin" 2>/dev/null |
+      while read -r t; do [ "$(git -C "$dir" rev-parse -q --verify "$t^{commit}")" = "$pin" ] || echo "$t"; done) || newer_tag=''
+    if [ -n "$newer_tag" ]; then echo newer; else echo match; fi
+    return 0
+  fi
   if ! git -C "$dir" cat-file -e "$pin^{commit}" 2>/dev/null; then echo behind && return 0; fi
   if git -C "$dir" merge-base --is-ancestor "$base" "$pin" 2>/dev/null; then echo behind && return 0; fi
   if git -C "$dir" merge-base --is-ancestor "$pin" "$base" 2>/dev/null; then echo newer && return 0; fi
