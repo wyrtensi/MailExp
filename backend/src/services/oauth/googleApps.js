@@ -239,14 +239,33 @@ export async function findKnownGoogleEmails(q) {
   return rows.map((row) => row.email);
 }
 
+// system_settings key recording that the single-app settings were taken over by the app registry.
+const LEGACY_IMPORT_DONE_KEY = 'google_oauth_legacy_import_done';
+
+async function markLegacyImportDone(client) {
+  await client.query(
+    `INSERT INTO system_settings (key, value, updated_at) VALUES ($1, 'true', NOW())
+     ON CONFLICT (key) DO NOTHING`,
+    [LEGACY_IMPORT_DONE_KEY],
+  );
+}
+
 // One-time import of the single-app settings (Settings → Integrations, or the
 // GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment) as the first app. Runs at every
-// startup and does nothing once any app exists.
+// startup. Once an app exists, or an import ran, it is recorded and never runs again: an app the
+// administrator deleted must not come back from environment variables still passed to the backend.
+// While no app ever existed and there is nothing to import, nothing is recorded, so a client set
+// later is still imported.
 export async function importLegacyGoogleConfig() {
   return withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtext('google-oauth-app-import'))");
+    const done = await client.query('SELECT 1 FROM system_settings WHERE key = $1', [LEGACY_IMPORT_DONE_KEY]);
+    if (done.rows.length) return null;
     const existing = await client.query('SELECT 1 FROM google_oauth_apps LIMIT 1');
-    if (existing.rows.length) return null;
+    if (existing.rows.length) {
+      await markLegacyImportDone(client);
+      return null;
+    }
 
     const stored = await client.query("SELECT config FROM integration_config WHERE provider = 'google'");
     const config = stored.rows[0]?.config || {};
@@ -291,6 +310,7 @@ export async function importLegacyGoogleConfig() {
          WHERE provider = 'google'`,
       );
     }
+    await markLegacyImportDone(client);
     console.log(`Google OAuth: imported the client from ${source.from} as app "Google 1"`);
     return appId;
   });

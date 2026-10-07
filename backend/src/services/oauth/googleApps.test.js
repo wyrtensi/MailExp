@@ -269,9 +269,11 @@ describe('importLegacyGoogleConfig', () => {
     delete process.env.GOOGLE_CLIENT_SECRET;
   });
 
-  function importDb({ appExists = false, config = null } = {}) {
+  function importDb({ appExists = false, config = null, done = false } = {}) {
     const { client, calls } = scriptedClient([
       [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT 1 FROM system_settings/, { rows: done ? [{ '?column?': 1 }] : [] }],
+      [/^\s*INSERT INTO system_settings/, { rows: [] }],
       [/^\s*SELECT 1 FROM google_oauth_apps/, { rows: appExists ? [{ '?column?': 1 }] : [] }],
       [/^\s*SELECT config FROM integration_config/, { rows: config ? [{ config }] : [] }],
       [/^\s*INSERT INTO google_oauth_apps/, { rows: [{ id: 'app-new' }] }],
@@ -284,9 +286,19 @@ describe('importLegacyGoogleConfig', () => {
   }
   const findCall = (calls, re) => calls.find(([sql]) => re.test(sql));
 
-  it('does nothing once an app exists', async () => {
+  it('does nothing once an app exists, and records that the import is behind it', async () => {
     const calls = importDb({ appExists: true, config: { clientId: CLIENT_ID, clientSecret: 'enc(s)' } });
     expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
+    expect(findCall(calls, /INSERT INTO system_settings/)[1]).toEqual(['google_oauth_legacy_import_done']);
+  });
+
+  it('does nothing once the import was recorded, even with no app left', async () => {
+    process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
+    process.env.GOOGLE_CLIENT_SECRET = 'env-secret';
+    const calls = importDb({ done: true });
+    expect(await importLegacyGoogleConfig()).toBeNull();
+    expect(findCall(calls, /FROM google_oauth_apps/)).toBeUndefined();
     expect(findCall(calls, /INSERT INTO google_oauth_apps/)).toBeUndefined();
   });
 
