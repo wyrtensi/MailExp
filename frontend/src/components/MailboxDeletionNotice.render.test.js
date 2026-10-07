@@ -41,7 +41,7 @@ Object.assign(globalThis, {
 
 const React = await import('react');
 const { createRoot } = await import('react-dom/client');
-const { default: MailboxDeletionNotice, PendingDeletionLine } = await import('./MailboxDeletionNotice.jsx');
+const { default: MailboxDeletionNotice, MailboxDeactivatedNotice, PendingDeletionLine, ReadOnlyLine } = await import('./MailboxDeletionNotice.jsx');
 
 async function mount(element) {
   const host = dom.window.document.createElement('div');
@@ -99,5 +99,43 @@ describe('PendingDeletionLine', () => {
     const line = host.querySelector('[data-pending-deletion-line]');
     assert.ok(line.textContent.startsWith('sidebar.pendingDeletion'));
     assert.ok(line.textContent.includes('2026'));
+  });
+});
+
+describe('read-only mailboxes and EOP seats', () => {
+  test('the deletion notice says read-only and that cancelling takes a seat', async () => {
+    const host = await mount(React.createElement(MailboxDeletionNotice, { account: PENDING, seats: { used: 1, held: 0, free: 2 }, onCancel: () => {} }));
+    assert.ok(host.textContent.includes('admin.mailNode.seats.readOnlyNotice'));
+    assert.ok(host.textContent.includes('admin.mailNode.seats.cancelTakesSeat'));
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'admin.accounts.deletion.cancel');
+    assert.equal(button.disabled, false);
+  });
+
+  test('disables "Cancel deletion" at 0 free, with "Request seats" next to it', async () => {
+    const host = await mount(React.createElement(MailboxDeletionNotice, { account: PENDING, seats: { used: 2, held: 0, free: 0 }, onCancel: () => {} }));
+    assert.ok(host.textContent.includes('admin.mailNode.seats.cancelNoFree'));
+    const button = [...host.querySelectorAll('button')].find((b) => b.textContent === 'admin.accounts.deletion.cancel');
+    assert.equal(button.disabled, true);
+    assert.ok([...host.querySelectorAll('button')].some((b) => b.textContent === 'admin.mailNode.seats.request'));
+  });
+
+  test('the deactivated notice: who and why; "Activate" for administrators, off at 0 free', async () => {
+    const OFF = { ...PENDING, delete_after: null, deactivated_at: '2026-10-07T10:00:00.000Z', deactivated_by_email: 'admin@example.com', deactivation_reason: 'On leave' };
+    const host = await mount(React.createElement(MailboxDeactivatedNotice, { account: OFF, isAdmin: true, seats: { used: 1, held: 1, free: 0 }, onActivate: () => {} }));
+    const notice = host.querySelector('[data-deactivated="a1"]');
+    assert.ok(notice.textContent.includes('admin.accounts.deactivation.badge'));
+    assert.ok(notice.textContent.includes('On leave'));
+    const button = [...notice.querySelectorAll('button')].find((b) => b.textContent === 'admin.accounts.deactivation.activate');
+    assert.equal(button.disabled, true);
+    const user = await mount(React.createElement(MailboxDeactivatedNotice, { account: OFF, isAdmin: false, seats: null }));
+    assert.equal([...user.querySelectorAll('button')].length, 0);
+  });
+
+  test('the sidebar line says deactivated or deleted on a date, and read-only', async () => {
+    const off = await mount(React.createElement(ReadOnlyLine, { account: { ...PENDING, delete_after: null, deactivated_at: '2026-10-07T10:00:00.000Z' } }));
+    assert.ok(off.textContent.includes('sidebar.deactivated'));
+    const deleting = await mount(React.createElement(ReadOnlyLine, { account: PENDING }));
+    assert.ok(deleting.textContent.includes('sidebar.pendingDeletion'));
+    assert.ok(deleting.textContent.includes('sidebar.readOnly'));
   });
 });

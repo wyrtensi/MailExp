@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import MailNodeDomainOnboarding from './MailNodeDomainOnboarding.jsx';
 import MailNodeDnsResult from './MailNodeDnsResult.jsx';
+import MailNodeSeats from './MailNodeSeats.jsx';
 import {
   DEFAULT_DELETE_AFTER_DAYS,
   DEFAULT_DOMAIN_MAILBOXES,
@@ -87,7 +88,11 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
 
+  // The EOP seats counter (GET /api/mail-node/seats): used, temporarily unavailable, free.
+  const [seats, setSeats] = useState(null);
+
   const fail = (err) => setError({ key: mailNodeErrorKey(err?.code), detail: mailNodeErrorDetail(err) });
+  const loadSeats = useCallback(() => api.mailNode.getSeats().then(setSeats).catch(fail), []);
 
   // Each list shows on its own: a failing mailbox listing does not hide the domains, and a node
   // that cannot list its domains leaves the panel's record of them on screen with a warning.
@@ -104,7 +109,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
     if (n.status === 'fulfilled') setNodeDns(n.value?.node ?? null);
     const failed = [d, o, n].find((r) => r.status === 'rejected');
     if (failed) fail(failed.reason);
-  }, []);
+    loadSeats();
+  }, [loadSeats]);
 
   useEffect(() => {
     api.mailNode.getConfig()
@@ -381,6 +387,8 @@ export default function MailNodeSection({ revision = 0, onDomainsChanged }) {
 
       {stored?.configured && overview?.mailboxes && (
         <>
+          <div style={subTitleStyle}>{t('admin.mailNode.seats.title')}</div>
+          <MailNodeSeats seats={seats} isAdmin onChanged={loadSeats} />
           <div style={subTitleStyle}>{t('admin.mailNode.mailboxesTitle')}</div>
           {overview.mailboxes.length === 0 && <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.mailNode.mailboxesEmpty')}</div>}
           {overview.mailboxes.length > 0 && (

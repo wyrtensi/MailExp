@@ -3,7 +3,7 @@ import { shouldAutosave, isAutosaveDue } from '../utils/draftAutosave.js';
 import { useTranslation } from 'react-i18next';
 import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
-import { isForeignNodeAlias } from '../utils/mailNode.js';
+import { isForeignNodeAlias, isReadOnlyMailbox } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
 import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -1467,19 +1467,19 @@ export default function ComposeModal() {
                 const displayName = a.sender_name || a.name;
                 if (!aliases.length) {
                   return (
-                    <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}>
-                      {displayName} &lt;{a.email_address}&gt;
+                    <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
+                      {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
                     </option>
                   );
                 }
                 return (
                   <optgroup key={a.id} label={a.name} style={{ background: 'var(--bg-tertiary)' }}>
-                    <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}>
-                      {displayName} &lt;{a.email_address}&gt;
+                    <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
+                      {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
                     </option>
                     {aliases.map(alias => (
                       <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}
-                        disabled={isForeignNodeAlias(a, alias)}>
+                        disabled={isForeignNodeAlias(a, alias) || isReadOnlyMailbox(a)}>
                         {alias.name} &lt;{alias.email}&gt;{isForeignNodeAlias(a, alias) ? ` (${t('compose.nodeAliasStaleOption')})` : ''}
                       </option>
                     ))}
@@ -2117,19 +2117,19 @@ export default function ComposeModal() {
               const displayName = a.sender_name || a.name;
               if (!aliases.length) {
                 return (
-                  <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}>
-                    {displayName} &lt;{a.email_address}&gt;
+                  <option key={a.id} value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
+                    {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
                   </option>
                 );
               }
               return (
                 <optgroup key={a.id} label={a.name} style={{ background: 'var(--bg-tertiary)' }}>
-                  <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}>
-                    {displayName} &lt;{a.email_address}&gt;
+                  <option value={`account:${a.id}`} style={{ background: 'var(--bg-tertiary)' }} disabled={isReadOnlyMailbox(a)}>
+                    {displayName} &lt;{a.email_address}&gt;{isReadOnlyMailbox(a) ? ` (${t('compose.readOnlyOption')})` : ''}
                   </option>
                   {aliases.map(alias => (
                     <option key={alias.id} value={`alias:${alias.id}:${a.id}`} style={{ background: 'var(--bg-tertiary)' }}
-                      disabled={isForeignNodeAlias(a, alias)}>
+                      disabled={isForeignNodeAlias(a, alias) || isReadOnlyMailbox(a)}>
                       {alias.name} &lt;{alias.email}&gt;{isForeignNodeAlias(a, alias) ? ` (${t('compose.nodeAliasStaleOption')})` : ''}
                     </option>
                   ))}

@@ -96,6 +96,8 @@ beforeEach(() => {
   calls = [];
   answers = {
     'GET /api/mail-node/domains': { domains: [{ domain: 'example.com', active: true, state: 'ready' }] },
+    // A new mailbox needs a free EOP seat (the add form reads the counter).
+    'GET /api/mail-node/seats': { used: 1, held: 0, free: 5, known: true, heldSeats: [], requests: [] },
     'POST /api/accounts': account('n2', 'orders@example.com', { mail_node: true }),
     'DELETE /api/accounts/n1/aliases/al-old': { ok: true },
     'PUT /api/accounts/n2': { signature: '<p>Orders</p>' },
