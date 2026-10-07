@@ -7,12 +7,12 @@ import MailComposer from 'nodemailer/lib/mail-composer';
 // smtpTransport.js, so it can be unit-tested against a mocked `fetch` alone.
 
 // The "upload" variant of users.messages.send, needed (rather than the plain resource endpoint)
-// for two reasons: it accepts a raw message up to 35 MB (our own attachment cap is 25 MB of
-// attachment bytes — see routes/send.js's 26_214_400 check — which the raw MIME message, headers
-// and all, comfortably stays under), and — using uploadType=multipart — it lets a JSON metadata
+// for two reasons: it accepts a raw message up to 35 MB (our own attachment cap is 25 MiB of
+// attachment bytes — MAX_ATTACHMENT_BYTES in utils/attachmentLimit.js — which the raw MIME
+// message, headers and all, comfortably stays under), and — using uploadType=multipart — it lets a JSON metadata
 // part (threadId) travel alongside the message/rfc822 part in one request. The plain JSON
 // {raw: base64} form would need the whole message base64-encoded first (roughly +37% over the
-// raw byte count), pushing a message already near our 25 MB cap uncomfortably close to Gmail's
+// raw byte count), pushing a message already near our 25 MiB cap uncomfortably close to Gmail's
 // 35 MB limit and into territory where Google's general request-size limits for non-upload JSON
 // bodies (much smaller than 35 MB) could reject it outright. The single-part media upload
 // (uploadType=media) sends the raw bytes directly (no base64 tax) but has no room for threadId.
@@ -85,8 +85,8 @@ function buildMultipartBody(rawMessage, metadata) {
 // `status` is always Google's own real HTTP status when there was one (used for logic — e.g.
 // mailSendTransport.js's blanket "retry without threadId on any 4xx" — never shown to the user).
 // A terminal classification carries a separate `responseStatus`: the HTTP status WE answer the
-// caller with, which is deliberately not always the same number (e.g. Google's 403 for a daily
-// send-limit hit is reported to our own caller as 429). `googleMessage` is the raw text Google
+// caller with, which is deliberately not always the same number (e.g. Google's 403 for an
+// unanticipated refusal is reported to our own caller as 502). `googleMessage` is the raw text Google
 // returned (or ''), kept separately from any user-facing `message` so callers can pattern-match
 // on Google's own wording without depending on ours.
 function terminal({ code, responseStatus, message, googleMessage, status }) {
@@ -125,19 +125,20 @@ export function classifyGmailApiResponseError(status, body) {
   }
   // Gmail's per-mailbox sending limit (500/day for consumer accounts, higher for Workspace) is
   // enforced by Gmail's delivery system itself, not by the API — SMTP would hit the exact same
-  // wall, so this is terminal rather than a fallback trigger. Deliberately narrow: a bare
-  // "quota"/"sending limit" mention alone also shows up on ordinary per-minute API throttling
-  // (see the 429 branch below), which SMTP is NOT the same quota as and so CAN fall back.
-  const isDailyLimit = reasons.includes('dailyLimitExceeded') || /daily.*(limit|quota)/i.test(googleMessage);
-  // Gmail's documented text for hitting the mailbox's own send quota through the API, e.g.
-  // "User-rate limit exceeded. (Mail sending)" — a 429, but not the generic per-second/per-minute
-  // throttling the same status code otherwise means.
-  const isMailSendingRateLimit = status === 429 && /mail sending/i.test(googleMessage);
-  if (isDailyLimit || isMailSendingRateLimit) {
+  // wall, so this is terminal rather than a fallback trigger. Gmail's documented answer for it is
+  // a 429 "User-rate limit exceeded. Retry after <time> (Mail sending)" with reason
+  // rateLimitExceeded; only the "(Mail sending)" text sets it apart from the generic
+  // per-second/per-minute throttling the same status and reason otherwise mean.
+  if (status === 429 && /mail sending/i.test(googleMessage)) {
     return terminal({
       code: 'gmail_quota_exceeded', responseStatus: 429,
       message: 'Gmail daily sending limit reached for this account.', googleMessage, status,
     });
+  }
+  // A 403 dailyLimitExceeded ("Daily Limit Exceeded") is the Google Cloud project's API quota,
+  // not the mailbox's sending limit: SMTP does not count against it, so falling back can deliver.
+  if (reasons.includes('dailyLimitExceeded')) {
+    return fallback({ reason: 'project_quota', googleMessage, status });
   }
   // Plain API request throttling (calls/second), unrelated to the mailbox's own sending limit —
   // SMTP is a different quota entirely, so falling back can succeed.

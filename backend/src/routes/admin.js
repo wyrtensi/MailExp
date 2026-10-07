@@ -196,8 +196,10 @@ router.patch('/users/:id', async (req, res) => {
           RETURNING ${USER_LIST_COLUMNS}`,
         [id, after.is_admin, after.email, after.disabled_at, req.session.userId],
       );
-      // Losing the way in: turned off, or in google mode left without an email to sign in with.
-      const lost = (!current.disabled_at && !!after.disabled_at) || (googleMode && !!current.email && !after.email);
+      // Losing the way in: turned off, or left without the email the sessions were opened for.
+      // A replaced address counts too: the row may now stand for another person, and a session
+      // opened under the old address must not carry the row's access over to them.
+      const lost = (!current.disabled_at && !!after.disabled_at) || (!!current.email && after.email !== current.email);
       return { row: updated, lostAccess: lost, previous: current };
     });
 
@@ -235,6 +237,9 @@ router.delete('/users/:id', async (req, res) => {
       if (countsAsActiveAdmin(current, googleMode) && !(await otherActiveAdminExists(client, id, googleMode))) {
         throw new AdminUserError(409, 'last_admin', 'At least one active admin must remain');
       }
+      // Delete while the admin-guard lock is held: two admins deleting each other at once would
+      // otherwise both pass the check above and leave no active admin.
+      await client.query('DELETE FROM users WHERE id = $1', [id]);
       return current;
     });
   } catch (err) {
@@ -242,7 +247,6 @@ router.delete('/users/:id', async (req, res) => {
   }
 
   await signOutEverywhere(id);
-  await query('DELETE FROM users WHERE id = $1', [id]);
   recordAudit([userAuditEntry(req, 'user.deleted', deleted)]);
   requestAccessSync('user_deleted');
   // Let plugins clean up any user-scoped data the FK cascade can't reach (GTD removes the

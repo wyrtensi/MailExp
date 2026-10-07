@@ -12,7 +12,8 @@ import { htmlToText } from '../utils/htmlToText.js';
 import { buildRawMessage } from '../services/gmailApiSender.js';
 import { imapManager } from '../index.js';
 import { OAUTH_SEND_FAILURES } from '../services/oauth/constants.js';
-import { isForeignNodeAliasAddress, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
+import { isDisabledMailbox, isForeignNodeAliasAddress, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
+import { ATTACHMENT_LIMIT_ERROR, MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
 import { smtpFailureIsDefinite, smtpConnectionFailure } from '../services/smtpErrors.js';
 import {
   enqueueOutgoingSend, existingSendJob, parseSendAt, pickComposeContext, sendJobResponse, sendRetryConflict,
@@ -135,7 +136,7 @@ router.post('/send', async (req, res) => {
     if (!Array.isArray(attachments)) return res.status(400).json({ error: 'attachments must be an array' });
     if (attachments.length > 100) return res.status(400).json({ error: 'Too many attachments (max 100)' });
     const totalBytes = attachments.reduce((sum, a) => sum + (typeof a.content === 'string' ? Math.ceil(a.content.length * 0.75) : 0), 0);
-    if (totalBytes > 26_214_400) return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+    if (totalBytes > MAX_ATTACHMENT_BYTES) return res.status(400).json({ error: ATTACHMENT_LIMIT_ERROR });
     for (const [i, a] of attachments.entries()) {
       if (typeof a.filename !== 'string' || !a.filename.trim()) return res.status(400).json({ error: `attachments[${i}].filename is required` });
       if (typeof a.content !== 'string') return res.status(400).json({ error: `attachments[${i}].content must be a base64 string` });
@@ -172,6 +173,9 @@ router.post('/send', async (req, res) => {
   if (account.oauth_reconnect_required) {
     const failure = OAUTH_SEND_FAILURES.oauth_reconnect_required;
     return res.status(failure.status).json({ error: failure.error, code: 'oauth_reconnect_required' });
+  }
+  if (isDisabledMailbox(account)) {
+    return res.status(409).json({ error: 'This mailbox is disabled: it cannot send.', code: 'mailbox_disabled' });
   }
   // A deactivated mail node mailbox, or one pending deletion, is read-only (EOP seats design): say so
   // now, not after the undo window.
@@ -248,8 +252,8 @@ router.post('/send', async (req, res) => {
         declaredFwdBytes += Number(att.size) || 0;
         return { msg, att };
       });
-      if (uploadedBytes + declaredFwdBytes > 26_214_400) {
-        return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+      if (uploadedBytes + declaredFwdBytes > MAX_ATTACHMENT_BYTES) {
+        return res.status(400).json({ error: ATTACHMENT_LIMIT_ERROR });
       }
 
       // Load the owning accounts once, then fetch bodies with bounded concurrency so we never
@@ -280,8 +284,8 @@ router.post('/send', async (req, res) => {
 
       // Exact backstop: declared sizes can under-report, so re-check against fetched bytes.
       const fwdBytes = resolvedFwdAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
-      if (uploadedBytes + fwdBytes > 26_214_400) {
-        return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+      if (uploadedBytes + fwdBytes > MAX_ATTACHMENT_BYTES) {
+        return res.status(400).json({ error: ATTACHMENT_LIMIT_ERROR });
       }
     } catch (err) {
       return res.status(err.status || 500).json({ error: err.message || 'Failed to fetch forwarded attachments' });
@@ -334,8 +338,8 @@ router.post('/send', async (req, res) => {
   // by way of its explicit/forwarded attachments but carries large embedded images would
   // otherwise slip through uncounted.
   const totalAttachmentBytes = allAttachments.reduce((sum, a) => sum + (a.content?.length || 0), 0);
-  if (totalAttachmentBytes > 26_214_400) {
-    return res.status(400).json({ error: 'Total attachment size exceeds 25 MB' });
+  if (totalAttachmentBytes > MAX_ATTACHMENT_BYTES) {
+    return res.status(400).json({ error: ATTACHMENT_LIMIT_ERROR });
   }
   if (allAttachments.length) {
     mailOptions.attachments = allAttachments;

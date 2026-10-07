@@ -38,6 +38,12 @@ export function isReadOnlyNodeMailbox(account) {
   return account?.mail_node === true && (account?.delete_after != null || account?.deactivated_at != null);
 }
 
+// A mailbox turned off (`enabled` false, by its owner or an administrator) does not send, whatever
+// its kind: its credentials may still work, but turning it off must stop its mail going out too.
+export function isDisabledMailbox(account) {
+  return account?.enabled === false;
+}
+
 // An address compared the way node mailboxes are made: lowercase, the domain in its ASCII (punycode)
 // form, which is the only form a node mailbox has (services/mailNode/mailcow.js parseHostName), so
 // `sales@пример.рф` and `sales@xn--e1afmkfd.xn--p1ai` are one address.

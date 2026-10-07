@@ -158,12 +158,53 @@ describe('the hold period', () => {
 });
 
 describe('closeFulfilledRequests', () => {
+  // Requests made at given times; returns their ids in that order.
+  const request = async (...rows) => {
+    const ids = [];
+    for (const [seats, purchasedAtRequest, minutes] of rows) {
+      const { rows: [row] } = await db.query(`
+        INSERT INTO mail_node_seat_requests (provider, seats, purchased_at_request, requested_at)
+        VALUES ('manual', $1, $2, NOW() - interval '1 day' + make_interval(mins => $3)) RETURNING id`,
+      [seats, purchasedAtRequest, minutes]);
+      ids.push(Number(row.id));
+    }
+    return ids;
+  };
+
   it('closes a request once purchased reaches the number at request plus the seats asked for', async () => {
-    await db.query(`INSERT INTO mail_node_seat_requests (provider, seats, purchased_at_request) VALUES ('manual', 2, 5), ('manual', 1, NULL)`);
-    expect(await closeFulfilledRequests(6)).toHaveLength(1);
-    expect((await getSeats()).requests.map((r) => r.seats)).toEqual([2]);
-    expect(await closeFulfilledRequests(7)).toHaveLength(1);
+    const [id] = await request([2, 5, 0]);
+    expect(await closeFulfilledRequests(6)).toEqual([]);
+    expect(await closeFulfilledRequests(7)).toEqual([id]);
     expect((await getSeats()).requests).toEqual([]);
+  });
+
+  it('closes overlapping requests one by one, in creation order, as the seats come', async () => {
+    // Two requests for one seat each, both made when 5 were bought: 6 covers only the first.
+    const [first, second] = await request([1, 5, 0], [1, 5, 1]);
+    expect(await closeFulfilledRequests(6)).toEqual([first]);
+    // The next read of the same number must not hand the same seat to the second request.
+    expect(await closeFulfilledRequests(6)).toEqual([]);
+    expect(await closeFulfilledRequests(7)).toEqual([second]);
+  });
+
+  it('stacks a request with an unknown count behind the earlier ones', async () => {
+    const [two, unknown] = await request([2, 5, 0], [1, null, 1]);
+    expect(await closeFulfilledRequests(6)).toEqual([]);
+    expect(await closeFulfilledRequests(7)).toEqual([two]);
+    expect(await closeFulfilledRequests(8)).toEqual([unknown]);
+  });
+
+  it('closes several requests at once when the purchase covers them all', async () => {
+    const ids = await request([1, 5, 0], [2, 5, 1], [1, 6, 2]);
+    expect(await closeFulfilledRequests(9)).toEqual(ids);
+  });
+
+  it('does not stack a request on one already closed before it was made', async () => {
+    const [first] = await request([1, 5, 0]);
+    expect(await closeFulfilledRequests(6)).toEqual([first]);
+    // Licences dropped to 4 afterwards; a new request for 2, made after the close, is covered by 6.
+    const [later] = await request([2, 4, 60 * 24 * 365]);
+    expect(await closeFulfilledRequests(6)).toEqual([later]);
   });
 });
 

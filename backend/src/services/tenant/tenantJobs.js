@@ -167,7 +167,13 @@ export async function readAntispam(session, now = Date.now()) {
 export async function readSeats(session, previous = null, now = Date.now()) {
   const at = new Date(now).toISOString();
   try {
-    return { at, ok: true, ...parseSubscribedSkus(await session.graph.request('GET', '/subscribedSkus')) };
+    const answer = await session.graph.request('GET', '/subscribedSkus');
+    // A valid answer always carries the array `value` (empty: no subscription at all, so 0 seats).
+    // Anything else is no count: it fails the read rather than replace the last good number with 0.
+    if (!Array.isArray(answer?.value)) {
+      throw new TenantError('graph_failed', 'Graph answered GET /subscribedSkus without a value array');
+    }
+    return { at, ok: true, ...parseSubscribedSkus(answer) };
   } catch (err) {
     // firstErrorAt: when it began to fail while it never answered, so a missing permission alerts
     // after 3 days (eopSeats.js purchasedSeats).

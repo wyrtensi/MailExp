@@ -206,7 +206,8 @@
     "signatureLabel": "Подпись",
     "signatureHint": "Добавляется в конец письма. В текстовой версии перед ней ставится строка «-- »: по ней почтовые программы узнают подпись и не цитируют её в ответах.",
     "priorityHint": "Помечает письмо как важное или неважное (заголовки X-Priority и Importance). Outlook и Thunderbird показывают пометку, Gmail — нет.",
-    "readOnlyOption": "только чтение"
+    "readOnlyOption": "только чтение",
+    "disabledOption": "отключён"
   },
   "message": {
     "find": {

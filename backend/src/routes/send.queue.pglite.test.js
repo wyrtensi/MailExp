@@ -379,6 +379,15 @@ describe('Failures after the writer left', () => {
     expect((await job(body.jobId)).status).toBe('done');
   });
 
+  it('fails a queued letter of a mailbox disabled meanwhile, before SMTP', async () => {
+    const { body } = await send();
+    await db.query('UPDATE email_accounts SET enabled = false WHERE id = $1', [ACCOUNT]);
+    await makeDue(body.jobId);
+    await runDueJobs({ wait: true });
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(await job(body.jobId)).toMatchObject({ status: 'failed', error_code: 'mailbox_disabled' });
+  });
+
   it('fails a queued letter of a node mailbox deactivated meanwhile, before SMTP', async () => {
     await db.query('UPDATE email_accounts SET mail_node = true WHERE id = $1', [ACCOUNT]);
     const { body } = await send();

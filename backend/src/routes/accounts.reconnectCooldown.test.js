@@ -79,6 +79,15 @@ describe('account routes lift the connect cooldown before reconnecting', () => {
     expect(imapManager.connectAccount).not.toHaveBeenCalled();
   });
 
+  it('POST /:id/reconnect refuses a disabled mailbox and connects nothing', async () => {
+    query.mockImplementation(async () => ({ rows: [{ ...row, enabled: false }] }));
+    const res = await fetch(`${base}/api/accounts/${ID}/reconnect`, { method: 'POST' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('mailbox_disabled');
+    expect(imapManager.clearConnectCooldown).not.toHaveBeenCalled();
+    expect(imapManager.connectAccount).not.toHaveBeenCalled();
+  });
+
   it('PUT /:id with new credentials clears the cooldown, then connects', async () => {
     const res = await fetch(`${base}/api/accounts/${ID}`, {
       method: 'PUT',

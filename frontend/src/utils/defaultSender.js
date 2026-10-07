@@ -11,16 +11,30 @@
 // in localStorage it also never followed the user to another device, unlike the rest of
 // their settings.
 
+import { isReadOnlyMailbox } from './mailNode.js';
+
 const ACCOUNT_PREFIX = 'account:';
 const ALIAS_PREFIX = 'alias:';
 
 /**
- * Does this From value still name an account (and alias) the user actually has?
+ * Why a mailbox cannot be picked as From: the i18n key of the note its option carries, or null.
+ * A turned-off mailbox (any kind) and a read-only mail node mailbox both refuse to send, and the
+ * server refuses them too (mailbox_disabled, mailbox_read_only).
+ */
+export function fromBlockedKey(account) {
+  if (account?.enabled === false) return 'compose.disabledOption';
+  if (isReadOnlyMailbox(account)) return 'compose.readOnlyOption';
+  return null;
+}
+
+/**
+ * Does this From value still name an account (and alias) the user actually has, and one that
+ * can send (not blocked: fromBlockedKey)?
  *
  * Preferences outlive the things they point at: an account can be removed or an alias
- * deleted long after being chosen as the default. An unvalidated value would leave the
- * composer with a From that cannot send, so every candidate is checked and a stale one is
- * skipped in favour of the next fallback.
+ * deleted long after being chosen as the default, or the mailbox turned off or made read-only.
+ * An unvalidated value would leave the composer with a From that cannot send, so every
+ * candidate is checked and a stale one is skipped in favour of the next fallback.
  */
 export function isValidFromValue(value, accounts) {
   if (typeof value !== 'string' || !value) return false;
@@ -32,13 +46,13 @@ export function isValidFromValue(value, accounts) {
     const [, aliasId, accountId] = parts;
     if (!aliasId || !accountId) return false;
     const account = list.find(a => a && a.id === accountId);
-    return Boolean(account && Array.isArray(account.aliases)
+    return Boolean(account && !fromBlockedKey(account) && Array.isArray(account.aliases)
       && account.aliases.some(al => al && al.id === aliasId));
   }
 
   if (value.startsWith(ACCOUNT_PREFIX)) {
     const accountId = value.slice(ACCOUNT_PREFIX.length);
-    return Boolean(accountId && list.some(a => a && a.id === accountId));
+    return Boolean(accountId && list.some(a => a && a.id === accountId && !fromBlockedKey(a)));
   }
 
   return false;
@@ -53,7 +67,10 @@ export function isValidFromValue(value, accounts) {
  *   3. the account whose folder is currently open (composing "from" that account)
  *   4. the user's configured default sender      (#417, the new rung)
  *   5. the account last sent from
- *   6. the first account, by the user's own sidebar ordering
+ *   6. the first account that can send, by the user's own sidebar ordering
+ *
+ * A mailbox that cannot send (turned off, or a read-only mail node mailbox) is skipped on
+ * every rung.
  *
  * The configured default deliberately outranks last-used. Below it, the drift described
  * above would simply continue and setting a default would look like it did nothing. It sits
@@ -73,16 +90,20 @@ export function resolveInitialFrom({
 } = {}) {
   const list = Array.isArray(accounts) ? accounts : [];
 
-  if (composeData?.aliasId && composeData?.accountId) {
+  // The alias a reply arrived at is taken as given (its account's aliases may not be loaded),
+  // unless that mailbox cannot send.
+  const requestAccount = list.find(a => a && a.id === composeData?.accountId);
+  if (composeData?.aliasId && composeData?.accountId && !fromBlockedKey(requestAccount)) {
     return `${ALIAS_PREFIX}${composeData.aliasId}:${composeData.accountId}`;
   }
+  const firstAllowed = list.find(a => a?.id && !fromBlockedKey(a));
 
   const candidates = [
     composeData?.accountId ? `${ACCOUNT_PREFIX}${composeData.accountId}` : null,
     selectedAccountId ? `${ACCOUNT_PREFIX}${selectedAccountId}` : null,
     defaultSender,
     lastUsedAccountId ? `${ACCOUNT_PREFIX}${lastUsedAccountId}` : null,
-    list[0]?.id ? `${ACCOUNT_PREFIX}${list[0].id}` : null,
+    firstAllowed ? `${ACCOUNT_PREFIX}${firstAllowed.id}` : null,
   ];
 
   for (const candidate of candidates) {

@@ -18,7 +18,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./deliveryReport.js', async (importOriginal) => ({ ...(await importOriginal()), readDeliveryReports: vi.fn(async () => 0) }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, skipsDuplicateView, folderSpecialUse, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -172,23 +172,58 @@ describe('providerProfile — oauth_provider fallback', () => {
   });
 });
 
-// ── providerProfile — skipFolderPatterns ─────────────────────────────────────
+// ── skipsDuplicateView ───────────────────────────────────────────────────────────────────────────────────────────
 
-describe('providerProfile — skipFolderPatterns', () => {
-  it('google skips All Mail, Starred, Important', () => {
-    const { skipFolderPatterns } = providerProfile(account('imap.gmail.com'));
-    expect(skipFolderPatterns.some(p => '[Gmail]/All Mail'.toLowerCase().includes(p))).toBe(true);
-    expect(skipFolderPatterns.some(p => '[Gmail]/Starred'.toLowerCase().includes(p))).toBe(true);
-    expect(skipFolderPatterns.some(p => '[Gmail]/Important'.toLowerCase().includes(p))).toBe(true);
+describe('skipsDuplicateView', () => {
+  const gmail = providerProfile(account('imap.gmail.com'));
+
+  it('google skips All Mail, Starred and Important by their special-use flag, in any language', () => {
+    expect(skipsDuplicateView(gmail, '[Gmail]/All Mail', '\\All')).toBe(true);
+    expect(skipsDuplicateView(gmail, '[Gmail]/Вся почта', '\\All')).toBe(true);
+    expect(skipsDuplicateView(gmail, '[Gmail]/Starred', '\\Flagged')).toBe(true);
+    expect(skipsDuplicateView(gmail, '[Gmail]/Important', '\\Important')).toBe(true);
   });
 
-  it('yahoo has no skip patterns', () => {
-    expect(providerProfile(account('imap.mail.yahoo.com')).skipFolderPatterns).toHaveLength(0);
+  it('google skips the system views by exact name under [Gmail], [GoogleMail] and [Google Mail]', () => {
+    for (const path of [
+      '[Gmail]', '[Gmail]/All Mail', '[Gmail]/Starred', '[Gmail]/Important',
+      '[GoogleMail]', '[GoogleMail]/All Mail', '[GoogleMail]/Starred', '[GoogleMail]/Important',
+      '[Google Mail]', '[Google Mail]/All Mail', '[Google Mail]/Starred', '[Google Mail]/Important',
+    ]) expect(skipsDuplicateView(gmail, path, null)).toBe(true);
+    expect(skipsDuplicateView(gmail, '[Google Mail]/Sent Mail', '\\Sent')).toBe(false);
   });
 
-  it('generic has no skip patterns', () => {
-    // Use a genuinely-unknown host — purelymail.com now routes to its own profile.
-    expect(providerProfile(account('imap.fastmail.com')).skipFolderPatterns).toHaveLength(0);
+  it('google keeps a user label that merely contains "all mail", and real system folders', () => {
+    expect(skipsDuplicateView(gmail, 'All Mail backup', null)).toBe(false);
+    expect(skipsDuplicateView(gmail, 'Projects/All Mail', null)).toBe(false);
+    expect(skipsDuplicateView(gmail, 'Clients/Important', null)).toBe(false);
+    expect(skipsDuplicateView(gmail, '[Gmail]/Drafts', '\\Drafts')).toBe(false);
+    expect(skipsDuplicateView(gmail, '[GoogleMail]/Sent Mail', '\\Sent')).toBe(false);
+  });
+
+  it('other providers skip nothing, flagged views included', () => {
+    for (const host of ['imap.mail.yahoo.com', 'imap.fastmail.com']) {
+      const profile = providerProfile(account(host));
+      expect(skipsDuplicateView(profile, 'Archive', '\\All')).toBe(false);
+      expect(skipsDuplicateView(profile, '[Gmail]/All Mail', null)).toBe(false);
+    }
+  });
+});
+
+describe('folderSpecialUse', () => {
+  // imapflow's specialUse never names \Important (it knows \All \Archive \Drafts \Flagged
+  // \Junk \Sent \Trash); Gmail's LIST still carries it among the raw flags.
+  it('takes the special use imapflow resolved', () => {
+    expect(folderSpecialUse({ specialUse: '\\All', flags: new Set(['\\HasNoChildren', '\\All']) })).toBe('\\All');
+  });
+
+  it('takes \\Important from the raw LIST flags when imapflow resolved none', () => {
+    expect(folderSpecialUse({ flags: new Set(['\\HasNoChildren', '\\Important']) })).toBe('\\Important');
+  });
+
+  it('answers null for a plain folder or a missing flag set', () => {
+    expect(folderSpecialUse({ flags: new Set(['\\HasNoChildren']) })).toBeNull();
+    expect(folderSpecialUse({})).toBeNull();
   });
 });
 
@@ -3881,6 +3916,27 @@ describe('backfill stops on a provider refusal (#433)', () => {
     expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id });
   });
 
+  it('does not backfill a folder that cannot be selected', async () => {
+    query.mockImplementation(async () => ({ rows: [{ path: 'B' }] }));
+    const mgr = allFoldersManager(async () => undefined);
+    await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
+    const [sql] = query.mock.calls.find(([q]) => /FROM folders/.test(q));
+    expect(sql).toMatch(/NOT no_select/);
+  });
+
+  it('skips Gmail system views by flag or exact name, never a user label that mentions them', async () => {
+    const gmail = { ...acct, imap_host: 'imap.gmail.com' };
+    query.mockImplementation(async () => ({ rows: [
+      { path: '[GoogleMail]/Important', special_use: null },
+      { path: '[GoogleMail]/Starred', special_use: '\\Flagged' },
+      { path: '[Gmail]/Вся почта', special_use: '\\All' },
+      { path: 'Projects/All Mail export', special_use: null },
+    ] }));
+    const mgr = allFoldersManager(async () => undefined);
+    await ImapManager.prototype.backfillAllFolders.call(mgr, gmail);
+    expect(mgr.backfillMessages.mock.calls.map(c => c[1])).toEqual(['INBOX', 'Projects/All Mail export']);
+  });
+
   it('still backfills every folder when nothing is refused', async () => {
     query.mockImplementation(async () => ({ rows: [{ path: 'A' }, { path: 'B' }] }));
     const mgr = allFoldersManager(async () => undefined);
@@ -4060,7 +4116,7 @@ describe('backfillAllFolders reuses one connection across folders', () => {
     query.mockReset();
     query.mockImplementation(async (sql) => {
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [acct] };
-      if (sql.startsWith('SELECT path FROM folders')) return { rows: [{ path: 'A' }, { path: 'B' }] };
+      if (sql.startsWith('SELECT path, special_use FROM folders')) return { rows: [{ path: 'A' }, { path: 'B' }] };
       if (sql.startsWith('SELECT COUNT(*)')) return { rows: [{ count: '1', max_uid: '1' }] };
       if (sql.startsWith('SELECT uid FROM messages')) return { rows: [{ uid: '1' }] };
       return { rows: [] };
@@ -6289,6 +6345,14 @@ describe('the live-sync ladder is cleared by a successful sync, not by a login',
       mgr.syncMessages = vi.fn().mockResolvedValue({});
       expect(await mgr.connectAccount(acct)).toBe(true);
       expect(mgr._connectCooldown.has(acct.id)).toBe(false);
+    });
+
+    it('does not open IMAP for a disabled mailbox', async () => {
+      const mgr = connectManager();
+      mgr.syncMessages = vi.fn().mockResolvedValue({});
+      expect(await mgr.connectAccount({ ...acct, enabled: false })).toBe(false);
+      expect(ImapFlow).not.toHaveBeenCalled();
+      expect(mgr.syncMessages).not.toHaveBeenCalled();
     });
   });
 

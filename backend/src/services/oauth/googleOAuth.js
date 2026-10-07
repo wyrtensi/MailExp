@@ -179,6 +179,9 @@ export async function refreshGoogleToken(account) {
   const newRefreshToken = typeof tokens.refresh_token === 'string' && tokens.refresh_token
     ? tokens.refresh_token
     : null;
+  // Encrypted once: the ciphertext stored is the one handed back below (each encrypt() draws its
+  // own IV), so a later compare-and-set on it (tokenManager.markReconnectRequired) finds the row.
+  const storedNewRefreshToken = newRefreshToken ? encrypt(newRefreshToken) : null;
 
   // Compare-and-set on the grant the refresh started from: a reconnect may have committed new
   // tokens, possibly through another app, while the provider call was in flight. The stored
@@ -193,7 +196,7 @@ export async function refreshGoogleToken(account) {
       AND oauth_refresh_token IS NOT DISTINCT FROM $5
       AND oauth_app_id IS NOT DISTINCT FROM $6
   `, [
-    encrypt(tokens.access_token), newRefreshToken ? encrypt(newRefreshToken) : null, expiry, account.id,
+    encrypt(tokens.access_token), storedNewRefreshToken, expiry, account.id,
     account.oauth_refresh_token, account.oauth_app_id ?? null,
   ]);
   if (saved?.rowCount === 0) {
@@ -202,7 +205,12 @@ export async function refreshGoogleToken(account) {
     return rows[0];
   }
 
-  return { ...account, oauth_access_token: tokens.access_token, oauth_token_expiry: expiry };
+  return {
+    ...account,
+    oauth_access_token: tokens.access_token,
+    oauth_refresh_token: storedNewRefreshToken ?? account.oauth_refresh_token,
+    oauth_token_expiry: expiry,
+  };
 }
 
 // Revoke a token Google issued. Best effort: it never throws, and only the HTTP status or the

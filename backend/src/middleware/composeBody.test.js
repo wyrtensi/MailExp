@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
 import { composeJson } from './composeBody.js';
 
-const MAX_ATTACHMENT_BYTES = 26_214_400;
+import { MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
 let server;
 let base;
 
@@ -16,7 +16,7 @@ beforeAll(async () => {
 afterAll(() => new Promise(resolve => server.close(resolve)));
 
 describe('the composer JSON body limit', () => {
-  it('takes a full 25 MB of attachments as base64 with a large quoted body', async () => {
+  it('takes a full 25 MiB of attachments as base64 with a large quoted body', async () => {
     const content = Buffer.alloc(MAX_ATTACHMENT_BYTES, 1).toString('base64');
     const quotedBodyHtml = `<blockquote>${'x'.repeat(4 * 1024 * 1024)}</blockquote>`;
     const res = await fetch(`${base}/send`, {

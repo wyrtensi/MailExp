@@ -151,6 +151,9 @@ async function doRefreshMicrosoftToken(account) {
   const refreshExpiresInSecs = Number.isFinite(expires_in) && expires_in > 0 ? expires_in : 3600;
   const expiry = new Date(Date.now() + refreshExpiresInSecs * 1000);
   const isPublic = !!account.oauth_public_client || becamePublic;
+  // Encrypted once: the ciphertext stored is the one handed back below (each encrypt() draws its
+  // own IV), so a later compare-and-set on it (tokenManager.markReconnectRequired) finds the row.
+  const storedNewRefreshToken = refresh_token ? encrypt(refresh_token) : null;
 
   // Compare-and-set on the grant and flow the refresh started from: a reconnect (auth-code or
   // device-code) may have committed new tokens while the provider call was in flight. The stored
@@ -166,7 +169,7 @@ async function doRefreshMicrosoftToken(account) {
       AND oauth_refresh_token IS NOT DISTINCT FROM $6
       AND oauth_public_client = $7
   `, [
-    encrypt(access_token), refresh_token ? encrypt(refresh_token) : null, expiry, isPublic, account.id,
+    encrypt(access_token), storedNewRefreshToken, expiry, isPublic, account.id,
     account.oauth_refresh_token, !!account.oauth_public_client,
   ]);
   if (saved?.rowCount === 0) {
@@ -180,6 +183,13 @@ async function doRefreshMicrosoftToken(account) {
   }
 
   // Return plaintext tokens so callers can use them immediately without decrypting (the stored
-  // row returned above after a lost race carries encrypted ones; decrypt() handles both)
-  return { ...account, oauth_access_token: access_token, oauth_token_expiry: expiry, oauth_public_client: isPublic };
+  // row returned above after a lost race carries encrypted ones; decrypt() handles both). The refresh
+  // token stays as stored (ciphertext, like the row): callers compare it with the row.
+  return {
+    ...account,
+    oauth_access_token: access_token,
+    oauth_refresh_token: storedNewRefreshToken ?? account.oauth_refresh_token,
+    oauth_token_expiry: expiry,
+    oauth_public_client: isPublic,
+  };
 }

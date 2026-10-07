@@ -206,7 +206,8 @@
     "signatureLabel": "Signature",
     "signatureHint": "Added at the end of the letter. In the plain-text copy a \"-- \" line goes before it, so mail programs recognise the signature and leave it out of quotes in replies.",
     "priorityHint": "Marks the letter as important or unimportant (X-Priority and Importance headers). Outlook and Thunderbird show the mark; Gmail does not.",
-    "readOnlyOption": "read-only"
+    "readOnlyOption": "read-only",
+    "disabledOption": "disabled"
   },
   "message": {
     "find": {

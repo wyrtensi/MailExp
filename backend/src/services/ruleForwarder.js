@@ -3,9 +3,9 @@ import { query } from './db.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { sendFailureIsDefinite } from './smtpErrors.js';
-import { isReadOnlyNodeMailbox } from '../utils/senderNames.js';
+import { isDisabledMailbox, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
+import { ATTACHMENT_LIMIT_ERROR, MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
 
-const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -145,7 +145,7 @@ function ensureAttachmentLimit(attachments) {
     0
   );
   if (totalBytes > MAX_ATTACHMENT_BYTES) {
-    throw new Error('Total attachment size exceeds 25 MB');
+    throw new Error(ATTACHMENT_LIMIT_ERROR);
   }
 }
 
@@ -200,7 +200,7 @@ async function loadForwardContent({ row, account, imapManager }) {
     0
   );
   if (knownBytes > MAX_ATTACHMENT_BYTES) {
-    throw new Error('Total attachment size exceeds 25 MB');
+    throw new Error(ATTACHMENT_LIMIT_ERROR);
   }
 
   let fetchedAttachments = [];
@@ -247,15 +247,18 @@ export async function forwardRuleMessage({
   imapManager,
   recipient,
 }) {
-  // A read-only mail node mailbox (EOP seats design) does not forward. Read fresh: the account object
-  // a rule runs with may predate the change. Only node mailboxes are asked, so other mailboxes'
-  // paths are unchanged.
-  if (account?.mail_node) {
-    const { rows: [state] } = await query('SELECT mail_node, delete_after, deactivated_at FROM email_accounts WHERE id = $1', [account.id]);
-    if (isReadOnlyNodeMailbox(state)) {
-      console.warn(`ruleForwarder: rule ${ruleId} not forwarded: the mailbox is read-only`);
-      return 'read_only';
-    }
+  // A turned-off mailbox, or a read-only mail node mailbox (EOP seats design), does not forward. Read
+  // fresh: the account object a rule runs with may predate the change.
+  const { rows: [state] } = await query(
+    'SELECT enabled, mail_node, delete_after, deactivated_at FROM email_accounts WHERE id = $1', [account.id],
+  );
+  if (isDisabledMailbox(state)) {
+    console.warn(`ruleForwarder: rule ${ruleId} not forwarded: the mailbox is disabled`);
+    return 'disabled';
+  }
+  if (isReadOnlyNodeMailbox(state)) {
+    console.warn(`ruleForwarder: rule ${ruleId} not forwarded: the mailbox is read-only`);
+    return 'read_only';
   }
   const reserved = await query(
     `INSERT INTO inbox_rule_forwards (rule_id, message_id)

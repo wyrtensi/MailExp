@@ -263,6 +263,23 @@ describe('refreshGoogleToken', () => {
     expect(query.mock.calls[0][1][1]).toBe('enc(new-rt)');
   });
 
+  it('hands back the rotated refresh token as stored, so a later compare-and-set finds the row', async () => {
+    // mailSendTransport.js flags oauth_reconnect_required with a compare-and-set on the refresh
+    // token of the account this returns: the old token would no longer match the stored row.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, {
+      access_token: 'new-at', refresh_token: 'new-rt', expires_in: 3600,
+    })));
+    const result = await refreshGoogleToken(account);
+    expect(result.oauth_refresh_token).toBe(query.mock.calls[0][1][1]);
+    expect(result.oauth_refresh_token).not.toBe(account.oauth_refresh_token);
+  });
+
+  it('keeps the stored refresh token on the account when Google does not rotate it', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(true, { access_token: 'new-at', expires_in: 3600 })));
+    const result = await refreshGoogleToken(account);
+    expect(result.oauth_refresh_token).toBe(account.oauth_refresh_token);
+  });
+
   it('surfaces invalid_grant as a machine code without the provider body', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonRes(false, {
       error: 'invalid_grant', error_description: 'Token has been expired or revoked. stored-rt',

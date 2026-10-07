@@ -212,6 +212,20 @@ export function deliveryFailure(err, account) {
   return new JobError(sanitizeSmtpError(err), { outcome: 'fail', code: 'smtp_rejected' });
 }
 
+const GMAIL_IMAP_HOSTS = new Set(['imap.gmail.com', 'imap.googlemail.com']);
+const GMAIL_SMTP_HOSTS = new Set(['smtp.gmail.com', 'smtp.googlemail.com']);
+
+// Whether the mail server files the Sent copy itself, so the panel must not APPEND one. OAuth
+// providers (Gmail, Microsoft) do. So does Gmail added with manual IMAP/SMTP settings: a letter
+// sent through Gmail's own SMTP server lands in that Gmail mailbox's Sent (support.google.com/mail
+// /answer/78892), and an APPEND would at best duplicate it. Matched by exact host: the Workspace
+// relay (smtp-relay.gmail.com) files nothing, nor does Gmail SMTP for a mailbox kept elsewhere.
+export function serverSavesSentCopy(account) {
+  if (account?.oauth_provider) return true;
+  const host = (value) => String(value ?? '').trim().toLowerCase();
+  return GMAIL_IMAP_HOSTS.has(host(account?.imap_host)) && GMAIL_SMTP_HOSTS.has(host(account?.smtp_host));
+}
+
 // Sends the letter. mail: { options, meta } as routes/send.js built it (options: nodemailer
 // options with Buffer attachments; meta: normalized to/cc/bcc, subject, fromName, fromEmail,
 // snippet). actorUserId: the author, journaled as the sender. markEffectStarted: called right
@@ -252,16 +266,16 @@ export async function deliverOutgoingMessage({
     threadId = gmailThreadIdFromProviderThreadId(threadRow.rows[0]?.provider_thread_id ?? null);
   }
 
-  // OAuth providers (Gmail, Microsoft) save sent mail to IMAP automatically via their
-  // servers — skip APPEND and sync after a delay.  All other accounts use direct IMAP
-  // APPEND so sent mail reliably appears regardless of what the SMTP server does.
-  const serverAutoSaves = !!account.oauth_provider;
+  // A server that saves the Sent copy itself: skip APPEND and sync after a delay. All other
+  // accounts use direct IMAP APPEND so sent mail reliably appears regardless of what the SMTP
+  // server does.
+  const serverAutoSaves = serverSavesSentCopy(account);
 
   // For servers that don't auto-save, generate the raw MIME now so we can APPEND it.
   // Use CRLF newlines ('windows'): RFC 5322 / IMAP APPEND require CRLF. A bare-LF message is
   // stored verbatim by strict servers (e.g. PurelyMail/Dovecot), and downstream clients then
   // mis-parse the headers — the reporter saw Subject and the To display-name dropped (#365). This
-  // only affects non-OAuth accounts (OAuth servers auto-save and skip this path); the SMTP-
+  // only affects accounts whose server does not auto-save (those skip this path); the SMTP-
   // delivered copy uses a separate transport that is already CRLF, so only the Sent copy was wrong.
   let rawMessage = null;
   if (!serverAutoSaves) {

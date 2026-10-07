@@ -1065,8 +1065,10 @@ function safeDate(d) {
 // flagPollEveryTicks:  for non-push flag providers, poll flags every N successful sync ticks.
 // snippetIndex:        run the background snippet indexer after backfill.
 //                      Disabled for providers that throttle body fetches too aggressively.
-// skipFolderPatterns:  folder path substrings to skip during backfill (label-view dedup).
-// skipFolderNames:     exact folder paths to skip (non-selectable namespace containers).
+// skipSpecialUse:      special-use flags of duplicate views to skip during backfill and the
+//                      status check (label-view dedup); see skipsDuplicateView().
+// skipFolderNames:     exact folder paths to skip, lowercased: namespace containers and the
+//                      duplicate views on servers that do not flag them.
 // batchSize/Delay/errorDelay/batchesPerConn: backfill rate-limit tuning.
 // connectStaggerMs:     base gap between successive account connects at startup, to keep the
 //                       initial burst under a provider's per-IP connection rate limit.
@@ -1120,10 +1122,15 @@ const PROVIDERS = {
     pushesFlags: false,
     snippetIndex: false,
     speculativeFetch: false,
-    skipFolderPatterns: ['all mail', '[gmail]/starred', '[gmail]/important'],
-    // [Gmail] is a namespace container — not a selectable mailbox. It must be
-    // matched exactly so that real subfolders like [Gmail]/Drafts are not skipped.
-    skipFolderNames: ['[gmail]'],
+    // All Mail, Starred and Important repeat letters stored under other labels. Gmail's LIST flags
+    // them \All, \Flagged and \Important (localized names keep the flag). imapflow resolves only
+    // the first two into specialUse; syncFolders stores \Important from the raw LIST flags
+    // (folderSpecialUse). The exact names cover a row saved without the flag. Matched exactly,
+    // never as a substring: a user label such as "Projects/All Mail" is a real folder. [Gmail],
+    // [GoogleMail] and [Google Mail] (the prefixes Gmail uses in some countries) are namespace
+    // containers, not selectable mailboxes; real subfolders like [Gmail]/Drafts are kept.
+    skipSpecialUse: ['\\All', '\\Flagged', '\\Important'],
+    skipFolderNames: ['[gmail]', '[googlemail]', '[google mail]'].flatMap(ns => [ns, ...['all mail', 'starred', 'important'].map(view => `${ns}/${view}`)]),
   },
   yahoo: {
     // Yahoo accepts about three simultaneous sessions per account: a fourth login gets
@@ -1147,7 +1154,7 @@ const PROVIDERS = {
     pushesFlags: true,
     snippetIndex: true,
     speculativeFetch: false,
-    skipFolderPatterns: [],
+    skipSpecialUse: [],
     skipFolderNames: [],
   },
   apple: {
@@ -1157,7 +1164,7 @@ const PROVIDERS = {
     pushesFlags: true,
     snippetIndex: true,
     speculativeFetch: true,
-    skipFolderPatterns: [],
+    skipSpecialUse: [],
     skipFolderNames: [],
   },
   microsoft: {
@@ -1166,7 +1173,7 @@ const PROVIDERS = {
     pushesFlags: true,
     snippetIndex: true,
     speculativeFetch: true,
-    skipFolderPatterns: [],
+    skipSpecialUse: [],
     skipFolderNames: [],
   },
   purelymail: {
@@ -1210,7 +1217,7 @@ const PROVIDERS = {
     prefetchNewBodies: true,
     prefetchNewBodiesLimit: 1, // warm only the newest arrival; avoids BODY[] bursts while
                                // making notification-click opens use the DB cache.
-    skipFolderPatterns: [],
+    skipSpecialUse: [],
     skipFolderNames: [],
   },
   strato: {
@@ -1226,7 +1233,7 @@ const PROVIDERS = {
     pushesFlags: true,
     snippetIndex: true,
     speculativeFetch: true,
-    skipFolderPatterns: [],
+    skipSpecialUse: [],
     skipFolderNames: [],
     disableIMAP4rev2: true,
   },
@@ -1237,7 +1244,7 @@ const PROVIDERS = {
     pushesFlags: true,
     snippetIndex: true,
     speculativeFetch: true,
-    skipFolderPatterns: [],
+    skipSpecialUse: [],
     skipFolderNames: [],
   },
 };
@@ -1343,6 +1350,21 @@ export async function deleteMessageCopyRow(accountId, uid, folder) {
 export async function emitSectionsChanged(mgr, account, changedCount) {
   if (!(changedCount > 0)) return;
   await pluginRegistry.runHook('sectionsChanged', { mgr, account, changedCount });
+}
+
+// A provider's duplicate-view folder (Gmail's All Mail, Starred, Important), by its special-use
+// flag or its exact path; never by a substring of a user's own folder name.
+export function skipsDuplicateView(profile, path, specialUse) {
+  return (!!specialUse && profile.skipSpecialUse.includes(specialUse))
+    || profile.skipFolderNames.includes(String(path).toLowerCase());
+}
+
+// The special use a folder row stores: imapflow's specialUse, else Gmail's \Important from the raw
+// LIST flags (imapflow knows only \All \Archive \Drafts \Flagged \Junk \Sent \Trash), so the
+// Important view is skipped (skipsDuplicateView) and treated as virtual (moveQueue.js) in any language.
+export function folderSpecialUse(mailbox) {
+  if (mailbox?.specialUse) return mailbox.specialUse;
+  return mailbox?.flags?.has?.('\\Important') ? '\\Important' : null;
 }
 
 export function providerProfile(account) {
@@ -2387,7 +2409,7 @@ export class ImapManager {
     this._statusAccountTimers = new Map();
     this.folderStatusMonitor = new FolderStatusMonitor({
       withClient: (account, fn) => this._withCountClient(account, fn),
-      enqueueSync: (account, path, status) => this._queueObservedFolder(account, path, status),
+      enqueueSync: (account, path, status, specialUse) => this._queueObservedFolder(account, path, status, specialUse),
       broadcast: (...args) => this.broadcast(...args),
     });
     // OAuth accounts waiting for reconsent are skipped: they cannot log in.
@@ -3034,6 +3056,11 @@ export class ImapManager {
     // keeps climbing the ladder.
     // An OAuth grant that was revoked stays down until the user consents again: the consent
     // callbacks reset the flag and reconnect with the fresh row.
+    // A turned-off mailbox is not connected by any caller: enabling it again connects it.
+    if (account.enabled === false) {
+      logger.debug(`connectAccount: ${logAccount(account)} skipped — mailbox disabled`);
+      return false;
+    }
     if (account.oauth_reconnect_required) {
       logger.debug(`connectAccount: ${logAccount(account)} skipped — OAuth reconnect required`);
       return false;
@@ -4340,10 +4367,10 @@ export class ImapManager {
     await this._clearAccountError(account);
   }
 
-  _queueObservedFolder(account, path, status) {
+  _queueObservedFolder(account, path, status, specialUse = null) {
     const profile = providerProfile(account);
     // Observe counts for every selectable folder, but preserve deliberate Gmail view exclusions.
-    if (profile.skipFolderPatterns.some(p => path.toLowerCase().includes(p)) || profile.skipFolderNames.includes(path.toLowerCase())) return false;
+    if (skipsDuplicateView(profile, path, specialUse)) return false;
     const key = `${account.id}:${path}`;
     if (Date.now() < (this._statusSyncBackoff.get(key)?.until || 0)) return false;
     if (this._statusSyncRunning.has(key) || this.backfillRunning.has(key) || this.onDemandSyncing.has(key)) return false;
@@ -4558,7 +4585,7 @@ export class ImapManager {
           VALUES ($1, $2, $3, $4, $5, $6)
           ON CONFLICT (account_id, path) DO UPDATE
           SET name = $3, special_use = $5, no_select = $6, updated_at = NOW()
-        `, [account.id, mb.path, mb.name, mb.delimiter, mb.specialUse || null, noSelect]);
+        `, [account.id, mb.path, mb.name, mb.delimiter, folderSpecialUse(mb), noSelect]);
       }
       // Many IMAP servers omit INBOX from LIST responses (it is implicit per RFC 3501).
       // Without a row in folders, subfolders like INBOX/Work have no parent in the map
@@ -5978,7 +6005,7 @@ export class ImapManager {
       // catch-up — live sync (IDLE + the periodic interval) is unaffected and keeps flowing.
       await this._bgConnSem.acquire(host);
       slotHeld = true;
-      const { skipFolderPatterns, skipFolderNames } = providerProfile(account);
+      const profile = providerProfile(account);
 
       // Stop opening per-folder logins once the provider has refused us or rejected the
       // credentials. The skipped folders are not lost: the UID-diff backfill is idempotent, so
@@ -6000,15 +6027,15 @@ export class ImapManager {
         return;
       }
 
-      // Then all other known folders (discovered at connect time by syncFolders)
+      // Then all other known folders (discovered at connect time by syncFolders). A \Noselect
+      // container cannot be opened, so it has nothing to backfill.
       const folderResult = await query(
-        "SELECT path FROM folders WHERE account_id = $1 AND path != 'INBOX' ORDER BY path",
+        "SELECT path, special_use FROM folders WHERE account_id = $1 AND path != 'INBOX' AND NOT no_select ORDER BY path",
         [account.id]
       );
-      const folders = folderResult.rows.map(r => r.path).filter(path => {
-        const pathLower = path.toLowerCase();
-        return !skipFolderPatterns.some(pat => pathLower.includes(pat)) && !skipFolderNames.includes(pathLower);
-      });
+      const folders = folderResult.rows
+        .filter(r => !skipsDuplicateView(profile, r.path, r.special_use))
+        .map(r => r.path);
 
       for (let i = 0; i < folders.length; i++) {
         const path = folders[i];

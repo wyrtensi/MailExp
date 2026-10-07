@@ -10,7 +10,7 @@ vi.mock('../utils/mailUtils.js', () => ({ resolveSentFolder: vi.fn() }));
 import { query } from './db.js';
 import { createAccountSmtpTransport } from './smtpTransport.js';
 import { resolveSentFolder } from '../utils/mailUtils.js';
-import { deliverOutgoingMessage } from './sendDelivery.js';
+import { deliverOutgoingMessage, serverSavesSentCopy } from './sendDelivery.js';
 
 const imapManager = {
   appendToSent: vi.fn(),
@@ -64,4 +64,29 @@ describe('the Sent folder sync after a send', () => {
     await vi.waitFor(() => expect(imapManager.syncFolderOnDemand).toHaveBeenCalled(), { timeout: 5000, interval: 200 });
     expect(imapManager.syncFolderOnDemand).toHaveBeenCalledWith(oauth, 'Sent', { background: true });
   }, 10000);
+
+  it('does not APPEND for Gmail added with manual IMAP/SMTP settings: Gmail saves the Sent copy', async () => {
+    const gmail = { ...account, imap_host: 'imap.gmail.com', smtp_host: 'SMTP.gmail.com' };
+    createAccountSmtpTransport.mockResolvedValue({ account: gmail, transport: { sendMail } });
+    await expect(deliver(gmail)).resolves.toMatchObject({ sentFolder: 'Sent', sentCopySaved: null });
+    await vi.waitFor(() => expect(imapManager.syncFolderOnDemand).toHaveBeenCalled(), { timeout: 5000, interval: 200 });
+    expect(imapManager.appendToSent).not.toHaveBeenCalled();
+  }, 10000);
+});
+
+describe('serverSavesSentCopy', () => {
+  it('trusts an OAuth provider, and Gmail sending through its own SMTP server', () => {
+    expect(serverSavesSentCopy({ oauth_provider: 'google' })).toBe(true);
+    expect(serverSavesSentCopy({ oauth_provider: 'microsoft' })).toBe(true);
+    expect(serverSavesSentCopy({ imap_host: 'imap.gmail.com', smtp_host: 'smtp.gmail.com' })).toBe(true);
+    expect(serverSavesSentCopy({ imap_host: 'imap.googlemail.com', smtp_host: 'smtp.googlemail.com' })).toBe(true);
+  });
+
+  it('APPENDs when the letter does not go out through Gmail into the same Gmail mailbox', () => {
+    expect(serverSavesSentCopy({ imap_host: 'imap.example.com', smtp_host: 'smtp.example.com' })).toBe(false);
+    // Workspace SMTP relay does not file a Sent copy; nor does Gmail SMTP for a non-Gmail mailbox.
+    expect(serverSavesSentCopy({ imap_host: 'imap.gmail.com', smtp_host: 'smtp-relay.gmail.com' })).toBe(false);
+    expect(serverSavesSentCopy({ imap_host: 'imap.example.com', smtp_host: 'smtp.gmail.com' })).toBe(false);
+    expect(serverSavesSentCopy({ imap_host: 'imap.gmail.com', smtp_host: 'smtp.example.com' })).toBe(false);
+  });
 });

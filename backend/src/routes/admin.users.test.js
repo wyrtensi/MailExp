@@ -76,6 +76,7 @@ const sqlCall = (re) => calls.find(([sql]) => re.test(sql));
 const lock = [/pg_advisory_xact_lock/, { rows: [] }];
 const target = (row) => [/SELECT id, email, is_admin, disabled_at FROM users WHERE id = \$1 FOR UPDATE/, { rows: row ? [row] : [] }];
 const otherAdmins = (count) => [/SELECT COUNT\(\*\)::int AS count FROM users/, { rows: [{ count }] }];
+const deleteUser = [/DELETE FROM users WHERE id = \$1/, { rows: [] }];
 
 beforeEach(() => {
   query.mockReset();
@@ -209,6 +210,19 @@ describe('PATCH /api/admin/users/:id', () => {
     expect((await send('PATCH', `/users/${USER_ID}`, { email: 'admin@example.com' })).body.code).toBe('email_taken');
   });
 
+  it('signs the user out when their email is replaced', async () => {
+    installTransaction([lock, target(USER_ROW), update(USER_ROW), [/SELECT id FROM users WHERE lower\(email\) = \$1 AND id <> \$2/, { rows: [] }]]);
+    expect((await send('PATCH', `/users/${USER_ID}`, { email: 'new@example.com' })).body.user.email).toBe('new@example.com');
+    expect(destroyUserSessions).toHaveBeenCalledWith(USER_ID);
+    expect(closeUserSockets).toHaveBeenCalledWith(imapManager.wss, USER_ID);
+  });
+
+  it('keeps sessions when the email is resent unchanged', async () => {
+    installTransaction([lock, target(USER_ROW), update(USER_ROW)]);
+    await send('PATCH', `/users/${USER_ID}`, { email: 'User@Example.com' });
+    expect(destroyUserSessions).not.toHaveBeenCalled();
+  });
+
   it('signs a user out when google mode loses their email', async () => {
     vi.stubEnv('AUTH_MODE', 'google');
     installTransaction([lock, target(USER_ROW), update(USER_ROW)]);
@@ -229,13 +243,23 @@ describe('DELETE /api/admin/users/:id', () => {
   });
 
   it('signs the user out everywhere and deletes them, keeping the mailboxes', async () => {
-    installTransaction([lock, target(USER_ROW)]);
-    query.mockResolvedValue({ rows: [] });
+    installTransaction([lock, target(USER_ROW), deleteUser]);
     expect(await send('DELETE', `/users/${USER_ID}`)).toEqual({ status: 200, body: { ok: true } });
     expect(destroyUserSessions).toHaveBeenCalledWith(USER_ID);
     expect(closeUserSockets).toHaveBeenCalledWith(imapManager.wss, USER_ID);
-    expect(query).toHaveBeenCalledWith('DELETE FROM users WHERE id = $1', [USER_ID]);
+    expect(sqlCall(/DELETE FROM users/)).toEqual(['DELETE FROM users WHERE id = $1', [USER_ID]]);
     expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
+  });
+
+  it('deletes under the admin-guard lock, in the transaction that checked the other admins', async () => {
+    // Two admins deleting each other at once: each check must still hold when its delete runs.
+    installTransaction([lock, target({ ...USER_ROW, is_admin: true }), otherAdmins(1), deleteUser]);
+    expect((await send('DELETE', `/users/${USER_ID}`)).status).toBe(200);
+    const order = calls.map(([sql]) => sql);
+    expect(order.findIndex((sql) => /DELETE FROM users/.test(sql)))
+      .toBeGreaterThan(order.findIndex((sql) => /COUNT/.test(sql)));
+    expect(order[0]).toMatch(/pg_advisory_xact_lock/);
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM users/.test(sql))).toBe(false);
   });
 });
 
@@ -281,8 +305,7 @@ describe('user administration is journaled', () => {
   });
 
   it('records a deleted user with the email and role it had', async () => {
-    installTransaction([lock, target(USER_ROW)]);
-    query.mockResolvedValue({ rows: [] });
+    installTransaction([lock, target(USER_ROW), deleteUser]);
     await send('DELETE', `/users/${USER_ID}`);
     expect(recordAudit).toHaveBeenCalledWith([entry('user.deleted')]);
   });
@@ -316,8 +339,7 @@ describe('user changes request an Access sync', () => {
     installTransaction([lock, target(USER_ROW), update(USER_ROW), [/SELECT id FROM users WHERE lower\(email\) = \$1 AND id <> \$2/, { rows: [] }]]);
     await send('PATCH', `/users/${USER_ID}`, { email: 'new@example.com' });
 
-    installTransaction([lock, target(USER_ROW)]);
-    query.mockResolvedValue({ rows: [] });
+    installTransaction([lock, target(USER_ROW), deleteUser]);
     await send('DELETE', `/users/${USER_ID}`);
 
     expect(requestAccessSync.mock.calls).toEqual([

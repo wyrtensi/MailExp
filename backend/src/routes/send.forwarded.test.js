@@ -63,7 +63,7 @@ describe('POST /api/mail/send — forwarded attachment guards (#F2)', () => {
       forwardedAttachments: [{ messageId: MSG_ID, part: '2' }],
     });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/exceeds 25 MB/);
+    expect((await res.json()).error).toBe('Total attachment size exceeds 25 MiB');
     // The whole point: no IMAP fetch happens when the declared size already blows the limit.
     expect(imapManager.fetchAttachment).not.toHaveBeenCalled();
   });
