@@ -13,7 +13,7 @@ import {
   deleteMailbox, getDeleteAfterDays, getDiskStatus, getMailNodeConfig, listDomains, listMailboxes, parseHostName, parseLocalPart,
   provisionMailbox,
 } from './mailcow.js';
-import { READ_ONLY_FILTER_DESC, closeLocalDelivery, openLocalDelivery } from './readOnlyFilter.js';
+import { READ_ONLY_FILTER_DESC, closeLocalDelivery, lockMailbox, openLocalDelivery } from './readOnlyFilter.js';
 import { cancelDeletion, requestDeletion } from './mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from './domains.js';
 import { getEopSettings } from './eopSettings.js';
@@ -350,15 +350,13 @@ async function kickMailboxDomain(email, actor) {
   await kickDomainSync(String(email).toLowerCase().split('@')[1], jobBy(actor));
 }
 
-// One action at a time per mailbox, across processes (the panel and the CLI): every action below runs
-// in one transaction that takes this lock first, does its node call and its row changes inside, and
-// commits together. Taken before the seats lock, never after. The node calls come before the seats
+// One action at a time per mailbox, across processes (the panel and the CLI), and the reconciliation
+// of the read-only filters (readOnlyFilter.js lockMailbox): every action below runs in one
+// transaction that takes that lock first, does its node call and its row changes inside, and commits
+// together. Taken before the seats lock, never after. The node calls come before the seats
 // lock and hold no row lock: a slow node then holds up neither the other mailboxes' seat changes
 // (creations, cancels, the hold) nor this row's other writers (the sync), whose statements would
 // otherwise run into the statement timeout.
-async function lockMailbox(client, accountId) {
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mail_node:mailbox:${accountId}`]);
-}
 
 // The mailbox as the action sees it once it holds the lock. No row lock: only the actions under the
 // mailbox lock change delete_after and deactivated_at, and the deletion job removes only a row pending

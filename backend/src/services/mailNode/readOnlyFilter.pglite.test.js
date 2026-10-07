@@ -7,7 +7,10 @@ import { createFakeMailcow } from '../testing/fakeMailcow.js';
 
 const dbState = { db: null };
 const fake = vi.hoisted(() => ({ current: null }));
-vi.mock('../db.js', () => ({ query: (sql, params) => dbState.db.query(sql, params) }));
+vi.mock('../db.js', () => ({
+  query: (sql, params) => dbState.db.query(sql, params),
+  withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
+}));
 vi.mock('../encryption.js', () => ({ encrypt: (v) => `enc:${v}`, decrypt: (v) => v }));
 vi.mock('../safeFetch.js', () => ({ safeFetch: (url, options) => fake.current.fetch(url, options) }));
 
@@ -121,6 +124,33 @@ describe('reconcileLocalDelivery', () => {
     await addAccount('b@example.com', { deleteAfter: true });
     mc.node.refuse['add/filter'] = 'sieve_error';
     expect(await reconcileLocalDelivery(CFG)).toEqual({ closed: 0, opened: 0, failed: 2 });
+  });
+
+  // An action (mailboxActions.js) puts the filter in, then commits its row change: the run must not
+  // undo the filter of a mailbox whose change was in flight when it read the rows.
+  it('acts on each mailbox as it is under the mailbox lock of the actions, not as the first read saw it', async () => {
+    await addAccount('a@example.com');
+    const { rows: [{ id }] } = await db.query("SELECT id FROM email_accounts WHERE email_address = 'a@example.com'");
+    await closeLocalDelivery(CFG, 'a@example.com');
+    const seen = [];
+    const original = db.transaction.bind(db);
+    const spy = vi.spyOn(db, 'transaction').mockImplementation((fn) => original((tx) => fn({
+      query: (sql, params) => { seen.push([sql, params]); return tx.query(sql, params); },
+    })));
+    // The deactivation commits after the run read the rows and before it reads the node.
+    fake.current = {
+      fetch: async (url, options) => {
+        if (String(url).includes('get/filters/all')) await db.query('UPDATE email_accounts SET deactivated_at = NOW()');
+        return mc.fetch(url, options);
+      },
+    };
+    try {
+      expect(await reconcileLocalDelivery(CFG)).toMatchObject({ opened: 0, failed: 0 });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(filtersOf('a@example.com').filter((f) => f.active)).toHaveLength(1);
+    expect(seen.some(([sql, params]) => sql.includes('pg_advisory_xact_lock') && params?.[0] === `mail_node:mailbox:${id}`)).toBe(true);
   });
 
   it('throws when the node cannot be asked', async () => {

@@ -1,4 +1,4 @@
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
 import {
   addMailboxFilter, deleteMailboxFilters, editMailboxFilter, listAllMailboxFilters, listMailboxFilters,
 } from './mailcow.js';
@@ -14,6 +14,14 @@ import {
 // re-enables exactly those, then deletes ours. Every step is idempotent, so a retry after a crash
 // finishes the job. reconcileLocalDelivery makes the node match the rows (the alert run calls it), so
 // a failed step, a mailbox that became read-only in a migration or an edit made by hand heal.
+
+// One action at a time per mailbox, across processes (the panel and the CLI): the node mailbox
+// actions (mailboxActions.js) and the reconciliation below take it in a transaction first, so the
+// reconciliation never acts on a mailbox whose change is in flight (its filter in, its row not yet
+// committed). Taken before the seats lock, never after.
+export async function lockMailbox(client, accountId) {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`mail_node:mailbox:${accountId}`]);
+}
 
 export const READ_ONLY_FILTER_DESC = 'mailexpert-read-only';
 const READ_ONLY_SCRIPT = 'require ["reject"];\nreject "This mailbox is closed and no longer takes mail.";\n';
@@ -54,14 +62,16 @@ export async function openLocalDelivery(cfg, email) {
 }
 
 // Makes the node's filters match the rows: a read-only mailbox has our filter, a working one has
-// none. One read of every filter of the node; only the differences are written. Returns
-// { closed, opened, failed }; a node that cannot be asked throws.
+// none. One read of every filter of the node; only the differences are written, each under the
+// mailbox locks of the address's rows with the rows read again there (an action may have changed
+// them since the first read). Returns { closed, opened, failed }; a node that cannot be asked throws.
 export async function reconcileLocalDelivery(cfg) {
+  const host = String(cfg.mailHost).toLowerCase();
   const { rows } = await query(`
     SELECT lower(email_address) AS email,
            (delete_after IS NOT NULL OR deactivated_at IS NOT NULL) AS read_only
       FROM email_accounts
-     WHERE mail_node AND lower(imap_host) = $1`, [String(cfg.mailHost).toLowerCase()]);
+     WHERE mail_node AND lower(imap_host) = $1`, [host]);
   // An address held by several rows is read-only only when all of them are.
   const readOnly = new Map();
   for (const row of rows) readOnly.set(row.email, (readOnly.get(row.email) ?? true) && row.read_only);
@@ -75,14 +85,26 @@ export async function reconcileLocalDelivery(cfg) {
     const filters = byUser.get(email) ?? [];
     const hasActive = filters.some((f) => isOurs(f) && f.active);
     const hasAny = filters.some((f) => f.desc.startsWith(READ_ONLY_FILTER_DESC));
+    if (!(closed && !hasActive) && !(!closed && hasAny)) continue;
     try {
-      if (closed && !hasActive) {
-        await closeLocalDelivery(cfg, email);
-        result.closed += 1;
-      } else if (!closed && hasAny) {
+      const done = await withTransaction(async (client) => {
+        const { rows: ids } = await client.query(
+          'SELECT id FROM email_accounts WHERE mail_node AND lower(imap_host) = $1 AND lower(email_address) = $2 ORDER BY id', [host, email],
+        );
+        for (const { id } of ids) await lockMailbox(client, id);
+        const { rows: now } = await client.query(`
+          SELECT (delete_after IS NOT NULL OR deactivated_at IS NOT NULL) AS read_only
+            FROM email_accounts WHERE id = ANY($1::uuid[])`, [ids.map((r) => r.id)]);
+        if (!now.length) return null;
+        // Both steps are idempotent and read the mailbox's filters again.
+        if (now.every((r) => r.read_only)) {
+          await closeLocalDelivery(cfg, email);
+          return closed ? 'closed' : null;
+        }
         await openLocalDelivery(cfg, email);
-        result.opened += 1;
-      }
+        return closed ? null : 'opened';
+      });
+      if (done) result[done] += 1;
     } catch (err) {
       if (err?.code === 'mail_node_unreachable' || err?.code === 'mail_node_auth') throw err;
       console.error(`Read-only filter of a node mailbox not reconciled: ${err?.code || 'error'}`);
