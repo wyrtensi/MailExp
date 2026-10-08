@@ -30,7 +30,7 @@ import { threadCacheKey } from '../utils/threadKey.js';
 import { clampComposePosition, clampComposeSize } from '../utils/composeWindow.js';
 import { SmileIcon } from './UiIcons.jsx';
 import SendLaterMenu from './SendLaterMenu.jsx';
-import { composeContext } from '../utils/scheduledSend.js';
+import { composeContext, sendFailureKey } from '../utils/scheduledSend.js';
 import { trackSend } from '../utils/sendTracker.js';
 import { formatDateTime } from '../utils/formatDate.js';
 import { useOnValuesChange } from '../hooks/useOnValuesChange.js';
@@ -1009,8 +1009,12 @@ export default function ComposeModal() {
         // A conflict means this key is spent: the next attempt is a new send.
         if (err.code === 'idempotency_conflict' || err.code === 'send_cancelled') idempotencyKeyRef.current = null;
         setError(t(SEND_ERROR_KEYS[err.code]));
+      } else if (sendFailureKey(err.code)) {
+        // A disabled or read-only mailbox, a letter that cannot be built: the same words as a
+        // queued letter that failed for that reason.
+        setError(t(sendFailureKey(err.code)));
       } else {
-        setError(err.message);
+        setError(err.message || t('scheduled.failure.generic'));
       }
       setSending(false);
     }
@@ -1117,7 +1121,10 @@ export default function ComposeModal() {
       console.error('Save draft failed:', err.message);
       // A save the user asked for says when the mailbox is busy or its password was rejected;
       // autosave stays quiet and retries on its next interval.
-      if (!silent && !closedRef.current && isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+      if (!silent && !closedRef.current) {
+        if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+        else addNotification({ type: 'error', title: t('compose.draftSaveFailed'), body: err.message || t('compose.draftSaveFailedBody') });
+      }
     } finally {
       reportStored(null); // no-op once the answer was reported
       setSavingDraft(false);

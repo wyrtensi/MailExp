@@ -207,7 +207,9 @@
     "signatureHint": "Added at the end of the letter. In the plain-text copy a \"-- \" line goes before it, so mail programs recognise the signature and leave it out of quotes in replies.",
     "priorityHint": "Marks the letter as important or unimportant (X-Priority and Importance headers). Outlook and Thunderbird show the mark; Gmail does not.",
     "readOnlyOption": "read-only",
-    "disabledOption": "disabled"
+    "disabledOption": "disabled",
+    "draftSaveFailed": "Draft not saved",
+    "draftSaveFailedBody": "Check the connection and try saving again."
   },
   "message": {
     "find": {
@@ -3587,7 +3589,12 @@
       "auth": "The mail server did not accept the mailbox's credentials.",
       "reconnect": "Access to this mailbox was revoked or has expired. Reconnect it to send mail.",
       "authorDisabled": "Its author can no longer send mail.",
-      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. Do not send it again."
+      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. Do not send it again.",
+      "mailboxDisabled": "This mailbox is disabled and cannot send. An administrator can turn it back on in the mailbox settings.",
+      "mailboxReadOnly": "This mailbox is read-only (deactivated or waiting for deletion) and cannot send. Send from another mailbox or ask an administrator.",
+      "buildFailed": "The letter could not be put together for sending. Check the attachments and pictures in the text, then try again.",
+      "accountMissing": "The mailbox of this letter was deleted, so it cannot be sent.",
+      "letterMissing": "The content of this letter is gone, so it cannot be sent. Write it again."
     },
     "undoFailedTitle": "Could not undo",
     "undoTooLate": "The letter is already being sent and can no longer be stopped.",

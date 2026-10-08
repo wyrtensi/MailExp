@@ -86,6 +86,13 @@ const FAILURE_KEYS = Object.freeze({
   author_disabled: 'scheduled.failure.authorDisabled',
   node_alias_stale: 'compose.errorNodeAliasStale',
   delivered_unrecorded: 'scheduled.failure.deliveredUnrecorded',
+  // The mailbox cannot send or the letter cannot go out at all (backend routes/send.js refuses
+  // these at once, services/sendQueue.js when the job runs).
+  mailbox_disabled: 'scheduled.failure.mailboxDisabled',
+  mailbox_read_only: 'scheduled.failure.mailboxReadOnly',
+  mail_build_failed: 'scheduled.failure.buildFailed',
+  account_missing: 'scheduled.failure.accountMissing',
+  letter_missing: 'scheduled.failure.letterMissing',
 });
 
 // A letter the mail server accepted although its job could not be recorded as sent (backend
