@@ -4484,7 +4484,7 @@ describe('health check asserts that IDLE is running', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     query.mockReset();
-    query.mockResolvedValue({ rows: [row] });
+    query.mockImplementation(async (sql) => ({ rows: /oauth_reconnect_required = true/.test(sql) ? [] : [row] }));
     _resetImapMetrics();
   });
   afterEach(() => { vi.restoreAllMocks(); });

@@ -91,3 +91,141 @@ setup() {
   run bash "$SCRIPT" list
   [[ $output != *"see --help"* ]]
 }
+
+@test "show, enable, close, disable and delete need exactly one app id" {
+  for cmd in show enable close disable delete; do
+    run bash "$SCRIPT" "$cmd"
+    [ "$status" -eq 2 ]
+    [[ $output == *"$cmd needs its arguments"* ]]
+    run bash "$SCRIPT" "$cmd" an-id extra
+    [ "$status" -eq 2 ]
+    [[ $output == *"unknown argument: extra"* ]]
+  done
+}
+
+@test "set-limit needs an id and a positive whole number" {
+  run bash "$SCRIPT" set-limit an-id
+  [ "$status" -eq 2 ]
+  for bad in 0 1.5 abc; do
+    run bash "$SCRIPT" set-limit an-id "$bad"
+    [ "$status" -eq 2 ]
+    [[ $output == *"set-limit needs a positive whole number"* ]]
+  done
+}
+
+@test "set-label needs an id and a label, and a label may be named like a command" {
+  run bash "$SCRIPT" set-label an-id
+  [ "$status" -eq 2 ]
+  run bash "$SCRIPT" set-label an-id list
+  [[ $output != *"one command only"* && $output != *"needs its arguments"* ]]
+}
+
+@test "replace-secret needs an id and a readable secret file or -" {
+  run bash "$SCRIPT" replace-secret an-id
+  [ "$status" -eq 2 ]
+  run bash "$SCRIPT" replace-secret an-id "$BATS_TEST_TMPDIR/missing.txt"
+  [ "$status" -eq 2 ]
+  [[ $output == *"no such file"* ]]
+  run bash "$SCRIPT" replace-secret an-id -
+  [[ $output != *"needs its arguments"* && $output != *"no such file"* ]]
+}
+
+@test "options are only accepted by the commands that use them" {
+  run bash "$SCRIPT" list --yes
+  [ "$status" -eq 2 ]
+  [[ $output == *"--yes applies to delete only"* ]]
+  run bash "$SCRIPT" disable an-id --json
+  [ "$status" -eq 2 ]
+  [[ $output == *"--json applies to list and show only"* ]]
+  run bash "$SCRIPT" show an-id --user-limit 5
+  [ "$status" -eq 2 ]
+  [[ $output == *"apply to add only"* ]]
+}
+
+# --- routing past the root check: id and docker stubbed on PATH; docker records its arguments and
+# --- whatever arrives on its stdin, so file vs stdin vs /dev/null can be told apart.
+
+stub_docker() {
+  STUB=$BATS_TEST_TMPDIR/bin
+  mkdir -p "$STUB"
+  printf '#!/usr/bin/env bash\n[ "$1" = -u ] && echo 0 || command -p id "$@"\n' >"$STUB/id"
+  cat >"$STUB/docker" <<'STUB_EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *" node "*)
+    printf '%s\n' "$*" >>"$DOCKER_LOG"
+    cat >"$STDIN_LOG"
+    exit "${STUB_CLI_STATUS:-0}"
+    ;;
+esac
+exit 0
+STUB_EOF
+  chmod +x "$STUB/id" "$STUB/docker"
+  export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log STDIN_LOG=$BATS_TEST_TMPDIR/stdin.log
+  : >"$DOCKER_LOG"
+  : >"$STDIN_LOG"
+  P=$BATS_TEST_TMPDIR/p
+  mkdir -p "$P"
+  printf '%s\n' VERSION=sha-0123456789ab SIGNIN=direct DIRECT_HOST=panel.example.com LOCAL_AUTH=1 \
+    PROJECT=me-test HTTP_PORT=18090 >"$P/install.conf"
+}
+
+@test "add pipes the client JSON file into the container and keeps it out of the arguments" {
+  stub_docker
+  run bash "$SCRIPT" add "$JSON" --prefix "$P" --label "My App"
+  [ "$status" -eq 0 ]
+  grep -q -- "exec -T backend node src/cli/googleApp.js add --label My App" "$DOCKER_LOG"
+  [ "$(cat "$STDIN_LOG")" = "$(cat "$JSON")" ]
+  ! grep -q "client_secret" "$DOCKER_LOG"
+}
+
+@test "commands without a secret get /dev/null, not the caller's stdin" {
+  stub_docker
+  for cmd in "list" "show an-id" "disable an-id" "delete an-id --yes" "set-limit an-id 5" "set-label an-id Name"; do
+    : >"$DOCKER_LOG"
+    # shellcheck disable=SC2086
+    run bash "$SCRIPT" $cmd --prefix "$P" <<<"leaked-from-caller"
+    [ "$status" -eq 0 ]
+    [ ! -s "$STDIN_LOG" ]
+    grep -q -- "node src/cli/googleApp.js ${cmd%% *}" "$DOCKER_LOG"
+  done
+}
+
+@test "replace-secret reads a file into the container, or the caller's stdin with -" {
+  stub_docker
+  printf '%s' 'GOCSPX-from-file' >"$BATS_TEST_TMPDIR/secret.txt"
+  run bash "$SCRIPT" replace-secret an-id "$BATS_TEST_TMPDIR/secret.txt" --prefix "$P" <<<"ignored"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STDIN_LOG")" = "GOCSPX-from-file" ]
+  grep -q -- "googleApp.js replace-secret an-id\$" "$DOCKER_LOG"
+  run bash "$SCRIPT" replace-secret an-id - --prefix "$P" <<<"GOCSPX-from-stdin"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STDIN_LOG")" = "GOCSPX-from-stdin" ]
+  ! grep -q "GOCSPX" "$DOCKER_LOG"
+}
+
+@test "-- lets a label start with a dash and is forwarded after the options" {
+  stub_docker
+  run bash "$SCRIPT" set-label --prefix "$P" -- an-id -draft
+  [ "$status" -eq 0 ]
+  grep -q -- "googleApp.js set-label -- an-id -draft" "$DOCKER_LOG"
+  # Without --, the wrapper forwards the word and the CLI refuses it as an option (backend tests).
+  run bash "$SCRIPT" set-label an-id -draft --prefix "$P"
+  grep -q -- "googleApp.js set-label an-id -draft" "$DOCKER_LOG"
+}
+
+@test "the CLI's exit codes 1, 2 and 3 pass through" {
+  stub_docker
+  for code in 1 2 3; do
+    STUB_CLI_STATUS=$code run bash "$SCRIPT" list --prefix "$P"
+    [ "$status" -eq "$code" ]
+  done
+}
+
+@test "--help lists every command" {
+  run bash "$SCRIPT" --help
+  [ "$status" -eq 0 ]
+  for cmd in show enable close disable delete set-limit set-label replace-secret; do
+    [[ $output == *"$cmd"* ]]
+  done
+}

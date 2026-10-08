@@ -196,13 +196,17 @@ ufw, `cloudflare access`), and what is left to the human: recovery key, Google a
 mailboxes (`docs/operations/google-oauth.md`), the mail node, and with `cf`/`both` the optional
 user sync into the Access policy (`docs/operations/cloudflare.md`, section 8: the token goes in
 through `mailexpert-cli.sh access token < file`, stdin only, run by the human).
+Access recovery over SSH without the web panel (the human runs these; secrets stdin only):
+`mailexpert-cli.sh user list`, `user set <ADMIN_EMAIL> --enable --admin`, `user totp-reset <USER_EMAIL>
+--yes`, `settings set internal_auth_disabled false` (password login back on), `sso list|add|set|remove`,
+`integration microsoft show|set|remove` (`docs/operations/cli.md`, sections 3.7-3.10).
 
 Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sections 2-6е (as in quickstart.md, section 8). mailcow's
 `generate_config.sh` is interactive: the human runs it. The node's MailExpert scripts are cloned
 to `/opt/mailexpert-node-src` at the **panel's commit**, then `setup.sh --dry-run` (show the diff)
 and `setup.sh` with `--panel-ip <PANEL_IP>`; the API key and the node settings are entered by the
 human in "Настройки → Администрирование → Почтовый узел", or over SSH with the panel CLI
-(`docs/operations/cli.md`, sections 3.7-3.10): `mailexpert-cli.sh node config set --mail-host
+(`docs/operations/cli.md`, sections 3.11-3.14): `mailexpert-cli.sh node config set --mail-host
 <MAIL_HOST> --api-key-stdin < file` (stdin only, run by the human), `eop set ...`, `domain add`,
 `node apply`. The agent token for `setup.sh --agent-token-file` comes from `mailexpert-cli.sh agent
 token issue --out <TOKEN_FILE> --yes` (a 0600 file on the panel host, moved to the node by the

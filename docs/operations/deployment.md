@@ -273,6 +273,10 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
 | `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]` — синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
+| `user` | `list`, `show <EMAIL>`, `create <EMAIL> [--admin]`, `set <EMAIL> [--admin\|--no-admin] [--disable\|--enable] [--email <NEW>]`, `delete <EMAIL>`, `totp-reset <EMAIL>` — пользователи панели, с защитой последнего администратора |
+| `settings` | `get [<KEY>]`, `set <KEY> <VALUE>` — настройки экрана администратора (вход по паролю, регистрация, 2FA, лимиты входа, интервалы синхронизации, сетевые разрешения) |
+| `sso` | `list`, `add ...`, `set <ID\|SLUG> ...`, `remove <ID\|SLUG>` — SSO-провайдеры; секрет клиента только со stdin |
+| `integration` | `microsoft show\|set\|remove` — клиент Microsoft OAuth для ящиков Outlook; секрет только со stdin (`--secret`) |
 | `node` | `config show`, `config set [--mail-host <MAIL_HOST>] [--quota <MB>] [--delete-after-days <N>] [--disk-ping-url <URL>] [--panel-ips <LIST>] [--node-ip <IP>] [--api-key-stdin]` (ключ mailcow только со stdin), `apply [--domain <DOMAIN> [--confirm-dkim-delete]]`, `apply --prefilter` — настройки почтового узла и их применение |
 | `eop` | `show`, `set [--eop-host ...] [--licenses <N>] ...` (все поля экрана EOP), `budget` — настройки EOP и бюджет TERRL |
 | `seats` | `status`, `check [--wait]`, `set-hold <DAYS>`, `request <N>` — места EOP |
@@ -294,7 +298,7 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 - `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
   `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `domain ready`, `domain ack`,
   `quarantine pause`, `mailbox deactivate`, `node apply --prefilter`, `agent token issue` при ротации,
-  `agent token revoke`. Без
+  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`. Без
   терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,
