@@ -48,9 +48,9 @@ src/cli/mailexpert.js ...`, передавая все остальные арг�
   `--json`. Иначе `docker compose exec -T`: с терминалом stderr слился бы со stdout и сломал JSON. Значит,
   в конвейере, скрипте и с `--json` CLI не может задать вопрос: действие, которое просит подтверждения,
   требует `--yes` (удаление ящика — `--confirm-address`).
-- stdin обёртки доходит до CLI целиком: `access token < файл`, `sso add`, `sso set --secret`,
-  `integration microsoft set --secret` и `node config set --api-key-stdin < файл` читают секрет
-  оттуда. Свои проверки перед запуском CLI обёртка делает без stdin.
+- stdin обёртки доходит до CLI целиком: команды из раздела 2 «Секреты и stdin» читают оттуда
+  секрет, `rule create` / `rule set` — JSON правила (их `--file` — путь внутри контейнера),
+  `settings set custom_css -` — текст CSS. Свои проверки перед запуском CLI обёртка делает без stdin.
 - Единственное изменение аргументов: `agent token ... --out <TOKEN_FILE>` — файл на хосте, а не в
   контейнере. Обёртка сама создаёт его (права 0600, поверх существующего файла никогда — иначе код 2),
   запускает CLI с `--out -` (токен один на stdout) без терминала и пишет вывод в файл; при любом сбое
@@ -104,7 +104,7 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 |---|---|
 | `--json` | Печатает ответ действия как JSON на stdout, в тех же формах, что отвечает API панели. Ошибка — `{ "error", "code" }` на stdout. С `--json` вопросов не бывает никогда, даже в терминале. |
 | `--yes`, `-y` | Отвечает «да» на подтверждение необратимого действия. Удаление ящика им не подтверждается (нужен `--confirm-address`). |
-| `--as <ADMIN_EMAIL>` | Записать действие в журнал от имени этого администратора. Администратор ищется по адресу (или имени пользователя), он должен быть включённым администратором панели, иначе отказ `admin_not_found` (код 1) до любого действия. Без `--as` исполнитель в журнале — `cli`. |
+| `--as <ADMIN_EMAIL>` | Записать действие в журнал от имени этого администратора. Администратор ищется по адресу или имени пользователя без учёта регистра; совпасть должен ровно один включённый администратор панели, иначе отказ `admin_not_found` (код 1) до любого действия. Без `--as` исполнитель в журнале — `cli`. |
 | `--wait`, `--timeout <SEC>` | Только у команд, ставящих задание (раздел 3). Ждать, пока воркер backend выполнит задание. `--timeout` — секунды ожидания, целое от 1 до 3600, по умолчанию 120. |
 | `--help`, `-h` | Справка CLI, группы или команды. Справка команды содержит строку `Journal:`. |
 
@@ -118,13 +118,22 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 код 1, код ошибки `cancelled`, ничего не изменено). Без терминала (конвейер, `exec -T`, `--json`) CLI не
 ждёт ответа: код 2, ошибка `confirmation_required`. `--yes` отвечает «да».
 
-Спрашивают: `domain restart`, `domain allow-authoritative`, `domain internal-relay`,
-`domain approve-alias-removal`, `quarantine pause`, `user delete`, `user totp-reset`, `sso remove`,
-`integration microsoft remove`, `invite revoke`, `system-email remove`, `mailbox oauth-reset`,
-`rule delete`, `rule run`, `queue flush`, `queue delete`, `outage delete`, `spam-quarantine release`,
-`spam-quarantine learn-spam`, `spam-quarantine delete`, `spam-quarantine node-settings apply`. Не спрашивают: `domain hold`, `domain sync`,
-`quarantine resume`, `quarantine release`, `tenant test`, `tenant antispam`, `mailbox ...` (кроме
-`delete`), все команды чтения.
+Спрашивают:
+
+- `mailbox deactivate`, `mailbox oauth-reset` (и `mailbox delete` — вводом адреса, см. ниже);
+- `domain ready`, `domain ack` (без `--created`), `domain restart`, `domain allow-authoritative`,
+  `domain internal-relay`, `domain approve-alias-removal`;
+- `quarantine pause` (`resume` не спрашивает);
+- `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`;
+- `node apply --prefilter`, `agent token issue` (только при ротации уже выданного токена),
+  `agent token revoke`;
+- `queue flush`, `queue delete`, `outage delete`, `spam-quarantine release`,
+  `spam-quarantine learn-spam`, `spam-quarantine delete`, `spam-quarantine node-settings apply`;
+- `invite revoke`, `system-email remove`, `rule delete`, `rule run`.
+
+Остальные команды не спрашивают, в том числе `domain hold`, `domain sync`, `quarantine release`,
+`tenant ...`, `seats ...`, `node apply` без `--prefilter`, `queue hold` / `release` / `deliver`,
+`outage open` / `update` / `close`, все команды чтения.
 
 `mailbox delete` подтверждается вводом полного адреса ящика: на вопрос в терминале или параметром
 `--confirm-address <ADDRESS>`. `--yes` его не заменяет. Без терминала и без `--confirm-address` — код 2,
@@ -134,10 +143,32 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 `domain approve-alias-removal` перед вопросом пишет в stderr адреса, которые держит последний прогон
 (`Contacts held on <DOMAIN>: ...`), и одобряет только их.
 
+### Секреты и stdin
+
+Секрет CLI берёт **только со stdin** (файл или конвейер; в терминале — вставить и нажать Ctrl-D),
+никогда из аргумента, и нигде его не печатает:
+
+| Команда | Что читает | Когда |
+|---|---|---|
+| `access token` | API-токен Cloudflare (пробелы по краям отбрасываются) | всегда |
+| `sso add` | секрет клиента OIDC | всегда; пустой stdin — `fields_required` |
+| `sso set` | секрет клиента OIDC | только с `--secret`; пустой stdin — `secret_missing` |
+| `integration microsoft set` | секрет клиента Microsoft | только с `--secret`; пустой stdin — `secret_missing` |
+| `node config set` | API-ключ mailcow | только с `--api-key-stdin`; пустой stdin — `api_key_required` |
+| `system-email set` | пароль SMTP системной почты | только с `--password-stdin`; пустой stdin — `password_missing` |
+| `account create` | пароль IMAP (SMTP входит с ним же) | всегда; пустой stdin — `password_missing` |
+| `account set-connection` | пароль IMAP или SMTP | только с `--password-stdin` или `--smtp-password-stdin` (один за запуск); пустой — `password_missing` |
+
+Ключи и токены обрезаются по краям; пароли (`system-email`, `account`) берутся как есть, с пробелами,
+отбрасывается только один перевод строки в конце. Кроме секретов stdin читают `rule create` /
+`rule set` (JSON правила без `--file` или с `--file -`) и `settings set custom_css -` (текст CSS).
+Секреты Google-приложений (JSON клиента, новый секрет) — у отдельного CLI, раздел 3.10.
+
 ### Задания и `--wait`
 
 Команды, ставящие задание тенанта: `domain sync`, `domain internal-relay`, `domain approve-alias-removal`,
-`tenant test`, `tenant antispam`, `quarantine release`; `domain allow-authoritative` (снятие удержания)
+`tenant test`, `tenant antispam`, `tenant poll`, `quarantine release`, `seats check`;
+`domain allow-authoritative` (снятие удержания)
 тоже ставит прогон домена, но отвечает состоянием домена, а не заданием. CLI ставит задание в очередь и, без `--wait`,
 сразу отвечает его состоянием (`job <ID> (<вид>) queued`, либо `already queued`, если такое задание уже
 стоит и новое не создано; в JSON это `created: false`). Выполняет задание воркер backend (опрос раз в
@@ -153,7 +184,10 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 
 Состояния заданий: `queued`, `running`, `done`, `failed`, `cancelled`, `needs_attention`. Виды заданий
 тенанта (для `jobs list --kind`): `tenant_test_connection`, `tenant_poll`, `tenant_antispam_read`,
-`tenant_domain_sync`, `tenant_quarantine_release`.
+`tenant_seats_read`, `tenant_domain_sync`, `tenant_quarantine_release`.
+
+`access sync` ставит задание `access_sync` и ждёт его всегда (`--wait` у него нет, только
+`--timeout`), раздел 3.6. `jobs` показывает только задания тенанта.
 
 Проверки узла, которые принадлежат процессу backend (`domain dns-check` без домена, `alerts check`,
 `outage trace`), CLI тоже не выполняет сам: он ставит задание `mail_node_check` (одна попытка), его
@@ -182,7 +216,7 @@ CLI, имеют исполнителя `cli` (или администратор�
 
 | Команда | Что делает | Журнал |
 |---|---|---|
-| `mailbox list [--domain <DOMAIN>]` | Список ящиков узла с квотой, использованием, лимитом отправки и ожидающими удалениями; `--domain` оставляет ящики одного домена. | нет (чтение) |
+| `mailbox list [--domain <DOMAIN>]` | Список ящиков узла с квотой, использованием, лимитом отправки, деактивацией и ожидающими удалениями; `--domain` оставляет ящики одного домена. | нет (чтение) |
 | `mailbox show <address\|id>` | Один ящик: имена, ожидающее удаление и взгляд узла (активен ли, квота, использование). Недоступный узел не ошибка: он показан полем `node.error`. | нет (чтение) |
 | `mailbox create <LOCAL>@<DOMAIN> [--name N] [--sender-name N] [--second-sender-name N]` | Создаёт ящик на узле; домен должен завершить онбординг. | `mailbox.added`, как у панели |
 | `mailbox set-names <address\|id> [--name N] [--sender-name N] [--second-sender-name N]` | Переименовывает ящик или меняет имена отправителя. Нужен хотя бы один параметр. | нет: панель имена тоже не журналирует |
@@ -192,6 +226,7 @@ CLI, имеют исполнителя `cli` (или администратор�
 | `mailbox reactivate <address\|id>` | Снова включает деактивированный ящик: своё место, пока оно удерживается, иначе свободное (`no_free_seats` при нуле). Ящику, ожидающему удаления, сначала нужен `cancel-deletion`. | `mailbox.activated` с местом |
 | `mailbox set-quota <address\|id> <MB>` | Квота ящика на узле в МБ (`PUT /api/mail-node/mailboxes/<ID>/quota`); узел принимает её сразу. | `mailbox.quota_changed` с прежней квотой |
 | `mailbox set-rate-limit <address\|id> <N/s\|N/m\|N/h\|N/d\|default>` | Собственный лимит отправки ящика (`PUT .../rate-limit`): сначала узел, потом панель, так что следующие применения его сохраняют. `default` убирает собственный лимит: ящик получает лимит домена или настроек EOP. Другой формат — код 2. | `mailbox.rate_limit_changed` с прежним лимитом |
+| `mailbox oauth-reset <address\|id>` | Забывает, к какой учётке Google или Microsoft привязан OAuth-ящик не с узла; спрашивает подтверждение. Подробнее — после раздела 3.22. | `mailbox.oauth_subject_reset` с провайдером |
 
 Параметры имён (у `create` и `set-names`):
 
@@ -212,7 +247,7 @@ CLI, имеют исполнителя `cli` (или администратор�
 - `delete`: ящик продолжает работать до срока, потом задание удаления удаляет его на узле со всей почтой.
   Отменить можно до срока командой `cancel-deletion`.
 - `list`: колонки `ADDRESS`, `ON NODE` (`active`, `inactive`, `missing`), `QUOTA MB`, `USED MB`,
-  `SEND LIMIT` (`<N>/<период>`, `(own)` у собственного лимита), `DELETION`, `SENDER NAME`; после таблицы
+  `SEND LIMIT` (`<N>/<период>`, `(own)` у собственного лимита), `DEACTIVATED`, `DELETION`, `SENDER NAME`; после таблицы
   строка `disk: N% used` (или `disk: not read (<код>)`).
 - `show` и `list` читают узел; сбой чтения узла в `list` — ошибка (код 3), а в `show` отображается в
   ответе.
@@ -260,7 +295,7 @@ CLI, имеют исполнителя `cli` (или администратор�
 | `tenant status` | Драйвер тенанта (`none`, если нет), настроен ли тенант, достиг ли backend воркера (по сохранённым результатам проверки и опроса), последняя проверка соединения, срок сертификата, заблокированные коннекторы, изменения коннекторов с эталона, последние задания проверки/опроса/антиспама и состояние антиспам-политики. | нет |
 | `tenant test [--wait] [--timeout SEC]` | Ставит проверку соединения с тенантом через воркера (кнопка «Test connection»). | `tenant.connection_tested`, пишет задание |
 | `tenant antispam [--wait] [--timeout SEC]` | Проверяет и исправляет политику Default anti-spam (кнопка «Check and fix»): действия spam, high confidence spam, phishing и bulk ставятся в `MoveToJmf`, где они отличаются (раздел 5.14); что изменилось, журналируется. | `tenant.antispam_enforced`, пишет задание, когда меняет политику |
-| `tenant poll [--wait] [--timeout SEC]` | Ставит опрос тенанта (кнопка «Check now», `POST /tenant/poll`): заблокированные коннекторы, коннекторы и сертификат. | при постановке нет |
+| `tenant poll [--wait] [--timeout SEC]` | Ставит опрос тенанта (кнопка «Check now», `POST /tenant/poll`): заблокированные коннекторы, коннекторы и сертификат. | при постановке нет; то, что находит опрос, журналирует задание |
 | `tenant connectors-reference` | Последнее прочтение коннекторов становится эталоном (R-25, `POST /tenant/connectors/reference`); `tenant status` показывает изменения с него. Пока опрос коннекторы не прочитал — `connectors_not_read`. | `tenant.connector_reference_taken` с именами коннекторов |
 
 В `tenant status` строка `worker profile without driver` появляется, когда профиль воркера включён, но
@@ -403,8 +438,15 @@ backend подключить ящик заново (`reconnect`), а `rule run` 
 
 ### 3.10. `integration`: клиент Microsoft OAuth
 
-Клиент, через который подключаются ящики Outlook (`/api/integrations/microsoft`). Приложения Google —
-своим CLI (`src/cli/googleApp.js`).
+Клиент, через который подключаются ящики Outlook (`/api/integrations/microsoft`). Приложений Google в
+группе `integration` нет: у них отдельный CLI `src/cli/googleApp.js` (не группа `mailexpert`) и
+обёртка на хосте `scripts/deploy/google-app.sh` — `add` (JSON клиента со stdin или из файла), `list`,
+`show`, `enable` / `close` / `disable`, `delete --yes`, `set-limit`, `set-label`, `replace-secret`
+(новый секрет только из файла или stdin). Приложение — одно на проект Google Cloud: занятые места
+`show` считает по выданным доступам (grants) проекта, которые переживают удаление ящика. Коды выхода
+те же: 0 сделано, 1 отказ, 2 неверный ввод, 3 сбой. Старый единственный клиент из `integration_config`
+один раз импортируется при старте; `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` из окружения не
+читаются. Подробно — [google-oauth.md, «Управление из командной строки»](google-oauth.md#управление-из-командной-строки).
 
 | Команда | Что делает | Журнал |
 |---|---|---|
@@ -438,8 +480,8 @@ backend подключить ящик заново (`reconnect`), а `rule run` 
 | Команда | Что делает | Журнал |
 |---|---|---|
 | `seats status` | Занято, удерживается («временно недоступно», с каждым местом и датой освобождения), свободно; откуда число купленных мест, срок удержания, открытые запросы мест. | нет |
-| `seats check [--wait] [--timeout SEC]` | «Reconcile»: ставит задание прочитать число купленных мест у Microsoft. Отказ `seats_manual`, пока число вводится вручную (`eop set --licenses`). | при постановке нет |
-| `seats set-hold <DAYS>` | Срок удержания освободившегося места, 0-3650 дней; удерживаемые места получают новые даты. | `mail_node.seat_hold_changed` со старым и новым значением |
+| `seats check [--wait] [--timeout SEC]` | «Reconcile»: ставит задание тенанта `tenant_seats_read` — прочитать число купленных мест у Microsoft. Отказ `seats_manual`, пока число вводится вручную (`eop set --licenses`). | при постановке нет; прогон журналирует MailExpert, как для кнопки |
+| `seats set-hold <DAYS>` | Срок удержания освободившегося места, 0-3650 дней; удерживаемые места получают новые даты. | `mail_node.seat_hold_changed` со старым и новым значением, когда срок меняется |
 | `seats request <N>` | Просит ещё N мест (1-1000); запрос закрывается сам, когда купленное число его покроет. | `mail_node.seats_requested` |
 
 ### 3.14. `agent`: агент почтового узла
@@ -522,6 +564,7 @@ sudo $M alerts check --wait
 sudo $M outage open --start 2026-10-01T10:00:00Z --reason "Disk replacement" --planned
 sudo $M spam-quarantine release <ID> --yes
 ```
+
 ### 3.19. `invite`: приглашения
 
 Приглашения на регистрацию (`/api/admin/invites`, `services/admin/invites.js`): ссылка действует 7 дней
@@ -605,8 +648,8 @@ Microsoft привязан OAuth-ящик (`POST /api/accounts/:id/oauth-subject
 | `rule show <RULE_ID>` | Одно правило: условия, действия, порядок, автор. `--json` — строка API (`account_id`, `condition_logic`, `stop_processing`). | нет |
 | `rule create [--file PATH] [--account ...] [--user ...]` | Добавляет правило в конец. Проверки API: массивы условий и действий (`not_arrays`), условие (`invalid_condition` с текстом), пересылка на один адрес (`invalid_action`), ящик (`account_required`, `account_not_found`), папка для `move` у ящика (`move_folder_not_found`). Повторные действия назначения и пересылки отбрасываются, как у API. | `rule.created` (имя, типы действий, адрес пересылки) |
 | `rule set <RULE_ID> [--file PATH] [--account ...] [--user ...]` | Заменяет правило целиком, как сохранение экрана (`PUT /api/rules/:id`): пропущенное поле получает умолчание API, а не старое значение. Начать удобно с `rule show <RULE_ID> --json`. | `rule.updated` (с прежним адресом пересылки и прежним ящиком) |
-| `rule enable <RULE_ID>`, `rule disable <RULE_ID>` | Включает или выключает правило: экран для этого сохраняет правило целиком, CLI тоже. Уже в нужном состоянии — ничего не меняет. | `rule.updated` |
-| `rule delete <RULE_ID>` | Удаляет правило (просит подтверждения). | `rule.deleted` |
+| `rule enable <RULE_ID> [--user ...]`, `rule disable <RULE_ID> [--user ...]` | Включает или выключает правило: экран для этого сохраняет правило целиком, CLI тоже. Уже в нужном состоянии — ничего не меняет. | `rule.updated` |
+| `rule delete <RULE_ID> [--user ...]` | Удаляет правило (просит подтверждения). | `rule.deleted` |
 | `rule run --account ...`, `rule run --all` | «Применить правила к входящим»: все включённые правила ящика (или всех ящиков) по письмам, уже лежащим во входящих, — перемещение, удаление и пересылка тоже. Одно правило отдельно панель не запускает. Просит подтверждения. Прогон идёт в backend в фоне (задание); ящик, который уже прогоняется, пропускается. Итог — в логе backend. | `rule.run` по ящику, со списком правил: пишет backend, когда начинает прогон (пропущенный ящик записи не получает) |
 
 ## 4. Коды выхода
@@ -618,7 +661,7 @@ Microsoft привязан OAuth-ящик (`POST /api/accounts/:id/oauth-subject
 | 0 | Сделано (включая справку). |
 | 1 | Отказ: напечатан код ошибки API (например `domain_not_ready`); также ответ «нет» на вопрос (`cancelled`) и `admin_not_found` для `--as`. |
 | 2 | Ошибка в командной строке (неизвестная группа, команда или параметр, недостающий или лишний аргумент, неверное значение), либо подтверждение, которое CLI не смог спросить (`confirmation_required`). |
-| 3 | Сбой почтового узла, тенанта, задания или самой панели: отказ с HTTP-статусом 5xx, ошибка узла (`MailNodeError`, по умолчанию 502), задание закончилось не `done`, `wait_timeout`, `internal_error`. |
+| 3 | Сбой почтового узла, тенанта, задания или самой панели: отказ с HTTP-статусом 5xx, ошибка узла (`MailNodeError`, по умолчанию 502), задание закончилось не `done`, `wait_timeout`, итог `failed` у `access sync`, `database_unavailable`, `internal_error`. |
 
 Правило для отказов: код 3, если у отказа в каталоге статус 5xx, иначе 1.
 
@@ -662,8 +705,8 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 ```
 
 Ошибки командной строки (код 2: неизвестный параметр, недостающий аргумент) пишутся в stderr простым
-текстом и с `--json`: объект получают только отказы действий. Исключение: `confirmation_required` с
-`--json` приходит объектом на stdout.
+текстом и с `--json`: объект получают только отказы действий. Исключение: `confirmation_required` и
+`admin_required` (`invite create` без `--as`) — код 2, но с `--json` приходят объектом на stdout.
 
 Примеры форм успешных ответов (поля берутся из действий панели, показаны ключевые):
 
@@ -742,8 +785,11 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 | `confirmation_required` | 2 | Действие просит подтверждения, а терминала нет: добавьте `--yes` (для удаления ящика `--confirm-address`). |
 | `cancelled` | 1 | На вопрос ответили не «y»: ничего не изменено. |
 | `admin_not_found` | 1 | `--as`: нет включённого администратора с таким адресом. |
-| `wait_timeout` | 3 | `--wait` ждал дольше `--timeout`; задание идёт, следите командой `jobs show <ID>` (для `access sync` — `access status`: `jobs` показывает только задания тенанта). |
-| `internal_error` | 3 | Непредвиденный сбой панели; причина в строке выше на stderr. |
+| `wait_timeout` | 3 | `--wait` ждал дольше `--timeout`; задание идёт, следите командой `jobs show <ID>` (для `access sync` — `access status`, для проверок узла — `domain list`, `alerts status` или `outage list`: `jobs` показывает только задания тенанта). |
+| `database_unavailable` | 3 | База недоступна или не пускает (`ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`, `EAI_AGAIN`, `ECONNRESET`, `28P01`, `3D000`, `57P03`): проверьте, что стек запущен и `DATABASE_URL` указывает на него. |
+| `internal_error` | 3 | Непредвиденный сбой панели; причина в строке выше на stderr, в JSON-ошибке поле `cause`. |
+| `out_file_exists`, `out_file_failed` | 1 | `agent token issue --out`: файл уже есть или рядом не создаётся временный файл — проверяется до выдачи токена, токен не меняется. |
+| `out_file_failed` | 3 | `agent token issue --out`: токен выдан (старый уже не работает), но файл не записался; выдайте заново с другим `--out` или `--out -`. |
 | `job_failed`, `job_cancelled`, `job_needs_attention` | 3 | `--wait`: задание закончилось не `done`, а своего кода у него нет (иначе печатается `errorCode` задания). |
 
 ### Ящики (`MAILBOX_ERRORS`, включает `MAIL_NODE_ERRORS`)
@@ -910,6 +956,7 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 | `quarantine_item_invalid` | 400 | ID записи карантина — число. |
 | `quarantine_item_not_found` | 404 | Нет такой записи карантина. |
 | `dns_check_failed`, `alert_check_failed`, `trace_cooldown` | 3 | `--wait`: задание `mail_node_check` закончилось неудачей (проход трассировки был меньше двух минут назад). |
+
 ### Приглашения (`INVITE_ERRORS`) и системная почта (`SYSTEM_EMAIL_ERRORS`)
 
 | Код | Статус | Смысл |
