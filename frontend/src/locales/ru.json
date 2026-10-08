@@ -38,7 +38,8 @@
       "openDraft": "Не удалось открыть черновик для правки",
       "markAllRead": "Не удалось отметить всё прочитанным",
       "syncFolders": "Список папок не обновлён",
-      "reconnect": "Не удалось переподключить ящик"
+      "reconnect": "Не удалось переподключить ящик",
+      "compose": "Не удалось открыть ответ или пересылку"
     },
     "mailboxDisabled": "Этот ящик выключен. Включите его в настройках ящика, чтобы подключиться.",
     "prefSaveFailed": {
@@ -1003,7 +1004,21 @@
     }
   },
   "notifications": {
-    "newMessage": "Новое сообщение"
+    "newMessage": "Новое сообщение",
+    "desktop": {
+      "updateReady": "Обновление готово",
+      "updateDownloaded": "MailExpert скачал обновление.",
+      "updateVerified": "MailExpert скачал и проверил обновление.",
+      "updateVerifiedCommand": "MailExpert скачал и проверил обновление. Установите его из терминала командой:\n{{command}}",
+      "install": "Установить",
+      "copyAndQuit": "Скопировать и выйти",
+      "installFailed": "Не удалось установить",
+      "installFailedBody": "Обновление скачано, но установщик не запустился. Перезапустите MailExpert и попробуйте ещё раз.",
+      "copyFailed": "Не удалось скопировать",
+      "copyFailedBody": "Команду обновления не удалось скопировать. Перезапустите MailExpert и попробуйте ещё раз.",
+      "syncStarted": "Синхронизация запущена",
+      "syncStartedBody": "MailExpert проверяет новую почту."
+    }
   },
   "signatureEditor": {
     "bold": "Жирный (Ctrl+B)",

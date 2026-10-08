@@ -38,7 +38,8 @@
       "openDraft": "Could not open the draft for editing",
       "markAllRead": "Could not mark all as read",
       "syncFolders": "Folder list not refreshed",
-      "reconnect": "Could not reconnect the mailbox"
+      "reconnect": "Could not reconnect the mailbox",
+      "compose": "Could not open the reply or forward"
     },
     "mailboxDisabled": "This mailbox is turned off. Turn it on in its settings to connect.",
     "prefSaveFailed": {
@@ -969,7 +970,21 @@
     }
   },
   "notifications": {
-    "newMessage": "New message"
+    "newMessage": "New message",
+    "desktop": {
+      "updateReady": "Update ready",
+      "updateDownloaded": "MailExpert downloaded the update.",
+      "updateVerified": "MailExpert downloaded and verified the update.",
+      "updateVerifiedCommand": "MailExpert downloaded and verified the update. Install it from a terminal with:\n{{command}}",
+      "install": "Install",
+      "copyAndQuit": "Copy & Quit",
+      "installFailed": "Install failed",
+      "installFailedBody": "The update was downloaded, but the installer could not be started. Restart MailExpert and try again.",
+      "copyFailed": "Copy failed",
+      "copyFailedBody": "The update command could not be copied. Restart MailExpert and try again.",
+      "syncStarted": "Sync started",
+      "syncStartedBody": "MailExpert is checking for new mail."
+    }
   },
   "signatureEditor": {
     "bold": "Bold (Ctrl+B)",

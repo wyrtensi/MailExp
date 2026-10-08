@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import {
   openDeepLinkMessage, collectThreadReadIds, openGtdThreadWithAutoRead,
   classifyThread, unclassifyThread,
@@ -112,6 +113,7 @@ export function useGtdTriage() {
     } catch (err) {
       console.error('GTD read toggle failed:', err.message);
       markGtdThreadRead(identity, !read);
+      addNotification({ type: 'error', title: t('common.actionFailed.read'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
     }
   };
 
@@ -153,6 +155,7 @@ export function useGtdTriage() {
     } catch (err) {
       console.error('GTD star toggle failed:', err.message);
       markGtdThreadStarred(identity, !next);
+      addNotification({ type: 'error', title: t('common.actionFailed.star'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
     }
   };
 
@@ -235,6 +238,7 @@ export function useGtdTriage() {
           }
         } catch (err) {
           console.error('GTD compose prefill failed:', err.message);
+          addNotification({ type: 'error', title: t('common.actionFailed.compose'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
           scheduleGtdSectionsFetch();
         }
         break;

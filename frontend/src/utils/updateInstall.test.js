@@ -11,28 +11,30 @@ function setup(result) {
   };
   return { calls, notifications, updates, addNotification: (n) => notifications.push(n) };
 }
+const t = (key) => `t:${key}`;
 
 describe('copyInstallCommandAndQuitOrWarn', () => {
   it('passes the command and file path and stays silent when copied', async () => {
     const s = setup({ copied: true });
-    await copyInstallCommandAndQuitOrWarn(s.updates, { installCommand: 'sudo apt install "x.deb"', filePath: '/tmp/x.deb' }, s.addNotification);
+    await copyInstallCommandAndQuitOrWarn(s.updates, { installCommand: 'sudo apt install "x.deb"', filePath: '/tmp/x.deb' }, s.addNotification, t);
     assert.deepEqual(s.calls, [{ installCommand: 'sudo apt install "x.deb"', filePath: '/tmp/x.deb' }]);
     assert.deepEqual(s.notifications, []);
   });
 
   it('warns when the clipboard write failed', async () => {
     const s = setup({ copied: false, reason: 'clipboard-failed' });
-    await copyInstallCommandAndQuitOrWarn(s.updates, { installCommand: 'cmd', filePath: '' }, s.addNotification);
+    await copyInstallCommandAndQuitOrWarn(s.updates, { installCommand: 'cmd', filePath: '' }, s.addNotification, t);
     assert.equal(s.notifications.length, 1);
     assert.equal(s.notifications[0].type, 'error');
-    assert.equal(s.notifications[0].title, 'Copy failed');
+    assert.equal(s.notifications[0].title, 't:notifications.desktop.copyFailed');
+    assert.equal(s.notifications[0].body, 't:notifications.desktop.copyFailedBody');
   });
 
   it('warns when the native bridge is unavailable', async () => {
     const notifications = [];
-    await copyInstallCommandAndQuitOrWarn(undefined, { installCommand: 'cmd' }, (n) => notifications.push(n));
+    await copyInstallCommandAndQuitOrWarn(undefined, { installCommand: 'cmd' }, (n) => notifications.push(n), t);
     assert.equal(notifications.length, 1);
-    assert.equal(notifications[0].title, 'Copy failed');
+    assert.equal(notifications[0].title, 't:notifications.desktop.copyFailed');
   });
 });
 
@@ -41,7 +43,7 @@ describe('ElectronNotificationBridge manual update actions', () => {
     const source = readFileSync(new URL('../components/ElectronNotificationBridge.jsx', import.meta.url), 'utf8');
     // A direct bridge call would silently ignore { copied: false }.
     assert.doesNotMatch(source, /copyInstallCommandAndQuit\?\.\(/);
-    const copyActions = source.match(/actionLabel: (?:manualInstall \? )?'Copy & Quit'/g) || [];
+    const copyActions = source.match(/actionLabel: (?:manualInstall \? )?i18n\.t\('notifications\.desktop\.copyAndQuit'\)/g) || [];
     const helperCalls = source.match(/copyInstallCommandAndQuitOrWarn\(/g) || [];
     assert.equal(copyActions.length, 2);
     assert.equal(helperCalls.length, copyActions.length);
