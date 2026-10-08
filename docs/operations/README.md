@@ -163,9 +163,11 @@ gh api repos/wyrtensi/MailExpert/git/ref/tags/latest --jq '.object.sha[0:12]'   
 
 Workflow ничего не собирает: проверяет, что коммит на `main` и что его образы (backend, frontend,
 edge, tenant-worker) есть в GHCR, ставит им тег `latest` на тот же digest и переносит git-тег
-`latest`. Запускается только с `main`. **Один раз настроить**: Settings → Rules → Rulesets → New tag
-ruleset на `latest` (Restrict creations, updates, deletions) с обходом только для GitHub Actions и
-владельца — иначе тег мог бы сдвинуть любой с правом push. Последний зелёный `main` (если владелец
+`latest`. Запускается только с `main`.
+
+**Что сделать один раз, чтобы обновления работали на боевом сервере** (юниты исполнителя, ruleset
+на тег `latest` в GitHub, первое продвижение, проверка исполнителя, бэкапы, служба узла) —
+[deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере). Последний зелёный `main` (если владелец
 просит другую версию; кнопка её не поставит, только `update.sh sha-<12>` по SSH):
 
 ```bash
@@ -278,7 +280,11 @@ mailexpert-updater.path`. За один запуск исполнитель бе
 - **Новых миграций не было** (в предпроверке `pending_migrations none`, а не `unknown`, и
   `update.sh` написал «no migration was recorded as applied»):
   `sudo $D/install.sh --prefix <PREFIX> --version sha-<старая>` (тоже через `systemd-run`). Данные
-  не теряются.
+  не теряются. Если обновление меняло образ Caddy (строка «the Caddy image was replaced as well»),
+  **сначала** верните `EDGE_IMAGE` в `<PREFIX>/edge/.env` на значение из
+  `<PREFIX>/state/edge-image.previous` (пустое — если прежний образ не был закреплён):
+  `install.sh --version` прежний образ края сам не возвращает, `rollback.sh` и автооткат — возвращают.
+  Строка `info: migrations: none was applied ...` после обновления называет этот шаг сама.
 - **Миграции были или неизвестно**: `rollback.sh` (через `systemd-run`, как обновление):
 
   ```bash

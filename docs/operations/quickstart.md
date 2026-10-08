@@ -164,6 +164,25 @@ $D/backup.sh --show-recovery-key
 
 ## 9. Обновление
 
+**Один раз — включить обновления** (подробно и с причинами —
+[deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)):
+
+1. Сервер: ничего дополнительно — `install.sh` из шагов 3-5 (без `--no-system`) уже поставил
+   `mailexpert-updater.path` и `.service` и каталоги спула. Проверка:
+   `systemctl is-active mailexpert-updater.path` — `active`;
+   `cat /opt/mailexpert/state/update-spool/result/updater.json` — `"installed":true`.
+   С `--no-system` исполнителя нет: обновления только по SSH.
+2. GitHub (владелец репозитория): ruleset на тег `latest` — создавать, двигать и удалять его могут
+   только workflow `promote.yml` и владелец.
+3. Продвижение сборки: `promote.yml` с `main`, сначала `dry_run`, затем настоящий запуск. Кнопка
+   ставит только продвинутую `latest`, только вперёд и только с `main`.
+4. Бэкапы restic (шаг 4) — рекомендуются: без них перед обновлением делается только локальный дамп
+   на этом же сервере.
+5. Почтовый узел: подключить службу узла (токен — `mailexpert-cli.sh agent token issue --out
+   <FILE> --yes`, на узле — `setup.sh --panel-url https://<DIRECT_HOST> --agent-token-file <FILE>`),
+   тогда скрипты узла и mailcow (только до версии из `deploy/mailcow-version`) обновляются вслед за
+   панелью.
+
 - **Кнопкой**: «Настройки → Администрирование → Обновление панели» — показывает текущую версию,
   продвинутую `latest`, предпроверку и кнопку «Обновить»; ставит только `latest`.
 - **По SSH**:
