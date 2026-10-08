@@ -81,13 +81,30 @@ export function accessSyncRunSummary(lastRun, maxDisables) {
     values: {
       added: lastRun.added ?? 0,
       removed: lastRun.removed ?? 0,
+      imported: lastRun.imported ?? 0,
       disabled: lastRun.disabled ?? 0,
       wouldDisable: lastRun.wouldDisable ?? 0,
+      wouldImport: lastRun.wouldImport ?? 0,
       max: maxDisables,
       error: lastRun.error ?? '',
     },
     errorKey: ACCESS_SYNC_ERROR_KEYS[lastRun.error] ?? null,
   };
+}
+
+// The lines under the last run's summary, each { key, values }: emails the run could not import
+// and, after a failure that may pass, when it is retried (or that the retries ran out and the
+// hourly run tries again). formatTime turns the ISO time into the screen's own format.
+export function accessSyncRunNotes(lastRun, formatTime = (iso) => iso) {
+  if (!lastRun) return [];
+  const notes = [];
+  if (lastRun.errors > 0) notes.push({ key: 'admin.accessSync.importErrors', values: { count: lastRun.errors } });
+  if (lastRun.nextRetryAt) {
+    notes.push({ key: 'admin.accessSync.nextRetry', values: { time: formatTime(lastRun.nextRetryAt), attempt: lastRun.retryAttempt ?? 1 } });
+  } else if (lastRun.retriable) {
+    notes.push({ key: 'admin.accessSync.retriesExhausted', values: {} });
+  }
+  return notes;
 }
 
 // Why a manual run did nothing, or null when it ran.

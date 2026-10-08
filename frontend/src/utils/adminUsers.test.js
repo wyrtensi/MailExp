@@ -2,7 +2,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { ADMIN_USER_ERROR_CODES, adminUserErrorKey, adminUserErrorText } from './adminUsers.js';
+import { ADMIN_USER_ERROR_CODES, adminUserErrorKey, adminUserErrorText, accessStateBadge } from './adminUsers.js';
 
 const readLocale = (lang) => JSON.parse(readFileSync(new URL(`../locales/${lang}.json`, import.meta.url), 'utf8'));
 const en = readLocale('en');
@@ -49,5 +49,16 @@ describe('adminUserErrorText', () => {
   it('says the action failed when there is no text at all', () => {
     assert.equal(adminUserErrorText(refusal(''), tFor(ru)), ru.admin.users.errorFailed);
     assert.equal(adminUserErrorText(undefined, tFor(en)), en.admin.users.errorFailed);
+  });
+});
+
+describe('accessStateBadge', () => {
+  it('gives each access state a label and a tone, and nothing else a badge', () => {
+    assert.deepEqual(accessStateBadge('in_access'), { key: 'admin.users.accessInAccess', tone: 'ok' });
+    assert.deepEqual(accessStateBadge('pending'), { key: 'admin.users.accessPending', tone: 'muted' });
+    assert.deepEqual(accessStateBadge('removed_in_cloudflare'), { key: 'admin.users.accessRemovedInCloudflare', tone: 'warn' });
+    assert.deepEqual(accessStateBadge('not_synced'), { key: 'admin.users.accessNotSynced', tone: 'muted' });
+    assert.equal(accessStateBadge(null), null);
+    assert.equal(accessStateBadge('toString'), null);
   });
 });

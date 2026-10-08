@@ -36,6 +36,9 @@ export const AUDIT_ACTION_LABEL_KEYS = Object.freeze({
   'access.sync_aborted': 'admin.audit.actionAccessSyncAborted',
   'access.config_changed': 'admin.audit.actionAccessConfigChanged',
   'access.sync_requested': 'admin.audit.actionAccessSyncRequested',
+  'access.user_imported': 'admin.audit.actionAccessUserImported',
+  'access.import_aborted': 'admin.audit.actionAccessImportAborted',
+  'access.tombstone_cleared': 'admin.audit.actionAccessTombstoneCleared',
   'mail_node.config_changed': 'admin.audit.actionMailNodeConfigChanged',
   'mail_node.domain_added': 'admin.audit.actionMailNodeDomainAdded',
   'mail_node.domain_adopted': 'admin.audit.actionMailNodeDomainAdopted',
@@ -490,7 +493,20 @@ export function auditDetail(entry) {
     case 'user.deleted':
     case 'user.enabled':
     case 'user.disabled':
+    case 'access.tombstone_cleared':
       return details.email ? { text: details.email } : null;
+    // A user created from the Access policy: by the sync, or by a first Cloudflare Access sign-in.
+    case 'access.user_imported':
+      return details.email
+        ? { key: details.source === 'sign_in' ? 'admin.audit.detailAccessImportedSignIn' : 'admin.audit.detailAccessImportedSync', values: { email: details.email } }
+        : null;
+    case 'access.import_aborted': {
+      const candidates = Array.isArray(details.candidates) ? details.candidates : [];
+      return {
+        key: 'admin.audit.detailAccessImportAborted',
+        values: { wouldImport: candidates.length, emails: candidates.join(', ') },
+      };
+    }
     // An administrator switched a plugin for the whole panel (backend routes/plugins.js).
     case 'plugin.enabled':
     case 'plugin.disabled': {

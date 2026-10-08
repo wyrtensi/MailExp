@@ -395,9 +395,12 @@ const ACCESS_SYNC_FIXTURE = {
   },
   lastRun: {
     trigger: 'schedule', startedAt: demoTime('2026-09-17T09:00:00.000Z'), finishedAt: demoTime('2026-09-17T09:00:01.000Z'),
-    outcome: 'updated', added: 1, removed: 0, disabled: 0, wouldDisable: 0, error: null,
+    outcome: 'updated', added: 1, removed: 0, imported: 1, disabled: 0, wouldDisable: 0, wouldImport: 0, errors: 0,
+    error: null, retriable: false, retryAttempt: 0, nextRetryAt: null,
   },
   maxDisables: 10,
+  maxImports: 10,
+  tombstones: 0,
   googleMode: true,
 };
 
@@ -422,12 +425,12 @@ const ADMIN_USER_FIXTURES = [
   {
     id: 'demo-user', username: 'demo@mailexpert.local', email: 'demo@mailexpert.local',
     isAdmin: true, totpEnabled: false, disabledAt: null, created_at: demoTime('2026-08-01T09:00:00.000Z'),
-    isBootstrapAdmin: true,
+    isBootstrapAdmin: true, accessState: 'in_access',
   },
   {
     id: 'demo-colleague', username: 'colleague@demo.mailexpert.local', email: 'colleague@demo.mailexpert.local',
     isAdmin: false, totpEnabled: false, disabledAt: null, created_at: demoTime('2026-08-10T09:00:00.000Z'),
-    isBootstrapAdmin: false,
+    isBootstrapAdmin: false, accessState: 'in_access',
   },
 ];
 
@@ -525,6 +528,8 @@ let accessSync = structuredClone(ACCESS_SYNC_FIXTURE);
 // catch-all at the end of demoRequest — see routeCoverage.test.js's REJECTED table for which and
 // why. Rejecting (never a fake `{ ok: true, demo: true }`) applies to writes now too.
 let adminUsers = structuredClone(ADMIN_USER_FIXTURES);
+// Emails of deleted users (GET /admin/access-sync/tombstones), newest first.
+let demoTombstones = [];
 let demoInvites = [];
 let demoGoogleApps = [];
 let demoOidcProviders = [];
@@ -2914,7 +2919,8 @@ export async function demoRequest(method, path, body = {}) {
     ));
     return { entries: clone(entries), nextCursor: null };
   }
-  if (verb === 'GET' && pathname === '/admin/access-sync') return clone(accessSync);
+  if (verb === 'GET' && pathname === '/admin/access-sync') return { ...clone(accessSync), tombstones: demoTombstones.length };
+  if (verb === 'GET' && pathname === '/admin/access-sync/tombstones') return { tombstones: clone(demoTombstones) };
   if (verb === 'PUT' && pathname === '/admin/access-sync') {
     accessSync.config = {
       enabled: !!body.enabled,
@@ -2930,7 +2936,8 @@ export async function demoRequest(method, path, body = {}) {
     const now = new Date().toISOString();
     accessSync.lastRun = {
       trigger: 'manual', startedAt: now, finishedAt: now, outcome: 'unchanged',
-      added: 0, removed: 0, disabled: 0, wouldDisable: 0, error: null,
+      added: 0, removed: 0, imported: 0, disabled: 0, wouldDisable: 0, wouldImport: 0, errors: 0,
+      error: null, retriable: false, retryAttempt: 0, nextRetryAt: null,
     };
     return { result: clone(accessSync.lastRun), ...clone(accessSync) };
   }
@@ -3102,9 +3109,31 @@ export async function demoRequest(method, path, body = {}) {
     const user = {
       id: `demo-added-user-${nextInviteSequence++}`, username: email, email,
       isAdmin: false, totpEnabled: false, disabledAt: null, created_at: new Date().toISOString(), isBootstrapAdmin: false,
+      accessState: 'pending',
     };
     adminUsers = [...adminUsers, user];
+    demoTombstones = demoTombstones.filter(t => t.email !== email);
     return { user: clone(user) };
+  }
+  if (verb === 'POST' && pathname === '/admin/users/allow') {
+    const email = normalizeEmail(body?.email);
+    if (!email) throw demoError('A valid email address is required', 'email_invalid');
+    const tombstoneCleared = demoTombstones.some(t => t.email === email);
+    demoTombstones = demoTombstones.filter(t => t.email !== email);
+    let user = adminUsers.find(u => normalizeEmail(u.email) === email);
+    const created = !user;
+    const enabled = !!user?.disabledAt;
+    if (user) {
+      user.disabledAt = null;
+    } else {
+      user = {
+        id: `demo-added-user-${nextInviteSequence++}`, username: email, email,
+        isAdmin: false, totpEnabled: false, disabledAt: null, created_at: new Date().toISOString(), isBootstrapAdmin: false,
+        accessState: 'pending',
+      };
+      adminUsers = [...adminUsers, user];
+    }
+    return { user: clone(user), created, enabled, tombstoneCleared };
   }
   const adminUserMatch = pathname.match(/^\/admin\/users\/([^/]+)$/);
   if (verb === 'PATCH' && adminUserMatch) {
@@ -3121,7 +3150,14 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'DELETE' && adminUserMatch) {
     const id = decodeURIComponent(adminUserMatch[1]);
     if (id === 'demo-user') throw demoError('Cannot delete your own account');
+    const deleted = adminUsers.find(item => item.id === id);
     adminUsers = adminUsers.filter(item => item.id !== id);
+    if (deleted?.email) {
+      demoTombstones = [
+        { email: normalizeEmail(deleted.email), createdAt: new Date().toISOString(), createdBy: 'demo@mailexpert.local', inPolicy: true },
+        ...demoTombstones.filter(t => t.email !== normalizeEmail(deleted.email)),
+      ];
+    }
     return { ok: true };
   }
   const totpDisableMatch = pathname.match(/^\/admin\/users\/([^/]+)\/totp\/disable$/);
