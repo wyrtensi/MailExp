@@ -90,12 +90,12 @@ const SERVER_HELP = [
 const create = {
   name: 'create',
   summary: 'add a mailbox set up by hand over IMAP/SMTP; the password is read from stdin',
-  usage: 'account create <address> --imap-host HOST --smtp-host HOST [--imap-port N] [--smtp-port N] [--smtp-tls MODE] [--login LOGIN] [--name NAME] [--sender-name NAME] [--skip-tls-verify] < password-file',
+  usage: 'account create <address> --imap-host HOST --smtp-host HOST [--imap-port N] [--smtp-port N] [--smtp-tls MODE] [--login LOGIN] [--smtp-login LOGIN] [--name NAME] [--sender-name NAME] [--skip-tls-verify] < password-file',
   journal: 'mailbox.added',
   help: [
     'The IMAP password is read from stdin only (a file or a pipe; in a terminal, paste it and press',
     'Ctrl-D) and stored encrypted, spaces kept and one final line end dropped; SMTP signs in with',
-    'the same password. A separate SMTP password:',
+    'the same password (also with --smtp-login, which only changes the SMTP login). A separate SMTP password:',
     '"account set-connection <address> --smtp-login LOGIN --smtp-password-stdin" afterwards.',
     'Defaults as the panel\'s form: ports 993 and 587, STARTTLS, name and login the address.',
     ...SERVER_HELP,
@@ -105,7 +105,7 @@ const create = {
   positionals: ['address'],
   flags: {
     'imap-host': 'string', 'imap-port': 'string', 'smtp-host': 'string', 'smtp-port': 'string', 'smtp-tls': 'string',
-    login: 'string', name: 'string', 'sender-name': 'string', 'skip-tls-verify': 'boolean',
+    login: 'string', 'smtp-login': 'string', name: 'string', 'sender-name': 'string', 'skip-tls-verify': 'boolean',
   },
   async run(ctx) {
     const { flags } = ctx;
@@ -124,6 +124,7 @@ const create = {
       smtp_port: port('smtp-port', flags['smtp-port']) ?? 587,
       smtp_tls: tlsMode(flags['smtp-tls']) ?? 'STARTTLS',
       auth_user: flags.login ?? address,
+      smtp_auth_user: flags['smtp-login'] || null,
     };
     body.auth_pass = await readSecret(ctx, 'IMAP password', { exact: true });
     if (!body.auth_pass) throw new CliError('password_missing', 'No password on stdin');

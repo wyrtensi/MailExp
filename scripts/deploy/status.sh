@@ -54,7 +54,7 @@ usage() {
 Usage: status.sh [--prefix /opt/mailexpert] [--target sha-<12>] [--json]
 
 Read-only preflight: versions, readiness, containers, tenant worker, edge image, free space,
-backups, migrations, the mail node's spam rule, Cloudflare Access in front of <CF_HOST> (cf,
+backups, the host updater (mailexpert-updater.path), migrations, the mail node's spam rule, Cloudflare Access in front of <CF_HOST> (cf,
 both). --target checks a version to update to (the
 commit, its images, pending migrations, steps outside update.sh); a commit missing from the
 checkout is fetched. --json prints one JSON object on stdout (with "error" when the script
@@ -191,6 +191,33 @@ collect_disk_and_backups() {
   fi
   # shellcheck disable=SC2012 # our own names: pre-update-sha-<hex>.dump
   PRE_UPDATE_DUMPS=$(ls -1t "$BACKUP_DIR"/pre-update-*.dump 2>/dev/null | while IFS= read -r f; do basename "$f"; done || true)
+}
+
+# collect_updater: the host updater units install.sh installs when the checkout has updater.sh and
+# the install uses systemd. A missing or inactive one is a warning (update from the panel does not
+# work, update.sh itself does); without systemd (--no-system) it is only said so.
+collect_updater() {
+  local state expected=0
+  state=$(updater_state "$CFG_SYSTEM")
+  if [ "$CFG_SYSTEM" = 1 ] && [ -x "$APP_DIR/scripts/deploy/updater.sh" ]; then expected=1; fi
+  FACT[updater]=$state
+  FACT[updater_expected]=$expected
+  case $state in
+    no_system) info "updater: not installed, this install runs without systemd (--no-system); update from the panel is unavailable" ;;
+    no_systemd) info "updater: systemctl is not available here, the units cannot be checked" ;;
+    not_installed)
+      if [ "$expected" = 1 ]; then
+        warning "updater: mailexpert-updater.path is not installed, so update from the panel does not work (install.sh --prefix $OPT_PREFIX installs it)"
+      fi
+      ;;
+    inactive)
+      if [ "$expected" = 1 ]; then
+        warning "updater: mailexpert-updater.path is installed but not active (systemctl enable --now mailexpert-updater.path)"
+      else
+        info "updater: mailexpert-updater.path is installed but not active, and this checkout has no scripts/deploy/updater.sh"
+      fi
+      ;;
+  esac
 }
 
 collect_database() {
@@ -335,7 +362,7 @@ resolve_target_channel() {
 report_text() {
   local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
-  for key in version checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team backup_configured \
+  for key in version checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
     last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_commit; do
     [ -n "${FACT[$key]+set}" ] || continue
     printf '  %-20s %s\n' "$key" "${FACT[$key]:--}"
@@ -379,6 +406,7 @@ report_json() {
       edge_image: (if ($f.edge_image // "") == "" then null else $f.edge_image end),
       cf_access: (if $f.cf_access == null then null else
         {state: $f.cf_access, team: (if ($f.cf_access_team // "") == "" then null else $f.cf_access_team end)} end),
+      updater: {state: ($f.updater // "unknown"), expected: ($f.updater_expected | flag)},
       backup: {configured: ($f.backup_configured | flag),
                last_finished_at: (if ($f.last_backup_at // "") == "" then null else $f.last_backup_at end),
                last_dump_bytes: ($f.last_dump_bytes | num), pre_update_dumps: $dumps},
@@ -420,6 +448,7 @@ main() {
   collect_versions
   collect_containers
   collect_cf_access
+  collect_updater
   collect_disk_and_backups
   collect_database
   if [ "$target" = latest ]; then

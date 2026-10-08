@@ -190,7 +190,8 @@ gh run list --repo wyrtensi/MailExpert --workflow ci.yml --branch main --status 
 остальное — `update.sh` по SSH, откат — `rollback.sh` по SSH. Версию, с которой откатились, кнопка
 не предлагает, пока владелец не продвинет более новую. Юниты ставит `install.sh` с systemd (без `--no-system`) на новых и
 существующих установках; без них карточка пишет «механизм обновления не установлен», и обновление
-идёт по шагам ниже. Если кнопка не отвечает: `systemctl status mailexpert-updater.path
+идёт по шагам ниже. `status.sh` (поле `updater`, предупреждение) и `healthcheck.sh` (проблема, если
+`mailexpert-updater.path` установлен, но не активен) следят за этими юнитами. Если кнопка не отвечает: `systemctl status mailexpert-updater.path
 mailexpert-updater.service`; после множества запросов подряд юнит может упереться в лимит запусков —
 `systemctl reset-failed mailexpert-updater.service mailexpert-updater.path && systemctl start
 mailexpert-updater.path`. За один запуск исполнитель берёт не больше 10 запросов, остальные удаляет

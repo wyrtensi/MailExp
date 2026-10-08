@@ -404,7 +404,9 @@ backend подключить ящик заново (`reconnect`), а `rule run` 
 ### 3.10. `integration`: клиент Microsoft OAuth
 
 Клиент, через который подключаются ящики Outlook (`/api/integrations/microsoft`). Приложения Google —
-своим CLI (`src/cli/googleApp.js`).
+своим CLI (`src/cli/googleApp.js`, на хосте — `google-app.sh`, [google-oauth.md](google-oauth.md)):
+справка команды — `googleApp.js <команда> --help` (код 0, ничего не выполняется); обёртка
+`google-app.sh` при запуске не от root или без установки отвечает кодом 2, как и `mailexpert-cli.sh`.
 
 | Команда | Что делает | Журнал |
 |---|---|---|
@@ -575,7 +577,7 @@ SMTP, через который панель шлёт приглашения, к
 | Команда | Что делает | Журнал |
 |---|---|---|
 | `account list [--user <USER_EMAIL>]` | Ящики в порядке панели: адрес, вид (`imap`, `google`, `microsoft`, `node`), включён ли, здоровье, IMAP-сервер, последняя синхронизация, кто добавил, ID. `--user` — только добавленные этим пользователем (ящики общие, другой связи с пользователем нет). Секретов нет. | нет |
-| `account create <LOCAL>@<DOMAIN> --imap-host <IMAP_HOST> --smtp-host <SMTP_HOST> [--imap-port N] [--smtp-port N] [--smtp-tls STARTTLS\|SSL\|none] [--login LOGIN] [--name NAME] [--sender-name NAME] [--skip-tls-verify] < файл-с-паролем` | Добавляет ящик. Умолчания формы: порты 993 и 587, `STARTTLS`, имя и логин — адрес. Пароль IMAP со stdin (как есть, с пробелами, без одного перевода строки в конце; пустой — `password_missing`), SMTP входит с ним же; отдельный SMTP-пароль — потом `set-connection --smtp-login ... --smtp-password-stdin`. Backend подключает ящик (задание). | `mailbox.added` |
+| `account create <LOCAL>@<DOMAIN> --imap-host <IMAP_HOST> --smtp-host <SMTP_HOST> [--imap-port N] [--smtp-port N] [--smtp-tls STARTTLS\|SSL\|none] [--login LOGIN] [--smtp-login LOGIN] [--name NAME] [--sender-name NAME] [--skip-tls-verify] < файл-с-паролем` | Добавляет ящик. Умолчания формы: порты 993 и 587, `STARTTLS`, имя и логин — адрес; `--smtp-login` задаёт отдельный логин SMTP (без него SMTP входит логином IMAP). Пароль IMAP со stdin (как есть, с пробелами, без одного перевода строки в конце; пустой — `password_missing`), SMTP входит с ним же; отдельный SMTP-пароль — потом `set-connection --smtp-login ... --smtp-password-stdin`. Backend подключает ящик (задание). | `mailbox.added` |
 | `account set-connection <LOCAL>@<DOMAIN>\|ID [--imap-host H] [--imap-port N] [--smtp-host H] [--smtp-port N] [--smtp-tls MODE] [--login L] [--smtp-login L] [--skip-tls-verify\|--verify-tls] [--password-stdin\|--smtp-password-stdin]` | Меняет названные серверные поля, как сохранение администратора на экране; порт IMAP определяет TLS (993 — TLS). `--smtp-login ""` — SMTP снова входит логином IMAP. Пароль за один запуск один: IMAP (`--password-stdin`) или SMTP (`--smtp-password-stdin`), оба сразу — код 2. Ящик узла — отказ `mail_node_connection_locked`. Изменение стороны IMAP переподключает ящик (задание), SMTP берётся при следующей отправке. Без параметров — код 2. | `mailbox.connection_changed` с именами изменённых полей (без значений) |
 
 `mailbox oauth-reset <LOCAL>@<DOMAIN>|ID` (группа `mailbox`) забывает, к какой учётке Google или

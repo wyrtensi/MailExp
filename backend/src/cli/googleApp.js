@@ -50,8 +50,42 @@ function usage() {
     'history. --label defaults to the JSON project_id; --user-limit defaults to 100.',
     'replace-secret reads only the new secret (plain text) on stdin, never as an argument.',
     'Put -- before arguments that start with a dash (set-label <id> -- -label).',
+    '<command> --help prints the usage of that command.',
     'Exit codes: 0 done, 1 refused, 2 invalid input, 3 failed (database down, unexpected error).',
   ].join('\n');
+}
+
+// `googleApp.js <command> --help`: the command's own line(s) of usage() and its notes. A command
+// not listed here has no notes beyond its usage line.
+const COMMANDS = new Set([
+  'add', 'list', 'show', 'enable', 'close', 'disable', 'delete', 'set-limit', 'set-label', 'replace-secret',
+]);
+const COMMAND_NOTES = {
+  add: [
+    'Reads the OAuth client JSON downloaded from Google Cloud Console (Credentials -> OAuth client ->',
+    'Download JSON) on stdin, so the client secret never appears in argv or shell history.',
+    '--label defaults to the JSON project_id; --user-limit defaults to 100.',
+  ],
+  delete: ['Refused while mailboxes are bound to the app. Without --yes it changes nothing.'],
+  'replace-secret': ['Reads only the new secret (plain text) on stdin, never as an argument.'],
+  'set-label': ['Put -- before a label that starts with a dash: set-label <id> -- -label.'],
+};
+
+function commandUsage(command) {
+  const lines = usage().split('\n').filter((line) => line.startsWith(`  googleApp.js ${command} `));
+  return [
+    'Usage:',
+    ...lines,
+    ...(COMMAND_NOTES[command] ? ['', ...COMMAND_NOTES[command]] : []),
+    '',
+    'Exit codes: 0 done, 1 refused, 2 invalid input, 3 failed (database down, unexpected error).',
+  ].join('\n');
+}
+
+// True when --help or -h is among the arguments before a bare "--" (after it they are plain words).
+function wantsHelp(args) {
+  const end = args.indexOf('--');
+  return (end === -1 ? args : args.slice(0, end)).some((arg) => arg === '--help' || arg === '-h');
 }
 
 // Reads a stream to completion as utf8 text. Used for stdin, which docker compose exec -T pipes
@@ -298,6 +332,10 @@ const ERROR_MESSAGES = {
 export async function run(argv, stdin = process.stdin) {
   const [command, ...rest] = argv;
   try {
+    if (COMMANDS.has(command) && wantsHelp(rest)) {
+      console.log(commandUsage(command));
+      return 0;
+    }
     if (command === 'add') return await cmdAdd(rest, stdin);
     if (command === 'list') return await cmdList(rest);
     if (command === 'show') return await cmdShow(rest);

@@ -17,7 +17,8 @@
 #   google-app.sh replace-secret <id> <secret file | ->   new client secret from a file or stdin
 #
 # Exit codes: 0 done, 1 refused (unknown app, app still has mailboxes, invalid value), 2 invalid
-# input, 3 the CLI failed (database or Redis down). A label that starts with - goes after --:
+# input or a wrapper error (not root, no installation: the same as mailexpert-cli.sh), 3 the CLI
+# failed (database or Redis down). A label that starts with - goes after --:
 # google-app.sh set-label <id> -- -label.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
@@ -55,7 +56,7 @@ replace-secret reads the new client secret (plain text) from a file, or from std
 never an argument; on a terminal it is typed without echo.
 A label (or any argument) that starts with - goes after --, e.g. set-label <id> -- -label.
 Exit codes: 0 done, 1 refused (unknown app, app still has mailboxes, invalid value), 2 invalid
-input, 3 the CLI failed (database or Redis down).
+input or a wrapper error (not root, no installation), 3 the CLI failed (database or Redis down).
 EOF
 }
 
@@ -181,7 +182,7 @@ main() {
   if [ "$dashdash" = 1 ] && [ "${#pos_args[@]}" -gt 0 ]; then cli_args+=(--); fi
   if [ "${#pos_args[@]}" -gt 0 ]; then cli_args+=("${pos_args[@]}"); fi
 
-  [ "$(id -u)" = 0 ] || die "run google-app.sh as root"
+  [ "$(id -u)" = 0 ] || die "run google-app.sh as root" 2
   load_install "$prefix"
 
   # The CLI's own status (1 refused, 2 invalid input, 3 failed) is the script's: capture it, since

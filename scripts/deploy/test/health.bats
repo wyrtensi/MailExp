@@ -14,6 +14,42 @@ setup() {
   [ "$output" = $'containers: backend is restarting\ncontainers: postgres is unhealthy\ncontainers: redis is exited\ncontainers: edge-missing does not exist' ]
 }
 
+# stub_systemctl <absent|active|inactive>: a systemctl that knows mailexpert-updater.path in that state.
+stub_systemctl() {
+  mkdir -p "$BATS_TEST_TMPDIR/sbin"
+  printf '%s\n' '#!/usr/bin/env bash' 'case $1 in' '  cat) [ "$UPDATER_UNIT" != absent ] ;;' \
+    '  is-active) [ "$UPDATER_UNIT" = active ] ;;' 'esac' >"$BATS_TEST_TMPDIR/sbin/systemctl"
+  chmod +x "$BATS_TEST_TMPDIR/sbin/systemctl"
+  export UPDATER_UNIT=$1 PATH="$BATS_TEST_TMPDIR/sbin:$PATH"
+}
+
+@test "updater_state: no_system for --no-system installs, whatever systemctl says" {
+  stub_systemctl inactive
+  [ "$(updater_state 0)" = no_system ]
+}
+
+@test "updater_state: not_installed, active and inactive from systemctl" {
+  stub_systemctl absent
+  [ "$(updater_state 1)" = not_installed ]
+  stub_systemctl active
+  [ "$(updater_state 1)" = active ]
+  stub_systemctl inactive
+  [ "$(updater_state 1)" = inactive ]
+}
+
+@test "updater_state: no_systemd without systemctl" {
+  local PATH=$BATS_TEST_TMPDIR/empty
+  [ "$(updater_state 1)" = no_systemd ]
+}
+
+@test "updater_problem: only an installed but inactive path unit is a problem" {
+  run updater_problem inactive
+  [[ $output == "updater: mailexpert-updater.path is installed but not active"* ]]
+  for state in active not_installed no_system no_systemd; do
+    [ -z "$(updater_problem "$state")" ]
+  done
+}
+
 @test "service_problems: healthy, starting and services without a health check are fine" {
   ps=$'frontend running healthy\nbackend running starting\ncloudflared running '
   [ -z "$(service_problems frontend backend cloudflared <<<"$ps")" ]

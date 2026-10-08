@@ -285,6 +285,19 @@ describe('mailexpert account', () => {
     expect(hooks.reconnectAccount).toHaveBeenCalledWith(created.id);
   });
 
+  it('create --smtp-login stores a separate SMTP login that "create --help" offers; without it SMTP uses the IMAP login', async () => {
+    const help = await cli(['account', 'create', '--help']);
+    expect(help.code).toBe(0);
+    expect(help.out).toContain('--smtp-login');
+    const args = ['account', 'create', 'team@example.com', '--imap-host', 'imap.example.com', '--smtp-host', 'smtp.example.com', '--json'];
+    const separate = await cli([...args, '--smtp-login', 'smtp-user'], { stdin: PASSWORD });
+    expect(separate.code).toBe(0);
+    expect(await account(separate.json().account.id)).toMatchObject({ auth_user: 'team@example.com', smtp_auth_user: 'smtp-user' });
+    await db.query('DELETE FROM email_accounts');
+    const plain = await cli(args, { stdin: PASSWORD });
+    expect(await account(plain.json().account.id)).toMatchObject({ smtp_auth_user: null });
+  });
+
   it('keeps the route\'s checks: hosts, ports, control characters, a password', async () => {
     const create = (args, stdin = PASSWORD) => cli(['account', 'create', 'team@example.com', '--imap-host', 'imap.example.com', '--smtp-host', 'smtp.example.com', ...args], { stdin });
     hostState.refuse.add('10.0.0.5');

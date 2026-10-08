@@ -166,7 +166,8 @@ MailExpert подключает Gmail-ящики пользователей, н�
   хранилище и проверки им не мешают. Весь прогон юнита ограничен 6 часами.
 - **Проверка здоровья** — таймер `mailexpert-health.timer`, каждые 5 минут
   (`healthcheck.sh`): готовность `/api/health/ready`, состояние контейнеров, свободное место,
-  возраст последнего бэкапа, срок сертификата `<DIRECT_HOST>`.
+  возраст последнего бэкапа, срок сертификата `<DIRECT_HOST>`, исполнитель обновлений из панели
+  (проблема, если `mailexpert-updater.path` установлен, но не активен).
 - **Ручной бэкап:**
 
   ```bash
@@ -382,6 +383,14 @@ Caddy) и `info:` (справка: что `install.sh` сделал сам и `i
 новой миграцией не считается: `status.sh --target` пишет `info: migrations:` только когда
 `pending_migrations` не пуст. Запускать его лучше
 отдельно от SSH-сессии, через `systemd-run` — [README.md, раздел 9](README.md).
+
+Исполнитель кнопки (`mailexpert-updater.path` и `.service`, ставит `install.sh` с systemd) проверяют
+оба скрипта. `status.sh` показывает поле `updater` (`{"state": "active|inactive|not_installed|no_system|no_systemd", "expected": true|false}`):
+предупреждение `warning: updater: ...`, если юнитов нет или path-юнит не активен там, где они должны
+быть (с systemd и `updater.sh` в checkout); установка с `--no-system` и хост без `systemctl`
+получают строку `info:`, не ошибку. `healthcheck.sh` (таймер каждые 5 минут) считает проблемой
+только установленный, но не активный `mailexpert-updater.path`: кнопка в панели тогда молчит. Лечение
+— `systemctl enable --now mailexpert-updater.path` или `install.sh --prefix <PREFIX>`.
 
 ### Откат обновления
 
