@@ -39,7 +39,8 @@
       "markAllRead": "Could not mark all as read",
       "syncFolders": "Folder list not refreshed",
       "reconnect": "Could not reconnect the mailbox",
-      "compose": "Could not open the reply or forward"
+      "compose": "Could not open the reply or forward",
+      "openLetter": "Could not open the letter"
     },
     "mailboxDisabled": "This mailbox is turned off. Turn it on in its settings to connect.",
     "prefSaveFailed": {
@@ -240,7 +241,8 @@
     "readOnlyOption": "read-only",
     "disabledOption": "disabled",
     "draftSaveFailed": "Draft not saved",
-    "draftSaveFailedBody": "Check the connection and try saving again."
+    "draftSaveFailedBody": "Check the connection and try saving again.",
+    "attachReadFailed": "Could not read the file, it was not attached"
   },
   "message": {
     "find": {
@@ -859,7 +861,8 @@
       "copied": "Copied",
       "loading": "Loading headers…",
       "noHeaders": "No headers available",
-      "loadFailed": "Could not load the headers: {{message}}"
+      "loadFailed": "Could not load the headers: {{message}}",
+      "openFailed": "Could not open the headers"
     },
     "folders": {
       "back": "Move to folder",

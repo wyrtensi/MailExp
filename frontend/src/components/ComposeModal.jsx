@@ -796,6 +796,10 @@ export default function ComposeModal() {
           return [...prev, { name: file.name, size: file.size, type: file.type, data: base64 }];
         });
       };
+      // An unreadable file (moved, locked, no permission) is not attached: say which one.
+      reader.onerror = () => {
+        addNotification({ type: 'error', title: t('compose.attachReadFailed'), body: file.name });
+      };
       reader.readAsDataURL(file);
     });
     e.target.value = '';

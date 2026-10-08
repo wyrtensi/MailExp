@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import { useStore } from '../store/index.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
 import SenderAvatarImage from './SenderAvatarImage.jsx';
 import { contactComposeAddress, contactForEmail, contactFormFromSender, websiteHref, websiteLabel } from '../utils/contactLinks.js';
@@ -371,6 +372,9 @@ export default function ContactsPage() {
       window.setTimeout(() => useStore.getState().setSelectedMessage(msg.id), 0);
     } catch (err) {
       console.error('Failed to open letter:', err.message);
+      useStore.getState().addNotification({
+        type: 'error', title: t('common.actionFailed.openLetter'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')),
+      });
     }
   };
 

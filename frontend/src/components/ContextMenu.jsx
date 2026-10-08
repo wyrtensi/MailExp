@@ -4,6 +4,7 @@ import { copyToClipboard } from '../utils/clipboard.js';
 import { messageDeepLink } from '../utils/deepLink.js';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { getContextMenuPolicy, resolveContextMenuMessage } from '../utils/contextMenuPolicy.js';
 import { usePluginCollected } from '../plugins/PluginSlot.jsx';
 import MessageHeaderModal from './MessageHeaderModal.jsx';
@@ -310,6 +311,9 @@ export default function ContextMenu({ x, y, message, onClose, onAction, defaultM
               setHeaderMessage(await resolveContextMenuMessage(message, variant, api.resolveMessage));
             } catch (err) {
               console.error('Message header resolution failed:', err.message);
+              useStore.getState().addNotification({
+                type: 'error', title: t('contextMenu.headers.openFailed'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')),
+              });
             }
           },
           keepOpen: true,
