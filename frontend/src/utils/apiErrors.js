@@ -45,6 +45,9 @@ const ERROR_KEYS = {
   oauth_mailbox_not_found: 'admin.accounts.errorOAuthMailboxNotFound',
 };
 
+// The codes this module explains (for the locale coverage test).
+export const API_ERROR_CODES = Object.freeze(Object.keys(ERROR_KEYS));
+
 // `keys` is the screen's own { code: key } (checked first).
 export function apiErrorKey(code, keys = {}) {
   if (typeof code !== 'string') return null;

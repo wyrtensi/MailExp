@@ -18,6 +18,9 @@ const ERROR_KEYS = {
   email_taken: 'admin.users.errorEmailTaken',
 };
 
+// The codes this module explains (for the locale coverage test).
+export const ADMIN_USER_ERROR_CODES = Object.freeze(Object.keys(ERROR_KEYS));
+
 export function adminUserErrorKey(code) {
   return typeof code === 'string' && Object.hasOwn(ERROR_KEYS, code) ? ERROR_KEYS[code] : null;
 }

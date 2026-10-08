@@ -1,42 +1,53 @@
 // Run with: node --test src/utils/adminUsers.test.js
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { adminUserErrorKey, adminUserErrorText } from './adminUsers.js';
+import { readFileSync } from 'node:fs';
+import { ADMIN_USER_ERROR_CODES, adminUserErrorKey, adminUserErrorText } from './adminUsers.js';
 
-const t = (key) => `t:${key}`;
+const readLocale = (lang) => JSON.parse(readFileSync(new URL(`../locales/${lang}.json`, import.meta.url), 'utf8'));
+const en = readLocale('en');
+const ru = readLocale('ru');
+const lookup = (dict, key) => key.split('.').reduce((node, part) => node?.[part], dict);
+const tFor = (dict) => (key) => {
+  const value = lookup(dict, key);
+  return typeof value === 'string' ? value : key;
+};
+const refusal = (message, code) => Object.assign(new Error(message), code ? { code } : {});
 
 describe('adminUserErrorKey', () => {
-  it('maps every refusal code of the admin users API and nothing else', () => {
-    // backend services/admin/users.js ADMIN_USER_ERRORS
-    const codes = {
-      email_invalid: 'admin.users.errorEmailInvalid',
-      user_exists: 'admin.users.errorUserExists',
-      username_taken: 'admin.users.errorUsernameTaken',
-      invalid_field: 'admin.users.errorInvalidField',
-      no_fields: 'admin.users.errorInvalidField',
-      self_change: 'admin.users.errorSelfChange',
-      not_found: 'admin.users.errorNotFound',
-      bootstrap_admin: 'admin.users.errorBootstrapAdmin',
-      last_admin: 'admin.users.errorLastAdmin',
-      email_taken: 'admin.users.errorEmailTaken',
-    };
-    for (const [code, key] of Object.entries(codes)) assert.equal(adminUserErrorKey(code), key, code);
+  it('every mapped code has its text in English and Russian', () => {
+    assert.ok(ADMIN_USER_ERROR_CODES.length > 0);
+    for (const code of ADMIN_USER_ERROR_CODES) {
+      const key = adminUserErrorKey(code);
+      for (const [lang, dict] of [['en', en], ['ru', ru]]) {
+        assert.equal(typeof lookup(dict, key), 'string', `${code} -> ${key} missing in ${lang}`);
+      }
+    }
+  });
+
+  it('knows nothing of other codes nor of object properties', () => {
     for (const code of [undefined, null, '', 'toString', '__proto__', 'other']) assert.equal(adminUserErrorKey(code), null);
   });
 });
 
 describe('adminUserErrorText', () => {
-  it('explains a known code in the UI language', () => {
-    assert.equal(adminUserErrorText(Object.assign(new Error('At least one active admin must remain'), { code: 'last_admin' }), t),
-      't:admin.users.errorLastAdmin');
+  it('explains the guard refusals in the interface language', () => {
+    const lastAdmin = refusal('At least one active admin must remain', 'last_admin');
+    assert.match(adminUserErrorText(lastAdmin, tFor(en)), /At least one active administrator must remain/);
+    assert.match(adminUserErrorText(lastAdmin, tFor(ru)), /хотя бы один активный администратор/);
+    assert.match(adminUserErrorText(refusal('x', 'bootstrap_admin'), tFor(ru)), /BOOTSTRAP_ADMIN_EMAILS/);
+  });
+
+  it('uses a code any route answers when the users map has none', () => {
+    assert.equal(adminUserErrorText(refusal('Invalid id', 'invalid_id'), tFor(en)), en.common.apiError.invalidId);
   });
 
   it('keeps the server text for a refusal without a known code', () => {
-    assert.equal(adminUserErrorText(new Error('Cannot change your own account this way'), t), 'Cannot change your own account this way');
+    assert.equal(adminUserErrorText(refusal('Cannot change your own account this way'), tFor(ru)), 'Cannot change your own account this way');
   });
 
   it('says the action failed when there is no text at all', () => {
-    assert.equal(adminUserErrorText(new Error(''), t), 't:admin.users.errorFailed');
-    assert.equal(adminUserErrorText(undefined, t), 't:admin.users.errorFailed');
+    assert.equal(adminUserErrorText(refusal(''), tFor(ru)), ru.admin.users.errorFailed);
+    assert.equal(adminUserErrorText(undefined, tFor(en)), en.admin.users.errorFailed);
   });
 });
