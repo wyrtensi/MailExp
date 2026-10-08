@@ -206,6 +206,15 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   [ "$output" = "Container b  Created" ]
 }
 
+@test "last_output: the last line a command wrote, without a URL's user information" {
+  printf "== git fetch origin\nfatal: unable to access 'https://user:secret-token@example.com/x.git/': timeout\n\n" >"$BATS_TEST_TMPDIR/step.log"
+  run bash -c '. "$1"; last_output "$2"' _ "$NODE_SCRIPTS/node-update.sh" "$BATS_TEST_TMPDIR/step.log"
+  [ "$output" = "fatal: unable to access 'https://example.com/x.git/': timeout" ]
+  printf '== git fetch origin\n' >"$BATS_TEST_TMPDIR/step.log"
+  run bash -c '. "$1"; last_output "$2"' _ "$NODE_SCRIPTS/node-update.sh" "$BATS_TEST_TMPDIR/step.log"
+  [ "$output" = "no output" ]
+}
+
 @test "mailcow: at the pin already, nothing runs" {
   clone_mailcow 2026-09a
   run_hook

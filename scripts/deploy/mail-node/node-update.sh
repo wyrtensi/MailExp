@@ -161,10 +161,11 @@ run_step() {
 }
 
 # last_output <log>: the last line a command wrote to the log (its error, as a rule): no step
-# header, "[mailexpert] " dropped, cut to 160 characters; "no output" when there is none.
+# header, "[mailexpert] " dropped, URLs without user information (error_tail), cut to 160
+# characters; "no output" when there is none.
 last_output() {
   local line
-  line=$(grep -v -e '^== ' -e '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1) || line=''
+  line=$(grep -v -e '^== ' -e '^[[:space:]]*$' "$1" 2>/dev/null | error_tail) || line=''
   line=${line#\[mailexpert\] }
   printf '%s' "${line:-no output}" | cut -c1-160
 }
@@ -197,7 +198,7 @@ with_error() {
   file=$(mktemp)
   "$@" 2>"$file" || rc=$?
   cat "$file" >&2
-  LAST_ERROR=$(sed '/^[[:space:]]*$/d' "$file" | tail -n 1 | cut -c1-200)
+  LAST_ERROR=$(error_tail <"$file")
   rm -f "$file"
   return "$rc"
 }
