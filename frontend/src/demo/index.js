@@ -402,6 +402,8 @@ const ACCESS_SYNC_FIXTURE = {
   maxImports: 10,
   tombstones: 0,
   googleMode: true,
+  host: { issuer: 'https://example-team.cloudflareaccess.com', audienceSet: true },
+  signedInViaAccess: true,
 };
 
 const DEFAULT_PREFERENCES = {
@@ -2930,6 +2932,18 @@ export async function demoRequest(method, path, body = {}) {
       apiTokenSet: accessSync.config.apiTokenSet || !!String(body.apiToken ?? '').trim(),
     };
     return clone(accessSync);
+  }
+  // "Проверить": the made-up settings pass every check (nothing is called or stored).
+  if (verb === 'POST' && pathname === '/admin/access-sync/verify') {
+    return {
+      ok: true,
+      checks: [
+        { id: 'token', status: 'ok', code: 'active', expiresOn: null, owner: 'user' },
+        { id: 'app', status: 'ok', code: 'found', name: 'MailExpert' },
+        { id: 'audience', status: 'ok', code: 'match' },
+        { id: 'policy', status: 'ok', code: 'found', reusable: true },
+      ],
+    };
   }
   if (verb === 'POST' && pathname === '/admin/access-sync/run') {
     if (!accessSync.config.enabled) return { result: { outcome: 'not_configured' }, ...clone(accessSync) };

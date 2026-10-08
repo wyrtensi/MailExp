@@ -126,3 +126,67 @@ describe('updatePolicy', () => {
     expect(JSON.parse(init.body)).not.toHaveProperty('reusable');
   });
 });
+
+describe('verifyToken', () => {
+  it('asks Cloudflare about a user token and answers its status and expiry', async () => {
+    const fetchImpl = vi.fn(async () => reply(200, { success: true, result: { id: 'tid', status: 'active', expires_on: '2027-01-01T00:00:00Z' } }));
+    expect(await client(fetchImpl).verifyToken()).toEqual({ status: 'active', expiresOn: '2027-01-01T00:00:00Z', owner: 'user' });
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/user/tokens/verify`);
+    expect(init.method).toBe('GET');
+    expect(init.headers.authorization).toBe('Bearer tok-secret');
+  });
+
+  it('falls back to the account endpoint for an account-owned token', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(reply(401, { success: false, errors: [{ code: 1000 }] }))
+      .mockResolvedValueOnce(reply(200, { success: true, result: { id: 'tid', status: 'active' } }));
+    expect(await client(fetchImpl).verifyToken()).toEqual({ status: 'active', expiresOn: null, owner: 'account' });
+    expect(fetchImpl.mock.calls[1][0]).toBe(`${BASE}/accounts/${ACCOUNT}/tokens/verify`);
+  });
+
+  it('reports the user endpoint\'s refusal when the account endpoint refuses the token too', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(reply(401, { success: false, errors: [{ code: 1000 }] }))
+      .mockResolvedValueOnce(reply(401, { success: false, errors: [{ code: 1000 }] }));
+    const err = await client(fetchImpl).verifyToken().catch((e) => e);
+    expect(err).toBeInstanceOf(CloudflareAccessError);
+    expect(err.status).toBe(401);
+  });
+
+  it('reports the account endpoint\'s 403 or 404: a wrong account ID or a token of another account', async () => {
+    for (const [userStatus, accountStatus] of [[401, 403], [401, 404], [403, 404], [400, 403]]) {
+      const fetchImpl = vi.fn()
+        .mockResolvedValueOnce(reply(userStatus, { success: false, errors: [{ code: 1000 }] }))
+        .mockResolvedValueOnce(reply(accountStatus, { success: false, errors: [{ code: 7003 }] }));
+      const err = await client(fetchImpl).verifyToken().catch((e) => e);
+      expect(err.status).toBe(accountStatus);
+    }
+  });
+
+  it('reports the account endpoint\'s own failure when it is not a refusal', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(reply(401, { success: false, errors: [{ code: 1000 }] }))
+      .mockResolvedValueOnce(reply(503, { success: false, errors: [] }));
+    const err = await client(fetchImpl).verifyToken().catch((e) => e);
+    expect(err.status).toBe(503);
+  });
+
+  it('does not try the account endpoint after a network failure', async () => {
+    const fetchImpl = vi.fn(async () => { throw new TypeError('fetch failed'); });
+    const err = await client(fetchImpl).verifyToken().catch((e) => e);
+    expect(err.status).toBe('network');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getApp', () => {
+  it('reads the application by ID', async () => {
+    const app = { id: APP, name: 'MailExpert', aud: 'a'.repeat(64), domain: 'mail.example.com' };
+    const fetchImpl = vi.fn(async () => reply(200, { success: true, result: app }));
+    expect(await client(fetchImpl).getApp()).toEqual(app);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(`${BASE}/accounts/${ACCOUNT}/access/apps/${APP}`);
+    expect(init.method).toBe('GET');
+  });
+});

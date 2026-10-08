@@ -24,6 +24,15 @@ export function getAuthSettings(env = process.env) {
   };
 }
 
+// What the host set for Cloudflare Access (configure.sh -> <prefix>/.env), each value on its own:
+// getAuthSettings() answers cloudflare: null unless both are set, which hides which one is missing.
+// Neither is a secret (the team domain is in every Access redirect, the aud tag in every token).
+export function cloudflareEnvState(env = process.env) {
+  const issuer = text(env.CF_ACCESS_ISSUER).replace(/\/+$/, '');
+  const audience = text(env.CF_ACCESS_AUDIENCE);
+  return { issuer: issuer || null, audience: audience || null };
+}
+
 // A startup error for a configuration the server cannot run with, or null.
 export function authSettingsError(settings = getAuthSettings()) {
   if (!AUTH_MODES.has(settings.mode)) return 'AUTH_MODE must be "local" or "google".';

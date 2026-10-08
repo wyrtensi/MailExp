@@ -535,6 +535,7 @@ test('already-handled writes from part 1 of the demo-settings fix still answer',
   await answer('/admin/settings', 'PATCH', '/admin/settings', { registration_open: true });
   await answer('/admin/access-sync', 'PUT', '/admin/access-sync', { enabled: false });
   await answer('/admin/access-sync/run', 'POST', '/admin/access-sync/run');
+  await answer('/admin/access-sync/verify', 'POST', '/admin/access-sync/verify', {});
   await answer('/mail-node/config', 'PUT', '/mail-node/config', {});
   await answer('/mail-node/domains', 'POST', '/mail-node/domains', { domain: 'coverage.demo.mailexpert.local' });
   const step = await answer('/mail-node/domains/:param/steps/:param', 'POST', '/mail-node/domains/coverage.demo.mailexpert.local/steps/node_configured');

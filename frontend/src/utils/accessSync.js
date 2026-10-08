@@ -23,6 +23,9 @@ export const ACCESS_SYNC_ERROR_KEYS = Object.freeze({
 const SAVE_ERROR_KEYS = Object.freeze({
   invalid_id: 'admin.accessSync.errorInvalidId',
   incomplete: 'admin.accessSync.errorIncomplete',
+  token_invalid: 'admin.accessSync.errorTokenInvalid',
+  verify_incomplete: 'admin.accessSync.errorVerifyIncomplete',
+  token_undecryptable: 'admin.accessSync.errorTokenUnreadableVerify',
 });
 
 const IDLE_KEYS = Object.freeze({
@@ -120,4 +123,67 @@ export function tombstoneReasonKey(reason) {
 // Why a manual run did nothing, or null when it ran.
 export function accessSyncIdleKey(result) {
   return IDLE_KEYS[result?.outcome] ?? null;
+}
+
+// Body for POST /api/admin/access-sync/verify: the IDs exactly as the form has them (an emptied
+// one is checked as not set, as Save would store it), and the token only when one is typed: the
+// token is write-only, so a blank field means the stored token. Nothing sent here is stored.
+export function accessSyncVerifyPayload(form) {
+  const body = {
+    accountId: String(form.accountId ?? '').trim(),
+    appId: String(form.appId ?? '').trim(),
+    policyId: String(form.policyId ?? '').trim(),
+  };
+  const token = String(form.apiToken ?? '').trim();
+  if (token) body.apiToken = token;
+  return body;
+}
+
+const VERIFY_LABEL_KEYS = Object.freeze({
+  token: 'admin.accessSync.verifyToken',
+  app: 'admin.accessSync.verifyApp',
+  audience: 'admin.accessSync.verifyAudience',
+  policy: 'admin.accessSync.verifyPolicy',
+});
+
+// Keys by "<check>:<code>" first, then by code alone (the failures every call can have).
+const VERIFY_CHECK_KEYS = Object.freeze({
+  'token:token_disabled': 'admin.accessSync.checkTokenDisabled',
+  'token:token_expired': 'admin.accessSync.checkTokenExpired',
+  'token:forbidden': 'admin.accessSync.checkTokenWrongAccount',
+  'token:not_found': 'admin.accessSync.checkTokenWrongAccount',
+  'app:not_found': 'admin.accessSync.checkAppNotFound',
+  'audience:match': 'admin.accessSync.checkAudienceOk',
+  'audience:mismatch': 'admin.accessSync.checkAudienceMismatch',
+  'audience:not_configured': 'admin.accessSync.checkAudienceNotConfigured',
+  'audience:no_app': 'admin.accessSync.checkNoApp',
+  'policy:not_found': 'admin.accessSync.checkPolicyNotFound',
+  'policy:not_allow': 'admin.accessSync.checkNotAllow',
+  'policy:not_attached': 'admin.accessSync.checkNotAttached',
+  no_app_id: 'admin.accessSync.checkNoAppId',
+  no_policy_id: 'admin.accessSync.checkNoPolicyId',
+  refused: 'admin.accessSync.checkRefused',
+  forbidden: 'admin.accessSync.checkForbidden',
+  not_found: 'admin.accessSync.checkNotFound',
+  unavailable: 'admin.accessSync.checkUnavailable',
+  unreachable: 'admin.accessSync.checkUnreachable',
+  unexpected: 'admin.accessSync.checkUnexpected',
+});
+
+// One line of the verify result (backend/src/services/accessSync/verify.js): the check's label
+// key, the sentence key with its values, and the status (ok, failed, skipped). An unknown code
+// comes back as raw, with key null.
+export function accessSyncVerifyLine(check) {
+  const line = { labelKey: VERIFY_LABEL_KEYS[check.id] ?? check.id, key: null, values: {}, status: check.status };
+  if (check.id === 'token' && check.code === 'active') {
+    return check.expiresOn
+      ? { ...line, key: 'admin.accessSync.checkTokenOkExpires', values: { date: check.expiresOn } }
+      : { ...line, key: 'admin.accessSync.checkTokenOk' };
+  }
+  if (check.id === 'app' && check.code === 'found') return { ...line, key: 'admin.accessSync.checkAppOk', values: { name: check.name ?? '' } };
+  if (check.id === 'policy' && check.code === 'found') {
+    return { ...line, key: check.reusable ? 'admin.accessSync.checkPolicyOkReusable' : 'admin.accessSync.checkPolicyOk' };
+  }
+  const key = VERIFY_CHECK_KEYS[`${check.id}:${check.code}`] ?? VERIFY_CHECK_KEYS[check.code] ?? null;
+  return key ? { ...line, key } : { ...line, raw: check.code };
 }

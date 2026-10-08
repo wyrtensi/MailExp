@@ -342,6 +342,7 @@ CLI сохраняет тем же действием, что и экран (`se
 | `access status` | Настройки (включена ли, ID аккаунта, приложения и политики, задан ли токен — сам токен никогда), режим входа `google`, пределы за прогон (`ACCESS_SYNC_MAX_DISABLES`, `ACCESS_SYNC_MAX_IMPORTS`), сколько адресов удалённых пользователей помнит панель, последний прогон: итог, источник, время, сколько добавлено и удалено в политике, добавлено из Cloudflare, отключено, ошибок добавления, время и номер следующей попытки после сбоя сети или Cloudflare (или что повторы кончились). | нет |
 | `access config [--account ID] [--app ID] [--policy ID] [--enable \| --disable]` | Меняет только названные поля, остальные остаются. ID аккаунта — 32 шестнадцатеричных символа, ID приложения и политики — UUID (`invalid_id`); включить можно только с тремя ID и токеном (`incomplete`). Смена аккаунта, приложения или политики забывает, что синхронизация писала в старую. Если синхронизация после сохранения включена, ставится прогон (в ответе — ID задания). Без параметров или с `--enable --disable` — код 2. | `access.config_changed`: изменённые поля, ID, включена ли |
 | `access token` | Читает API-токен Cloudflare **только со stdin** (файл или конвейер; в терминале — вставить и нажать Ctrl-D), не из аргументов, и нигде его не печатает. Пробелы по краям и перевод строки отбрасываются; токен — одна строка из 20-512 символов без пробелов, иначе `token_invalid`. Хранится зашифрованным. Остальные настройки не меняются; если синхронизация включена, ставится прогон. Права токена — «Access: Apps and Policies» Edit на один аккаунт. | `access.config_changed` с `tokenChanged: true` (без значения) |
+| `access verify` | Проверяет сохранённые токен и ID в Cloudflare, ничего не записывая и не сохраняя; работает и при выключенной синхронизации. Только чтение: токен (`GET /user/tokens/verify`, для токена аккаунта — `GET /accounts/<ACCOUNT_ID>/tokens/verify`), приложение (`GET .../access/apps/<APP_ID>`, его `aud` сравнивается с `CF_ACCESS_AUDIENCE` сервера) и политика (`GET .../policies/<POLICY_ID>`, должна быть Allow). Право Edit без записи не проверить — его подтвердит первый прогон, который изменит политику. Код 0, если ни одна проверка не провалилась, иначе 1 (`verify_failed`, в `--json` — список `checks`); без ID аккаунта или токена — `verify_incomplete`. | нет |
 | `access sync [--timeout SEC]` | Ставит прогон и ждёт его итога (по умолчанию до 120 секунд). | `access.sync_requested`; сам прогон пишет `access.user_imported`, `user.disabled`, `access.sync_aborted` и `access.import_aborted` от «Cloudflare Access» |
 | `access tombstones` | Адреса удалённых пользователей (причина `deleted`) и прежние адреса пользователей, которым администратор сменил или убрал email (`email_changed`): причина, когда и кем, есть ли адрес ещё в политике (по последнему удачному прогону). Синхронизация их не возвращает, вход через Access с ними отклоняется (`user_deleted`). | нет |
 | `access allow <email>` | Снимает запрет с адреса удалённого пользователя и одобряет его: новый пользователь (или включает существующего с этим адресом). Backend просит прогон синхронизации. То же делает `user create <email>`. | `access.tombstone_cleared`, `user.added` или `user.enabled` |
@@ -362,6 +363,7 @@ CLI сохраняет тем же действием, что и экран (`se
 ```bash
 M=<PREFIX>/app/scripts/deploy/mailexpert-cli.sh
 sudo $M access token < /root/access-sync-token.txt      # токен — только stdin
+sudo $M access verify                                   # токен, приложение, AUD и политика — только чтение
 sudo $M access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID> --enable
 sudo $M access sync --json | jq '.job.result'
 ```
@@ -764,7 +766,8 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 `connectorDrift`, `jobs`) плюс `worker`: `{ "reachable", "at", "code", "source" }`. `quarantine list` —
 `{ "held": {...}, "messages": [...] }` (сводка и сами сообщения), `quarantine pause`/`resume` — `{ "enabled": ..., "changedAt": ... }`.
 `access status` — то же, что `GET /api/admin/access-sync`: `{ "config": { "enabled", "accountId", "appId",
-"policyId", "apiTokenSet" }, "lastRun", "maxDisables", "maxImports", "tombstones", "googleMode" }`; `access config` и `access token` —
+"policyId", "apiTokenSet" }, "lastRun", "maxDisables", "maxImports", "tombstones", "googleMode", "host": { "issuer",
+"audienceSet" } }` (`host` — `CF_ACCESS_ISSUER` и задан ли `CF_ACCESS_AUDIENCE` на сервере; их меняет только `configure.sh`); `access config` и `access token` —
 то же плюс `"job": { "id", "status" }` (или `null`, если прогон не ставился); `access sync` —
 `{ "job": { "id", "status", "result", "errorCode", "error" } }`, где `result` — итог прогона
 (`outcome`, `added`, `removed`, `imported`, `disabled`, `wouldDisable`, `wouldImport`, `errors`, `error`,

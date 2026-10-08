@@ -3,6 +3,8 @@
 const DEFAULT_API_BASE = 'https://api.cloudflare.com/client/v4';
 const TIMEOUT_MS = 10_000;
 const READ_ONLY_FIELDS = new Set(['id', 'uid', 'created_at', 'updated_at', 'reusable', 'app_count']);
+// Statuses with which a token-verify endpoint refuses a token it does not own.
+const REFUSED = new Set([400, 401, 403]);
 
 export class CloudflareAccessError extends Error {
   // retryAfter: the seconds of a Retry-After header (a 429 or a 5xx), or null.
@@ -64,6 +66,35 @@ export function createCloudflareAccessClient({
   }
 
   return {
+    // Whether Cloudflare takes the token at all, and its status and expiry. A user token answers
+    // on /user/tokens/verify; an account-owned token is refused there and answers on the account's
+    // own endpoint. When the account endpoint also refuses the token itself (400, 401), the user
+    // endpoint's refusal is reported; any other failure there is reported as is: a 403 or 404 says
+    // the account ID is wrong or the token belongs to another account, a 5xx or the network that
+    // Cloudflare could not tell.
+    async verifyToken() {
+      const answer = (result, owner) => ({
+        status: typeof result?.status === 'string' ? result.status : 'unknown',
+        expiresOn: typeof result?.expires_on === 'string' ? result.expires_on : null,
+        owner,
+      });
+      try {
+        return answer(await call('verifyToken', 'GET', `${apiBase}/user/tokens/verify`), 'user');
+      } catch (err) {
+        if (!REFUSED.has(err.status)) throw err;
+        try {
+          return answer(await call('verifyToken', 'GET', `${apiBase}/accounts/${accountId}/tokens/verify`), 'account');
+        } catch (accountErr) {
+          throw accountErr.status === 400 || accountErr.status === 401 ? err : accountErr;
+        }
+      }
+    },
+
+    // The Access application, with its aud tag; needs "Access: Apps and Policies" Read.
+    getApp() {
+      return call('getApp', 'GET', `${accessUrl}/apps/${appId}`);
+    },
+
     async getPolicy(policyId) {
       try {
         return await call('getPolicy', 'GET', `${accessUrl}/apps/${appId}/policies/${policyId}`);

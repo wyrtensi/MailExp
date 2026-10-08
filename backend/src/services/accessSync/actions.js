@@ -1,12 +1,13 @@
 import { recordAudit } from '../auditLog.js';
 import { auditOf } from '../actor.js';
-import { getAuthSettings } from '../auth/authSettings.js';
+import { cloudflareEnvState, getAuthSettings } from '../auth/authSettings.js';
 import { enqueueJob, getJob, registerJobKind } from '../jobQueue.js';
 import { requestAccessSync, runAccessSyncNow, withAccessSyncLock } from './index.js';
 import {
-  AccessSyncConfigError, accessSyncMaxDisables, accessSyncMaxImports, loadState, loadStoredConfig, publicConfig, updateConfig,
+  API_TOKEN_RE, AccessSyncConfigError, accessSyncMaxDisables, accessSyncMaxImports, loadState, loadStoredConfig, publicConfig, updateConfig,
 } from './settings.js';
 import { listTombstones } from './tombstones.js';
+import { AccessSyncVerifyError, resolveVerifyConfig, verifyAccessSyncConfig } from './verify.js';
 
 // The Cloudflare Access sync's administrator actions, shared by the admin API (routes/accessSync.js)
 // and the panel CLI (cli/commands/access.js): the same checks, refusal codes and journal.
@@ -30,16 +31,20 @@ export const ACCESS_SYNC_ERRORS = Object.freeze({
   incomplete: [400, INVALID],
   token_invalid: [400, 'The API token must be one line of 20 to 512 characters without spaces'],
   job_not_found: [404, 'Job not found'],
+  verify_incomplete: [400, 'To verify, give the account ID and an API token (or store them first)'],
+  token_undecryptable: [409, 'The stored API token can no longer be decrypted (ENCRYPTION_KEY changed): enter it again'],
 });
 
 const CONFIG_FIELDS = Object.freeze(['enabled', 'accountId', 'appId', 'policyId']);
-const TOKEN_RE = /^[A-Za-z0-9._~+/=-]{20,512}$/;
 
 // What the admin screen and `mailexpert access status` show: the settings without the token, the
 // last run (with its imports, errors and the next retry), the limits, how many emails are
-// tombstoned and whether the panel signs in through Google/Access at all.
+// tombstoned, whether the panel signs in through Google/Access at all, and what the host set for
+// Access sign-in (host: the team domain and whether the aud tag is set; configure.sh owns both,
+// the panel only shows them).
 export async function accessSyncSnapshot() {
   const [stored, state, tombstones] = await Promise.all([loadStoredConfig(), loadState(), listTombstones()]);
+  const edge = cloudflareEnvState();
   return {
     config: publicConfig(stored),
     lastRun: state.lastRun,
@@ -47,6 +52,7 @@ export async function accessSyncSnapshot() {
     maxImports: accessSyncMaxImports(),
     tombstones: tombstones.length,
     googleMode: getAuthSettings().mode === 'google',
+    host: { issuer: edge.issuer, audienceSet: !!edge.audience },
   };
 }
 
@@ -106,8 +112,22 @@ async function applyAccessSyncConfig(build, actor, { onEnabled = () => requestAc
 // next run tells whether Cloudflare accepts it.
 export async function setAccessSyncToken(token, actor, options) {
   const value = typeof token === 'string' ? token.trim() : '';
-  if (!TOKEN_RE.test(value)) return { error: 'token_invalid' };
+  if (!API_TOKEN_RE.test(value)) return { error: 'token_invalid' };
   return patchAccessSyncConfig({ apiToken: value }, actor, options);
+}
+
+// Checks the settings against Cloudflare without storing or writing anything (verify.js): the
+// stored ones, or what input gives in their place (the screen's unsaved form, never stored).
+// Answers { result: { ok, checks } } or { error: code }.
+export async function verifyAccessSync(input, options = {}) {
+  let config;
+  try {
+    config = await resolveVerifyConfig(input, options);
+  } catch (err) {
+    if (err instanceof AccessSyncVerifyError) return { error: err.code };
+    throw err;
+  }
+  return { result: await verifyAccessSyncConfig(config, options) };
 }
 
 // Journals that an administrator asked for a run now (the screen's button or the CLI).
