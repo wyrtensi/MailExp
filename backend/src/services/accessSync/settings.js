@@ -98,12 +98,6 @@ export async function loadRunConfig() {
   };
 }
 
-// Whether the sync is turned on, for callers outside a run that only need that one flag (the
-// Cloudflare sign-in gate in userIdentity.js).
-export async function isAccessSyncEnabled() {
-  return (await loadStoredConfig()).enabled === true;
-}
-
 const emailList = (value) => (Array.isArray(value) ? value.filter((email) => typeof email === 'string') : []);
 
 // baseline: the emails MailExpert wrote to the policy last time (reconcile.js). policyEmails: every

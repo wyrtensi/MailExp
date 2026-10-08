@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
-vi.mock('../accessSync/settings.js', () => ({ isAccessSyncEnabled: vi.fn() }));
+vi.mock('../accessSync/tombstones.js', () => ({ isTombstoned: vi.fn() }));
+vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
 
 const { query, withTransaction } = await import('../db.js');
-const { isAccessSyncEnabled } = await import('../accessSync/settings.js');
+const { isTombstoned } = await import('../accessSync/tombstones.js');
+const { recordAudit } = await import('../auditLog.js');
 const {
   UserIdentityError,
   bindSessionUser,
@@ -39,7 +41,8 @@ function scriptedClient(handlers) {
 beforeEach(() => {
   query.mockReset();
   withTransaction.mockReset();
-  isAccessSyncEnabled.mockReset().mockResolvedValue(false);
+  isTombstoned.mockReset().mockResolvedValue(false);
+  recordAudit.mockReset();
 });
 
 describe('normalizeEmail', () => {
@@ -140,9 +143,8 @@ describe('resolveVerifiedUser', () => {
     expect(withTransaction).not.toHaveBeenCalled();
   });
 
-  it('creates an account for a new Cloudflare Access identity while the sync is off', async () => {
+  it('creates an account for a new Cloudflare Access identity and journals it', async () => {
     query.mockResolvedValue({ rows: [] });
-    isAccessSyncEnabled.mockResolvedValue(false);
     const { client } = scriptedClient([
       [/pg_advisory_xact_lock/, { rows: [] }],
       [/^\s*SELECT .* WHERE lower\(email\) = \$1/, { rows: [] }],
@@ -152,19 +154,26 @@ describe('resolveVerifiedUser', () => {
     withTransaction.mockImplementation(async (fn) => fn(client));
     expect(await resolveVerifiedUser({ email: 'new@example.com', source: 'cloudflare', settings: settings() }))
       .toEqual({ user: { ...USER, email: 'new@example.com' } });
+    expect(isTombstoned).toHaveBeenCalledWith('new@example.com', client);
+    expect(recordAudit).toHaveBeenCalledWith({
+      actorEmail: 'Cloudflare Access', action: 'access.user_imported',
+      details: { userId: 'u1', email: 'new@example.com', source: 'sign_in' },
+    });
   });
 
-  it('refuses an unknown Cloudflare identity while the Access sync is on', async () => {
+  it('refuses a Cloudflare identity whose user an administrator deleted', async () => {
     query.mockResolvedValue({ rows: [] });
-    isAccessSyncEnabled.mockResolvedValue(true);
-    expect(await resolveVerifiedUser({ email: 'new@example.com', source: 'cloudflare', settings: settings() }))
-      .toEqual({ error: 'not_allowed' });
-    expect(withTransaction).not.toHaveBeenCalled();
+    isTombstoned.mockResolvedValue(true);
+    const { client, calls } = scriptedClient([[/pg_advisory_xact_lock/, { rows: [] }]]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    expect(await resolveVerifiedUser({ email: 'gone@example.com', source: 'cloudflare', settings: settings() }))
+      .toEqual({ error: 'user_deleted' });
+    expect(calls.some(([sql]) => /INSERT INTO users/.test(sql))).toBe(false);
+    expect(recordAudit).not.toHaveBeenCalled();
   });
 
-  it('still creates a bootstrap admin on Cloudflare sign-in while the Access sync is on', async () => {
+  it('creates a bootstrap admin on Cloudflare sign-in without a tombstone check', async () => {
     query.mockResolvedValue({ rows: [] });
-    isAccessSyncEnabled.mockResolvedValue(true);
     const { client } = scriptedClient([
       [/pg_advisory_xact_lock/, { rows: [] }],
       [/^\s*SELECT .* WHERE lower\(email\) = \$1/, { rows: [] }],
@@ -174,13 +183,15 @@ describe('resolveVerifiedUser', () => {
     withTransaction.mockImplementation(async (fn) => fn(client));
     expect(await resolveVerifiedUser({ email: 'user@example.com', source: 'cloudflare', settings: settings(['user@example.com']) }))
       .toEqual({ user: { ...USER, is_admin: true } });
+    expect(isTombstoned).not.toHaveBeenCalled();
   });
 
-  it('returns a known active user without reading the Access sync setting', async () => {
+  it('returns a known active user with a single read', async () => {
     query.mockResolvedValue({ rows: [USER] });
     expect(await resolveVerifiedUser({ email: 'user@example.com', source: 'cloudflare', settings: settings() }))
       .toEqual({ user: USER });
-    expect(isAccessSyncEnabled).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(isTombstoned).not.toHaveBeenCalled();
   });
 
   it('creates and promotes a bootstrap admin on direct sign-in', async () => {

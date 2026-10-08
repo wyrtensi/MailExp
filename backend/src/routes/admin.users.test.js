@@ -18,6 +18,10 @@ vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(asyn
 vi.mock('./auth.js', () => ({ destroyUserSessions: vi.fn(async () => {}) }));
 vi.mock('../services/websocket.js', () => ({ closeUserSockets: vi.fn() }));
 vi.mock('../services/auditLog.js', () => ({ AUDIT_ACTIONS: [], recordAudit: vi.fn(async () => {}) }));
+// The access state is covered by services/admin/users.pglite.test.js.
+vi.mock('../services/accessSync/accessState.js', async (importOriginal) => ({
+  ...(await importOriginal()), loadAccessStateContext: vi.fn(async () => null),
+}));
 vi.mock('../services/accessSync/index.js', () => ({
   requestAccessSync: vi.fn(), runAccessSyncNow: vi.fn(), withAccessSyncLock: vi.fn((op) => op()),
 }));
@@ -64,7 +68,7 @@ function installTransaction(handlers) {
   const client = {
     query: vi.fn(async (sql, params) => {
       calls.push([sql, params]);
-      for (const [re, result] of handlers) {
+      for (const [re, result] of [...handlers, tombstones]) {
         if (re.test(sql)) return typeof result === 'function' ? result(params) : result;
       }
       throw new Error(`unexpected SQL: ${sql}`);
@@ -72,6 +76,8 @@ function installTransaction(handlers) {
   };
   withTransaction.mockImplementation(async (fn) => fn(client));
 }
+// Tombstones (services/accessSync/tombstones.js): none cleared unless a test says otherwise.
+const tombstones = [/access_tombstones/, { rows: [], rowCount: 0 }];
 const sqlCall = (re) => calls.find(([sql]) => re.test(sql));
 const lock = [/pg_advisory_xact_lock/, { rows: [] }];
 const target = (row) => [/SELECT id, email, is_admin, disabled_at FROM users WHERE id = \$1 FOR UPDATE/, { rows: row ? [row] : [] }];
@@ -249,6 +255,8 @@ describe('DELETE /api/admin/users/:id', () => {
     expect(closeUserSockets).toHaveBeenCalledWith(imapManager.wss, USER_ID);
     expect(sqlCall(/DELETE FROM users/)).toEqual(['DELETE FROM users WHERE id = $1', [USER_ID]]);
     expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
+    // The email is tombstoned in the delete's transaction, naming who deleted it.
+    expect(sqlCall(/INSERT INTO access_tombstones/)[1]).toEqual(['user@example.com', ADMIN_ID, null]);
   });
 
   it('deletes under the admin-guard lock, in the transaction that checked the other admins', async () => {

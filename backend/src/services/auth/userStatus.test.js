@@ -17,7 +17,7 @@ function fakeClient(users) {
           && (!/email IS NOT NULL/.test(sql) || u.email)).length;
         return { rows: [{ count }] };
       }
-      if (/UPDATE users SET disabled_at = NOW\(\), disabled_by = NULL WHERE id = \$1/.test(sql)) {
+      if (/UPDATE users SET disabled_at = NOW\(\), disabled_by = NULL, disabled_source = 'cloudflare_access' WHERE id = \$1/.test(sql)) {
         const user = users.find((u) => u.id === params[0]);
         user.disabled_at = new Date();
         return { rows: [{ id: user.id, email: user.email, is_admin: user.is_admin }] };

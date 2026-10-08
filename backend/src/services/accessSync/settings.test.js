@@ -8,7 +8,7 @@ vi.mock('../encryption.js', () => ({
 
 import { query, withTransaction } from '../db.js';
 import {
-  ACCESS_SYNC_CONFIG_KEY, ACCESS_SYNC_STATE_KEY, accessSyncMaxDisables, isAccessSyncEnabled, loadRunConfig, loadState,
+  ACCESS_SYNC_CONFIG_KEY, ACCESS_SYNC_STATE_KEY, accessSyncMaxDisables, loadRunConfig, loadState,
   loadStoredConfig, publicConfig, saveConfig, saveState,
 } from './settings.js';
 
@@ -131,14 +131,6 @@ describe('settings', () => {
     await expect(saveConfig({ ...full, apiToken: '', policyId: OTHER_POLICY })).rejects.toThrow('config write failed');
     expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ ...EMPTY_STATE, lastRun: { outcome: 'updated' } });
     expect(stored(ACCESS_SYNC_CONFIG_KEY).policyId).toBe(POLICY);
-  });
-
-  it('reports whether the sync is on', async () => {
-    expect(await isAccessSyncEnabled()).toBe(false);
-    await saveConfig(full);
-    expect(await isAccessSyncEnabled()).toBe(true);
-    await saveConfig({ ...full, enabled: false, apiToken: '' });
-    expect(await isAccessSyncEnabled()).toBe(false);
   });
 
   it('hands a run a null token it cannot decrypt, and survives a corrupt state', async () => {

@@ -1,5 +1,10 @@
 import { query, withTransaction } from '../db.js';
-import { isAccessSyncEnabled } from '../accessSync/settings.js';
+import { recordAudit } from '../auditLog.js';
+import { isTombstoned } from '../accessSync/tombstones.js';
+
+// The journal's actor for an account created by a Cloudflare Access sign-in; the same name the
+// Access sync's own changes carry (accessSync/runner.js ACCESS_SYNC_ACTOR).
+const ACCESS_SIGN_IN_ACTOR = 'Cloudflare Access';
 
 export const USER_COLUMNS = 'id, username, email, is_admin, disabled_at, created_at';
 export const SESSION_AUTH_METHODS = new Set(['cloudflare', 'google']);
@@ -62,11 +67,14 @@ export async function claimOrCreateUserByEmail(client, email, { isAdmin = false 
   }
 }
 
-// The account a verified identity signs in as, or { error }. A Cloudflare Access identity is
-// already approved by the Access policy and gets an account on first sign-in — unless the Access
-// sync is on, in which case MailExpert's user list is the only place users are approved and an
-// unknown Cloudflare identity is refused instead (see below). A direct Google sign-in needs an
-// approved user, except for bootstrap admins. Bootstrap admins become admins on every sign-in.
+// The account a verified identity signs in as, or { error }. Membership in the panel's Access
+// policy is a panel account: a Cloudflare Access identity is already admitted by the policy and
+// gets an account on first sign-in (journaled as access.user_imported), as the Access sync imports
+// it on its next run. Two exceptions: a disabled user stays disabled (user_disabled) until an
+// administrator enables them, and a user an administrator deleted (a tombstone, migration 0097)
+// does not come back just because Cloudflare still lists the email or their Access token is
+// still valid (user_deleted). A direct Google sign-in needs an approved user, except for
+// bootstrap admins. Bootstrap admins become admins on every sign-in.
 export async function resolveVerifiedUser({ email, source, settings }) {
   const address = normalizeEmail(email);
   if (!address) return { error: 'not_allowed' };
@@ -77,19 +85,25 @@ export async function resolveVerifiedUser({ email, source, settings }) {
   if (known?.disabled_at) return { error: 'user_disabled' };
   if (known && (!bootstrap || known.is_admin)) return { user: known };
   if (!known && source !== 'cloudflare' && !bootstrap) return { error: 'not_allowed' };
-  // A deleted user must not come back just because their Cloudflare Access session token is
-  // still valid: while the sync is on, it is MailExpert's user list that removed them from the
-  // policy, and letting Cloudflare recreate them here would write their email straight back in
-  // on the next run. Only read the setting when there is no known user, so the common signed-in
-  // path above stays a single read.
-  if (!known && source === 'cloudflare' && !bootstrap && await isAccessSyncEnabled()) {
-    return { error: 'not_allowed' };
-  }
+  const fromAccess = !known && !bootstrap;
 
   try {
     return await withTransaction(async (client) => {
-      let { user } = await claimOrCreateUserByEmail(client, address, { isAdmin: bootstrap });
+      // Checked under the per-address lock claimOrCreateUserByEmail takes (re-entrant), so a
+      // delete committed meanwhile is seen.
+      if (fromAccess) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`user-email:${address}`]);
+        if (await isTombstoned(address, client)) return { error: 'user_deleted' };
+      }
+      const claim = await claimOrCreateUserByEmail(client, address, { isAdmin: bootstrap });
+      let { user } = claim;
       if (user.disabled_at) return { error: 'user_disabled' };
+      if (fromAccess && (claim.created || claim.claimed)) {
+        recordAudit({
+          actorEmail: ACCESS_SIGN_IN_ACTOR, action: 'access.user_imported',
+          details: { userId: user.id, email: user.email, source: 'sign_in' },
+        });
+      }
       if (bootstrap && !user.is_admin) {
         ({ rows: [user] } = await client.query(
           `UPDATE users SET is_admin = true WHERE id = $1 RETURNING ${USER_COLUMNS}`,
