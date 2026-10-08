@@ -47,8 +47,12 @@ Usage: mailexpert-cli.sh [--prefix /opt/mailexpert] [--] <group> <command> [opti
 Runs the panel CLI in the installed panel's backend container. Groups: mailbox, domain,
 tenant, quarantine, jobs, access, user, settings, sso, integration, node, eop, seats, agent.
 Mail node operations: queue, alerts, outage, spam-quarantine.
+Panel operations: invite, system-email, audit, account, rule.
 stdin reaches the CLI (access token, sso add, sso set --secret, integration microsoft set
---secret and node config set --api-key-stdin read their secret from it). "mailexpert-cli.sh
+--secret, node config set --api-key-stdin, system-email set --password-stdin, account create
+and account set-connection --password-stdin/--smtp-password-stdin read their secret from it;
+rule create and rule set read the rule's JSON from it: their --file is a path in the
+container). "mailexpert-cli.sh
 <group> --help" lists a group's commands (it needs the installed panel); options such as --json,
 --yes and --as go after the command. agent token issue --out FILE writes the token to FILE on
 this host (0600).

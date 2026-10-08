@@ -18,7 +18,10 @@
 `<ACCOUNT_ID>`, `<APP_ID>`, `<POLICY_ID>` — ID аккаунта, приложения и политики Cloudflare Access
 ([cloudflare.md](cloudflare.md)), `<USER_EMAIL>` — адрес пользователя панели, `<IDP_NAME>`, `<SLUG>`,
 `<IDP_HOST>` — имя, slug и хост SSO-провайдера, `<CLIENT_ID>` — ID OAuth-клиента, `<MAIL_HOST>` — имя
-хоста mailcow, `<EOP_HOST>` — следующий хоп EOP, `<TOKEN_FILE>` — файл для токена агента узла.
+хоста mailcow, `<EOP_HOST>` — следующий хоп EOP, `<TOKEN_FILE>` — файл для токена агента узла,
+`<INVITE_ID>`, `<RULE_ID>` — ID приглашения и правила, `<IMAP_HOST>`, `<SMTP_HOST>` — серверы ящика,
+настроенного вручную, `<SMTP_HOST_SYSTEM>`, `<LOGIN>`, `<ADDRESS>` — SMTP системной почты панели, его
+логин и адрес отправителя.
 
 ## 1. Как запускать
 
@@ -117,7 +120,9 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 
 Спрашивают: `domain restart`, `domain allow-authoritative`, `domain internal-relay`,
 `domain approve-alias-removal`, `quarantine pause`, `user delete`, `user totp-reset`, `sso remove`,
-`integration microsoft remove`. Не спрашивают: `domain hold`, `domain sync`,
+`integration microsoft remove`, `invite revoke`, `system-email remove`, `mailbox oauth-reset`,
+`rule delete`, `rule run`, `queue flush`, `queue delete`, `outage delete`, `spam-quarantine release`,
+`spam-quarantine learn-spam`, `spam-quarantine delete`, `spam-quarantine node-settings apply`. Не спрашивают: `domain hold`, `domain sync`,
 `quarantine resume`, `quarantine release`, `tenant test`, `tenant antispam`, `mailbox ...` (кроме
 `delete`), все команды чтения.
 
@@ -335,7 +340,9 @@ sudo $M access sync --json | jq '.job.result'
 выполняет теми же функциями (`services/admin/adminEffects.js`). В ответе команды — строка
 `backend: job <ID> queued (...)` (в `--json` — поле `job`). Пока backend остановлен, задание ждёт в
 очереди; изменение в базе уже сделано, а отключённого или удалённого пользователя `requireAuth` не
-пускает и без задания.
+пускает и без задания. Тем же заданием `account create` и `account set-connection` (3.22) просят
+backend подключить ящик заново (`reconnect`), а `rule run` (3.23) — прогнать правила по входящим
+(`runRules`): IMAP-соединения есть только у процесса backend.
 
 ### 3.7. `user`: пользователи панели
 
@@ -441,7 +448,7 @@ sudo $M access sync --json | jq '.job.result'
 |---|---|---|---|
 | `agent status` | Выдан ли токен, на связи ли агент, когда был виден, последний отчёт о состоянии, коммит панели и закреплённая версия mailcow, последние задания. | нет | нет |
 | `agent jobs [--limit N]` | Последние задания агента, новые первыми (`--limit` 1-50, по умолчанию 20). | нет | нет |
-| `agent token issue [--out <TOKEN_FILE> \| --out -]` | Выдаёт токен агента; панель хранит только его хеш. Токен — единственный секрет, который CLI печатает: один раз, для `setup.sh --agent-token-file` на узле. `--out <TOKEN_FILE>` пишет его в новый файл (0600, поверх существующего — отказ `out_file_exists` до выдачи токена) вместо вывода; через обёртку файл создаётся на хосте. `--out -` печатает только токен (без `--json`). Уже выданный токен ротируется: работающий агент отрезан до нового токена, его задания падают. | да, при ротации | `mail_node.agent_token_issued` (`rotated`), без токена |
+| `agent token issue [--out <TOKEN_FILE> \| --out -]` | Выдаёт токен агента; панель хранит только его хеш. Токен печатается один раз (кроме него CLI печатает только ссылку приглашения, 3.19), для `setup.sh --agent-token-file` на узле. `--out <TOKEN_FILE>` пишет его в новый файл (0600, поверх существующего — отказ `out_file_exists` до выдачи токена) вместо вывода; через обёртку файл создаётся на хосте. `--out -` печатает только токен (без `--json`). Уже выданный токен ротируется: работающий агент отрезан до нового токена, его задания падают. | да, при ротации | `mail_node.agent_token_issued` (`rotated`), без токена |
 | `agent token revoke` | Отзывает токен: агент отрезан со следующего запроса, его задания падают. | да | `mail_node.agent_token_revoked` |
 | `agent run status\|backup\|update` | Ставит задание агенту: отчёт о состоянии, резервную копию почты, обновление скриптов узла до коммита панели. Агент берёт его при следующем опросе; следить — `agent jobs`. Без токена — `agent_not_set_up`, при идущем задании того же вида (или резервной копии/обновлении) — `job_active`. | нет | `mail_node.agent_job_requested` |
 
@@ -515,6 +522,92 @@ sudo $M alerts check --wait
 sudo $M outage open --start 2026-10-01T10:00:00Z --reason "Disk replacement" --planned
 sudo $M spam-quarantine release <ID> --yes
 ```
+### 3.19. `invite`: приглашения
+
+Приглашения на регистрацию (`/api/admin/invites`, `services/admin/invites.js`): ссылка действует 7 дней
+и один раз. Письмо уходит только через системный SMTP (3.20); без него ссылку передают сами. Журнал
+приглашения не пишет — экран тоже.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `invite list [--limit N] [--offset N]` | Приглашения, новые первыми (по 100, не больше 200): адрес, состояние (`open`, `expired`, `used ... by ...`), создано, истекает, ID. Токен (секрет ссылки) человеческий вывод не печатает; `--json` отвечает как API, с токеном. | нет |
+| `invite create <USER_EMAIL> --as <ADMIN_EMAIL>` | Создаёт приглашение и отправляет письмо. Приглашение всегда от администратора: без `--as` — код 2 (`admin_required`). Печатает ссылку и `email: sent` или `not sent` с причиной. Нужен `APP_URL` в `.env` (`app_url_missing`; как и у экрана, запись приглашения к этому моменту уже сделана). | нет |
+| `invite revoke <INVITE_ID>` | Удаляет приглашение: ссылка больше не работает (просит подтверждения). Нет такого — `not_found`. | нет |
+
+### 3.20. `system-email`: системная почта
+
+SMTP, через который панель шлёт приглашения, коды входа и другую системную почту
+(`/api/admin/system-email`, `services/admin/systemEmail.js`). Пароль читается **только со stdin**,
+хранится зашифрованным и не печатается. Журнал не пишется — экран тоже.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `system-email show` | Хост, порт, TLS, логин, отправитель; задан ли пароль (значение никогда). | нет |
+| `system-email set [--host <SMTP_HOST_SYSTEM>] [--port N] [--tls STARTTLS\|SSL\|none] [--user <LOGIN>] [--from-name NAME] [--from-email <ADDRESS>] [--password-stdin]` | Меняет названные поля, остальные остаются сохранёнными (первое сохранение требует хост, логин и пароль: `fields_required`). Умолчания экрана: порт 587, `STARTTLS`, отправитель `MailExpert` с адресом логина. Хост проходит политику `allow_private_hosts` (`host_refused` с текстом API). Без `--password-stdin` пароль не меняется; пустой stdin — `password_missing`. Пароль берётся как есть, с пробелами; отбрасывается только один перевод строки в конце. Без параметров — код 2. | нет |
+| `system-email test` | Подключается к сохранённому серверу и входит, как кнопка экрана; письма не отправляет. Отказ сервера — `smtp_failed` с его ответом. | нет |
+| `system-email remove` | Удаляет настройки (просит подтверждения): приглашения и системная почта не уходят, пока их не зададут снова. | нет |
+
+Отправить тестовое письмо на адрес панель не умеет (кнопка экрана только проверяет вход), поэтому у
+`test` нет получателя.
+
+### 3.21. `audit`: журнал и события входа
+
+То же, что раздел «Аудит» экрана (`/api/admin/audit`, `/api/admin/auth-events`;
+`services/admin/auditQuery.js`, `services/authEvents.js`). Чтение журнала само в журнал не пишется.
+
+| Команда | Что делает |
+|---|---|
+| `audit list [--action A] [--since T] [--until T] [--account <LOCAL>@<DOMAIN>\|ID] [--user <USER_EMAIL>] [--before CURSOR] [--limit N]` | Записи журнала, новые первыми: время, действие, исполнитель, ящик, детали. `--action` — одно из действий журнала (неизвестное — код 2 со списком). `--since` включительно, `--until` — до; время ISO (`2026-10-01`, `2026-10-01T10:00:00Z`) или возраст (`30m`, `24h`, `7d`). `--account` — ящик по адресу или ID, `--user` — исполнитель по адресу (у записей CLI без `--as` пользователя нет, их исполнитель — `cli`). Страница — до 100 записей (`--limit` 1-100); если есть ещё, последней строкой идёт `(more: --before <CURSOR>)`, в JSON — `nextCursor`. |
+| `audit auth-events [--limit N] [--offset N]` | События входа, новые первыми (по 100, не больше 500): время, тип, пользователь, IP, успешно ли. |
+
+### 3.22. `account`: ящики, ручная настройка IMAP/SMTP
+
+Все ящики панели и те, что администратор настраивает вручную (`POST /api/accounts` без `kind: domain`,
+серверные поля `PUT /api/accounts/:id`; `services/accounts/manualAccounts.js`). Проверки те же, что у
+экрана: хосты — политика `allow_private_hosts`, порты IMAP 993/143 и SMTP 587/465 — пока выключено
+`allow_nonstandard_ports` (`servers_refused` с текстом API, например `IMAP: Port 1143 is not allowed`),
+имя и адрес без управляющих символов. Небезопасный TLS (`allow_insecure_tls`) панель проверяет при
+подключении, а не при сохранении: `--skip-tls-verify` при выключенной настройке не действует. Пароли —
+**только stdin**. Проверки соединения при сохранении нет и у экрана: подключает ящик backend (задание
+`admin_effects`), его состояние и ошибку синхронизации показывает `account list`. Ящик узла создаётся
+`mailbox create`, его серверы принадлежат настройкам узла.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `account list [--user <USER_EMAIL>]` | Ящики в порядке панели: адрес, вид (`imap`, `google`, `microsoft`, `node`), включён ли, здоровье, IMAP-сервер, последняя синхронизация, кто добавил, ID. `--user` — только добавленные этим пользователем (ящики общие, другой связи с пользователем нет). Секретов нет. | нет |
+| `account create <LOCAL>@<DOMAIN> --imap-host <IMAP_HOST> --smtp-host <SMTP_HOST> [--imap-port N] [--smtp-port N] [--smtp-tls STARTTLS\|SSL\|none] [--login LOGIN] [--name NAME] [--sender-name NAME] [--skip-tls-verify] < файл-с-паролем` | Добавляет ящик. Умолчания формы: порты 993 и 587, `STARTTLS`, имя и логин — адрес. Пароль IMAP со stdin (как есть, с пробелами, без одного перевода строки в конце; пустой — `password_missing`), SMTP входит с ним же; отдельный SMTP-пароль — потом `set-connection --smtp-login ... --smtp-password-stdin`. Backend подключает ящик (задание). | `mailbox.added` |
+| `account set-connection <LOCAL>@<DOMAIN>\|ID [--imap-host H] [--imap-port N] [--smtp-host H] [--smtp-port N] [--smtp-tls MODE] [--login L] [--smtp-login L] [--skip-tls-verify\|--verify-tls] [--password-stdin\|--smtp-password-stdin]` | Меняет названные серверные поля, как сохранение администратора на экране; порт IMAP определяет TLS (993 — TLS). `--smtp-login ""` — SMTP снова входит логином IMAP. Пароль за один запуск один: IMAP (`--password-stdin`) или SMTP (`--smtp-password-stdin`), оба сразу — код 2. Ящик узла — отказ `mail_node_connection_locked`. Изменение стороны IMAP переподключает ящик (задание), SMTP берётся при следующей отправке. Без параметров — код 2. | `mailbox.connection_changed` с именами изменённых полей (без значений) |
+
+`mailbox oauth-reset <LOCAL>@<DOMAIN>|ID` (группа `mailbox`) забывает, к какой учётке Google или
+Microsoft привязан OAuth-ящик (`POST /api/accounts/:id/oauth-subject/reset`): следующее переподключение
+привяжет того, кто войдёт с подтверждённым адресом ящика. Для любого OAuth-ящика не с узла, иначе
+`oauth_mailbox_not_found`. Просит подтверждения; журнал — `mailbox.oauth_subject_reset`.
+
+### 3.23. `rule`: правила входящих
+
+Правила (`/api/rules`, `services/rules/ruleActions.js`) с теми же проверками и журналом. Правило
+принадлежит ящику; правила общие: кто открывает ящик, видит и меняет все его правила, а `created_by` —
+только автор. CLI действует как оператор: в журнале — `cli` или администратор из `--as`. С `--user
+<USER_EMAIL>` изменение делается от имени пользователя: при создании он становится автором правила, а в
+журнале появляется `details.onBehalfOf`.
+
+Тело правила — JSON, как его шлёт экран (`POST /api/rules`): `name`, `accountId`, `conditionLogic`
+(`AND`/`OR`), `conditions` (поля `from`, `to`, `subject`, `body`, `header` с `headerName`,
+`has_attachment`, `read_status`; операторы `contains`, `not_contains`, `equals`, `starts_with`,
+`ends_with`, `regex`), `actions` (`move` с папкой, `archive`, `delete`, `forward` на один адрес,
+`mark_read`, `star`), `enabled`, `stopProcessing`. Читается из `--file PATH` или со stdin (без `--file`
+или `--file -`); через обёртку — только stdin: `--file` — путь внутри контейнера. `--account
+<LOCAL>@<DOMAIN>|ID` подставляет `accountId` по адресу.
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `rule list [--account ...] [--user <USER_EMAIL>]` | Правила в порядке выполнения: имя, включено ли, ящик, действия, автор, ID. `--account` — правила ящика, `--user` — созданные пользователем. | нет |
+| `rule show <RULE_ID>` | Одно правило: условия, действия, порядок, автор. `--json` — строка API (`account_id`, `condition_logic`, `stop_processing`). | нет |
+| `rule create [--file PATH] [--account ...] [--user ...]` | Добавляет правило в конец. Проверки API: массивы условий и действий (`not_arrays`), условие (`invalid_condition` с текстом), пересылка на один адрес (`invalid_action`), ящик (`account_required`, `account_not_found`), папка для `move` у ящика (`move_folder_not_found`). Повторные действия назначения и пересылки отбрасываются, как у API. | `rule.created` (имя, типы действий, адрес пересылки) |
+| `rule set <RULE_ID> [--file PATH] [--account ...] [--user ...]` | Заменяет правило целиком, как сохранение экрана (`PUT /api/rules/:id`): пропущенное поле получает умолчание API, а не старое значение. Начать удобно с `rule show <RULE_ID> --json`. | `rule.updated` (с прежним адресом пересылки и прежним ящиком) |
+| `rule enable <RULE_ID>`, `rule disable <RULE_ID>` | Включает или выключает правило: экран для этого сохраняет правило целиком, CLI тоже. Уже в нужном состоянии — ничего не меняет. | `rule.updated` |
+| `rule delete <RULE_ID>` | Удаляет правило (просит подтверждения). | `rule.deleted` |
+| `rule run --account ...`, `rule run --all` | «Применить правила к входящим»: все включённые правила ящика (или всех ящиков) по письмам, уже лежащим во входящих, — перемещение, удаление и пересылка тоже. Одно правило отдельно панель не запускает. Просит подтверждения. Прогон идёт в backend в фоне (задание); ящик, который уже прогоняется, пропускается. Итог — в логе backend. | `rule.run` по ящику, со списком правил: пишет backend, когда начинает прогон (пропущенный ящик записи не получает) |
 
 ## 4. Коды выхода
 
@@ -817,6 +910,50 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 | `quarantine_item_invalid` | 400 | ID записи карантина — число. |
 | `quarantine_item_not_found` | 404 | Нет такой записи карантина. |
 | `dns_check_failed`, `alert_check_failed`, `trace_cooldown` | 3 | `--wait`: задание `mail_node_check` закончилось неудачей (проход трассировки был меньше двух минут назад). |
+### Приглашения (`INVITE_ERRORS`) и системная почта (`SYSTEM_EMAIL_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `admin_required` | 2 | `invite create` без `--as` (код CLI). |
+| `email_invalid` | 400 | Не адрес почты. |
+| `app_url_missing` | 500 | Не задан `APP_URL` в `.env`. |
+| `not_found` | 404 | Нет приглашения с таким ID (код CLI; API на удаление всегда отвечает `ok`). |
+| `fields_required` | 400 | Нужны хост и логин SMTP. |
+| `host_refused` | 400 | Хост запрещён политикой `allow_private_hosts` или не разрешается; текст — от проверки. |
+| `not_configured` | 400 | `test`: системная почта не настроена. |
+| `password_missing` | 400 / 1 | `test`: пароль не сохранён; у `set --password-stdin` — пустой stdin (код CLI). |
+| `config_corrupted` | 500 | Сохранённые настройки не читаются. |
+| `smtp_failed` | 400 | Сервер отказал при входе; текст — его ответ. |
+
+### Журнал (`AUDIT_QUERY_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `invalid_filter` | 400 | Фильтр не принят (неверный курсор `--before`). Неизвестное действие и неверное время CLI ловит раньше — код 2. |
+
+### Ящики, настроенные вручную (`ACCOUNT_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `account_not_found` | 404 | Нет ящика с таким адресом или ID. |
+| `account_ambiguous` | 409 | Адрес у нескольких ящиков: назовите ящик ID. |
+| `name_email_required`, `name_email_control_chars`, `sender_name_control_chars` | 400 | Имя и адрес обязательны и без управляющих символов. |
+| `servers_refused` | 400 | Хост или порт против политики подключений; текст — как у API (`IMAP: ...`, `SMTP: ...`). |
+| `mail_node_connection_locked` | 400 | Серверы ящика узла принадлежат настройкам узла. |
+| `no_fields` | 400 | Нечего менять. |
+| `oauth_mailbox_not_found` | 404 | `mailbox oauth-reset`: ящик не OAuth или на узле. |
+| `password_missing` | 1 | Пароль ожидался на stdin, а он пуст (код CLI). |
+
+### Правила (`RULE_ERRORS`)
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `not_arrays` | 400 | `conditions` и `actions` должны быть массивами. |
+| `invalid_condition` | 400 | Условие не принято; текст — какое (пустое значение, нет `headerName`, опасный regex). |
+| `invalid_action` | 400 | Пересылка не на один верный адрес. |
+| `account_required`, `invalid_account`, `account_not_found` | 400, 400, 404 | Нет `accountId`, он не ID или такого ящика нет. |
+| `move_folder_not_found` | 400 | У ящика нет папки для `move`. |
+| `not_found` | 404 | Нет правила с таким ID. |
 
 ## 7. Практические примеры
 
@@ -879,6 +1016,27 @@ sudo $cli sso add --name "<IDP_NAME>" --slug <SLUG> --issuer https://<IDP_HOST> 
 sudo $cli sso set <SLUG> --secret < /root/oidc-secret.txt && shred -u /root/oidc-secret.txt
 sudo $cli integration microsoft set --client-id <CLIENT_ID> --tenant-id common --secret < /root/ms-secret.txt
 sudo $cli integration microsoft show
+
+# Системная почта и приглашение: пароль SMTP — только stdin
+sudo $cli system-email set --host <SMTP_HOST_SYSTEM> --user <LOGIN> --from-email <ADDRESS> --password-stdin < /root/smtp-pass.txt
+sudo $cli system-email test
+sudo $cli invite create <USER_EMAIL> --as <ADMIN_EMAIL>
+
+# Журнал: что менялось за сутки у ящика; кто входил
+sudo $cli audit list --account <LOCAL>@<DOMAIN> --since 24h
+sudo $cli audit list --action mailbox.connection_changed --json | jq '.entries[].accountEmail'
+sudo $cli audit auth-events --limit 20
+
+# Ящик вручную по IMAP/SMTP и смена его сервера; пароль — только stdin
+sudo $cli account create <LOCAL>@<DOMAIN> --imap-host <IMAP_HOST> --smtp-host <SMTP_HOST> --as <ADMIN_EMAIL> < /root/imap-pass.txt
+sudo $cli account set-connection <LOCAL>@<DOMAIN> --imap-host <IMAP_HOST> --password-stdin < /root/imap-pass.txt
+sudo $cli mailbox oauth-reset <LOCAL>@<DOMAIN> --yes
+
+# Правила: создать из JSON со stdin, выключить, прогнать по входящим
+sudo $cli rule create --account <LOCAL>@<DOMAIN> --user <USER_EMAIL> < rule.json
+sudo $cli rule list --account <LOCAL>@<DOMAIN>
+sudo $cli rule disable <RULE_ID>
+sudo $cli rule run --account <LOCAL>@<DOMAIN> --yes
 
 # Скрипты: JSON и код выхода
 sudo $cli jobs list --status problems --json | jq -r '.jobs[].id'

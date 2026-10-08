@@ -13,7 +13,7 @@
 | `backend/src/cli/args.js` | разбор параметров без зависимостей, `EXIT` |
 | `backend/src/cli/common.js` | `CliError`, отказ по каталогу кодов, сбой узла, подтверждение, `--wait` |
 | `backend/src/cli/output.js` | таблицы и пары «ключ: значение» |
-| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access`, `user`, `settings`, `sso`, `integration`, `node`, `eop`, `seats`, `agent`, `queue`, `alerts`, `outage`, `spam-quarantine` |
+| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access`, `user`, `settings`, `sso`, `integration`, `node`, `eop`, `seats`, `agent`, `queue`, `alerts`, `outage`, `spam-quarantine`, `invite`, `system-email`, `audit`, `account`, `rule` |
 | `backend/src/cli/effects.js` | постановка задания `admin_effects` для административных групп, чтение секрета со stdin |
 | `backend/src/services/admin/users.js` | пользователи: список, поиск по адресу, одобрение, правка, удаление, сброс 2FA (бывшие обработчики `/api/admin/users`) |
 | `backend/src/services/admin/systemSettings.js` | ключи и проверки `PATCH /api/admin/settings` |
@@ -34,6 +34,10 @@
 | `backend/src/services/mailNode/nodeChecks.js` | задание `mail_node_check`: проверки узла (DNS всех доменов, оповещения, трассировка простоев), которые CLI ставит для backend |
 | `backend/src/services/accountAliases.js` | алиасы ящика с правилом D-16 |
 | `backend/src/services/tenant/tenantActions.js` | действия тенанта: статус, задания кнопок, шаги домена, hold, Internal Relay, контакты псевдонимов, выпуск из карантина, задания |
+| `backend/src/services/admin/invites.js`, `admin/systemEmail.js`, `admin/auditQuery.js` | приглашения, системная почта, чтение журнала (бывшие обработчики `/api/admin/invites`, `/system-email`, `/audit`); события входа — `services/authEvents.js` (`listAuthEvents`) |
+| `backend/src/services/accounts/manualAccounts.js` | ящики, настроенные вручную: поиск по адресу или ID, список, создание (`POST /api/accounts`), смена серверов, сброс привязки OAuth |
+| `backend/src/services/accounts/connection.js` | поля подключения ящика, проверки хостов и портов по политике, хранение значений, переподключение (`reconnectAccount`) — общие для `routes/accounts.js` и `manualAccounts.js` |
+| `backend/src/services/rules/ruleActions.js` | правила: проверки, список, создание, замена, удаление, журнал, прогон по входящим (бывшие обработчики `/api/rules`) |
 | `scripts/deploy/mailexpert-cli.sh` | обёртка на хосте: `docker compose exec backend node src/cli/mailexpert.js` |
 | `backend/src/cli/googleApp.js`, `scripts/deploy/google-app.sh` | отдельная команда для Google-приложений (добавить из JSON клиента, список, show, enable/close/disable, delete, set-limit, set-label, replace-secret); не группа `mailexpert` ([google-oauth.md](../operations/google-oauth.md)) |
 
@@ -90,7 +94,8 @@
   CLI несут `via: cli`. Маршрут его не передаёт, его записи прежние.
 - Шаги онбординга записывают адрес подтвердившего из строки `users`; без `--as` у CLI адреса нет, в
   шаге остаётся только время, а исполнитель — в журнале (`cli`).
-- Токен агента — единственный секрет, который печатает CLI (`agent token issue`): он для этого и
+- Токен агента — секрет, который печатает CLI (`agent token issue`; кроме него — только ссылка
+  приглашения: `invite create` и, в форме API, `invite list --json`): он для этого и
   выдаётся. `--out FILE` до выдачи токена проверяет, что файла нет, и создаёт рядом временный (0600,
   `wx`), поэтому занятый или недоступный путь не ротирует токен впустую. Токен пишется во временный
   файл и жёсткой ссылкой (`link`, не поверх существующего) становится FILE: тот либо целый, либо его
@@ -175,6 +180,36 @@ backend: планировщик (`services/accessSync/index.js`) один на �
 экран их тоже не журналирует, а новые действия журнала (`AUDIT_ACTIONS`) в эту работу не входили.
 Сбросить блокировки входа по лимиту попыток панель не умеет, поэтому и CLI тоже.
 
+## Приглашения, системная почта, журнал, ящики и правила из CLI
+
+Обработчики `/api/admin/invites`, `/api/admin/system-email`, `/api/admin/audit`,
+`/api/admin/auth-events`, `POST /api/accounts` (ручная настройка), `POST
+/api/accounts/:id/oauth-subject/reset` и `/api/rules` вынесены в сервисы (таблица выше); ответы
+маршрутов не изменились. `requireMailbox` (`utils/requireMailbox.js`) получил чистую часть
+`findMailboxId`, которой пользуются сервис правил и CLI.
+
+- Приглашение требует `created_by` (`NOT NULL`): CLI создаёт его только с `--as`. Письмо отправляет сам
+  процесс CLI через системный SMTP — это сеть, а не состояние backend. Приглашения и системная почта
+  журнал не пишут, как и экран.
+- `PUT /api/accounts/:id` по-прежнему маршрут (правка любых полей с хуками плагинов). Общими стали его
+  части про подключение: поля, проверка хостов и портов по политике, хранение значений, переподключение
+  (`services/accounts/connection.js`). `account set-connection` вызывает `updateAccountConnection`,
+  который меняет только поля подключения с теми же проверками и записью `mailbox.connection_changed`.
+  Проверки соединения при сохранении у маршрута нет, у CLI тоже.
+- Подключение ящика и прогон правил по входящим требуют IMAP-соединений процесса backend. Маршрут
+  делает это сразу; CLI ставит `admin_effects` с новыми видами последствий: `reconnect` (ID ящиков,
+  хук `reconnectAccount` с той же очередью на ящик, что у маршрута, подключает только включённый
+  IMAP-ящик) и `runRules` (ID ящиков; хук занимает ящики, как `POST /api/rules/run`, и запускает
+  прогон в фоне; занятый ящик пропускается). Запись `rule.run` пишет хук, когда занял ящики, от
+  того, кто поставил задание (`created_by` и `via` задания), как маршрут при старте прогона.
+  Пароли со stdin (`system-email`, `account`) берутся как есть: `readSecret(..., { exact: true })`
+  отбрасывает только один перевод строки в конце; ключи и токены по-прежнему обрезаются.
+- Правила принадлежат ящику (миграция 0056 убрала `user_id`), поэтому «от имени пользователя»
+  значит автора: `--user` ставит `created_by` при создании и `details.onBehalfOf` в записи журнала;
+  исполнитель — по-прежнему `cli` или `--as`. Отдельного включения и выключения у API нет: CLI, как
+  экран, сохраняет правило целиком (`rule.updated`). Запуска одного правила у панели нет, `rule run`
+  прогоняет все включённые правила ящика или всех ящиков.
+
 ## Кто в журнале
 
 `actor = { userId, via }` (`services/actor.js`). Маршрут передаёт `{ userId }` — записи журнала те же,
@@ -237,6 +272,15 @@ CLI проходят как есть.
   секреты со stdin хранятся зашифрованными и не печатаются, задание `admin_effects` выполняет воркер
   теста с записывающими хуками (разлогин, перечитывание, очистка, синхронизация).
 - `services/admin/adminEffects.test.js` — слияние и порядок выполнения последствий.
+- `cli/mailexpert.panelOps.pglite.test.js` — группы `invite`, `system-email`, `audit`, `account` и
+  `mailbox oauth-reset` на PGlite с подменённым SMTP и DNS: `--as` у приглашения, пароли со stdin
+  хранятся зашифрованными и не печатаются, проверки хостов и портов, фильтры журнала, задание
+  `reconnect`.
+- `cli/mailexpert.rules.pglite.test.js` — группа `rule` на PGlite: проверки API, `--user` как автор,
+  журнал с прежним адресом пересылки, включение целым сохранением, задание `runRules`.
+- `routes/admin.effectHooks.pglite.test.js` — настоящие хуки `ADMIN_EFFECT_HOOKS`: `reconnect` не
+  подключает выключенный ящик, `runRules` пишет `rule.run` от автора задания только после захвата
+  ящика и пропускает ящик, который уже прогоняется.
 - `scripts/deploy/test/mailexpert-cli.bats` — разбор параметров обёртки, а с `id` и `docker`,
   подменёнными в `PATH`, — вызов контейнера: `-T`, параметры без изменений, stdin целиком до CLI, коды
   CLI, сбои docker, файл токена агента на хосте (`agent token --out`).

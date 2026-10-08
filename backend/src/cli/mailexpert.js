@@ -3,8 +3,9 @@
 // inconvenient. It runs inside the backend container, next to the panel, and calls the same
 // services as the HTTP routes (services/mailNode/mailboxActions.js, domainActions.js,
 // services/tenant/tenantActions.js, services/accessSync/actions.js, services/admin/users.js,
-// systemSettings.js, services/auth/oidcProviders.js, services/integrations/microsoft.js): the same
-// checks, the same refusal codes, the same journal.
+// systemSettings.js, services/auth/oidcProviders.js, services/integrations/microsoft.js,
+// services/admin/invites.js, systemEmail.js, auditQuery.js, services/accounts/manualAccounts.js,
+// services/rules/ruleActions.js): the same checks, the same refusal codes, the same journal.
 // Whoever reaches the container is an administrator; the journal names the actor "cli", or the
 // administrator given with --as. Work for the tenant is queued for the backend's job worker; the
 // CLI never runs it itself. So is what an admin change asks of the backend's process (sign-outs,
@@ -43,12 +44,18 @@ import queue from './commands/queue.js';
 import alerts from './commands/alerts.js';
 import outage from './commands/outage.js';
 import spamQuarantine from './commands/spamQuarantine.js';
+import invite from './commands/invite.js';
+import systemEmail from './commands/systemEmail.js';
+import audit from './commands/audit.js';
+import account from './commands/account.js';
+import rule from './commands/rule.js';
 
 export const GROUPS = Object.freeze([
   mailbox, domain, tenant, quarantine, jobs, access,
   user, settings, sso, integration,
   node, eop, seats, agent,
   queue, alerts, outage, spamQuarantine,
+  invite, systemEmail, audit, account, rule,
 ]);
 
 const GLOBAL_HELP = [

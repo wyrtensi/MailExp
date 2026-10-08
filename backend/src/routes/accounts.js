@@ -4,16 +4,14 @@ import { query } from '../services/db.js';
 import { isAdminRequest, requireAuth, requireAdmin } from '../middleware/auth.js';
 import { imapManager } from '../index.js';
 import { providerProfile } from '../services/imapManager.js';
-import { encrypt, decrypt } from '../services/encryption.js';
+import { decrypt } from '../services/encryption.js';
 import { revokeGoogleToken } from '../services/oauth/googleOAuth.js';
 import { redactEmail } from '../utils/redact.js';
 import { sanitizeSignature } from '../services/emailSanitizer.js';
-import { validateHost } from '../services/hostValidation.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { computeAccountHealth } from '../services/accountHealth.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { recordAudit } from '../services/auditLog.js';
-import { createKeyedSerializer } from '../utils/keyedSerializer.js';
 import { uuidParam } from '../utils/uuid.js';
 import {
   ALIAS_ERRORS, createAlias, deleteAlias, hasHeaderInjectionChars, listAliases, updateAlias,
@@ -28,31 +26,15 @@ import {
 import { routeActor } from '../services/actor.js';
 import { mailNodeFailure, onOtherMailHost, refuse as refuseMailNode } from './mailNode.js';
 import { failJobsOfDeletedAccount } from '../services/jobQueue.js';
+import {
+  CONNECTION_FIELDS, changedConnectionFields, changedServersError, impliedImapTls,
+  reconnectAccount, reconnectQueue, storedColumnValue,
+} from '../services/accounts/connection.js';
+import {
+  ACCOUNT_ERRORS, createManualAccount, resetOAuthSubject, safeAccount,
+} from '../services/accounts/manualAccounts.js';
 
 const THREAD_MODES = new Set([THREAD_MODE_RFC, THREAD_MODE_GMAIL]);
-
-// Serialize an account's reconnect triggers so a rapid settings change (e.g. a
-// gtd_enabled double-toggle) can't fire two overlapping disconnect→connect chains —
-// connectAccount's in-progress guard would drop the second and leave the GTD sync
-// tick armed inconsistently with the final DB value. Queued per account id.
-const reconnectQueue = createKeyedSerializer();
-
-const ALLOWED_IMAP_PORTS = new Set([143, 993]);
-const ALLOWED_SMTP_PORTS = new Set([465, 587]);
-
-function validatePort(port, allowed) {
-  const n = Number(port);
-  if (!Number.isInteger(n) || n < 1 || n > 65535) {
-    return `Port ${port} is not a valid port number`;
-  }
-  // When private/local hosts are explicitly allowed (e.g. Proton Mail Bridge on 1143/1025),
-  // skip the whitelist — the operator has already opted into unrestricted host access.
-  if (process.env.ALLOW_PRIVATE_IMAP_HOSTS === 'true') return null;
-  if (!allowed.has(n)) {
-    return `Port ${port} is not allowed. Allowed: ${[...allowed].join(', ')}`;
-  }
-  return null;
-}
 
 const router = Router();
 router.use(requireAuth);
@@ -60,31 +42,6 @@ router.use(requireAuth);
 // Postgres cast error surfaces as a 500). Every :id/:aliasId in this router is a UUID.
 router.param('id', uuidParam('id'));
 router.param('aliasId', uuidParam('aliasId'));
-
-// Fields safe to return to the client — matches the GET list, excludes credentials and tokens
-const SAFE_FIELDS = [
-  'id', 'name', 'sender_name', 'email_address', 'color', 'protocol',
-  'imap_host', 'imap_port', 'imap_skip_tls_verify',
-  'smtp_host', 'smtp_port', 'smtp_tls',
-  'auth_user', 'smtp_auth_user', 'oauth_provider', 'oauth_reconnect_required', 'enabled',
-  'include_in_unified_inbox', 'mail_node',
-  'last_sync', 'sync_error', 'sort_order', 'folder_mappings',
-  'signature', 'created_at', 'categorization_enabled', 'thread_mode',
-  // A mail node mailbox someone asked to delete (migration 0081): when, by whom, when it goes for
-  // good, and why the deletion job could not delete it yet.
-  'deletion_requested_at', 'deletion_requested_by_email', 'deletion_reason', 'delete_after', 'deletion_last_error',
-  // A deactivated mail node mailbox (migration 0095): read-only, its seat on hold.
-  'deactivated_at', 'deactivated_by_email', 'deactivation_reason',
-  // Stage 7b (R-32): the mailbox's domain is Authoritative and the tenant has no recipient for it
-  // yet, so EOP still rejects mail to it; computed by GET /.
-  'tenant_pending',
-];
-function safeAccount(row) {
-  const obj = Object.fromEntries(SAFE_FIELDS.map(k => [k, row[k]]));
-  // Sanitize on read so legacy values stored before the write-time sanitizer are safe
-  if (obj.signature) obj.signature = sanitizeSignature(obj.signature);
-  return obj;
-}
 
 router.get('/', async (req, res) => {
   const result = await query(
@@ -148,26 +105,10 @@ router.get('/', async (req, res) => {
   res.json(enriched);
 });
 
-// Server and credential settings: where the mailbox connects and what it signs in with. Their
-// change is the audit log's (by name only) and an administrator's alone, since a host, a port or a
-// TLS switch decides where the stored password or OAuth token is sent. The settings form sends
-// every server field on each save, so a field counts only when its value differs. Nothing else
-// writes these columns from a request: a new manual mailbox is admin-only (POST /), the OAuth
-// callbacks set their provider's fixed servers, a node mailbox takes the node's.
-const CONNECTION_FIELDS = [
-  'imap_host', 'imap_port', 'imap_tls', 'imap_skip_tls_verify', 'smtp_host', 'smtp_port', 'smtp_tls',
-  'auth_user', 'auth_pass', 'smtp_auth_user', 'smtp_auth_pass',
-];
-const PASSWORD_FIELDS = new Set(['auth_pass', 'smtp_auth_pass']);
-
-function changedConnectionFields(stored, updates) {
-  return CONNECTION_FIELDS.filter((key) => {
-    if (!(key in updates)) return false;
-    // Passwords are stored encrypted and never compared: a new one or a cleared one is a change.
-    if (PASSWORD_FIELDS.has(key)) return !!updates[key] || !!stored[key];
-    return String(stored[key] ?? '') !== String(updates[key] ?? '');
-  });
-}
+// Server and credential settings (services/accounts/connection.js, CONNECTION_FIELDS): their
+// change is the audit log's (by name only) and an administrator's alone. Nothing else writes these
+// columns from a request: a new manual mailbox is admin-only (POST /), the OAuth callbacks set
+// their provider's fixed servers, a node mailbox takes the node's.
 
 // A mailbox on the mail node, open to everyone signed in: the server picks the host, the ports and
 // a password only MailExpert knows, so nothing from the body reaches the connection settings
@@ -196,71 +137,23 @@ function refuseMailbox(res, code) {
 router.post('/', (req, res, next) => (
   req.body?.kind === 'domain' ? createDomainMailbox(req, res) : next()
 ), requireAdmin, async (req, res) => {
-  const {
-    name, sender_name = null, email_address, color = '#6366f1', protocol = 'imap',
-    imap_host, imap_port = 993, imap_skip_tls_verify = false,
-    smtp_host, smtp_port = 587, smtp_tls = 'STARTTLS',
-    auth_user, auth_pass, smtp_auth_user = null, smtp_auth_pass = null,
-    oauth_provider, oauth_access_token, oauth_refresh_token,
-    signature = null
-  } = req.body;
-
-  if (!name || !email_address) return res.status(400).json({ error: 'Name and email required' });
-  if (hasHeaderInjectionChars(name) || hasHeaderInjectionChars(email_address)) {
-    return res.status(400).json({ error: 'Name and email address cannot contain control characters' });
-  }
-  if (sender_name && hasHeaderInjectionChars(sender_name)) {
-    return res.status(400).json({ error: 'Sender name cannot contain control characters' });
-  }
-
-  const policy = await getConnectionPolicy();
-
-  if (imap_host) {
-    const err = (await validateHost(imap_host, { allowPrivate: policy.allowPrivateHosts }))
-      || (!policy.allowNonstandardPorts && validatePort(imap_port, ALLOWED_IMAP_PORTS));
-    if (err) return res.status(400).json({ error: `IMAP: ${err}` });
-  }
-  if (smtp_host) {
-    const err = (await validateHost(smtp_host, { allowPrivate: policy.allowPrivateHosts }))
-      || (!policy.allowNonstandardPorts && validatePort(smtp_port, ALLOWED_SMTP_PORTS));
-    if (err) return res.status(400).json({ error: `SMTP: ${err}` });
-  }
-
+  // services/accounts/manualAccounts.js holds the checks, shared with the panel CLI.
+  let result;
   try {
-    const result = await query(`
-      INSERT INTO email_accounts (
-        added_by, name, sender_name, email_address, color, protocol,
-        imap_host, imap_port, imap_tls, imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
-        auth_user, auth_pass, smtp_auth_user, smtp_auth_pass, oauth_provider, oauth_access_token, oauth_refresh_token,
-        signature
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-      RETURNING *
-    `, [
-      req.session.userId, name, sender_name || null, email_address, color, protocol,
-      imap_host, imap_port, Number(imap_port) % 1000 === 993, !!imap_skip_tls_verify, smtp_host, smtp_port, smtp_tls,
-      auth_user, encrypt(auth_pass), smtp_auth_user || null, encrypt(smtp_auth_pass) || null,
-      oauth_provider, encrypt(oauth_access_token), encrypt(oauth_refresh_token),
-      sanitizeSignature(signature) || null
-    ]);
-
-    const account = result.rows[0];
-    recordAudit({
-      actorUserId: req.session.userId,
-      accountId: account.id,
-      action: 'mailbox.added',
-      details: { protocol: account.protocol, oauthProvider: account.oauth_provider ?? null },
-    });
-
-    // Immediately try to connect — needs full credentials from DB row
-    if (protocol === 'imap') {
-      imapManager.connectAccount(account).catch(console.error);
-    }
-
-    res.json(safeAccount(account));
+    result = await createManualAccount(req.body, routeActor(req));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Failed to add account' });
+    return res.status(500).json({ error: 'Failed to add account' });
   }
+  if (result.error) {
+    return res.status(400).json({ error: result.message ?? ACCOUNT_ERRORS[result.error][1] });
+  }
+  const { account } = result;
+  // Immediately try to connect — needs full credentials from DB row
+  if (account.protocol === 'imap') {
+    imapManager.connectAccount(account).catch(console.error);
+  }
+  res.json(safeAccount(account));
 });
 
 router.put('/:id', async (req, res) => {
@@ -302,29 +195,10 @@ router.put('/:id', async (req, res) => {
     return res.status(400).json({ error: 'Sender name cannot contain control characters' });
   }
   const policy = await getConnectionPolicy();
+  const serversError = await changedServersError(updates, policy);
+  if (serversError) return res.status(400).json({ error: serversError });
 
-  if ('imap_host' in updates && updates.imap_host) {
-    const err = await validateHost(updates.imap_host, { allowPrivate: policy.allowPrivateHosts });
-    if (err) return res.status(400).json({ error: `IMAP: ${err}` });
-  }
-  if ('imap_port' in updates && updates.imap_port !== undefined && updates.imap_port !== null) {
-    if (!policy.allowNonstandardPorts) {
-      const err = validatePort(updates.imap_port, ALLOWED_IMAP_PORTS);
-      if (err) return res.status(400).json({ error: `IMAP: ${err}` });
-    }
-  }
-  if ('smtp_host' in updates && updates.smtp_host) {
-    const err = await validateHost(updates.smtp_host, { allowPrivate: policy.allowPrivateHosts });
-    if (err) return res.status(400).json({ error: `SMTP: ${err}` });
-  }
-  if ('smtp_port' in updates && updates.smtp_port !== undefined && updates.smtp_port !== null) {
-    if (!policy.allowNonstandardPorts) {
-      const err = validatePort(updates.smtp_port, ALLOWED_SMTP_PORTS);
-      if (err) return res.status(400).json({ error: `SMTP: ${err}` });
-    }
-  }
-
-  if ('imap_port' in updates) updates.imap_tls = Number(updates.imap_port) % 1000 === 993;
+  if ('imap_port' in updates) updates.imap_tls = impliedImapTls(updates.imap_port);
 
   // Let plugins validate the settings fields they own (GTD owns gtd_enabled/gtd_folders) before we
   // touch anything. A plugin may hard-reject the change (return an error response), report per-field
@@ -352,11 +226,7 @@ router.put('/:id', async (req, res) => {
   for (const key of allowed) {
     if (key in updates) {
       sets.push(`${key} = $${i++}`);
-      const value = ((key === 'auth_pass' || key === 'smtp_auth_pass') && updates[key]) ? encrypt(updates[key])
-        : (key === 'smtp_auth_user' || key === 'smtp_auth_pass') ? (updates[key] || null)
-        : (key === 'signature') ? sanitizeSignature(updates[key]) || null
-        : updates[key];
-      values.push(value);
+      values.push(storedColumnValue(key, updates[key]));
     }
   }
 
@@ -431,17 +301,10 @@ router.put('/:id', async (req, res) => {
     reconnectQueue(id, () => imapManager.disconnectAccount(id))
       .catch(err => console.error(`Failed to disconnect account ${id} after disable:`, err.message));
   } else if (needsReconnect && updated.protocol === 'imap' && updated.enabled) {
-    reconnectQueue(id, () =>
-      imapManager.disconnectAccount(id)
-        .then(() => query('SELECT * FROM email_accounts WHERE id = $1', [id]))
-        .then(r => {
-          if (!r.rows.length) return;
-          // New credentials/host may cure an auth failure or refusal — don't let the old
-          // cooldown silently swallow this reconnect.
-          imapManager.clearConnectCooldown(id);
-          return imapManager.connectAccount(r.rows[0]);
-        })
-    ).catch(err => console.error(`Failed to reconnect account ${id} after update:`, err.message));
+    // New credentials/host may cure an auth failure or refusal: the reconnect clears the old
+    // cooldown so it cannot silently swallow this one.
+    reconnectAccount(imapManager, id)
+      .catch(err => console.error(`Failed to reconnect account ${id} after update:`, err.message));
   }
 });
 
@@ -634,17 +497,8 @@ router.post('/:id/reconnect', async (req, res) => {
 // reconnect binds whoever signs in with the mailbox's verified address. For a mailbox whose owner's
 // provider account was recreated, or one bound to the wrong account. Admin-only, journaled.
 router.post('/:id/oauth-subject/reset', requireAdmin, async (req, res) => {
-  const { rows } = await query(
-    `UPDATE email_accounts SET oauth_subject = NULL
-      WHERE id = $1 AND oauth_provider IN ('google', 'microsoft') AND mail_node IS NOT TRUE
-      RETURNING id, oauth_provider`,
-    [req.params.id],
-  );
-  if (!rows.length) return res.status(404).json({ error: 'OAuth mailbox not found', code: 'oauth_mailbox_not_found' });
-  recordAudit({
-    actorUserId: req.session.userId, accountId: rows[0].id, action: 'mailbox.oauth_subject_reset',
-    details: { oauthProvider: rows[0].oauth_provider },
-  });
+  const result = await resetOAuthSubject(req.params.id, routeActor(req));
+  if (result.error) return res.status(404).json({ error: 'OAuth mailbox not found', code: 'oauth_mailbox_not_found' });
   res.json({ ok: true });
 });
 
@@ -789,15 +643,8 @@ router.post('/:id/threading/mode', requireAdmin, async (req, res) => {
   // reconnects — same reconnect chain the settings PATCH uses, guarded the same way (only a
   // connected-or-connectable mailbox needs it; a disabled or non-IMAP one has nothing to reconnect).
   if (row.protocol === 'imap' && row.enabled) {
-    reconnectQueue(id, () =>
-      imapManager.disconnectAccount(id)
-        .then(() => query('SELECT * FROM email_accounts WHERE id = $1', [id]))
-        .then(r => {
-          if (!r.rows.length) return;
-          imapManager.clearConnectCooldown(id);
-          return imapManager.connectAccount(r.rows[0]);
-        })
-    ).catch(err => console.error(`Failed to reconnect account ${id} after threading mode change:`, err.message));
+    reconnectAccount(imapManager, id)
+      .catch(err => console.error(`Failed to reconnect account ${id} after threading mode change:`, err.message));
   }
 
   // New mail arriving during the pass already threads under the new mode; the pass rekeys what's
