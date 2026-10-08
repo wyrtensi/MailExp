@@ -22,6 +22,7 @@
 |---|---|
 | [quickstart.md](quickstart.md) | быстрый старт: панель на чистом VPS, почтовый узел по желанию, установка агентом |
 | [deployment.md](deployment.md) | установка панели, режимы входа, CLI, обновление, откат, переезд панели |
+| [migrate-to-install.md](migrate-to-install.md) | замена собственного docker compose боевой установкой: перенос данных, бэкапы, обновления, переезд из бэкапа |
 | [cloudflare.md](cloudflare.md) | Cloudflare до установки: Zero Trust, туннель, приложение Access, токены DNS и синхронизации, неполадки |
 | [ports.md](ports.md) | порты всех модулей: входящие, исходящие, Docker/loopback, production и стенды |
 | [cli.md](cli.md) | справочник командной строки панели `mailexpert` |
