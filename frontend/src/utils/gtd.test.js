@@ -2,6 +2,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applyGtdThreadRead,
   STALE_DAYS,
   agingDays,
   isStale,
@@ -1617,5 +1618,37 @@ describe('unclassifyThread', () => {
     };
     await unclassifyThread('m1', 'todo', deps);
     assert.deepEqual(calls, [['notify', 'gtd.removeFailed', 'gtd.state.todo']]);
+  });
+});
+
+describe('applyGtdThreadRead', () => {
+  const deps = (calls, { fail = false } = {}) => ({
+    markRead: (identity, read) => calls.push(['mark', identity, read]),
+    bulkRead: async (ids, read) => {
+      calls.push(['bulk', ids, read]);
+      if (fail) throw new Error('offline');
+    },
+    getThread: null,
+    onSaved: () => calls.push(['saved']),
+    onFailed: (err) => calls.push(['failed', err.message]),
+  });
+  const thread = { id: 'r1', message_id: '<m1>', is_read: false };
+
+  it('marks the row at once and reconciles after the save', async () => {
+    const calls = [];
+    await applyGtdThreadRead(thread, true, deps(calls));
+    assert.deepEqual(calls, [['mark', '<m1>', true], ['bulk', ['r1'], true], ['saved']]);
+  });
+
+  it('a click that fails flips the row back and is reported', async () => {
+    const calls = [];
+    await applyGtdThreadRead(thread, true, deps(calls, { fail: true }));
+    assert.deepEqual(calls, [['mark', '<m1>', true], ['bulk', ['r1'], true], ['mark', '<m1>', false], ['failed', 'offline']]);
+  });
+
+  it('an auto-read on open that fails flips back silently, as the message list does', async () => {
+    const calls = [];
+    await applyGtdThreadRead(thread, true, { ...deps(calls, { fail: true }), silent: true });
+    assert.deepEqual(calls, [['mark', '<m1>', true], ['bulk', ['r1'], true], ['mark', '<m1>', false]]);
   });
 });
