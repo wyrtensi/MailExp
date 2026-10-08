@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
-  accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunSummary, accessSyncSaveErrorKey,
+  accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunNotes, accessSyncRunSummary,
+  accessSyncSaveErrorKey, tombstoneReasonKey,
 } from '../utils/accessSync.js';
+import { adminUserErrorText } from '../utils/adminUsers.js';
 import { localeTag } from '../utils/formatDate.js';
 
 const fieldStyle = {
@@ -23,11 +25,14 @@ const ID_FIELDS = [
   { field: 'policyId', labelKey: 'admin.accessSync.policyId' },
 ];
 
-// Cloudflare Access sync settings and the last run (AUTH_MODE=google). The API token is only ever
-// sent to the server; the form learns just whether one is stored.
+// Cloudflare Access sync settings, the last run and the deleted users the sync does not import
+// again (AUTH_MODE=google). The API token is only ever sent to the server; the form learns just
+// whether one is stored.
 export default function AccessSyncPanel() {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
+  const [tombstones, setTombstones] = useState(null);
+  const [tombstonesError, setTombstonesError] = useState('');
   const [form, setForm] = useState(() => accessSyncForm(null));
   const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,10 +44,15 @@ export default function AccessSyncPanel() {
     setForm(accessSyncForm(next.config));
   };
 
+  const loadTombstones = () => api.admin.getAccessSyncTombstones()
+    .then((next) => { setTombstones(next.tombstones); setTombstonesError(''); })
+    .catch((err) => setTombstonesError(err.message));
+
   useEffect(() => {
     api.admin.getAccessSync()
       .then(apply)
       .catch((err) => setLoadError(err.message));
+    loadTombstones();
   }, []);
 
   if (!data) {
@@ -83,10 +93,26 @@ export default function AccessSyncPanel() {
     setData(next);
     const idleKey = accessSyncIdleKey(next.result);
     if (idleKey) setNotice(t(idleKey));
+    await loadTombstones();
   });
+
+  // Clears the tombstone and approves the email; the sync writes it to the policy.
+  const allowAgain = (email) => act(async () => {
+    try {
+      await api.admin.allowUser(email);
+    } catch (err) {
+      throw new Error(adminUserErrorText(err, t), { cause: err });
+    }
+    setNotice(t('admin.accessSync.allowed', { email }));
+    setTombstones((list) => (list ?? []).filter((entry) => entry.email !== email));
+    setData(await api.admin.getAccessSync());
+  });
+
+  const formatTime = (iso) => new Date(iso).toLocaleString(localeTag());
 
   const formErrorKey = accessSyncFormError(form, data.config.apiTokenSet);
   const summary = accessSyncRunSummary(data.lastRun, data.maxDisables);
+  const notes = accessSyncRunNotes(data.lastRun, formatTime);
   const troubled = data.lastRun?.outcome === 'failed' || data.lastRun?.outcome === 'aborted';
 
   return (
@@ -160,8 +186,55 @@ export default function AccessSyncPanel() {
             {t(summary.key, { ...summary.values, error: summary.errorKey ? t(summary.errorKey) : summary.values.error })}
           </div>
         )}
+        {notes.map((note) => (
+          <div key={note.key} style={{ color: 'var(--text-secondary)', fontSize: 12, marginTop: 4 }}>{t(note.key, note.values)}</div>
+        ))}
         <div style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 6 }}>
-          {t('admin.accessSync.limit', { max: data.maxDisables })}
+          {t('admin.accessSync.limit', { max: data.maxDisables, maxImports: data.maxImports })}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 24, maxWidth: 520 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+          {t('admin.accessSync.tombstonesTitle')}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
+          {t('admin.accessSync.tombstonesDesc')}
+        </div>
+        {tombstonesError && (
+          <div style={{ fontSize: 13, color: 'var(--red)' }}>{t('admin.accessSync.tombstonesLoadFailed', { message: tombstonesError })}</div>
+        )}
+        {!tombstonesError && tombstones?.length === 0 && (
+          <div style={{ fontSize: 13, color: 'var(--text-tertiary)' }}>{t('admin.accessSync.tombstonesEmpty')}</div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {(tombstones ?? []).map((entry) => {
+            const date = new Date(entry.createdAt).toLocaleDateString(localeTag());
+            return (
+              <div
+                key={entry.email}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8,
+                  background: 'var(--bg-tertiary)', border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{entry.email}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    {t(tombstoneReasonKey(entry.reason))}
+                    {' · '}
+                    {entry.createdBy
+                      ? t('admin.accessSync.tombstoneMeta', { date, by: entry.createdBy })
+                      : date}
+                    {entry.inPolicy && ` · ${t('admin.accessSync.tombstoneInPolicy')}`}
+                  </div>
+                </div>
+                <button type="button" disabled={busy} onClick={() => allowAgain(entry.email)} style={{ ...buttonStyle, padding: '5px 10px', fontSize: 12 }}>
+                  {t('admin.accessSync.allowAgain')}
+                </button>
+              </div>
+            );
+          })}
         </div>
       </div>
 

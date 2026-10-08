@@ -2,7 +2,8 @@ import { query } from './db.js';
 
 // Everything a user can do that the journal records (a letter queued, cancelled, moved to another
 // time or failed after its author left included), plus the Cloudflare Access sync stopping
-// itself, an administrator changing its settings or token or asking for a run, MailExpert restoring a rejected mail node password, taking in the mail node domains
+// itself, importing a user from the policy (or a first Access sign-in creating one), an
+// administrator clearing a deleted user's tombstone, changing its settings or token or asking for a run, MailExpert restoring a rejected mail node password, taking in the mail node domains
 // that already had mailboxes, a scheduled DNS check whose result changed, a mail node alert that
 // was raised or cleared, and an administrator releasing, deleting or training a letter of the
 // mail node's quarantine or writing its settings, and a mail node outage window opened or closed by
@@ -29,6 +30,7 @@ export const AUDIT_ACTIONS = Object.freeze([
   'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
   'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
   'access.sync_aborted', 'access.config_changed', 'access.sync_requested',
+  'access.user_imported', 'access.import_aborted', 'access.tombstone_cleared',
   'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
   'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
   'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',

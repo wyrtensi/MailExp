@@ -4,7 +4,7 @@ import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import { localeTag } from '../utils/formatDate.js';
-import { adminUserErrorText } from '../utils/adminUsers.js';
+import { accessStateBadge, adminUserErrorText } from '../utils/adminUsers.js';
 
 const PAGE_SIZE = 200;
 
@@ -16,13 +16,21 @@ const badgeStyle = {
   fontSize: 10, padding: '2px 6px', borderRadius: 20, fontWeight: 600,
   letterSpacing: '0.04em', textTransform: 'uppercase',
 };
+// Badge colours by tone (accessStateBadge in utils/adminUsers.js).
+const ACCESS_TONES = {
+  ok: { background: 'rgba(74,222,128,0.12)', color: 'var(--green)' },
+  warn: { background: 'rgba(251,191,36,0.14)', color: 'var(--amber)' },
+  muted: { background: 'var(--bg-secondary)', color: 'var(--text-tertiary)' },
+};
 const actionStyle = {
   padding: '5px 10px', borderRadius: 6, fontSize: 11, fontWeight: 500, border: '1px solid var(--border)',
   background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer',
 };
 
 // Users screen for AUTH_MODE=google: approving an email is what lets a person sign in, and every
-// signed-in user works with all mailboxes.
+// signed-in user works with all mailboxes. With the Cloudflare Access sync on, each row shows where
+// the user stands in the Access policy; disabling takes a user out of the policy and enabling puts
+// them back, and deleting remembers the email (AccessSyncPanel lists it to allow again).
 export default function GoogleUsersPanel() {
   const { t } = useTranslation();
   const { user: currentUser } = useStore();
@@ -34,6 +42,8 @@ export default function GoogleUsersPanel() {
   // The last failed request (an Error with the server's code), explained at render.
   const [error, setError] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  // The user whose email is being changed: { id, value }.
+  const [editing, setEditing] = useState(null);
 
   useEffect(() => {
     api.admin.getUsers({ limit: PAGE_SIZE, offset: 0 })
@@ -74,6 +84,11 @@ export default function GoogleUsersPanel() {
     upsert((await api.admin.updateUser(u.id, { disabled: !u.disabledAt })).user);
   });
 
+  const saveEmail = () => run(async () => {
+    upsert((await api.admin.updateUser(editing.id, { email: editing.value.trim() })).user);
+    setEditing(null);
+  });
+
   const loadMore = () => run(async () => {
     const data = await api.admin.getUsers({ limit: PAGE_SIZE, offset: users.length });
     setUsers((list) => [...list, ...data.users]);
@@ -82,7 +97,7 @@ export default function GoogleUsersPanel() {
 
   const remove = (u) => setConfirmDialog({
     title: t('admin.users.deleteConfirmTitle', { username: u.email || u.username }),
-    message: t('admin.users.deleteConfirmBody'),
+    message: t('admin.users.deleteConfirmBodyAccess'),
     confirmLabel: t('admin.users.deleteConfirmLabel'),
     onConfirm: async () => {
       await api.admin.deleteUser(u.id).catch((err) => { throw new Error(adminUserErrorText(err, t), { cause: err }); });
@@ -143,6 +158,8 @@ export default function GoogleUsersPanel() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {users.map((u) => {
           const self = u.id === currentUser?.id;
+          const access = accessStateBadge(u.accessState);
+          const editingThis = editing?.id === u.id;
           return (
             <div key={u.id} style={{ ...rowStyle, opacity: u.disabledAt ? 0.6 : 1 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -160,6 +177,7 @@ export default function GoogleUsersPanel() {
                       {t('admin.users.disabledBadge')}
                     </span>
                   )}
+                  {access && <span style={{ ...badgeStyle, ...ACCESS_TONES[access.tone] }}>{t(access.key)}</span>}
                   {self && <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{t('admin.users.you')}</span>}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 1 }}>
@@ -169,9 +187,34 @@ export default function GoogleUsersPanel() {
                       ? t('admin.users.bootstrapBadge')
                       : t('admin.users.joined', { date: new Date(u.created_at).toLocaleDateString(localeTag()) })}
                 </div>
+                {editingThis && (
+                  <form
+                    onSubmit={(e) => { e.preventDefault(); if (editing.value.includes('@') && !busy) saveEmail(); }}
+                    style={{ display: 'flex', gap: 6, marginTop: 6 }}
+                  >
+                    <input
+                      type="email"
+                      value={editing.value}
+                      onChange={(e) => setEditing({ id: u.id, value: e.target.value })}
+                      placeholder={t('admin.users.emailPh')}
+                      autoFocus
+                      style={{
+                        flex: 1, minWidth: 0, padding: '5px 8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                        borderRadius: 6, color: 'var(--text-primary)', fontSize: 12, outline: 'none',
+                      }}
+                    />
+                    <button type="submit" disabled={busy || !editing.value.includes('@')} style={actionStyle}>{t('common.save')}</button>
+                    <button type="button" onClick={() => setEditing(null)} style={actionStyle}>{t('common.cancel')}</button>
+                  </form>
+                )}
               </div>
               {!self && !u.isBootstrapAdmin && (
-                <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
+                <div style={{ display: 'flex', gap: 5, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  {!editingThis && (
+                    <button type="button" disabled={busy} onClick={() => setEditing({ id: u.id, value: u.email ?? '' })} style={actionStyle}>
+                      {t('admin.users.changeEmail')}
+                    </button>
+                  )}
                   <button type="button" disabled={busy} onClick={() => toggleAdmin(u)} style={actionStyle}>
                     {u.isAdmin ? t('admin.users.removeAdmin') : t('admin.users.makeAdmin')}
                   </button>

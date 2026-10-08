@@ -33,3 +33,18 @@ export function adminUserErrorText(err, t) {
   if (key) return t(key);
   return apiErrorText(err, t, { fallback: t('admin.users.errorFailed') });
 }
+
+// Where a user stands in the Cloudflare Access policy (backend services/accessSync/accessState.js
+// accessState), as a badge: its label key and tone. null: no badge (no email, disabled by an
+// administrator, or a panel that does not sign in through Google/Access).
+const ACCESS_STATE_BADGES = {
+  in_access: { key: 'admin.users.accessInAccess', tone: 'ok' },
+  pending: { key: 'admin.users.accessPending', tone: 'muted' },
+  admitted_by_rule: { key: 'admin.users.accessByRule', tone: 'muted' },
+  removed_in_cloudflare: { key: 'admin.users.accessRemovedInCloudflare', tone: 'warn' },
+  not_synced: { key: 'admin.users.accessNotSynced', tone: 'muted' },
+};
+
+export function accessStateBadge(state) {
+  return typeof state === 'string' && Object.hasOwn(ACCESS_STATE_BADGES, state) ? ACCESS_STATE_BADGES[state] : null;
+}

@@ -1,8 +1,17 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunSummary, accessSyncSaveErrorKey,
+  accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunNotes, accessSyncRunSummary,
+  accessSyncSaveErrorKey, tombstoneReasonKey,
 } from './accessSync.js';
+
+describe('tombstoneReasonKey', () => {
+  it('names a deleted user and a replaced email, and treats anything else as deleted', () => {
+    assert.equal(tombstoneReasonKey('deleted'), 'admin.accessSync.tombstoneReasonDeleted');
+    assert.equal(tombstoneReasonKey('email_changed'), 'admin.accessSync.tombstoneReasonEmailChanged');
+    assert.equal(tombstoneReasonKey(undefined), 'admin.accessSync.tombstoneReasonDeleted');
+  });
+});
 
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';
@@ -62,11 +71,13 @@ describe('accessSyncRunSummary', () => {
     assert.equal(accessSyncRunSummary(null, 10), null);
     assert.deepEqual(accessSyncRunSummary(run, 10), {
       key: 'admin.accessSync.outcomeUpdated',
-      values: { added: 2, removed: 1, disabled: 0, wouldDisable: 0, max: 10, error: '' },
+      values: { added: 2, removed: 1, imported: 0, disabled: 0, wouldDisable: 0, wouldImport: 0, max: 10, error: '' },
       errorKey: null,
     });
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'unchanged' }, 10).key, 'admin.accessSync.outcomeUnchanged');
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'aborted', wouldDisable: 12 }, 10).values.wouldDisable, 12);
+    assert.equal(accessSyncRunSummary({ ...run, outcome: 'aborted', wouldImport: 30 }, 10).values.wouldImport, 30);
+    assert.equal(accessSyncRunSummary({ ...run, imported: 3 }, 10).values.imported, 3);
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'empty' }, 10).key, 'admin.accessSync.outcomeEmpty');
     assert.equal(accessSyncRunSummary({ ...run, outcome: 'surprise' }, 10), null);
   });
@@ -89,5 +100,23 @@ describe('accessSyncIdleKey', () => {
     assert.equal(accessSyncIdleKey({ outcome: 'not_google_mode' }), 'admin.accessSync.notGoogleMode');
     assert.equal(accessSyncIdleKey({ outcome: 'updated' }), null);
     assert.equal(accessSyncIdleKey(undefined), null);
+  });
+});
+
+describe('accessSyncRunNotes', () => {
+  it('names import errors and the next retry, or that the retries ran out', () => {
+    assert.deepEqual(accessSyncRunNotes(null), []);
+    assert.deepEqual(accessSyncRunNotes({ outcome: 'updated', errors: 0 }), []);
+    assert.deepEqual(accessSyncRunNotes({ outcome: 'updated', errors: 2 }), [
+      { key: 'admin.accessSync.importErrors', values: { count: 2 } },
+    ]);
+    assert.deepEqual(
+      accessSyncRunNotes({ outcome: 'failed', retriable: true, retryAttempt: 2, nextRetryAt: '2026-10-09T10:05:00.000Z' }, (iso) => `at ${iso}`),
+      [{ key: 'admin.accessSync.nextRetry', values: { time: 'at 2026-10-09T10:05:00.000Z', attempt: 2 } }],
+    );
+    assert.deepEqual(accessSyncRunNotes({ outcome: 'failed', retriable: true, nextRetryAt: null }), [
+      { key: 'admin.accessSync.retriesExhausted', values: {} },
+    ]);
+    assert.deepEqual(accessSyncRunNotes({ outcome: 'failed', retriable: false }), []);
   });
 });

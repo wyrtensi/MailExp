@@ -60,6 +60,7 @@ const CONCRETE_PATH = {
   '/admin/auth-events': '/admin/auth-events?limit=100&offset=0',
   '/admin/audit': '/admin/audit',
   '/admin/access-sync': '/admin/access-sync',
+  '/admin/access-sync/tombstones': '/admin/access-sync/tombstones',
   '/admin/update': '/admin/update',
   '/admin/google-apps': '/admin/google-apps',
   '/admin/oidc': '/admin/oidc',
@@ -331,6 +332,12 @@ test('admin user management round-trips through in-memory state', async () => {
   await answer('/admin/users/:param', 'DELETE', `/admin/users/${id}`);
   const list = await demoRequest('GET', '/admin/users');
   assert.equal(list.users.some(u => u.id === id), false);
+  // The deleted user's email is remembered, and allowing it again brings the user back.
+  const { tombstones } = await demoRequest('GET', '/admin/access-sync/tombstones');
+  assert.equal(tombstones.some(t => t.email === 'newadmin@example.com'), true);
+  const allowed = await answer('/admin/users/allow', 'POST', '/admin/users/allow', { email: 'newadmin@example.com' });
+  assert.equal(allowed.created, true);
+  assert.equal(allowed.tombstoneCleared, true);
 });
 
 test('admin invites round-trip through in-memory state', async () => {

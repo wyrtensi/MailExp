@@ -26,6 +26,7 @@ function userLines(user) {
     ['bootstrap admin', user.isBootstrapAdmin],
     ['2fa', user.totpEnabled],
     ['disabled', user.disabledAt ? fmtDate(user.disabledAt) : false],
+    ['access', user.accessState ?? undefined],
     ['created', fmtDate(user.created_at)],
   ]);
 }
@@ -48,6 +49,7 @@ const list = {
       { header: 'ADMIN', value: (u) => (u.isBootstrapAdmin ? 'bootstrap' : u.isAdmin) },
       { header: '2FA', value: (u) => u.totpEnabled },
       { header: 'DISABLED', value: (u) => (u.disabledAt ? fmtDate(u.disabledAt) : '') },
+      { header: 'ACCESS', value: (u) => u.accessState ?? '' },
       { header: 'CREATED', value: (u) => fmtDate(u.created_at) },
     ], { empty: '(no users)' });
     if (data.total > offset + data.users.length) lines.push(`(${data.users.length} of ${data.total}: --offset ${offset + data.users.length} for more)`);
@@ -70,10 +72,11 @@ const create = {
   name: 'create',
   summary: 'approve an email: a new user, or the user whose username it is',
   usage: 'user create <email> [--admin]',
-  journal: 'user.added, and user.admin_changed with --admin',
+  journal: 'user.added, and user.admin_changed with --admin; access.tombstone_cleared for a deleted user\'s email',
   help: [
     '--admin   make the user an administrator as well',
-    'With AUTH_MODE=google, an approved email is what lets a person sign in.',
+    'With AUTH_MODE=google, an approved email is what lets a person sign in. Approving the email',
+    'of a deleted user clears its tombstone ("access tombstones").',
   ],
   positionals: ['email'],
   flags: { admin: 'boolean' },
@@ -135,7 +138,8 @@ const remove = {
   help: [
     'Asks for confirmation (--yes answers it). Refused for the last active administrator, a',
     'bootstrap admin and the --as administrator. The backend then signs the user out and lets the',
-    'plugins remove their data (a queued job).',
+    'plugins remove their data (a queued job). The email is tombstoned: the Access sync does not',
+    'import it again and an Access sign-in under it is refused until "access allow <email>".',
   ],
   positionals: ['email'],
   async run(ctx) {

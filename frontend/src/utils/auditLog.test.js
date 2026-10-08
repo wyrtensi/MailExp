@@ -12,6 +12,7 @@ describe('AUDIT_ACTIONS', () => {
       'message.move_reverted', 'message.send_queued', 'message.send_cancelled', 'message.send_rescheduled', 'message.send_failed',
       'user.added', 'user.deleted', 'user.enabled', 'user.disabled', 'user.admin_changed',
       'access.sync_aborted', 'access.config_changed', 'access.sync_requested',
+      'access.user_imported', 'access.import_aborted', 'access.tombstone_cleared',
       'mail_node.config_changed', 'mail_node.domain_added', 'mail_node.domain_adopted', 'mail_node.domain_state_changed',
       'mail_node.domain_identity_acknowledged', 'mail_node.applied', 'mail_node.dns_checked',
       'mail_node.queue_action', 'mail_node.alert_raised', 'mail_node.alert_cleared',
@@ -67,6 +68,9 @@ describe('AUDIT_ACTIONS', () => {
     assert.equal(auditActionLabelKey('mailbox.password_restored'), 'admin.audit.actionMailboxPasswordRestored');
     assert.equal(auditActionLabelKey('user.admin_changed'), 'admin.audit.actionUserAdminChanged');
     assert.equal(auditActionLabelKey('access.sync_aborted'), 'admin.audit.actionAccessSyncAborted');
+    assert.equal(auditActionLabelKey('access.user_imported'), 'admin.audit.actionAccessUserImported');
+    assert.equal(auditActionLabelKey('access.import_aborted'), 'admin.audit.actionAccessImportAborted');
+    assert.equal(auditActionLabelKey('access.tombstone_cleared'), 'admin.audit.actionAccessTombstoneCleared');
     assert.equal(auditActionLabelKey('message.read'), null);
   });
 });
@@ -196,6 +200,23 @@ describe('auditDetail', () => {
       auditDetail({ action: 'access.sync_aborted', details: {} }),
       { key: 'admin.audit.detailAccessSyncAborted', values: { wouldDisable: 0, emails: '' } },
     );
+  });
+
+  it('names a user imported from Access, an import the limit stopped and a cleared tombstone', () => {
+    assert.deepEqual(
+      auditDetail({ action: 'access.user_imported', details: { email: 'a@example.com', source: 'cloudflare_access' } }),
+      { key: 'admin.audit.detailAccessImportedSync', values: { email: 'a@example.com' } },
+    );
+    assert.deepEqual(
+      auditDetail({ action: 'access.user_imported', details: { email: 'a@example.com', source: 'sign_in' } }),
+      { key: 'admin.audit.detailAccessImportedSignIn', values: { email: 'a@example.com' } },
+    );
+    assert.equal(auditDetail({ action: 'access.user_imported', details: {} }), null);
+    assert.deepEqual(
+      auditDetail({ action: 'access.import_aborted', details: { candidates: ['x@example.com'], maxImports: 0 } }),
+      { key: 'admin.audit.detailAccessImportAborted', values: { wouldImport: 1, emails: 'x@example.com' } },
+    );
+    assert.deepEqual(auditDetail({ action: 'access.tombstone_cleared', details: { email: 'g@example.com' } }), { text: 'g@example.com' });
   });
 
   it('names the Access sync settings that changed, the token only as replaced', () => {

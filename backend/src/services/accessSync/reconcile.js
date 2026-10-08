@@ -1,7 +1,8 @@
 // Three-way reconcile of an Access policy's include list with MailExpert's active users. The
 // baseline is the set of emails MailExpert itself wrote last time: only those are MailExpert's to
-// remove, and one missing from Cloudflare means someone removed it there. Every other rule —
-// foreign emails, groups, email domains — is left exactly as it is.
+// remove, and one missing from Cloudflare means someone removed it there. An email someone added
+// in Cloudflare becomes a user (importCandidates) and from then on is MailExpert's like the rest.
+// Every other rule — groups, email domains, emails that are not imported — is left as it is.
 
 const lower = (value) => (typeof value === 'string' ? value.trim().toLowerCase() : '');
 const ruleEmail = (rule) => lower(rule?.email?.email);
@@ -29,6 +30,30 @@ export function removedInCloudflare({ policy, baseline, activeEmails, pinned }) 
   return [...new Set(baseline)]
     .filter((email) => active.has(email) && !listed.has(email) && !pinned.has(email) && !admits(email))
     .sort();
+}
+
+// Emails the policy lists that MailExpert did not write: someone added them in Cloudflare, so they
+// are candidates to become users (the runner drops those that already have a user or a
+// tombstone). An email the policy also excludes is not admitted, and a bootstrap admin gets an
+// admin account on their first sign-in instead.
+export function importCandidates({ policy, baseline, pinned }) {
+  const owned = new Set(baseline);
+  const excludedEmails = new Set((policy.exclude ?? []).map(ruleEmail).filter(Boolean));
+  const excludedDomains = new Set((policy.exclude ?? []).map(ruleDomain).filter(Boolean));
+  return [...new Set((policy.include ?? []).map(ruleEmail).filter(Boolean))]
+    .filter((email) => !owned.has(email) && !pinned.has(email) && !excludedEmails.has(email)
+      && !excludedDomains.has(email.slice(email.lastIndexOf('@') + 1)))
+    .sort();
+}
+
+// Every email an include list names, sorted: what the policy admits by address.
+export function listedEmails(include) {
+  return [...new Set((include ?? []).map(ruleEmail).filter(Boolean))].sort();
+}
+
+// Whether a run would import too many users to trust it.
+export function exceedsImportLimit(count, maxImports) {
+  return count > maxImports;
 }
 
 // Whether a run would disable too many users to trust it.

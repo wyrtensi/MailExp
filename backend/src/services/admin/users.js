@@ -4,6 +4,8 @@ import { auditOf } from '../actor.js';
 import { getAuthSettings } from '../auth/authSettings.js';
 import { UserIdentityError, claimOrCreateUserByEmail, normalizeEmail } from '../auth/userIdentity.js';
 import { countsAsActiveAdmin, lockAdminGuard, otherActiveAdminExists } from '../auth/userStatus.js';
+import { accessStateOf, loadAccessStateContext } from '../accessSync/accessState.js';
+import { addTombstone, clearTombstone, lockAddress } from '../accessSync/tombstones.js';
 
 // The administrator's actions on users, shared by the admin API (routes/admin.js, /api/admin/users)
 // and the panel CLI (cli/commands/user.js): the same checks, refusal codes and journal.
@@ -35,10 +37,11 @@ class AdminUserError extends Error {
   }
 }
 
-export const USER_LIST_COLUMNS = 'id, username, email, is_admin, totp_enabled, disabled_at, created_at';
+export const USER_LIST_COLUMNS = 'id, username, email, is_admin, totp_enabled, disabled_at, disabled_source, access_source, created_at';
 
-// A user as the API answers it.
-export function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstrapAdminEmails) {
+// A user as the API answers it. With an access context (accessSync/accessState.js), it says where
+// the user stands in the Cloudflare Access policy (accessState).
+export function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstrapAdminEmails, accessContext = null) {
   return {
     id: row.id,
     username: row.username,
@@ -48,7 +51,13 @@ export function publicUser(row, bootstrapAdminEmails = getAuthSettings().bootstr
     disabledAt: row.disabled_at ?? null,
     created_at: row.created_at,
     isBootstrapAdmin: !!row.email && bootstrapAdminEmails.has(row.email.toLowerCase()),
+    ...(accessContext ? { accessState: accessStateOf(row, accessContext) } : {}),
   };
+}
+
+// publicUser with the access state, for answers the users screen shows.
+async function screenUser(row, settings = getAuthSettings()) {
+  return publicUser(row, settings.bootstrapAdminEmails, await loadAccessStateContext({ settings }));
 }
 
 const lockTargetUser = async (client, id) => {
@@ -56,6 +65,19 @@ const lockTargetUser = async (client, id) => {
   if (!rows[0]) throw new AdminUserError('not_found');
   return rows[0];
 };
+
+// The address a user row signs in under: its email, else a username that is an address (a legacy
+// row claimOrCreateUserByEmail would hand to whoever signs in with it).
+const addressOf = (row) => (row ? (row.email ? row.email.toLowerCase() : normalizeEmail(row.username)) : null);
+
+// Takes the per-address locks of a user row before the admin guard (tombstones.js lockAddress),
+// read without a lock first: the row's own lock comes after the guard.
+async function lockRowAddresses(client, id, extra = []) {
+  const { rows: [row] } = await client.query('SELECT email, username FROM users WHERE id = $1', [id]);
+  const addresses = [...new Set([addressOf(row), ...extra].filter(Boolean))].sort();
+  for (const address of addresses) await lockAddress(client, address);
+  return row ?? null;
+}
 
 const isBootstrapEmail = (settings, email) => !!email && settings.bootstrapAdminEmails.has(email.toLowerCase());
 
@@ -72,9 +94,10 @@ export async function listUsers({ limit = 100, offset = 0 } = {}) {
     query(`SELECT ${USER_LIST_COLUMNS} FROM users ORDER BY created_at ASC LIMIT $1 OFFSET $2`, [limit, offset]),
     query('SELECT COUNT(*) AS total FROM users'),
   ]);
-  const { bootstrapAdminEmails } = getAuthSettings();
+  const settings = getAuthSettings();
+  const accessContext = await loadAccessStateContext({ settings });
   return {
-    users: result.rows.map((row) => publicUser(row, bootstrapAdminEmails)),
+    users: result.rows.map((row) => publicUser(row, settings.bootstrapAdminEmails, accessContext)),
     total: parseInt(countResult.rows[0].total),
   };
 }
@@ -90,23 +113,83 @@ export async function findUser(login) {
       ORDER BY (lower(email) = $1) DESC NULLS LAST, created_at ASC LIMIT 1`,
     [name],
   );
-  return rows[0] ? { user: publicUser(rows[0]) } : refuse('not_found');
+  return rows[0] ? { user: await screenUser(rows[0]) } : refuse('not_found');
 }
 
+const tombstoneClearedEntry = (actor, email) => auditOf(actor, { action: 'access.tombstone_cleared', details: { email } });
+
 // Approves an email (what lets a person sign in when AUTH_MODE=google): a new user, or the
-// existing user whose username is this address. Answers { user, created, effects }.
+// existing user whose username is this address. Approving the email of a deleted user clears its
+// tombstone (accessSync/tombstones.js). Answers { user, created, effects }.
 export async function createUser(rawEmail, actor) {
   const email = normalizeEmail(rawEmail);
   if (!email) return refuse('email_invalid');
   try {
-    const { user, created, claimed } = await withTransaction((client) => claimOrCreateUserByEmail(client, email));
-    if (!created && !claimed) return refuse('user_exists');
-    recordAudit([userAuditEntry(actor, 'user.added', user)]);
-    return { user: publicUser(user), created, effects: { accessSync: 'user_added' } };
+    const { user, created, cleared } = await withTransaction(async (client) => {
+      const claim = await claimOrCreateUserByEmail(client, email);
+      // Only an approval clears the tombstone: user_exists rolls the transaction back.
+      if (!claim.created && !claim.claimed) throw new AdminUserError('user_exists');
+      return { ...claim, cleared: await clearTombstone(client, email) };
+    });
+    recordAudit([
+      userAuditEntry(actor, 'user.added', user),
+      ...(cleared ? [tombstoneClearedEntry(actor, email)] : []),
+    ]);
+    return { user: await screenUser(user), created, effects: { accessSync: 'user_added' } };
   } catch (err) {
-    if (err instanceof UserIdentityError) return refuse(err.code);
+    if (err instanceof UserIdentityError || err instanceof AdminUserError) return refuse(err.code);
     throw err;
   }
+}
+
+// Lets a deleted user's email in again (the screen's list of deleted users, `mailexpert access
+// allow`): clears the tombstone and approves the email, or enables the user who has it. Answers
+// { user, created, enabled, tombstoneCleared, effects }.
+export async function allowEmail(rawEmail, actor) {
+  const email = normalizeEmail(rawEmail);
+  if (!email) return refuse('email_invalid');
+  let outcome;
+  try {
+    outcome = await withTransaction(async (client) => {
+      // Under the address lock a delete of the same address also takes (deleteUser), so the two
+      // run one after the other.
+      await lockAddress(client, email);
+      const cleared = await clearTombstone(client, email);
+      const claim = await claimOrCreateUserByEmail(client, email);
+      let { user } = claim;
+      const created = claim.created || claim.claimed;
+      let enabled = false;
+      // An administrator's approval: the user is enabled and no longer only admitted by a rule.
+      if (!created && (user.disabled_at || user.access_source)) {
+        const { rows } = await client.query(
+          `UPDATE users SET disabled_at = NULL, disabled_by = NULL, disabled_source = NULL, access_source = NULL
+            WHERE id = $1 RETURNING ${USER_LIST_COLUMNS}`,
+          [user.id],
+        );
+        // The row went away under us: roll back, the tombstone stays.
+        if (!rows[0]) throw new AdminUserError('not_found');
+        enabled = !!user.disabled_at;
+        [user] = rows;
+      }
+      return { user, created, enabled, cleared };
+    });
+  } catch (err) {
+    if (err instanceof UserIdentityError || err instanceof AdminUserError) return refuse(err.code);
+    throw err;
+  }
+  const { user, created, enabled, cleared } = outcome;
+  const entries = [];
+  if (cleared) entries.push(tombstoneClearedEntry(actor, email));
+  if (created) entries.push(userAuditEntry(actor, 'user.added', user));
+  if (enabled) entries.push(userAuditEntry(actor, 'user.enabled', user));
+  if (entries.length) recordAudit(entries);
+  return {
+    user: await screenUser(user),
+    created,
+    enabled,
+    tombstoneCleared: cleared,
+    effects: { accessSync: created || enabled ? 'user_added' : null },
+  };
 }
 
 // Changes a user: patch { isAdmin?, disabled?, email? } (email null or '' clears it). Every check
@@ -133,6 +216,8 @@ export async function updateUser(id, patch, actor) {
   let outcome;
   try {
     outcome = await withTransaction(async (client) => {
+      // A new or cleared email changes who an address lets in: both addresses are locked first.
+      if (emailGiven) await lockRowAddresses(client, id, email ? [email] : []);
       await lockAdminGuard(client);
       const current = await lockTargetUser(client, id);
       const after = {
@@ -154,34 +239,47 @@ export async function updateUser(id, patch, actor) {
         if (taken.length) throw new AdminUserError('email_taken');
       }
 
+      const emailChanged = emailGiven && after.email !== current.email;
+      // Giving a user the email of a deleted user lets that email in again.
+      const cleared = emailChanged && email ? await clearTombstone(client, email) : false;
+      // The address the user had must not come back on its own: Cloudflare may still list it
+      // until the next run, and a sign-in under it would otherwise get a fresh account.
+      if (emailChanged && current.email) await addTombstone(client, current.email, actor, 'email_changed');
+
+      // disabled_source stays while the user stays disabled (the sync's mark, accessSync/
+      // accessState.js) and goes with an enable. A new email from an administrator ends the
+      // "admitted by a rule" mark (access_source): the administrator approved this address.
       const { rows: [updated] } = await client.query(
         `UPDATE users
             SET is_admin = $2, email = $3, disabled_at = $4,
-                disabled_by = CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE COALESCE(disabled_by, $5::uuid) END
+                disabled_by = CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE COALESCE(disabled_by, $5::uuid) END,
+                disabled_source = CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE disabled_source END,
+                access_source = CASE WHEN $6::boolean THEN NULL ELSE access_source END
           WHERE id = $1
           RETURNING ${USER_LIST_COLUMNS}`,
-        [id, after.is_admin, after.email, after.disabled_at, actorId],
+        [id, after.is_admin, after.email, after.disabled_at, actorId, emailChanged],
       );
       // Losing the way in: turned off, or left without the email the sessions were opened for.
       // A replaced address counts too: the row may now stand for another person, and a session
       // opened under the old address must not carry the row's access over to them.
       const lost = (!current.disabled_at && !!after.disabled_at) || (!!current.email && after.email !== current.email);
-      return { row: updated, lostAccess: lost, previous: current };
+      return { row: updated, lostAccess: lost, previous: current, cleared };
     });
   } catch (err) {
     if (err instanceof AdminUserError) return refuse(err.code);
     throw err;
   }
 
-  const { row, lostAccess, previous } = outcome;
+  const { row, lostAccess, previous, cleared } = outcome;
   const auditEntries = [];
   if (!!previous.disabled_at !== !!row.disabled_at) {
     auditEntries.push(userAuditEntry(actor, row.disabled_at ? 'user.disabled' : 'user.enabled', row));
   }
   if (!!previous.is_admin !== !!row.is_admin) auditEntries.push(userAuditEntry(actor, 'user.admin_changed', row));
+  if (cleared) auditEntries.push(tombstoneClearedEntry(actor, row.email));
   if (auditEntries.length) recordAudit(auditEntries);
   return {
-    user: publicUser(row, settings.bootstrapAdminEmails),
+    user: await screenUser(row, settings),
     effects: {
       signOut: lostAccess ? [id] : [],
       // Who may sign in changed: the Access policy follows.
@@ -191,7 +289,10 @@ export async function updateUser(id, patch, actor) {
 }
 
 // Deletes a user. The delete runs while the admin-guard lock is held: two admins deleting each
-// other at once would otherwise both pass the last-admin check and leave no active admin.
+// other at once would otherwise both pass the last-admin check and leave no active admin. The
+// address (the email, or a username that is an address) is tombstoned in the same transaction,
+// under the address lock (accessSync/tombstones.js): the Access sync does not import it again and
+// a Cloudflare Access sign-in under it is refused until an administrator adds the user again.
 // Answers { ok, effects }.
 export async function deleteUser(id, actor) {
   if (actor?.userId && id === actor.userId) return refuse('self_change', 'Cannot delete your own account');
@@ -200,6 +301,7 @@ export async function deleteUser(id, actor) {
   let deleted;
   try {
     deleted = await withTransaction(async (client) => {
+      const named = await lockRowAddresses(client, id);
       await lockAdminGuard(client);
       const current = await lockTargetUser(client, id);
       if (isBootstrapEmail(settings, current.email)) {
@@ -209,6 +311,7 @@ export async function deleteUser(id, actor) {
         throw new AdminUserError('last_admin');
       }
       await client.query('DELETE FROM users WHERE id = $1', [id]);
+      await addTombstone(client, current.email ?? addressOf(named), actor, 'deleted');
       return current;
     });
   } catch (err) {

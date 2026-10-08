@@ -340,6 +340,8 @@ export const api = {
     createUser: (email) => request('POST', '/admin/users', { email }),
     updateUser: (id, data) => request('PATCH', `/admin/users/${id}`, data),
     deleteUser: (id) => request('DELETE', `/admin/users/${id}`),
+    // Lets a deleted user's email in again: clears its tombstone and approves it.
+    allowUser: (email) => request('POST', '/admin/users/allow', { email }),
     disableUserTotp: (id) => request('POST', `/admin/users/${id}/totp/disable`),
     getSettings: () => request('GET', '/admin/settings'),
     updateSettings: (data) => request('PATCH', '/admin/settings', data),
@@ -355,6 +357,7 @@ export const api = {
     getAccessSync: () => request('GET', '/admin/access-sync'),
     saveAccessSync: (data) => request('PUT', '/admin/access-sync', data),
     runAccessSync: () => request('POST', '/admin/access-sync/run'),
+    getAccessSyncTombstones: () => request('GET', '/admin/access-sync/tombstones'),
     // Update of the panel from the admin UI (the host's updater does the work; see utils/panelUpdate.js).
     // refresh: asks the backend to look at GitHub's `latest` now instead of its 6-hour cache (the
     // backend allows that once a minute); used when the card opens, never by the poll.
