@@ -4,11 +4,9 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { invalidateSocialDomainCache, backfillCategories, aiClassifyMessage, BUILTIN_SETS, getGlobalCategorizationEnabled } from '../services/categorizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
-import { uuidParam } from '../utils/uuid.js';
+import { uuidParams } from '../utils/uuid.js';
 
 const router = Router();
-router.param('id', uuidParam('id'));
-router.param('accountId', uuidParam('accountId'));
 
 // Validate that a URL is a safe external HTTPS URL (no private/loopback IPs).
 // Returns an error string or null if valid. Async because it performs DNS resolution.
@@ -148,7 +146,7 @@ router.post('/categories/sources', requireAdmin, async (req, res) => {
 
 // ── Toggle enabled ─────────────────────────────────────────────────────────────
 
-router.patch('/categories/sources/:id', requireAdmin, async (req, res) => {
+router.patch('/categories/sources/:id', requireAdmin, uuidParams('id'), async (req, res) => {
   const { enabled } = req.body;
   if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be boolean' });
 
@@ -166,7 +164,7 @@ router.patch('/categories/sources/:id', requireAdmin, async (req, res) => {
 
 // ── Delete source ─────────────────────────────────────────────────────────────
 
-router.delete('/categories/sources/:id', requireAdmin, async (req, res) => {
+router.delete('/categories/sources/:id', requireAdmin, uuidParams('id'), async (req, res) => {
   const result = await query(
     'DELETE FROM category_list_sources WHERE id = $1 RETURNING id',
     [req.params.id]
@@ -179,7 +177,7 @@ router.delete('/categories/sources/:id', requireAdmin, async (req, res) => {
 
 // ── Refresh URL subscription ──────────────────────────────────────────────────
 
-router.post('/categories/sources/:id/refresh', requireAdmin, async (req, res) => {
+router.post('/categories/sources/:id/refresh', requireAdmin, uuidParams('id'), async (req, res) => {
   const check = await query(
     'SELECT id, source_type, value FROM category_list_sources WHERE id = $1',
     [req.params.id]
@@ -203,7 +201,7 @@ router.post('/categories/sources/:id/refresh', requireAdmin, async (req, res) =>
 
 // ── Re-categorize account messages ───────────────────────────────────────────
 
-router.post('/categories/recategorize/:accountId', requireAdmin, async (req, res) => {
+router.post('/categories/recategorize/:accountId', requireAdmin, uuidParams('accountId'), async (req, res) => {
   const check = await query(
     'SELECT id, categorization_enabled FROM email_accounts WHERE id = $1',
     [req.params.accountId]

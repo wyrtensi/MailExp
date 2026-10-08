@@ -9,7 +9,7 @@ import { decrypt, isEncrypted } from '../services/encryption.js';
 import { validateHost } from '../services/hostValidation.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { logAuthEvent } from '../services/authEvents.js';
-import { uuidParam } from '../utils/uuid.js';
+import { uuidParams } from '../utils/uuid.js';
 
 // In-memory OIDC discovery cache keyed by issuerUrl
 const discoveryCache = new Map();
@@ -202,7 +202,6 @@ export async function buildEndSessionUrl({ providerId, idToken } = {}) {
 // ── Public API router (mounted at /api/auth/oidc) ─────────────────────────────
 
 const oidcApiRouter = Router();
-oidcApiRouter.param('id', uuidParam('id'));
 
 // List enabled providers — shown on login page, no auth required
 oidcApiRouter.get('/providers', async (req, res) => {
@@ -235,7 +234,7 @@ oidcApiRouter.get('/identities', requireAuth, async (req, res) => {
 });
 
 // Unlink an identity from the current user
-oidcApiRouter.delete('/identities/:id', requireAuth, async (req, res) => {
+oidcApiRouter.delete('/identities/:id', requireAuth, uuidParams('id'), async (req, res) => {
   try {
     // Prevent removing the last login method when no password is set
     const userResult = await query('SELECT password_hash FROM users WHERE id = $1', [req.session.userId]);

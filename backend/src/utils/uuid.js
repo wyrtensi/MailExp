@@ -10,6 +10,17 @@ export function isUuid(value) {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
+// The same check as a route middleware, for a router guarded route by route: placed after the
+// route's own guard (requireAuth, requireAdmin), so the caller is refused for who they are before
+// being told the id is malformed. A router.param callback runs before every route middleware.
+export function uuidParams(...names) {
+  return (req, res, next) => {
+    const bad = names.find((name) => !isUuid(req.params[name]));
+    if (bad) return res.status(400).json({ error: `Invalid ${bad}`, code: 'invalid_id' });
+    next();
+  };
+}
+
 // Factory for a router.param callback: (req, res, next, value) => 400 on a malformed UUID, with the
 // stable code invalid_id whichever param it was.
 export function uuidParam(name) {
