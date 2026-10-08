@@ -120,7 +120,7 @@ sudo /opt/mailexpert/app/scripts/deploy/backup.sh --show-recovery-key
 |---|---|---|---|
 | `direct` | Caddy закрывает TLS на `<DIRECT_HOST>` (сертификат через DNS-01), «Войти через Google» | `DNS_API_TOKEN`; `AUTH_GOOGLE_CLIENT_ID`/`AUTH_GOOGLE_CLIENT_SECRET`, если не `--local-auth` | `https://<DIRECT_HOST>/oauth/login/google/callback` |
 | `cf` | `cloudflared` — исходящий туннель к `<CF_HOST>`, вход через Cloudflare Access | `TUNNEL_TOKEN`; `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE`, если не `--local-auth` | не нужен: вход обрабатывает Access, а не клиент MailExpert |
-| `both` | оба хоста разом: `<CF_HOST>` — основной (`APP_URL`), `<DIRECT_HOST>` — дополнительный (`APP_ALT_URLS`) | все перечисленные выше | `https://<DIRECT_HOST>/oauth/login/google/callback` |
+| `both` | оба хоста разом: `<CF_HOST>` — основной (`APP_URL`), `<DIRECT_HOST>` — дополнительный (`APP_ALT_URLS`), запасной вход через Google, если Access недоступен ([cloudflare.md, раздел 8](cloudflare.md)) | все перечисленные выше | `https://<DIRECT_HOST>/oauth/login/google/callback` |
 
 Где взять каждый из этих секретов в Cloudflare — [cloudflare.md](cloudflare.md). В режимах `cf` и
 `both` `install.sh` после запуска туннеля проверяет, что `https://<CF_HOST>` закрыт Access команды
@@ -273,7 +273,7 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `tenant` | `status`, `test [--wait]`, `antispam [--wait]`, `poll [--wait]`, `connectors-reference` |
 | `quarantine` | `status`, `list`, `release [--wait]`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
-| `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]` — синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
+| `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]`, `tombstones`, `allow <EMAIL>` — двусторонняя синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
 | `user` | `list [--limit <N>] [--offset <N>]`, `show <EMAIL>`, `create <EMAIL> [--admin]`, `set <EMAIL> [--admin\|--no-admin] [--disable\|--enable] [--email <NEW>]`, `delete <EMAIL>`, `totp-reset <EMAIL>` — пользователи панели, с защитой последнего администратора |
 | `settings` | `get [<KEY>]`, `set <KEY> <VALUE>` — настройки экрана администратора (вход по паролю, регистрация, 2FA, лимиты входа, интервалы синхронизации, сетевые разрешения) |
 | `sso` | `list`, `add ...`, `set <ID\|SLUG> ...`, `remove <ID\|SLUG>` — SSO-провайдеры; секрет клиента только со stdin |
