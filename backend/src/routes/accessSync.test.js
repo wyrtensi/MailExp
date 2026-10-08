@@ -5,6 +5,7 @@ vi.mock('../services/encryption.js', () => ({ encrypt: (v) => `enc:${v}`, decryp
 vi.mock('../services/accessSync/index.js', () => ({
   requestAccessSync: vi.fn(), runAccessSyncNow: vi.fn(), withAccessSyncLock: vi.fn((op) => op()),
 }));
+vi.mock('../services/accessSync/tombstones.js', () => ({ listTombstones: vi.fn() }));
 vi.mock('../services/accessSync/settings.js', async (importOriginal) => ({
   ...(await importOriginal()),
   loadStoredConfig: vi.fn(), loadState: vi.fn(), saveConfig: vi.fn(), updateConfig: vi.fn(),
@@ -15,6 +16,7 @@ import accessSyncRoutes from './accessSync.js';
 import { requestAccessSync, runAccessSyncNow, withAccessSyncLock } from '../services/accessSync/index.js';
 import { AccessSyncConfigError, loadState, loadStoredConfig, saveConfig, updateConfig } from '../services/accessSync/settings.js';
 import { query } from '../services/db.js';
+import { listTombstones } from '../services/accessSync/tombstones.js';
 
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';
@@ -52,7 +54,10 @@ beforeEach(() => {
     const before = await loadStoredConfig();
     return { before, saved: await saveConfig(build(before)) };
   });
-  loadState.mockResolvedValue({ baseline: ['person@example.com'], abortedCandidates: null, lastRun: LAST_RUN });
+  loadState.mockResolvedValue({
+    baseline: ['person@example.com'], policyEmails: ['person@example.com', 'gone@example.com'], abortedCandidates: null, lastRun: LAST_RUN,
+  });
+  listTombstones.mockResolvedValue([{ email: 'gone@example.com', createdAt: '2026-10-01T00:00:00.000Z', createdBy: 'admin@example.com' }]);
 });
 afterEach(() => { vi.unstubAllEnvs(); });
 
@@ -71,10 +76,18 @@ const journaled = () => query.mock.calls
 
 const SNAPSHOT = {
   config: { enabled: true, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiTokenSet: true },
-  lastRun: LAST_RUN, maxDisables: 5, googleMode: true,
+  lastRun: LAST_RUN, maxDisables: 5, maxImports: 10, tombstones: 1, googleMode: true,
 };
 
 describe('Access sync admin API', () => {
+  it('lists the tombstoned emails and whether the policy still listed each', async () => {
+    const { status, body } = await send('GET', '/tombstones');
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      tombstones: [{ email: 'gone@example.com', createdAt: '2026-10-01T00:00:00.000Z', createdBy: 'admin@example.com', inPolicy: true }],
+    });
+  });
+
   it('shows the settings and the last run without the token or the baseline', async () => {
     const { status, body, text } = await send('GET', '');
     expect(status).toBe(200);

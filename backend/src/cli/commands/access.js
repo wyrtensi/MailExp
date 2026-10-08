@@ -1,12 +1,14 @@
 import { CliError, unwrap } from '../common.js';
 import { EXIT, UsageError, parseCount } from '../args.js';
-import { fmtDate, keyValues } from '../output.js';
+import { fmtDate, keyValues, table } from '../output.js';
+import { queueEffects } from '../effects.js';
 import {
-  ACCESS_SYNC_ERRORS, accessSyncSnapshot, enqueueAccessSync, getAccessSyncJob, journalSyncRequested,
+  ACCESS_SYNC_ERRORS, accessSyncSnapshot, accessSyncTombstones, enqueueAccessSync, getAccessSyncJob, journalSyncRequested,
   patchAccessSyncConfig, setAccessSyncToken,
 } from '../../services/accessSync/actions.js';
+import { ADMIN_USER_ERRORS, allowEmail } from '../../services/admin/users.js';
 
-// mailexpert access ...: the sync of approved users into a Cloudflare Access policy
+// mailexpert access ...: the two-way sync of the panel's users with a Cloudflare Access policy
 // (services/accessSync/, the admin screen's "Cloudflare Access" section). Settings are saved through
 // the same action as the screen; a run is queued for the backend's job worker, which runs it in the
 // backend process (it signs disabled users out there). The API token is read from stdin only and
@@ -31,7 +33,7 @@ const OUTCOME_TEXT = Object.freeze({
   empty: 'nothing written: the policy would be left without any address, so it was not changed',
   not_google_mode: 'the panel does not sign in through Google or Cloudflare Access (AUTH_MODE is not google)',
   not_configured: 'the sync is off or its settings are incomplete',
-  aborted: 'stopped: the run would disable more users than ACCESS_SYNC_MAX_DISABLES allows (journaled as access.sync_aborted)',
+  aborted: 'stopped: the run would disable more users than ACCESS_SYNC_MAX_DISABLES allows (journaled as access.sync_aborted) or import more than ACCESS_SYNC_MAX_IMPORTS allows (access.import_aborted)',
   failed: 'failed',
 });
 
@@ -43,8 +45,13 @@ function lastRunLines(run) {
     ['  finished', fmtDate(run.finishedAt)],
     ['  added', run.added],
     ['  removed', run.removed],
+    ['  imported', run.imported ?? 0],
     ['  disabled', run.disabled],
+    ['  errors', run.errors || undefined],
     ['  would disable', run.wouldDisable || undefined],
+    ['  would import', run.wouldImport || undefined],
+    ['  next retry', run.nextRetryAt ? `${fmtDate(run.nextRetryAt)} (attempt ${run.retryAttempt})` : undefined],
+    ['  retry', run.retriable && !run.nextRetryAt ? 'no more retries: the hourly run tries again' : undefined],
   ]);
 }
 
@@ -58,12 +65,14 @@ function configLines(snapshot) {
     ['api token', config.apiTokenSet ? 'set' : 'not set'],
     ['sign-in mode google', snapshot.googleMode],
     ['max disables per run', snapshot.maxDisables],
+    ['max imports per run', snapshot.maxImports],
+    ['deleted users (tombstones)', snapshot.tombstones],
   ]);
 }
 
 const status = {
   name: 'status',
-  summary: 'the sync settings (never the token), the last run and the disable limit',
+  summary: 'the sync settings (never the token), the last run with its imports and retry, and the limits',
   usage: 'access status',
   async run() {
     const snapshot = await accessSyncSnapshot();
@@ -168,8 +177,55 @@ const sync = {
   },
 };
 
+const tombstones = {
+  name: 'tombstones',
+  summary: 'the emails of deleted users, which the sync does not import again',
+  usage: 'access tombstones',
+  help: [
+    'A deleted user\'s email is not imported from the policy again, and a Cloudflare Access sign-in',
+    'under it is refused (user_deleted), until "access allow <email>" or "user create <email>".',
+    'IN POLICY: the policy still listed the email at the last successful run.',
+  ],
+  async run() {
+    const list = await accessSyncTombstones();
+    return {
+      data: { tombstones: list },
+      lines: table(list, [
+        { header: 'EMAIL', value: (t) => t.email },
+        { header: 'DELETED', value: (t) => fmtDate(t.createdAt) },
+        { header: 'BY', value: (t) => t.createdBy ?? '' },
+        { header: 'IN POLICY', value: (t) => t.inPolicy },
+      ], { empty: '(no deleted users)' }),
+    };
+  },
+};
+
+const allow = {
+  name: 'allow',
+  summary: 'let a deleted user\'s email in again: clear its tombstone and approve it',
+  usage: 'access allow <email>',
+  journal: 'access.tombstone_cleared, and user.added or user.enabled',
+  help: [
+    'Clears the tombstone and creates the user (or enables the user who has the email); the',
+    'backend\'s next sync writes the email to the policy (a queued job).',
+  ],
+  positionals: ['email'],
+  async run(ctx) {
+    const result = unwrap(await allowEmail(ctx.args.email, ctx.actor), ADMIN_USER_ERRORS);
+    const queued = await queueEffects(ctx, result.effects);
+    const what = result.created ? 'created' : result.enabled ? 'enabled' : 'already active:';
+    return {
+      data: { user: result.user, created: result.created, enabled: result.enabled, tombstoneCleared: result.tombstoneCleared, job: queued.job },
+      lines: [
+        `${what} ${result.user.email}${result.tombstoneCleared ? ' (tombstone cleared)' : ''}`,
+        ...queued.lines,
+      ],
+    };
+  },
+};
+
 export default {
   name: 'access',
-  summary: 'the sync of approved users into a Cloudflare Access policy',
-  commands: [status, config, token, sync],
+  summary: 'the two-way sync of the panel\'s users with a Cloudflare Access policy',
+  commands: [status, config, token, sync, tombstones, allow],
 };

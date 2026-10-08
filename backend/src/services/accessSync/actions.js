@@ -4,8 +4,9 @@ import { getAuthSettings } from '../auth/authSettings.js';
 import { enqueueJob, getJob, registerJobKind } from '../jobQueue.js';
 import { requestAccessSync, runAccessSyncNow, withAccessSyncLock } from './index.js';
 import {
-  AccessSyncConfigError, accessSyncMaxDisables, loadState, loadStoredConfig, publicConfig, updateConfig,
+  AccessSyncConfigError, accessSyncMaxDisables, accessSyncMaxImports, loadState, loadStoredConfig, publicConfig, updateConfig,
 } from './settings.js';
+import { listTombstones } from './tombstones.js';
 
 // The Cloudflare Access sync's administrator actions, shared by the admin API (routes/accessSync.js)
 // and the panel CLI (cli/commands/access.js): the same checks, refusal codes and journal.
@@ -35,15 +36,26 @@ const CONFIG_FIELDS = Object.freeze(['enabled', 'accountId', 'appId', 'policyId'
 const TOKEN_RE = /^[A-Za-z0-9._~+/=-]{20,512}$/;
 
 // What the admin screen and `mailexpert access status` show: the settings without the token, the
-// last run, the disable limit and whether the panel signs in through Google/Access at all.
+// last run (with its imports, errors and the next retry), the limits, how many emails are
+// tombstoned and whether the panel signs in through Google/Access at all.
 export async function accessSyncSnapshot() {
-  const [stored, state] = await Promise.all([loadStoredConfig(), loadState()]);
+  const [stored, state, tombstones] = await Promise.all([loadStoredConfig(), loadState(), listTombstones()]);
   return {
     config: publicConfig(stored),
     lastRun: state.lastRun,
     maxDisables: accessSyncMaxDisables(),
+    maxImports: accessSyncMaxImports(),
+    tombstones: tombstones.length,
     googleMode: getAuthSettings().mode === 'google',
   };
+}
+
+// The tombstoned emails (users an administrator deleted), newest first, each with whether the
+// policy still listed it at the last successful run: { email, createdAt, createdBy, inPolicy }.
+export async function accessSyncTombstones() {
+  const [tombstones, state] = await Promise.all([listTombstones(), loadState()]);
+  const listed = new Set(state.policyEmails);
+  return tombstones.map((entry) => ({ ...entry, inPolicy: listed.has(entry.email) }));
 }
 
 // Saves the settings (settings.js updateConfig: a blank token keeps the stored one; one transaction

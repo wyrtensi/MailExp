@@ -237,6 +237,24 @@ describe('PATCH /api/admin/users/:id', () => {
   });
 });
 
+describe('POST /api/admin/users/allow', () => {
+  it('clears a tombstone, approves the email and asks for a sync', async () => {
+    expect((await send('POST', '/users/allow', { email: 'nope' })).body.code).toBe('email_invalid');
+    installTransaction([
+      [/DELETE FROM access_tombstones/, { rows: [], rowCount: 1 }],
+      lock,
+      [/^\s*SELECT .* FROM users WHERE lower\(email\) = \$1/, { rows: [] }],
+      [/^\s*UPDATE users SET email = \$1/, { rows: [] }],
+      [/^\s*INSERT INTO users/, { rows: [USER_ROW] }],
+    ]);
+    const { status, body } = await send('POST', '/users/allow', { email: 'user@example.com' });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ created: true, enabled: false, tombstoneCleared: true, user: { id: USER_ID } });
+    expect(recordAudit.mock.calls.flat(2).map((e) => e.action)).toEqual(['access.tombstone_cleared', 'user.added']);
+    expect(requestAccessSync).toHaveBeenCalled();
+  });
+});
+
 describe('DELETE /api/admin/users/:id', () => {
   it('refuses a bootstrap admin and the last active admin', async () => {
     vi.stubEnv('BOOTSTRAP_ADMIN_EMAILS', 'user@example.com');

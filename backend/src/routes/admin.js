@@ -10,7 +10,7 @@ import { uuidParam } from '../utils/uuid.js';
 import { routeActor } from '../services/actor.js';
 import { applyAdminEffects, registerAdminEffectsJobKind } from '../services/admin/adminEffects.js';
 import {
-  ADMIN_USER_ERRORS, createUser, deleteUser, disableUserTotp, listUsers, updateUser,
+  ADMIN_USER_ERRORS, allowEmail, createUser, deleteUser, disableUserTotp, listUsers, updateUser,
 } from '../services/admin/users.js';
 import {
   SYSTEM_SETTINGS_ERRORS, updateSystemSettings,
@@ -125,6 +125,16 @@ router.post('/users', async (req, res) => {
   await applyEffects(result.effects);
   console.log(`[admin] ${req.session.userId} approved user ${result.user.id}`);
   return res.status(result.created ? 201 : 200).json({ user: result.user });
+});
+
+// Lets a deleted user's email in again: clears its tombstone and approves it (or enables the user
+// who has it).
+router.post('/users/allow', async (req, res) => {
+  const result = await allowEmail(req.body?.email, routeActor(req));
+  if (result.error) return sendUserRefusal(res, result);
+  await applyEffects(result.effects);
+  console.log(`[admin] ${req.session.userId} allowed a deleted user's email again (user ${result.user.id})`);
+  return res.json({ user: result.user, created: result.created, enabled: result.enabled, tombstoneCleared: result.tombstoneCleared });
 });
 
 router.post('/users/:id/totp/disable', async (req, res) => {

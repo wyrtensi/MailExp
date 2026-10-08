@@ -113,7 +113,7 @@ describe('mailexpert access status', () => {
     const json = (await cli(['access', 'status', '--json'])).json();
     expect(json).toEqual({
       config: { enabled: false, accountId: '', appId: '', policyId: '', apiTokenSet: false },
-      lastRun: null, maxDisables: 10, googleMode: true,
+      lastRun: null, maxDisables: 10, maxImports: 10, tombstones: 0, googleMode: true,
     });
   });
 });
@@ -182,6 +182,26 @@ describe('mailexpert access config', () => {
     const off = await cli(['access', 'config', '--disable']);
     expect(off.code).toBe(0);
     expect(await accessJobs()).toHaveLength(1);
+  });
+});
+
+describe('mailexpert access tombstones and allow', () => {
+  it('lists a deleted user\'s email, and allow clears it and approves the email again', async () => {
+    await db.query("INSERT INTO access_tombstones (email, created_by) VALUES ('gone@example.com', $1)", [ADMIN]);
+    const list = await cli(['access', 'tombstones', '--json']);
+    expect(list.code).toBe(0);
+    expect(list.json().tombstones).toEqual([
+      { email: 'gone@example.com', createdAt: expect.any(String), createdBy: 'admin@example.com', inPolicy: false },
+    ]);
+    expect((await cli(['access', 'status'])).out).toMatch(/deleted users \(tombstones\):\s+1/);
+
+    const allowed = await cli(['access', 'allow', 'Gone@Example.com', '--json']);
+    expect(allowed.code).toBe(0);
+    expect(allowed.json()).toMatchObject({ created: true, tombstoneCleared: true, user: { email: 'gone@example.com' } });
+    expect((await db.query('SELECT count(*)::int AS n FROM access_tombstones')).rows[0].n).toBe(0);
+    const actions = (await auditSettled(2)).map((e) => e.action);
+    expect(actions).toEqual(expect.arrayContaining(['access.tombstone_cleared', 'user.added']));
+    await db.query("DELETE FROM users WHERE email = 'gone@example.com'");
   });
 });
 

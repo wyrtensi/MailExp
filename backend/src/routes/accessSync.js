@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { runAccessSyncNow } from '../services/accessSync/index.js';
 import {
-  ACCESS_SYNC_ERRORS, accessSyncSnapshot, journalSyncRequested, saveAccessSyncConfig,
+  ACCESS_SYNC_ERRORS, accessSyncSnapshot, accessSyncTombstones, journalSyncRequested, saveAccessSyncConfig,
 } from '../services/accessSync/actions.js';
 import { routeActor } from '../services/actor.js';
 
@@ -11,6 +11,11 @@ const router = Router();
 
 router.get('/', async (_req, res) => {
   res.json(await accessSyncSnapshot());
+});
+
+// Emails of deleted users the sync does not import again; POST /api/admin/users/allow lets one in.
+router.get('/tombstones', async (_req, res) => {
+  res.json({ tombstones: await accessSyncTombstones() });
 });
 
 router.put('/', async (req, res) => {
