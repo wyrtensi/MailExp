@@ -1181,11 +1181,12 @@ export const useStore = create((set, get) => ({
   pinAccount: (accountId) => {
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
+    const wasPinned = current.includes(accountId);
     setPinnedAccounts(pinAccountIds(current, accountId));
     api.savePreferences({ pinAccount: accountId }).catch(err => {
       console.error('Failed to save the pin:', err?.message || err);
-      // Undo only this pin: other pins made meanwhile stay.
-      get().setPinnedAccounts(unpinAccountIds(get().pinnedAccounts, accountId));
+      // Undo only this pin (not one that was already there): other pins made meanwhile stay.
+      if (!wasPinned) get().setPinnedAccounts(unpinAccountIds(get().pinnedAccounts, accountId));
       notifyPrefSaveFailed(i18n.t('common.prefSaveFailed.pinBody'));
     });
   },
