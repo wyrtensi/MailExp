@@ -267,9 +267,9 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 
 | Группа | Команды |
 |---|---|
-| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>`, `deactivate <ADDRESS> --reason <TEXT>`, `reactivate <ADDRESS>` |
-| `domain` | `list`, `show <DOMAIN>`, `add <DOMAIN> [--mailboxes <N>]`, `adopt <DOMAIN>`, `step <DOMAIN> <STEP>`, `ready <DOMAIN>`, `ack <DOMAIN> [--created <TIME>]`, `dns-expected <DOMAIN> [--mx ...] [--tenant-txt ...] [--dkim-cname1 ...] [--dkim-cname2 ...]`, `restart <DOMAIN>`, `sync <DOMAIN>`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN>`, `approve-alias-removal <DOMAIN>` |
-| `tenant` | `status`, `test`, `antispam` |
+| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>`, `deactivate <ADDRESS> --reason <TEXT>`, `reactivate <ADDRESS>`, `set-quota <ADDRESS> <MB>`, `set-rate-limit <ADDRESS> <N/h\|default>` |
+| `domain` | `list`, `show <DOMAIN>`, `add <DOMAIN> [--mailboxes <N>]`, `adopt <DOMAIN>`, `step <DOMAIN> <STEP>`, `ready <DOMAIN>`, `ack <DOMAIN> [--created <TIME>]`, `dns-expected <DOMAIN> [--mx ...] [--tenant-txt ...] [--dkim-cname1 ...] [--dkim-cname2 ...]`, `restart <DOMAIN>`, `sync <DOMAIN>`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN>`, `approve-alias-removal <DOMAIN>`, `dns-check [<DOMAIN>] [--wait]` |
+| `tenant` | `status`, `test`, `antispam`, `poll`, `connectors-reference` |
 | `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
 | `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]` — синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
@@ -281,6 +281,10 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `eop` | `show`, `set [--eop-host ...] [--licenses <N>] ...` (все поля экрана EOP), `budget` — настройки EOP и бюджет TERRL |
 | `seats` | `status`, `check [--wait]`, `set-hold <DAYS>`, `request <N>` — места EOP |
 | `agent` | `status`, `jobs [--limit <N>]`, `token issue [--out <TOKEN_FILE>\|--out -]`, `token revoke`, `run status\|backup\|update` — агент узла; токен печатается один раз (или пишется в файл 0600 на хосте) для `setup.sh --agent-token-file` |
+| `queue` | `list`, `show <QUEUE_ID> [--body]`, `flush`, `hold\|release\|deliver\|delete <QUEUE_ID>` — почтовая очередь узла |
+| `alerts` | `status`, `check [--wait]`, `set [--ping-url <URL>] [--deferred-count <N>] [--deferred-minutes <N>]` — оповещения узла |
+| `outage` | `list`, `show <ID>`, `letters <ID>`, `open --start <TIME> --reason <TEXT>`, `update <ID>`, `close <ID>`, `delete <ID>`, `trace [--wait]`, `settings show\|set` — простои узла и письма в них |
+| `spam-quarantine` | `list`, `release\|learn-spam\|delete <ID>`, `settings show\|set --user-view on\|off`, `node-settings show\|apply` — карантин rspamd на узле (не EOP) |
 
 Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
 (`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`
@@ -298,7 +302,8 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 - `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
   `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `domain ready`, `domain ack`,
   `quarantine pause`, `mailbox deactivate`, `node apply --prefilter`, `agent token issue` при ротации,
-  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`. Без
+  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`, `queue flush`, `queue delete`, `outage delete`,
+  `spam-quarantine delete`, `spam-quarantine node-settings apply`. Без
   терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,

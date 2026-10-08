@@ -7,7 +7,7 @@ import { getSpamRuleState } from '../mailNode/nodeApply.js';
 import { getDomainRow } from '../mailNode/domains.js';
 import { parseHostName } from '../mailNode/mailcow.js';
 import { getTenantDriver, tenantOf, tenantProfileWithoutDriver } from './driver.js';
-import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState } from './tenantJobs.js';
+import { TENANT_JOB_KINDS, enqueueTenantJob, getTenantState, takeConnectorReference } from './tenantJobs.js';
 import { DOMAIN_SYNC_KIND, enqueueDomainSync, kickDomainSync } from './tenantDomains.js';
 import { connectorDrift } from './connectors.js';
 import {
@@ -208,4 +208,16 @@ export async function listTenantJobs({ statuses = null, kinds = null, limit = 50
   const wanted = kinds ? kinds.filter((kind) => KINDS.has(kind)) : TENANT_KINDS;
   const rows = await listJobs({ kinds: wanted, statuses, limit, newestFirst: true });
   return { jobs: rows.map((job) => ({ ...jobAnswer(job), domain: job.payload?.domain ?? null })) };
+}
+
+// R-25: the last read of the connectors becomes the reference; the status answers the drift from
+// it. Journaled with the names of the connectors. Answers { reference }.
+export async function takeConnectorReferenceAction(actor) {
+  const result = await takeConnectorReference({ userId: actor?.userId ?? null });
+  if (result.error) return result;
+  recordAudit(auditOf(actor, {
+    action: 'tenant.connector_reference_taken',
+    details: { inbound: result.reference.inbound.map((c) => c.name), outbound: result.reference.outbound.map((c) => c.name) },
+  }));
+  return { reference: result.reference };
 }

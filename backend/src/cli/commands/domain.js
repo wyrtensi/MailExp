@@ -1,11 +1,13 @@
 import {
-  CliError, WAIT_FLAGS, WAIT_HELP, confirm, jobLine, maybeWait, nodeAction, refusal, unwrap,
+  CliError, WAIT_FLAGS, WAIT_HELP, confirm, jobLine, maybeWait, nodeAction, nodeCheckWait, refusal, unwrap,
 } from '../common.js';
 import { UsageError } from '../args.js';
 import { fmtDate, fmtValue, keyValues, table } from '../output.js';
 import { parseHostName } from '../../services/mailNode/mailcow.js';
 import { MAIL_NODE_ERRORS } from '../../services/mailNode/errors.js';
-import { MANUAL_STEPS } from '../../services/mailNode/domains.js';
+import { MANUAL_STEPS, listDomainRows } from '../../services/mailNode/domains.js';
+import { checkDomainNow, getNodeDnsCheck } from '../../services/mailNode/dnsCheckJob.js';
+import { NODE_CHECK_ERRORS, enqueueNodeCheck } from '../../services/mailNode/nodeChecks.js';
 import {
   acknowledgeDomainIdentity, addNodeDomain, adminDomainList, adoptNodeDomain, confirmDomainStep, markDomainReady,
   restartDomain, setDomainDnsExpected,
@@ -361,8 +363,55 @@ const dnsExpected = {
   },
 };
 
+// The lines of a DNS check's result kept (the node's or a domain's): its overall status and the
+// checks that are not ok, or the lookup failure that kept the result before.
+function dnsLines(name, result) {
+  if (!result) return [`${name}: not checked yet`];
+  const lines = [`${name}: ${result.overall ?? '-'} at ${fmtDate(result.at)}`];
+  if (result.lookupFailed) lines[0] = `${name}: lookup failed (${result.lookupFailed.code}) at ${fmtDate(result.lookupFailed.at)}`;
+  for (const c of result.checks ?? []) {
+    if (c.status && c.status !== 'ok') lines.push(`  ${c.check}: ${c.status}${c.code ? ` (${c.code})` : ''}`);
+  }
+  return lines;
+}
+
+const dnsCheck = {
+  name: 'dns-check',
+  journal: 'mail_node.dns_checked',
+  summary: 'check the DNS of one domain now, or queue the check of the node and every domain',
+  usage: 'domain dns-check [<domain>] [--wait] [--timeout SEC]',
+  help: [
+    '<domain>        check this domain at once and print the result (the "Check now" of one domain)',
+    '(no domain)     the node and every domain the panel knows: the backend runs it (a run going',
+    '                there is joined); the command queues it and, with --wait, prints the results',
+    ...WAIT_HELP,
+    'A result only warns: it never changes a domain\'s onboarding state.',
+  ],
+  flags: WAIT_FLAGS,
+  optional: ['domain'],
+  async run(ctx) {
+    if (ctx.args.domain !== undefined) {
+      if (ctx.flags.wait || ctx.flags.timeout !== undefined) throw new UsageError('--wait is for the check of every domain: one domain is checked at once');
+      const domain = domainArg(ctx);
+      const result = await nodeAction(() => checkDomainNow({ domain, userId: ctx.actor?.userId ?? null, by: ctx.actor, trigger: 'manual' }));
+      return { data: result, lines: dnsLines(result.domain, result) };
+    }
+    const queued = unwrap(await enqueueNodeCheck('dns', ctx.actor), NODE_CHECK_ERRORS);
+    const job = await maybeWait(ctx, queued.job, nodeCheckWait('domain list'));
+    const lines = [jobLine(job)];
+    if (ctx.flags.wait) {
+      const node = await getNodeDnsCheck();
+      const rows = await listDomainRows();
+      lines.push(...dnsLines('node', node));
+      for (const row of rows) lines.push(...dnsLines(row.domain, row.dns_check));
+      return { data: { job, node, domains: rows.map((row) => ({ domain: row.domain, ...(row.dns_check ?? {}) })) }, lines };
+    }
+    return { data: { job }, lines };
+  },
+};
+
 export default {
   name: 'domain',
-  summary: 'the mail node\'s domains: onboarding and the tenant steps',
-  commands: [list, show, add, adopt, step, ready, ack, dnsExpected, restart, sync, hold, allowAuthoritative, internalRelay, approveAliasRemoval],
+  summary: 'the mail node\'s domains: onboarding, the tenant steps and the DNS check',
+  commands: [list, show, add, adopt, step, ready, ack, dnsExpected, restart, sync, hold, allowAuthoritative, internalRelay, approveAliasRemoval, dnsCheck],
 };

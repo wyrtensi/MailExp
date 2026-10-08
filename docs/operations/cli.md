@@ -4,7 +4,8 @@
 когда экран неудобен: массовые действия, скрипты, работа по SSH. CLI не имеет своей бизнес-логики:
 команды вызывают те же сервисы backend, что и HTTP-маршруты, с теми же проверками, кодами отказов и
 записями журнала. Мимо панели (напрямую в mailcow, тенант или Cloudflare) CLI ничего не делает, а
-работу для тенанта, прогон синхронизации с Cloudflare Access и то, что после изменения пользователей и
+работу для тенанта, прогон синхронизации с Cloudflare Access, проверки узла (DNS всех доменов,
+оповещения, трассировка простоев) и то, что после изменения пользователей и
 настроек должен сделать процесс backend (разлогинить, перечитать настройки), только ставит в очередь
 заданий: выполняет её воркер backend.
 
@@ -149,6 +150,13 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 тенанта (для `jobs list --kind`): `tenant_test_connection`, `tenant_poll`, `tenant_antispam_read`,
 `tenant_domain_sync`, `tenant_quarantine_release`.
 
+Проверки узла, которые принадлежат процессу backend (`domain dns-check` без домена, `alerts check`,
+`outage trace`), CLI тоже не выполняет сам: он ставит задание `mail_node_check` (одна попытка), его
+выполняет воркер backend теми же функциями, что кнопки экрана. `--wait` работает так же; при таймауте
+подсказка называет команду, которая показывает результат (`domain list`, `alerts status`, `outage list`):
+`jobs` эти задания не показывает. Коды ошибок такого задания: `dns_check_failed`, `alert_check_failed`,
+`trace_cooldown`.
+
 ### Журнал аудита
 
 У каждой меняющей команды справка говорит, что она пишет в журнал (`Journal: ...`). Записи, которые пишет
@@ -176,6 +184,8 @@ CLI, имеют исполнителя `cli` (или администратор�
 | `mailbox cancel-deletion <address\|id>` | Отменяет ожидающее удаление, ящик остаётся как есть. | `mailbox.deletion_cancelled` |
 | `mailbox deactivate <address\|id> --reason TEXT` | Деактивирует ящик, как кнопка панели: только чтение (письма читаются по IMAP, ничего не уходит и не приходит), ящик mailcow не трогается, место EOP уходит на удержание (`seats status`). Причина обязательна. Спрашивает подтверждение. | `mailbox.deactivated` с причиной и местом |
 | `mailbox reactivate <address\|id>` | Снова включает деактивированный ящик: своё место, пока оно удерживается, иначе свободное (`no_free_seats` при нуле). Ящику, ожидающему удаления, сначала нужен `cancel-deletion`. | `mailbox.activated` с местом |
+| `mailbox set-quota <address\|id> <MB>` | Квота ящика на узле в МБ (`PUT /api/mail-node/mailboxes/<ID>/quota`); узел принимает её сразу. | `mailbox.quota_changed` с прежней квотой |
+| `mailbox set-rate-limit <address\|id> <N/s\|N/m\|N/h\|N/d\|default>` | Собственный лимит отправки ящика (`PUT .../rate-limit`): сначала узел, потом панель, так что следующие применения его сохраняют. `default` убирает собственный лимит: ящик получает лимит домена или настроек EOP. Другой формат — код 2. | `mailbox.rate_limit_changed` с прежним лимитом |
 
 Параметры имён (у `create` и `set-names`):
 
@@ -219,6 +229,8 @@ CLI, имеют исполнителя `cli` (или администратор�
 | `domain allow-authoritative <DOMAIN>` | Разрешить полному зеркалу получателей сделать домен Authoritative. После этого EOP отвергает почту на адреса домена, для которых у тенанта нет получателя, включая ручные алиасы mailcow (D-16). | да | `tenant.domain_hold_changed`, когда удержание меняется |
 | `domain internal-relay <DOMAIN> [--wait] [--timeout SEC]` | Одобрить перевод домена, который у тенанта Authoritative, в Internal Relay. Ставит задание. | да | `tenant.internal_relay_approved` |
 | `domain approve-alias-removal <DOMAIN> [--wait] [--timeout SEC]` | Разрешить зеркалу убрать контакты ручных алиасов mailcow на домене Authoritative (раздел 5.14 требований): почта на эти алиасы отвергается EOP со следующего прогона. Ставит задание. | да, после показа адресов | `tenant.alias_contacts_removal_approved` с адресами |
+| `domain dns-check <DOMAIN>` | «Check now» одного домена (`POST /api/mail-node/domains/<DOMAIN>/dns-check`): проверка DNS сразу, печатает итог и проверки не `ok`. Результат только предупреждает, состояние онбординга не меняется. | нет | `mail_node.dns_checked` |
+| `domain dns-check [--wait] [--timeout SEC]` | «Check now» узла и всех доменов (`POST /dns-check`): прогон выполняет backend (идущий прогон присоединяется), CLI ставит задание `mail_node_check`; с `--wait` печатает итог узла и каждого домена. | нет | `mail_node.dns_checked` (`scope: all`), пишет backend |
 
 Предупреждения `domain show` и счётчик в `domain list` собирает CLI. Он указывает, в частности: узел не
 знает домен или не читается; домен неактивен на узле; узел сообщает другое время создания, чем то, к
@@ -242,6 +254,8 @@ CLI, имеют исполнителя `cli` (или администратор�
 | `tenant status` | Драйвер тенанта (`none`, если нет), настроен ли тенант, достиг ли backend воркера (по сохранённым результатам проверки и опроса), последняя проверка соединения, срок сертификата, заблокированные коннекторы, изменения коннекторов с эталона, последние задания проверки/опроса/антиспама и состояние антиспам-политики. | нет |
 | `tenant test [--wait] [--timeout SEC]` | Ставит проверку соединения с тенантом через воркера (кнопка «Test connection»). | `tenant.connection_tested`, пишет задание |
 | `tenant antispam [--wait] [--timeout SEC]` | Проверяет и исправляет политику Default anti-spam (кнопка «Check and fix»): действия spam, high confidence spam, phishing и bulk ставятся в `MoveToJmf`, где они отличаются (раздел 5.14); что изменилось, журналируется. | `tenant.antispam_enforced`, пишет задание, когда меняет политику |
+| `tenant poll [--wait] [--timeout SEC]` | Ставит опрос тенанта (кнопка «Check now», `POST /tenant/poll`): заблокированные коннекторы, коннекторы и сертификат. | при постановке нет |
+| `tenant connectors-reference` | Последнее прочтение коннекторов становится эталоном (R-25, `POST /tenant/connectors/reference`); `tenant status` показывает изменения с него. Пока опрос коннекторы не прочитал — `connectors_not_read`. | `tenant.connector_reference_taken` с именами коннекторов |
 
 В `tenant status` строка `worker profile without driver` появляется, когда профиль воркера включён, но
 `TENANT_WORKER_URL` не задан или токен слишком короткий.
@@ -435,6 +449,70 @@ M=<PREFIX>/app/scripts/deploy/mailexpert-cli.sh
 sudo $M node config set --api-key-stdin < /root/mailcow-api-key.txt   # ключ — только stdin
 sudo $M agent token issue --out <TOKEN_FILE> --yes                     # файл 0600 на хосте панели
 sudo $M agent run backup && sudo $M agent jobs
+```
+
+### 3.15. `queue`: почтовая очередь узла
+
+Раздел «Mail queue» экрана узла (R-16; `/api/mail-node/queue`). Письмо называется ID очереди Postfix
+(`53A99193F13`, регистр не важен). Удаление всей очереди mailcow CLI не предлагает.
+
+| Команда | Что делает | Подтверждение | Журнал |
+|---|---|---|---|
+| `queue list` | Письма очереди, старые первыми: очередь, возраст, размер, отправитель, получатели (с причиной ожидания); итог по очередям и возраст самого старого отложенного. | нет | нет |
+| `queue show <QUEUE_ID> [--body]` | Конверт и заголовки письма; тело только с `--body` (до 64 КБ). Письма уже нет — `queue_item_not_found`. | нет | `mail_node.queue_action` (`view_body`) с `--body`: ID и конверт, без тела |
+| `queue flush` | Повторить все отложенные письма сейчас (`postqueue -f`, кнопка «Retry all now»). | да | `mail_node.queue_action` (`flush`) |
+| `queue hold <QUEUE_ID>` | Задержать письмо: ждёт, пока его не отпустят. | нет | `mail_node.queue_action` (`hold`) с конвертом |
+| `queue release <QUEUE_ID>` | Вернуть задержанное письмо в очередь (`unhold`). | нет | `mail_node.queue_action` (`unhold`) с конвертом |
+| `queue deliver <QUEUE_ID>` | Попробовать доставить одно письмо сейчас; задержанное сначала отпускают (`queue_item_held`). | нет | `mail_node.queue_action` (`deliver`) с конвертом |
+| `queue delete <QUEUE_ID>` | Удалить одно письмо: оно не будет доставлено. | да | `mail_node.queue_action` (`delete`) с конвертом (отправитель, получатели, размер) |
+
+### 3.16. `alerts`: оповещения узла
+
+Раздел «Alerts» экрана узла (R-18, R-19; `/api/mail-node/alerts`).
+
+| Команда | Что делает | Журнал |
+|---|---|---|
+| `alerts status` | Последняя проверка (когда, чем запущена), её оповещения с важностью и деталями, источники, которые не прочитались, и настройки. | нет |
+| `alerts check [--wait] [--timeout SEC]` | «Check now»: проверку выполняет backend (идущая присоединяется; он же пингует URL Healthchecks и запускает трассировку простоев), CLI ставит задание `mail_node_check`; с `--wait` печатает итог. Без узла — `mail_node_not_configured`. | `mail_node.alert_raised` / `mail_node.alert_cleared` для изменившегося, пишет backend |
+| `alerts set [--ping-url URL] [--deferred-count N] [--deferred-minutes N]` | URL Healthchecks проверки (`""` убирает) и пороги очереди: число отложенных писем и возраст самого старого в минутах. Неназванные параметры остаются; без параметров — код 2. | `mail_node.config_changed` (`alerts`) с именами полей |
+
+### 3.17. `outage`: простои узла и письма в них
+
+Раздел «Outages» экрана узла (R-43; `/api/mail-node/outages`, `/outage-settings`). Окно называется своим
+ID (`outage list`). Время — ISO 8601, например `2026-10-01T10:00:00Z`, не дальше месяца вперёд.
+
+| Команда | Что делает | Подтверждение | Журнал |
+|---|---|---|---|
+| `outage list` | Окна (новые 50) с источником, письмами по исходам и причиной; подключена ли трассировка, сколько писем ещё ждёт в EOP, сколько дней хранятся письма. | нет | нет |
+| `outage show <ID>` | Одно окно с числом писем по исходам (как в списке; отдельного маршрута нет, ответ тот же, что `window` у `/outages/<ID>/letters`). | нет | нет |
+| `outage letters <ID>` | Все письма окна: задержанные, ждущие в EOP, потерянные и прочие. | нет | нет |
+| `outage open --start TIME [--end TIME] --reason TEXT [--planned]` | Окно вручную; без `--end` остаётся открытым. Причина обязательна (до 500 символов). | нет | `mail_node.outage_added` |
+| `outage update <ID> [--start TIME] [--end TIME] --reason TEXT` | Меняет начало, конец или причину; причина обязательна, так что каждое изменение объяснено. Новые границы убирают письма, на которые трассировка больше не смотрит. | нет | `mail_node.outage_changed` (`mail_node.outage_closed`, когда окно получает конец) |
+| `outage close <ID> [--end TIME] --reason TEXT` | Закрывает открытое окно сейчас или в `--end`; закрытое — `outage_already_closed`. | нет | `mail_node.outage_closed` |
+| `outage delete <ID> --reason TEXT` | Удаляет окно и то, что нашла для него трассировка; журнал хранит его время и причину. | да | `mail_node.outage_deleted` |
+| `outage trace [--wait] [--timeout SEC]` | Проход трассировки по всем отслеживаемым окнам сейчас. Его выполняет backend, который ведёт бюджет запросов трассировки; CLI ставит задание `mail_node_check`. Принудительный проход не чаще раза в две минуты: иначе задание падает с `trace_cooldown`. Маршрут не принимает ID окна, поэтому и команда без него. | нет | нет |
+| `outage settings show` / `outage settings set --retention-days N` | Сколько дней хранятся письма окон (1-90). | нет | `mail_node.config_changed` (`outages`) |
+
+### 3.18. `spam-quarantine`: карантин rspamd на узле
+
+Карантин самого узла: письма, которые rspamd отклонил или пометил как спам и которые хранит mailcow (R-20;
+`/api/mail-node/quarantine`). Не путать с группой `quarantine` (карантин EOP). Запись называется своим ID
+mailcow (`spam-quarantine list`). Письмо целиком CLI не печатает.
+
+| Команда | Что делает | Подтверждение | Журнал |
+|---|---|---|---|
+| `spam-quarantine list` | Записи, новые первыми: действие rspamd, оценка, получатель (и есть ли его ящик в панели), отправитель, тема; при пустом карантине — сколько писем история rspamd показывает отклонёнными (карантин mailcow, вероятно, выключен). | нет | нет |
+| `spam-quarantine release <ID>` | Узел доставляет письмо в ящик мимо rspamd, удаляет запись и обучает rspamd на нём как на ham. | нет | `mail_node.quarantine_released` с итогом обучения |
+| `spam-quarantine learn-spam <ID>` | Удаляет запись и обучает rspamd на письме как на спаме. | нет | `mail_node.quarantine_learned_spam` |
+| `spam-quarantine delete <ID>` | Удаляет запись: письма больше нет. | да | `mail_node.quarantine_deleted` |
+| `spam-quarantine settings show` / `settings set --user-view on\|off` | Видят ли все пользователи записи для ящиков панели. | нет | `mail_node.config_changed` (`quarantine`), когда меняется |
+| `spam-quarantine node-settings show` / `node-settings apply` | Настройки карантина, которые панель пишет в mailcow, и когда писала; `apply` («Enable quarantine on this node») пишет их все: mailcow не умеет их показать и сбрасывает неназванные. | да, у `apply` | `mail_node.quarantine_settings_applied` |
+
+```bash
+sudo $M queue list && sudo $M queue delete <QUEUE_ID> --yes
+sudo $M alerts check --wait
+sudo $M outage open --start 2026-10-01T10:00:00Z --reason "Disk replacement" --planned
+sudo $M spam-quarantine release <ID>
 ```
 
 ## 4. Коды выхода
@@ -714,6 +792,30 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 |---|---|---|
 | `client_secret_redacted` | 400 | В секрете символ `•`: это заглушка экрана, а не секрет. |
 | `secret_missing` | 1 | `--secret`, а stdin пуст (код CLI). |
+
+### Операции узла (`MAIL_NODE_ERRORS`, `OUTAGE_ERRORS`, `QUARANTINE_ERRORS`)
+
+Отказы групп `queue`, `alerts`, `outage`, `spam-quarantine` и команд `mailbox set-quota` /
+`set-rate-limit` сверх перечисленных выше:
+
+| Код | Статус | Смысл |
+|---|---|---|
+| `quota_invalid` | 400 | Квота — целое число МБ в допустимых пределах. |
+| `rate_limit_invalid` | 400 | Лимит отправки — целое число писем в секунду, минуту, час или день в допустимых пределах. |
+| `queue_id_invalid` | 400 | ID очереди — ID Postfix вроде `53A99193F13`. |
+| `queue_item_not_found` | 404 | В очереди нет письма с этим ID. |
+| `queue_item_held` | 409 | Задержанное письмо сначала отпускают (`queue release`), потом доставляют. |
+| `ping_url_invalid` | 400 | URL пинга — адрес https. |
+| `deferred_count_invalid`, `deferred_minutes_invalid` | 400 | Порог отложенных писем или их возраста вне пределов. |
+| `outage_start_invalid`, `outage_end_invalid` | 400 | Начало или конец — дата и время, не дальше месяца вперёд. |
+| `outage_end_before_start` | 400 | Конец раньше начала. |
+| `outage_reason_required`, `outage_reason_too_long` | 400 | Причина обязательна, до 500 символов. |
+| `outage_not_found` | 404 | Нет такого окна. |
+| `outage_already_closed` | 409 | Окно уже закрыто. |
+| `retention_days_invalid` | 400 | Дни хранения писем — целое число от 1 до 90. |
+| `quarantine_item_invalid` | 400 | ID записи карантина — число. |
+| `quarantine_item_not_found` | 404 | Нет такой записи карантина. |
+| `dns_check_failed`, `alert_check_failed`, `trace_cooldown` | 3 | `--wait`: задание `mail_node_check` закончилось неудачей (проход трассировки был меньше двух минут назад). |
 
 ## 7. Практические примеры
 

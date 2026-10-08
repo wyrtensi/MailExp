@@ -6,7 +6,12 @@
 const STOCK_PREFILTER = '# global_sieve_before script\n# global_sieve_before -> user sieve_before (mailcow UI) -> user sieve_after (mailcow UI) -> global_sieve_after\n';
 
 function answer(body, status = 200) {
-  return { status, ok: status >= 200 && status < 300, json: async () => body };
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    json: async () => body,
+    text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
+  };
 }
 const success = (...msg) => ({ type: 'success', msg });
 const danger = (...msg) => ({ type: 'danger', msg });
@@ -35,6 +40,13 @@ export function createFakeMailcow(initial = {}) {
     refuse: {},
     // Paths that time out once each (the request's AbortSignal fires).
     slow: [],
+    // The mail queue as postqueue -j prints it through mailcow ({ queue_id, queue_name,
+    // arrival_time, message_size, sender, recipients }), and postcat's dump per queue id.
+    queue: [],
+    postcat: {},
+    // The quarantine as mailcow keeps it ({ id, qid, subject, score, sender, rcpt, action,
+    // created, notified, virus_flag, symbols, msg }).
+    quarantine: [],
     ...initial,
   };
   let nextId = 1;
@@ -61,7 +73,7 @@ export function createFakeMailcow(initial = {}) {
     if (path === 'get/mailbox/all' || path.startsWith('get/mailbox/all/')) {
       const domain = path.startsWith('get/mailbox/all/') ? decodeURIComponent(path.slice('get/mailbox/all/'.length)) : null;
       return node.mailboxes.filter((m) => !domain || m.username.endsWith(`@${domain}`)).map((m) => ({
-        username: m.username, active: '1', active_int: 1, quota: 5368709120, quota_used: 0,
+        username: m.username, active: '1', active_int: 1, quota: m.quota ?? 5368709120, quota_used: 0,
         rl: m.rl ?? false, rl_scope: m.rl ? 'mailbox' : 'domain',
       }));
     }
@@ -71,7 +83,7 @@ export function createFakeMailcow(initial = {}) {
       const m = node.mailboxes.find((entry) => entry.username === email);
       return m ? {
         username: m.username, domain: email.split('@')[1], active: '1', active_int: m.active_int ?? 1,
-        quota: 5368709120, quota_used: 0, authsource: 'mailcow', attributes: { imap_access: '1', force_pw_update: '0' },
+        quota: m.quota ?? 5368709120, quota_used: 0, authsource: 'mailcow', attributes: { imap_access: '1', force_pw_update: '0' },
       } : {};
     }
     if (path === 'get/status/vmail') return node.disk ?? { used_percent: '12%', used: '1.2G', total: '10G' };
@@ -98,6 +110,23 @@ export function createFakeMailcow(initial = {}) {
     }
     if (path === 'get/global_filters/prefilter') return node.prefilter ? node.prefilter : {};
     if (path === 'get/fail2ban') return { ...node.fail2ban, regex: { 1: 'x' }, perm_bans: '', active_bans: '' };
+    if (path === 'get/mailq/all') return node.queue.length ? node.queue.map((q) => ({ ...q })) : {};
+    if (path.startsWith('get/postcat/')) {
+      const id = decodeURIComponent(path.slice('get/postcat/'.length));
+      return node.postcat[id] ?? `postcat: fatal: open queue file ${id}: No such file or directory`;
+    }
+    if (path === 'get/quarantine/all') {
+      // The listing carries neither the letter nor the symbols.
+      return node.quarantine.length
+        ? node.quarantine.map((q) => Object.fromEntries(Object.entries(q).filter(([key]) => key !== 'msg' && key !== 'symbols')))
+        : {};
+    }
+    if (path.startsWith('get/quarantine/')) {
+      const id = Number(decodeURIComponent(path.slice('get/quarantine/'.length)));
+      const item = node.quarantine.find((q) => q.id === id);
+      return item ? { ...item } : {};
+    }
+    if (path.startsWith('get/logs/rspamd-history/')) return node.rspamdHistory ?? [];
     if (path === 'get/fwdhost/all') {
       return node.fwdhosts.length
         ? node.fwdhosts.map((h) => ({ host: h.host, source: h.source, keep_spam: h.keepSpam ? 'yes' : 'no' }))
@@ -162,6 +191,43 @@ export function createFakeMailcow(initial = {}) {
           mailbox.rl = Number(body.attr.rl_value) ? { value: String(body.attr.rl_value), frame: body.attr.rl_frame } : null;
           return success('rl_saved', email);
         });
+      case 'edit/mailbox': {
+        const mailbox = node.mailboxes.find((m) => m.username === body.items[0]);
+        if (!mailbox) return [danger('access_denied')];
+        if (body.attr.quota !== undefined) mailbox.quota = Number(body.attr.quota) * 1024 * 1024;
+        return [success('mailbox_modified', mailbox.username)];
+      }
+      case 'edit/mailq': {
+        const { action } = body.attr;
+        if (action === 'flush') {
+          node.flushed = (node.flushed ?? 0) + 1;
+          return [success('mailq_flushed')];
+        }
+        for (const id of body.items) {
+          const item = node.queue.find((q) => q.queue_id === id);
+          if (item && action === 'hold') item.queue_name = 'hold';
+          if (item && action === 'unhold') item.queue_name = 'deferred';
+          if (item && action === 'deliver') node.delivered = [...(node.delivered ?? []), id];
+        }
+        return [success('mailq_modified')];
+      }
+      case 'delete/mailq':
+        node.queue = node.queue.filter((q) => !body.includes(q.queue_id));
+        return [success('mailq_deleted')];
+      case 'edit/qitem': {
+        const id = Number(body.items[0]);
+        if (!node.quarantine.some((q) => q.id === id)) return [danger('access_denied')];
+        node.quarantine = node.quarantine.filter((q) => q.id !== id);
+        if (body.attr.action === 'release') return [success('item_released', String(id)), success('learned_ham', String(id))];
+        if (body.attr.action === 'learnspam') return [success('qlearn_spam', String(id))];
+        return [danger('access_denied')];
+      }
+      case 'delete/qitem':
+        node.quarantine = node.quarantine.filter((q) => !body.map(Number).includes(q.id));
+        return [success('item_deleted', String(body[0]))];
+      case 'edit/quarantine':
+        node.quarantineSettings = { ...body.attr };
+        return [success('saved_settings')];
       case 'add/filter': {
         // An active filter makes the mailbox's other filters of that type inactive.
         if (!body.script_data || !body.script_desc) return [danger('value_missing')];

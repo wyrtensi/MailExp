@@ -116,6 +116,20 @@ describe('mailexpert tenant', () => {
     }
   });
 
+  it('polls the connectors through the queue, then takes their read as the reference, journaled as "cli"', async () => {
+    expect((await cli(['tenant', 'connectors-reference'])).err).toContain('(connectors_not_read)');
+    const polled = await cli(['tenant', 'poll', '--wait', '--json']);
+    expect(polled.code, polled.err).toBe(0);
+    expect(polled.json().job).toMatchObject({ kind: TENANT_JOB_KINDS.poll, status: 'done' });
+    const taken = await cli(['tenant', 'connectors-reference', '--json']);
+    expect(taken.code, taken.err).toBe(0);
+    expect(taken.json().reference).toMatchObject({ auto: false, by: null, inbound: expect.any(Array), outbound: expect.any(Array) });
+    expect((await cli(['tenant', 'connectors-reference'])).out).toMatch(/reference taken: \d+ inbound, \d+ outbound/);
+    const [entry] = (await auditSettled(1)).filter((e) => e.action === 'tenant.connector_reference_taken');
+    expect(entry).toMatchObject({ actor_user_id: null, actor_email: 'cli', details: { inbound: expect.any(Array), via: 'cli' } });
+    expect((await cli(['tenant', 'status', '--json'])).json().connectorDrift).toEqual([]);
+  });
+
   it('answers the job already queued instead of a second one', async () => {
     const first = (await cli(['tenant', 'test', '--json'])).json();
     const second = (await cli(['tenant', 'test', '--json'])).json();

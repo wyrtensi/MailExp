@@ -10,13 +10,14 @@ import {
 import { MAIL_NODE_ERRORS } from './errors.js';
 import { DISK_WARN_PERCENT } from './diskWatch.js';
 import {
+  MAX_QUOTA_MB, MailNodeError, RATE_LIMIT_FRAMES, getMailbox, parseWholeNumber, setMailboxQuota, setMailboxRateLimit,
   deleteMailbox, getDeleteAfterDays, getDiskStatus, getMailNodeConfig, listDomains, listMailboxes, parseHostName, parseLocalPart,
   provisionMailbox,
 } from './mailcow.js';
 import { READ_ONLY_FILTER_DESC, closeLocalDelivery, lockMailbox, openLocalDelivery } from './readOnlyFilter.js';
 import { cancelDeletion, requestDeletion } from './mailboxDeletion.js';
 import { canCreateMailboxes, getDomainRow } from './domains.js';
-import { getEopSettings } from './eopSettings.js';
+import { MAX_SEND_LIMIT_PER_HOUR, getEopSettings } from './eopSettings.js';
 import {
   confirmSeat, dropPendingSeat, getHoldDays, lockSeats, releaseSeat, reserveSeat, returnSeat, seatAvailableFor, seatSupply,
 } from './eopSeats.js';
@@ -564,4 +565,61 @@ export async function activateNodeMailbox({ accountId }, actor) {
   await kickMailboxDomain(result.email, actor);
   const { rows: [account] } = await query('SELECT * FROM email_accounts WHERE id = $1', [accountId]);
   return { account: withoutSecrets(account) };
+}
+
+// --- quota and send limit ---------------------------------------------------------------------------
+// PUT /api/mail-node/mailboxes/:id/quota and /rate-limit, and the panel CLI's mailbox set-quota and
+// set-rate-limit. accountId: a node mailbox row (the CLI finds it by address or ID first). Answers
+// a result or { error }; a failure of the node throws (MailNodeError).
+
+// The node row the quota and the send limit act on, and the node settings: { row, cfg } or { error }.
+async function nodeRowForLimits(accountId, columns) {
+  const { rows } = await query(`SELECT ${columns} FROM email_accounts WHERE id = $1 AND mail_node = true`, [accountId]);
+  if (!rows.length) return { error: 'mailbox_not_found' };
+  const cfg = await getMailNodeConfig();
+  if (!cfg) return { error: 'mail_node_not_configured' };
+  if (onOtherMailHost(rows[0], cfg)) return { error: 'mail_node_host_mismatch' };
+  return { row: rows[0], cfg };
+}
+
+// The mailbox's quota in MB, 1 to MAX_QUOTA_MB. The quota before the change, read from the node,
+// goes into the journal. Answers { ok, quotaMb }.
+export async function setNodeMailboxQuota({ accountId, quotaMb: raw }, actor) {
+  const quotaMb = parseWholeNumber(raw, 1, MAX_QUOTA_MB);
+  if (!quotaMb) return { error: 'quota_invalid' };
+  const found = await nodeRowForLimits(accountId, 'email_address, imap_host');
+  if (found.error) return found;
+  const { row, cfg } = found;
+  const before = await getMailbox(cfg, row.email_address);
+  await setMailboxQuota(cfg, row.email_address, quotaMb);
+  recordAudit(auditOf(actor, {
+    accountId, action: 'mailbox.quota_changed', details: { quotaMb, from: before?.quotaMb ?? null },
+  }));
+  return { ok: true, quotaMb };
+}
+
+// An administrator's send limit for one mailbox, { value, frame } (messages per s, m, h or d), or
+// { value: null } to go back to the default. The node takes it first; the panel keeps it after, so
+// every later apply keeps it too. Answers { ok, rateLimit, rateLimitOverride }.
+export async function setNodeMailboxRateLimit({ accountId, value: rawValue, frame: rawFrame }, actor) {
+  const clear = rawValue === null || rawValue === '';
+  const value = clear ? null : parseWholeNumber(rawValue, 1, MAX_SEND_LIMIT_PER_HOUR);
+  const frame = clear ? null : rawFrame;
+  if (!clear && (!value || !RATE_LIMIT_FRAMES.includes(frame))) return { error: 'rate_limit_invalid' };
+  const found = await nodeRowForLimits(accountId, 'email_address, imap_host, node_rl_value, node_rl_frame');
+  if (found.error) return found;
+  const { row, cfg } = found;
+  const email = row.email_address.toLowerCase();
+  const limit = clear ? (await defaultLimits([email]))(email) : { value, frame };
+  const result = await setMailboxRateLimit(cfg, [email], limit);
+  if (result.failed.length) throw new MailNodeError('mail_node_refused', `The mail node refused: ${result.reason ?? 'refused'}`);
+  // Every row of the address: two rows for one mailcow mailbox share its limit.
+  await query(
+    'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
+    [email, value, frame],
+  );
+  recordAudit(auditOf(actor, {
+    accountId, action: 'mailbox.rate_limit_changed', details: { ...limit, override: !clear, from: overrideOf(row) },
+  }));
+  return { ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit };
 }

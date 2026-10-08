@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { uuidParam } from '../utils/uuid.js';
-import { recordAudit } from '../services/auditLog.js';
 import { MAIL_NODE_ERRORS } from '../services/mailNode/errors.js';
 import {
   acknowledgeDomainIdentity, addNodeDomain, adminDomainList, adoptNodeDomain, applyDomainNow, confirmDomainStep,
@@ -11,19 +10,15 @@ import {
 import {
   eopBudgetNow, eopSettingsView, nodeConfigView, saveEopConfig, saveNodeConfig,
 } from '../services/mailNode/settingsActions.js';
-import { defaultLimits, listNodeMailboxes, onOtherMailHost, overrideOf } from '../services/mailNode/mailboxActions.js';
+import {
+  listNodeMailboxes, onOtherMailHost, setNodeMailboxQuota, setNodeMailboxRateLimit,
+} from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
 import {
-  MAX_QUOTA_MB,
   MailNodeError,
-  RATE_LIMIT_FRAMES,
-  getMailbox,
   getMailNodeConfig,
   listDomains,
   parseHostName,
-  parseWholeNumber,
-  setMailboxQuota,
-  setMailboxRateLimit,
 } from '../services/mailNode/mailcow.js';
 import {
   bindNodeIdentities,
@@ -32,30 +27,15 @@ import {
   mergeDomains,
 } from '../services/mailNode/domains.js';
 import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
-import { MAX_SEND_LIMIT_PER_HOUR } from '../services/mailNode/eopSettings.js';
 import {
   applyNode,
   applyPrefilter,
   getNodeApplyResult,
 } from '../services/mailNode/nodeApply.js';
+import { checkAlertsNow } from '../services/mailNode/nodeAlerts.js';
 import {
-  QUEUE_ACTIONS,
-  deleteQueued,
-  flushQueue,
-  getQueuedMessageText,
-  listQueue,
-  parseQueueId,
-  queueAction,
-} from '../services/mailNode/mailcow.js';
-import { parsePostcat, postcatGone, summarizeQueue } from '../services/mailNode/mailQueue.js';
-import {
-  ALERT_DEFAULTS,
-  checkAlertsNow,
-  getAlertSettings,
-  getAlertState,
-  parseAlertSettings,
-  saveAlertSettings,
-} from '../services/mailNode/nodeAlerts.js';
+  alertsView, flushNodeQueue, nodeQueue, queueItemAction, queuedMessage, saveAlertSettingsAction,
+} from '../services/mailNode/nodeOpsActions.js';
 
 // The mail node (mailcow) settings, its domains with their onboarding, the EOP settings, applying
 // them to the node (services/mailNode/nodeApply.js) and the quotas and send limits of the mailboxes
@@ -87,12 +67,6 @@ router.use(requireAuth);
 async function isAdmin(req) {
   const { rows } = await query('SELECT is_admin FROM users WHERE id = $1', [req.session.userId]);
   return !!rows[0]?.is_admin;
-}
-
-// A settings change is journaled by the names of the fields that changed, never their values.
-function configAudit(req, settings, fields) {
-  if (!fields.length) return;
-  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.config_changed', details: { settings, fields } });
 }
 
 // The node settings (services/mailNode/settingsActions.js, which the panel CLI shares): the API key
@@ -143,8 +117,9 @@ router.get('/domains', async (req, res) => {
   });
 });
 
-// A domain action's answer: its refusal, the node's failure or its result
-// (services/mailNode/domainActions.js, which the panel CLI shares).
+// A shared action's answer: its refusal, the node's failure or its result (the actions of
+// services/mailNode/domainActions.js, mailboxActions.js and nodeOpsActions.js, which the panel CLI
+// shares).
 async function domainAction(res, run) {
   let result;
   try {
@@ -286,65 +261,16 @@ router.get('/mailboxes', requireAdmin, async (req, res) => {
   return result.error ? refuse(res, result.error) : res.json(result);
 });
 
-router.put('/mailboxes/:id/quota', requireAdmin, async (req, res) => {
-  const quotaMb = parseWholeNumber(req.body?.quotaMb, 1, MAX_QUOTA_MB);
-  if (!quotaMb) return refuse(res, 'quota_invalid');
-  const { rows } = await query(
-    'SELECT email_address, imap_host FROM email_accounts WHERE id = $1 AND mail_node = true', [req.params.id]
-  );
-  if (!rows.length) return refuse(res, 'mailbox_not_found');
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuse(res, 'mail_node_not_configured');
-  if (onOtherMailHost(rows[0], cfg)) return refuse(res, 'mail_node_host_mismatch');
-  // The quota before the change, read from the node, goes into the journal.
-  let before;
-  try {
-    before = await getMailbox(cfg, rows[0].email_address);
-    await setMailboxQuota(cfg, rows[0].email_address, quotaMb);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  recordAudit({
-    actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.quota_changed',
-    details: { quotaMb, from: before?.quotaMb ?? null },
-  });
-  res.json({ ok: true, quotaMb });
-});
+// The quota (MB) and an administrator's send limit, { value, frame } (messages per s, m, h or d) or
+// { value: null } to go back to the default (services/mailNode/mailboxActions.js, shared with the
+// panel CLI).
+router.put('/mailboxes/:id/quota', requireAdmin, (req, res) => domainAction(res, () => (
+  setNodeMailboxQuota({ accountId: req.params.id, quotaMb: req.body?.quotaMb }, routeActor(req))
+)));
 
-// An administrator's send limit for one mailbox, { value, frame } (messages per s, m, h or d), or
-// { value: null } to go back to the default. The node takes it first; the panel keeps it after, so
-// every later apply keeps it too.
-router.put('/mailboxes/:id/rate-limit', requireAdmin, async (req, res) => {
-  const clear = req.body?.value === null || req.body?.value === '';
-  const value = clear ? null : parseWholeNumber(req.body?.value, 1, MAX_SEND_LIMIT_PER_HOUR);
-  const frame = clear ? null : req.body?.frame;
-  if (!clear && (!value || !RATE_LIMIT_FRAMES.includes(frame))) return refuse(res, 'rate_limit_invalid');
-  const { rows } = await query(
-    'SELECT email_address, imap_host, node_rl_value, node_rl_frame FROM email_accounts WHERE id = $1 AND mail_node = true', [req.params.id]
-  );
-  if (!rows.length) return refuse(res, 'mailbox_not_found');
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuse(res, 'mail_node_not_configured');
-  if (onOtherMailHost(rows[0], cfg)) return refuse(res, 'mail_node_host_mismatch');
-  const email = rows[0].email_address.toLowerCase();
-  const limit = clear ? (await defaultLimits([email]))(email) : { value, frame };
-  try {
-    const result = await setMailboxRateLimit(cfg, [email], limit);
-    if (result.failed.length) throw new MailNodeError('mail_node_refused', `The mail node refused: ${result.reason ?? 'refused'}`);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  // Every row of the address: two rows for one mailcow mailbox share its limit.
-  await query(
-    'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
-    [email, value, frame],
-  );
-  recordAudit({
-    actorUserId: req.session.userId, accountId: req.params.id, action: 'mailbox.rate_limit_changed',
-    details: { ...limit, override: !clear, from: overrideOf(rows[0]) },
-  });
-  res.json({ ok: true, rateLimit: limit, rateLimitOverride: clear ? null : limit });
-});
+router.put('/mailboxes/:id/rate-limit', requireAdmin, (req, res) => domainAction(res, () => (
+  setNodeMailboxRateLimit({ accountId: req.params.id, value: req.body?.value, frame: req.body?.frame }, routeActor(req))
+)));
 
 // --- Node operations: the mail queue (R-16), the alerts (R-18, R-19) and the TERRL budget (R-21) ---
 
@@ -354,104 +280,38 @@ async function nodeConfigOr(res) {
   return cfg;
 }
 
+// The queue and the alert settings (services/mailNode/nodeOpsActions.js, which the panel CLI
+// shares): the same answers, refusals and journal.
+
 // The node's mail queue: every message with its queue, age, size, sender and recipients (with the
 // reason a deferred one waits), counts per queue and the oldest deferred message's age.
-router.get('/queue', requireAdmin, async (req, res) => {
-  const cfg = await nodeConfigOr(res);
-  if (!cfg) return undefined;
-  try {
-    return res.json(summarizeQueue(await listQueue(cfg)));
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-});
+router.get('/queue', requireAdmin, (req, res) => domainAction(res, () => nodeQueue()));
 
 // One queued message: its envelope and headers; the body only with ?body=1 (cut at 64 KB), and
-// reading the body is journaled (the id and the envelope, never the body). Postcat's dump is read
-// up to 2 MB. Gone from the queue -> 404; any other answer that is no dump -> 502.
-router.get('/queue/:queueId', requireAdmin, async (req, res) => {
-  const queueId = parseQueueId(req.params.queueId);
-  if (!queueId) return refuse(res, 'queue_id_invalid');
-  const cfg = await nodeConfigOr(res);
-  if (!cfg) return undefined;
-  let dump;
-  try {
-    dump = await getQueuedMessageText(cfg, queueId);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  const withBody = req.query.body === '1';
-  const message = parsePostcat(dump.text, { withBody, truncated: dump.truncated });
-  if (!message) {
-    if (postcatGone(dump.text)) return refuse(res, 'queue_item_not_found');
-    return mailNodeFailure(res, new MailNodeError('mail_node_failed', 'The mail node did not show the queued message'));
-  }
-  if (withBody) {
-    recordAudit({
-      actorUserId: req.session.userId, action: 'mail_node.queue_action',
-      details: {
-        action: 'view_body', queueId, queue: message.queue,
-        sender: message.envelope.sender ?? '', recipients: message.envelope.recipients,
-      },
-    });
-  }
-  return res.json(message);
-});
+// reading the body is journaled (the id and the envelope, never the body). Gone from the queue ->
+// 404; any other answer that is no dump -> 502.
+router.get('/queue/:queueId', requireAdmin, (req, res) => domainAction(res, () => (
+  queuedMessage(req.params.queueId, { withBody: req.query.body === '1' }, routeActor(req))
+)));
 
 // "Retry all now" (postqueue -f). Journaled.
-router.post('/queue/flush', requireAdmin, async (req, res) => {
-  const cfg = await nodeConfigOr(res);
-  if (!cfg) return undefined;
-  try {
-    await flushQueue(cfg);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.queue_action', details: { action: 'flush' } });
-  return res.json({ ok: true, action: 'flush' });
-});
+router.post('/queue/flush', requireAdmin, (req, res) => domainAction(res, () => flushNodeQueue(routeActor(req))));
 
 // hold, unhold, deliver or delete one queued message. Delete needs { confirm: true } (the screen
-// asks first); the whole-queue delete of mailcow is never offered. The message must be in the queue
-// now; the journal keeps its envelope (sender, recipients, size), so a deleted message stays
-// traceable.
-router.post('/queue/:queueId/:action', requireAdmin, async (req, res) => {
-  const queueId = parseQueueId(req.params.queueId);
-  if (!queueId) return refuse(res, 'queue_id_invalid');
-  const { action } = req.params;
-  if (![...QUEUE_ACTIONS, 'delete'].includes(action)) return refuse(res, 'queue_action_invalid');
-  if (action === 'delete' && req.body?.confirm !== true) return refuse(res, 'queue_delete_unconfirmed');
-  const cfg = await nodeConfigOr(res);
-  if (!cfg) return undefined;
-  let item;
-  try {
-    item = (await listQueue(cfg)).find((entry) => entry.queueId === queueId);
-    if (!item) return refuse(res, 'queue_item_not_found');
-    // postqueue -i does not release a held message: it is released first, by "Release".
-    if (action === 'deliver' && item.queue === 'hold') return refuse(res, 'queue_item_held');
-    if (action === 'delete') await deleteQueued(cfg, [queueId]);
-    else await queueAction(cfg, [queueId], action);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  recordAudit({
-    actorUserId: req.session.userId, action: 'mail_node.queue_action',
-    details: {
-      action, queueId, queue: item.queue, sender: item.sender, size: item.size,
-      recipients: item.recipients.map((r) => r.address),
-    },
-  });
-  return res.json({ ok: true, action, queueId });
-});
+// asks first); the whole-queue delete of mailcow is never offered. The journal keeps the message's
+// envelope (sender, recipients, size), so a deleted message stays traceable.
+router.post('/queue/:queueId/:action', requireAdmin, (req, res) => domainAction(res, () => (
+  queueItemAction(req.params.queueId, req.params.action, { confirm: req.body?.confirm === true }, routeActor(req))
+)));
 
 // The alerts: the last run ({ at, alerts, errors, log, queue }, null before the first) and the
 // settings.
 router.get('/alerts', requireAdmin, async (req, res) => {
-  const [state, settings] = await Promise.all([getAlertState(), getAlertSettings()]);
-  res.json({ state, settings, defaults: ALERT_DEFAULTS });
+  res.json(await alertsView());
 });
 
-// "Check now": a run at once (or the one going), answered with its state.
+// "Check now": a run at once (or the one going), answered with its state. It runs in this process
+// (the panel CLI queues it for the backend: services/mailNode/nodeChecks.js).
 router.post('/alerts/check', requireAdmin, async (req, res) => {
   if (!(await nodeConfigOr(res))) return undefined;
   const state = await checkAlertsNow({ userId: req.session.userId, trigger: 'manual' });
@@ -461,12 +321,8 @@ router.post('/alerts/check', requireAdmin, async (req, res) => {
 
 // The ping URL of the alerts' own check and the queue thresholds. Journaled by field names.
 router.put('/alerts/settings', requireAdmin, async (req, res) => {
-  const { settings, error } = parseAlertSettings(req.body);
-  if (error) return refuse(res, error);
-  const current = await getAlertSettings();
-  await saveAlertSettings(settings);
-  configAudit(req, 'alerts', Object.keys(settings).filter((field) => settings[field] !== current[field]));
-  return res.json({ settings: { ...current, ...settings } });
+  const result = await saveAlertSettingsAction(req.body, routeActor(req));
+  return result.error ? refuse(res, result.error) : res.json(result);
 });
 
 // The TERRL budget now (services/mailNode/settingsActions.js eopBudgetNow, which the panel CLI

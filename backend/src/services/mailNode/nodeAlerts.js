@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { recordAudit } from '../auditLog.js';
+import { auditOf } from '../actor.js';
 import { safeFetch } from '../safeFetch.js';
 import { getContainers, getMailNodeConfig, listQueue, parsePingUrl, parseWholeNumber } from './mailcow.js';
 import { getEopSettings } from './eopSettings.js';
@@ -406,11 +407,14 @@ async function ping(url, fail, body) {
 }
 
 const actor = (userId) => (userId ? { actorUserId: userId } : { actorEmail: SYSTEM_ACTOR });
+// A journal entry of a run. by: who asked, as services/actor.js names them, when the panel CLI asked
+// (the entry then carries details.via); without it the user or the system.
+const entryOf = (userId, by, entry) => (by ? auditOf(by, entry) : { ...actor(userId), ...entry });
 const errorOf = (source, err) => ({ source, code: err?.code || 'error', message: err?.code ? err.message : 'error' });
 
 // Reads every source, keeps and journals the result, pings: the state kept, or null without a mail
 // node. Never throws for a source that fails: its error is kept with the state.
-export async function runAlertCheck({ userId = null, trigger = 'schedule', now = Date.now() } = {}) {
+export async function runAlertCheck({ userId = null, by = null, trigger = 'schedule', now = Date.now() } = {}) {
   const cfg = await getMailNodeConfig();
   if (!cfg) return null;
   const [settings, eop, previous] = await Promise.all([getAlertSettings(), getEopSettings(), getAlertState()]);
@@ -496,12 +500,12 @@ export async function runAlertCheck({ userId = null, trigger = 'schedule', now =
   const byKey = new Map(merged.alerts.map((alert) => [alert.key, alert]));
   const beforeByKey = new Map((previous?.alerts ?? []).map((alert) => [alert.key, alert]));
   recordAudit([
-    ...merged.raised.map((key) => ({
-      ...actor(userId), action: 'mail_node.alert_raised',
+    ...merged.raised.map((key) => entryOf(userId, by, {
+      action: 'mail_node.alert_raised',
       details: { alert: key, severity: byKey.get(key).severity, trigger, ...summaryOf(byKey.get(key)) },
     })),
-    ...merged.cleared.map((key) => ({
-      ...actor(userId), action: 'mail_node.alert_cleared',
+    ...merged.cleared.map((key) => entryOf(userId, by, {
+      action: 'mail_node.alert_cleared',
       details: { alert: key, trigger, since: beforeByKey.get(key)?.since ?? null },
     })),
   ]);
