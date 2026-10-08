@@ -26,7 +26,7 @@ describe('contacts are shared', () => {
     query.mockReset().mockImplementation(async (sql) => (
       sql.includes('COUNT(*)')
         ? { rows: [{ count: '0' }] }
-        : { rows: [{ id: 'c1', uid: 'u1', address_book_id: 'shared-book', emails: [], phones: [] }] }
+        : { rows: [{ id: '22222222-2222-4222-8222-222222222222', uid: 'u1', address_book_id: 'shared-book', emails: [], phones: [] }] }
     ));
   });
 
@@ -56,13 +56,13 @@ describe('contacts are shared', () => {
   });
 
   it('edits a contact whoever created it', async () => {
-    const res = await send('PATCH', '/c1', { displayName: 'Dana B' });
+    const res = await send('PATCH', '/22222222-2222-4222-8222-222222222222', { displayName: 'Dana B' });
     expect(res.status).toBe(200);
-    expect(query).toHaveBeenCalledWith('SELECT * FROM contacts WHERE id = $1', ['c1']);
+    expect(query).toHaveBeenCalledWith('SELECT * FROM contacts WHERE id = $1', ['22222222-2222-4222-8222-222222222222']);
     const [, params] = query.mock.calls.find(([s]) => s.includes('UPDATE contacts SET'));
     // The 12th parameter is the contact's websites.
     expect(params).toHaveLength(12);
-    expect(params[10]).toBe('c1');
+    expect(params[10]).toBe('22222222-2222-4222-8222-222222222222');
     expect(noOwnerOrSync()).toBe(true);
   });
 
@@ -75,8 +75,8 @@ describe('contacts are shared', () => {
   });
 
   it('deletes a contact whoever created it', async () => {
-    expect((await send('DELETE', '/c1')).status).toBe(200);
+    expect((await send('DELETE', '/22222222-2222-4222-8222-222222222222')).status).toBe(200);
     expect(query).toHaveBeenCalledTimes(1);
-    expect(query).toHaveBeenCalledWith('DELETE FROM contacts WHERE id = $1 RETURNING id', ['c1']);
+    expect(query).toHaveBeenCalledWith('DELETE FROM contacts WHERE id = $1 RETURNING id', ['22222222-2222-4222-8222-222222222222']);
   });
 });

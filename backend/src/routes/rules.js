@@ -6,6 +6,7 @@ import {
 } from '../services/rules/ruleActions.js';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
+import { isUuid, uuidParam } from '../utils/uuid.js';
 
 // Inbox rules: services/rules/ruleActions.js holds the checks and the journal, shared with the
 // panel CLI. The validators stay importable from here.
@@ -13,6 +14,7 @@ export { normalizeActions, validateActions, validateConditions };
 
 const router = Router();
 router.use(requireAuth);
+router.param('id', uuidParam('id'));
 
 const refuse = (res, result) => {
   const [status, body] = ruleRefusal(result);
@@ -96,6 +98,7 @@ router.delete('/:id', async (req, res) => {
 router.patch('/reorder', async (req, res) => {
   const { ids } = req.body;
   if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids must be an array' });
+  if (!ids.every(isUuid)) return res.status(400).json({ error: 'Invalid id', code: 'invalid_id' });
   try {
     // Every id must be an existing rule before anything is renumbered
     const found = await query(

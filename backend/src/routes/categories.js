@@ -4,8 +4,11 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { invalidateSocialDomainCache, backfillCategories, aiClassifyMessage, BUILTIN_SETS, getGlobalCategorizationEnabled } from '../services/categorizer.js';
 import { validateHost } from '../services/hostValidation.js';
 import { safeFetch } from '../services/safeFetch.js';
+import { uuidParam } from '../utils/uuid.js';
 
 const router = Router();
+router.param('id', uuidParam('id'));
+router.param('accountId', uuidParam('accountId'));
 
 // Validate that a URL is a safe external HTTPS URL (no private/loopback IPs).
 // Returns an error string or null if valid. Async because it performs DNS resolution.

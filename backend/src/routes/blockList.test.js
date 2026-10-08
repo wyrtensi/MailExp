@@ -27,7 +27,7 @@ describe('block list per mailbox', () => {
   beforeEach(() => {
     query.mockReset().mockImplementation(async (sql, params = []) => {
       if (sql === 'SELECT id FROM email_accounts WHERE id = $1') return { rows: params[0] === MAILBOX ? [{ id: MAILBOX }] : [] };
-      if (sql.includes('INSERT INTO block_list')) return { rows: [{ id: 'entry-1', account_id: params[0], email_address: params[1] }] };
+      if (sql.includes('INSERT INTO block_list')) return { rows: [{ id: '33333333-3333-4333-8333-333333333333', account_id: params[0], email_address: params[1] }] };
       return { rows: [] };
     });
   });
@@ -57,8 +57,8 @@ describe('block list per mailbox', () => {
   });
 
   it('removes an entry whoever added it', async () => {
-    query.mockResolvedValueOnce({ rows: [{ id: 'entry-1' }] });
-    expect((await send('DELETE', '/entry-1')).status).toBe(200);
-    expect(query).toHaveBeenCalledWith('DELETE FROM block_list WHERE id = $1 RETURNING id', ['entry-1']);
+    query.mockResolvedValueOnce({ rows: [{ id: '33333333-3333-4333-8333-333333333333' }] });
+    expect((await send('DELETE', '/33333333-3333-4333-8333-333333333333')).status).toBe(200);
+    expect(query).toHaveBeenCalledWith('DELETE FROM block_list WHERE id = $1 RETURNING id', ['33333333-3333-4333-8333-333333333333']);
   });
 });

@@ -9,6 +9,7 @@ import { decrypt, isEncrypted } from '../services/encryption.js';
 import { validateHost } from '../services/hostValidation.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { logAuthEvent } from '../services/authEvents.js';
+import { uuidParam } from '../utils/uuid.js';
 
 // In-memory OIDC discovery cache keyed by issuerUrl
 const discoveryCache = new Map();
@@ -201,6 +202,7 @@ export async function buildEndSessionUrl({ providerId, idToken } = {}) {
 // ── Public API router (mounted at /api/auth/oidc) ─────────────────────────────
 
 const oidcApiRouter = Router();
+oidcApiRouter.param('id', uuidParam('id'));
 
 // List enabled providers — shown on login page, no auth required
 oidcApiRouter.get('/providers', async (req, res) => {

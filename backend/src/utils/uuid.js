@@ -10,10 +10,11 @@ export function isUuid(value) {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
-// Factory for a router.param callback: (req, res, next, value) => 400 on a malformed UUID.
+// Factory for a router.param callback: (req, res, next, value) => 400 on a malformed UUID, with the
+// stable code invalid_id whichever param it was.
 export function uuidParam(name) {
   return (req, res, next, value) => {
-    if (!isUuid(value)) return res.status(400).json({ error: `Invalid ${name}` });
+    if (!isUuid(value)) return res.status(400).json({ error: `Invalid ${name}`, code: 'invalid_id' });
     next();
   };
 }

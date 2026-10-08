@@ -7,9 +7,11 @@ import { defaultAddressBookId } from '../services/addressBooks.js';
 import { normalizeContactUrls } from '../utils/contactUrls.js';
 import { contactLetters, CONTACT_LETTERS_DEFAULT_LIMIT } from '../services/contactLetters.js';
 import crypto from 'crypto';
+import { uuidParam } from '../utils/uuid.js';
 
 const router = Router();
 router.use(requireAuth);
+router.param('id', uuidParam('id'));
 
 // In-memory cache for Gravatar lookups (hash -> { buf, type } hit or { miss:true }).
 // Bounded + TTL'd so we don't re-hit Gravatar for every list render and so the number of

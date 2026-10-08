@@ -32,29 +32,29 @@ describe('GET /api/contacts/:id/letters', () => {
       items: [{ id: 'm1', account_id: 'a1', folder: 'INBOX', subject: 'Hi', snippet: 's', date: '2026-09-16T08:45:00.000Z', direction: 'in' }],
     });
 
-    const res = await fetch(`${base}/api/contacts/c1/letters?limit=5&offset=10`);
+    const res = await fetch(`${base}/api/contacts/22222222-2222-4222-8222-222222222222/letters?limit=5&offset=10`);
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       received: 2, sent: 1, lastDate: '2026-09-16T08:45:00.000Z', total: 3,
       items: [{ id: 'm1', account_id: 'a1', folder: 'INBOX', subject: 'Hi', snippet: 's', date: '2026-09-16T08:45:00.000Z', direction: 'in' }],
     });
-    expect(contactLetters).toHaveBeenCalledWith('c1', { limit: '5', offset: '10' });
+    expect(contactLetters).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222', { limit: '5', offset: '10' });
   });
 
   it('defaults limit and offset when not given', async () => {
     contactLetters.mockResolvedValueOnce({ received: 0, sent: 0, lastDate: null, total: 0, items: [] });
 
-    const res = await fetch(`${base}/api/contacts/c1/letters`);
+    const res = await fetch(`${base}/api/contacts/22222222-2222-4222-8222-222222222222/letters`);
 
     expect(res.status).toBe(200);
-    expect(contactLetters).toHaveBeenCalledWith('c1', { limit: 20, offset: 0 });
+    expect(contactLetters).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222', { limit: 20, offset: 0 });
   });
 
   it('404s for an unknown contact', async () => {
     contactLetters.mockResolvedValueOnce(null);
 
-    const res = await fetch(`${base}/api/contacts/missing/letters`);
+    const res = await fetch(`${base}/api/contacts/44444444-4444-4444-8444-444444444444/letters`);
 
     expect(res.status).toBe(404);
   });
@@ -62,7 +62,7 @@ describe('GET /api/contacts/:id/letters', () => {
   it('500s if the service throws, without leaking the error', async () => {
     contactLetters.mockRejectedValueOnce(new Error('db exploded'));
 
-    const res = await fetch(`${base}/api/contacts/c1/letters`);
+    const res = await fetch(`${base}/api/contacts/22222222-2222-4222-8222-222222222222/letters`);
 
     expect(res.status).toBe(500);
     expect((await res.json()).error).not.toMatch(/db exploded/);
