@@ -6,11 +6,14 @@ import { loadState, loadStoredConfig } from './settings.js';
 //   not_synced             the sync is off (or the panel does not sign in through Google/Access)
 //   in_access              active, and the policy listed the email at the last successful run
 //   pending                active, not written to the policy yet (the next run writes it)
+//   admitted_by_rule       active, created at a Cloudflare Access sign-in that a domain or group
+//                          rule admitted: the sync does not write this address into the policy
 //   removed_in_cloudflare  removed from the policy in Cloudflare: disabled by the sync, or waiting
 //                          to be disabled by a run the mass-change limit stopped
 //   null                   no email, or disabled by an administrator (the policy follows: the
 //                          sync removes the emails it wrote for users who are not active)
-export const ACCESS_STATES = Object.freeze(['not_synced', 'in_access', 'pending', 'removed_in_cloudflare']);
+export const ACCESS_STATES = Object.freeze(['not_synced', 'in_access', 'pending', 'admitted_by_rule', 'removed_in_cloudflare']);
+export const ACCESS_LOGIN_SOURCE = 'login';
 
 export const ACCESS_REMOVED_SOURCE = 'cloudflare_access';
 
@@ -24,7 +27,7 @@ export async function loadAccessStateContext({ settings = getAuthSettings() } = 
   };
 }
 
-// row: a users row with email, disabled_at and disabled_source.
+// row: a users row with email, disabled_at, disabled_source and access_source.
 export function accessStateOf(row, context) {
   if (!context) return null;
   if (!context.synced) return 'not_synced';
@@ -32,5 +35,6 @@ export function accessStateOf(row, context) {
   if (!email) return null;
   if (row.disabled_at) return row.disabled_source === ACCESS_REMOVED_SOURCE ? 'removed_in_cloudflare' : null;
   if (context.awaitingDisable.has(email)) return 'removed_in_cloudflare';
-  return context.policyEmails.has(email) ? 'in_access' : 'pending';
+  if (context.policyEmails.has(email)) return 'in_access';
+  return row.access_source === ACCESS_LOGIN_SOURCE ? 'admitted_by_rule' : 'pending';
 }

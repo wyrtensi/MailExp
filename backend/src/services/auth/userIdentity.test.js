@@ -3,10 +3,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../accessSync/tombstones.js', () => ({ isTombstoned: vi.fn() }));
 vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
+vi.mock('../accessSync/settings.js', () => ({ loadState: vi.fn() }));
 
 const { query, withTransaction } = await import('../db.js');
 const { isTombstoned } = await import('../accessSync/tombstones.js');
 const { recordAudit } = await import('../auditLog.js');
+const { loadState } = await import('../accessSync/settings.js');
 const {
   UserIdentityError,
   bindSessionUser,
@@ -43,6 +45,7 @@ beforeEach(() => {
   withTransaction.mockReset();
   isTombstoned.mockReset().mockResolvedValue(false);
   recordAudit.mockReset();
+  loadState.mockReset().mockResolvedValue({ policyEmails: ['new@example.com'] });
 });
 
 describe('normalizeEmail', () => {
@@ -159,6 +162,23 @@ describe('resolveVerifiedUser', () => {
       actorEmail: 'Cloudflare Access', action: 'access.user_imported',
       details: { userId: 'u1', email: 'new@example.com', source: 'sign_in' },
     });
+  });
+
+  it('marks an account a domain or group rule admitted, so the sync does not pin it into the policy', async () => {
+    query.mockResolvedValue({ rows: [] });
+    loadState.mockResolvedValue({ policyEmails: ['someone@example.com'] });
+    const { client, calls } = scriptedClient([
+      [/pg_advisory_xact_lock/, { rows: [] }],
+      [/^\s*SELECT .* WHERE lower\(email\) = \$1/, { rows: [] }],
+      [/^\s*UPDATE users SET email = \$1/, { rows: [] }],
+      [/^\s*INSERT INTO users/, { rows: [{ ...USER, email: 'walkin@example.org' }] }],
+      [/^\s*UPDATE users SET access_source = 'login'/, { rows: [{ ...USER, email: 'walkin@example.org', access_source: 'login' }] }],
+    ]);
+    withTransaction.mockImplementation(async (fn) => fn(client));
+    expect(await resolveVerifiedUser({ email: 'walkin@example.org', source: 'cloudflare', settings: settings() }))
+      .toEqual({ user: { ...USER, email: 'walkin@example.org', access_source: 'login' } });
+    expect(loadState).toHaveBeenCalledWith(client);
+    expect(calls.at(-1)[1]).toEqual(['u1']);
   });
 
   it('refuses a Cloudflare identity whose user an administrator deleted', async () => {

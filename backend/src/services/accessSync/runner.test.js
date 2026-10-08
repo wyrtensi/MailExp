@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
 vi.mock('../auth/userStatus.js', () => ({ disableUsersByEmail: vi.fn() }));
-vi.mock('./tombstones.js', () => ({ tombstonedAmong: vi.fn(), isTombstoned: vi.fn() }));
+vi.mock('./tombstones.js', () => ({ tombstonedAmong: vi.fn(), isTombstoned: vi.fn(), lockAddress: vi.fn() }));
 vi.mock('../auth/userIdentity.js', async (importOriginal) => ({ ...(await importOriginal()), claimOrCreateUserByEmail: vi.fn() }));
 vi.mock('./settings.js', () => ({
   loadRunConfig: vi.fn(), loadState: vi.fn(), loadStoredConfig: vi.fn(), saveState: vi.fn(), accessSyncMaxDisables: vi.fn(),
@@ -15,7 +15,7 @@ import { query, withTransaction } from '../db.js';
 import { recordAudit } from '../auditLog.js';
 import { disableUsersByEmail } from '../auth/userStatus.js';
 import { accessSyncMaxDisables, accessSyncMaxImports, loadRunConfig, loadState, loadStoredConfig, saveState } from './settings.js';
-import { isTombstoned, tombstonedAmong } from './tombstones.js';
+import { isTombstoned, lockAddress, tombstonedAmong } from './tombstones.js';
 import { UserIdentityError, claimOrCreateUserByEmail } from '../auth/userIdentity.js';
 import { CloudflareAccessError } from './cloudflareAccessClient.js';
 import { runAccessSync } from './runner.js';
@@ -85,7 +85,7 @@ describe('runAccessSync', () => {
       baseline: ['a@example.com', 'b@example.com'], policyEmails: ['a@example.com', 'b@example.com', 'contractor@example.net'],
       abortedCandidates: null, abortedImports: null, retryAttempt: 0, lastRun: result,
     });
-    expect(query.mock.calls[0][0]).toBe('SELECT email, disabled_at FROM users WHERE email IS NOT NULL');
+    expect(query.mock.calls[0][0]).toBe('SELECT email, disabled_at, access_source FROM users WHERE email IS NOT NULL');
   });
 
   it('keeps the state of a policy the settings moved to while it ran (the CLI saves from another process)', async () => {
@@ -266,6 +266,7 @@ describe('runAccessSync', () => {
       const result = await run();
       expect(result).toEqual(lastRun({ outcome: 'unchanged', imported: 1 }));
       expect(claimOrCreateUserByEmail).toHaveBeenCalledWith(TX, 'new@example.com');
+      expect(lockAddress).toHaveBeenCalledWith(TX, 'new@example.com');
       expect(isTombstoned).toHaveBeenCalledWith('new@example.com', TX);
       expect(recordAudit).toHaveBeenCalledWith([{
         actorEmail: 'Cloudflare Access', action: 'access.user_imported',
@@ -323,6 +324,37 @@ describe('runAccessSync', () => {
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
+    it('journals the users it already created when a later import fails', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      cloudflare(policyWith([email('a@example.com'), email('b1@example.com'), email('b2@example.com')]));
+      state(['a@example.com']);
+      activeUsers('a@example.com');
+      claimOrCreateUserByEmail
+        .mockResolvedValueOnce(created('b1@example.com'))
+        .mockRejectedValueOnce(Object.assign(new Error('connection lost'), { code: '57P01' }));
+      expect(await run()).toMatchObject({ outcome: 'failed', error: 'internal_error' });
+      expect(recordAudit).toHaveBeenCalledWith([expect.objectContaining({
+        action: 'access.user_imported', details: expect.objectContaining({ email: 'b1@example.com' }),
+      })]);
+      errorSpy.mockRestore();
+    });
+
+    it('does not pin a user a domain rule admitted, and adopts one the policy lists by address', async () => {
+      cloudflare(policyWith([email('a@example.com'), email('listed@example.org'), { email_domain: { domain: 'example.org' } }]));
+      state(['a@example.com']);
+      query.mockImplementation(async (sql) => (sql.startsWith('SELECT') ? {
+        rows: [
+          { email: 'a@example.com', disabled_at: null, access_source: null },
+          { email: 'walkin@example.org', disabled_at: null, access_source: 'login' },
+          { email: 'listed@example.org', disabled_at: null, access_source: 'login' },
+        ],
+      } : { rows: [] }));
+      expect(await run()).toMatchObject({ outcome: 'unchanged' });
+      expect(query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE users SET access_source = NULL/), [['listed@example.org']]);
+      expect(saved().baseline).toEqual(['a@example.com', 'listed@example.org']);
+      expect(cf.updatePolicy).not.toHaveBeenCalled();
+    });
+
     it('does not import a claimed row that is disabled', async () => {
       cloudflare(policyWith([email('a@example.com'), email('legacy@example.com')]));
       state(['a@example.com']);
@@ -341,38 +373,44 @@ describe('runAccessSync', () => {
     it('schedules a retry after a network failure, then backs off 1, 5 and 15 minutes', async () => {
       cloudflare(policyWith([]));
       cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 'network'));
-      expect(await run()).toEqual(lastRun({
+      expect(await run({ canRetry: true })).toEqual(lastRun({
         outcome: 'failed', error: 'Cloudflare getPolicy failed (network)', retriable: true, retryAttempt: 1, nextRetryAt: at(60_000),
       }));
       expect(saved().retryAttempt).toBe(1);
 
       state([], null, { retryAttempt: 1 });
-      expect((await run({ trigger: 'retry' })).nextRetryAt).toBe(at(5 * 60_000));
+      expect((await run({ trigger: 'retry', canRetry: true })).nextRetryAt).toBe(at(5 * 60_000));
       state([], null, { retryAttempt: 2 });
-      expect((await run({ trigger: 'retry' })).nextRetryAt).toBe(at(15 * 60_000));
+      expect((await run({ trigger: 'retry', canRetry: true })).nextRetryAt).toBe(at(15 * 60_000));
       state([], null, { retryAttempt: 3 });
-      expect(await run({ trigger: 'retry' })).toMatchObject({ retriable: true, retryAttempt: 0, nextRetryAt: null });
+      expect(await run({ trigger: 'retry', canRetry: true })).toMatchObject({ retriable: true, retryAttempt: 0, nextRetryAt: null });
     });
 
     it('honours a longer Retry-After on 429 and 5xx', async () => {
       cloudflare(policyWith([]));
       cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 429, [], { retryAfter: 600 }));
-      expect((await run()).nextRetryAt).toBe(at(600_000));
+      expect((await run({ canRetry: true })).nextRetryAt).toBe(at(600_000));
       cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 503, [], { retryAfter: 5 }));
-      expect((await run()).nextRetryAt).toBe(at(60_000));
+      expect((await run({ canRetry: true })).nextRetryAt).toBe(at(60_000));
       // Later than the hourly run: left to it.
       cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 503, [], { retryAfter: 7200 }));
-      expect((await run()).nextRetryAt).toBeNull();
+      expect((await run({ canRetry: true })).nextRetryAt).toBeNull();
+    });
+
+    it('answers no retry time for a run outside the scheduler, which has no timer to keep it', async () => {
+      cloudflare(policyWith([]));
+      cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 'network'));
+      expect(await run()).toMatchObject({ outcome: 'failed', retriable: true, retryAttempt: 0, nextRetryAt: null });
     });
 
     it('does not retry authentication or configuration failures, and a success resets the count', async () => {
       cloudflare(policyWith([]));
       cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 403, [10000]));
-      expect(await run()).toMatchObject({ retriable: false, nextRetryAt: null });
+      expect(await run({ canRetry: true })).toMatchObject({ retriable: false, nextRetryAt: null });
       cloudflare(policyWith([email('a@example.com')]));
       state(['a@example.com'], null, { retryAttempt: 2 });
       activeUsers('a@example.com');
-      expect(await run({ trigger: 'retry' })).toMatchObject({ outcome: 'unchanged', retryAttempt: 0 });
+      expect(await run({ trigger: 'retry', canRetry: true })).toMatchObject({ outcome: 'unchanged', retryAttempt: 0 });
       expect(saved().retryAttempt).toBe(0);
     });
   });

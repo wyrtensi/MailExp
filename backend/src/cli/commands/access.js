@@ -179,12 +179,14 @@ const sync = {
 
 const tombstones = {
   name: 'tombstones',
-  summary: 'the emails of deleted users, which the sync does not import again',
+  summary: 'addresses of deleted users and replaced emails, which the sync does not import again',
   usage: 'access tombstones',
   help: [
-    'A deleted user\'s email is not imported from the policy again, and a Cloudflare Access sign-in',
-    'under it is refused (user_deleted), until "access allow <email>" or "user create <email>".',
-    'IN POLICY: the policy still listed the email at the last successful run.',
+    'REASON deleted: the user was deleted; email_changed: an administrator changed or cleared the',
+    'user\'s email and this was the old one. Such an address is not imported from the policy again,',
+    'and a Cloudflare Access sign-in under it is refused (user_deleted), until "access allow',
+    '<email>" or "user create <email>". IN POLICY: the policy still listed the address at the last',
+    'successful run.',
   ],
   async run() {
     const list = await accessSyncTombstones();
@@ -192,7 +194,8 @@ const tombstones = {
       data: { tombstones: list },
       lines: table(list, [
         { header: 'EMAIL', value: (t) => t.email },
-        { header: 'DELETED', value: (t) => fmtDate(t.createdAt) },
+        { header: 'REASON', value: (t) => t.reason },
+        { header: 'SINCE', value: (t) => fmtDate(t.createdAt) },
         { header: 'BY', value: (t) => t.createdBy ?? '' },
         { header: 'IN POLICY', value: (t) => t.inPolicy },
       ], { empty: '(no deleted users)' }),

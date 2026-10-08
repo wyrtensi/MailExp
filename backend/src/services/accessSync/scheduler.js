@@ -43,7 +43,8 @@ export function createAccessSyncScheduler({
     if (!queuedRun) {
       queuedRun = exclusive(async () => {
         queuedRun = null;
-        const result = await run(trigger);
+        // Only a started scheduler has the timers that run a retry (scheduleRetry below).
+        const result = await run(trigger, { canRetry: !!intervalTimer });
         scheduleRetry(result);
         return result;
       });

@@ -10,7 +10,8 @@ import {
 import {
   accessSyncMaxDisables, accessSyncMaxImports, loadRunConfig, loadState, loadStoredConfig, saveState, withAccessSyncTransaction,
 } from './settings.js';
-import { isTombstoned, tombstonedAmong } from './tombstones.js';
+import { isTombstoned, lockAddress, tombstonedAmong } from './tombstones.js';
+import { ACCESS_LOGIN_SOURCE } from './accessState.js';
 
 // The name the audit log shows for changes the sync makes on its own.
 export const ACCESS_SYNC_ACTOR = 'Cloudflare Access';
@@ -31,25 +32,35 @@ export function retryDelayMs(attempt, retryAfterSeconds) {
   return delay > RETRY_CAP_MS ? null : delay;
 }
 
+const importedEntry = (user) => ({
+  actorEmail: ACCESS_SYNC_ACTOR, action: 'access.user_imported',
+  details: { userId: user.id, email: user.email, source: 'cloudflare_access' },
+});
+
 // Creates the users for emails someone added to the policy in Cloudflare. Each in its own
 // transaction, the tombstone checked again under the per-address lock: an administrator may have
-// deleted the user since the run read the tombstones. Answers { imported, errors }.
+// deleted the user since the run read the tombstones. Every user created is journaled, also when
+// a later one fails and the run stops. Answers { imported, errors }.
 async function importUsers(emails) {
   const imported = [];
   let errors = 0;
-  for (const email of emails) {
-    try {
-      const user = await withTransaction(async (client) => {
-        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`user-email:${email}`]);
-        if (await isTombstoned(email, client)) return null;
-        const result = await claimOrCreateUserByEmail(client, email);
-        return (result.created || result.claimed) && !result.user.disabled_at ? result.user : null;
-      });
-      if (user) imported.push(user);
-    } catch (err) {
-      if (!(err instanceof UserIdentityError)) throw err;
-      errors += 1;
+  try {
+    for (const email of emails) {
+      try {
+        const user = await withTransaction(async (client) => {
+          await lockAddress(client, email);
+          if (await isTombstoned(email, client)) return null;
+          const result = await claimOrCreateUserByEmail(client, email);
+          return (result.created || result.claimed) && !result.user.disabled_at ? result.user : null;
+        });
+        if (user) imported.push(user);
+      } catch (err) {
+        if (!(err instanceof UserIdentityError)) throw err;
+        errors += 1;
+      }
     }
+  } finally {
+    if (imported.length) recordAudit(imported.map(importedEntry));
   }
   return { imported, errors };
 }
@@ -68,6 +79,9 @@ export async function runAccessSync({
   now = () => new Date(),
   // Test hook: runs inside the state write's transaction, between reading the settings and writing.
   beforeStateWrite = null,
+  // Whether a retriable failure gets a retry: only the scheduler (scheduler.js) runs one, so only
+  // its runs answer nextRetryAt.
+  canRetry = false,
 }) {
   if (settings.mode !== 'google') return { outcome: 'not_google_mode' };
   const config = await loadRunConfig();
@@ -100,7 +114,7 @@ export async function runAccessSync({
   const fail = (error, cause = null) => {
     if (!cause?.retriable) return finish({ outcome: 'failed', error });
     const attempt = trigger === 'retry' ? state.retryAttempt + 1 : 1;
-    const delay = retryDelayMs(attempt, cause.retryAfter);
+    const delay = canRetry ? retryDelayMs(attempt, cause.retryAfter) : null;
     return finish({
       outcome: 'failed', error, retriable: true,
       retryAttempt: delay === null ? 0 : attempt,
@@ -115,9 +129,16 @@ export async function runAccessSync({
     if (policy?.decision !== 'allow') return await fail('policy_not_allow');
 
     const pinned = settings.bootstrapAdminEmails;
-    const { rows } = await query('SELECT email, disabled_at FROM users WHERE email IS NOT NULL');
+    const { rows } = await query('SELECT email, disabled_at, access_source FROM users WHERE email IS NOT NULL');
     const known = new Set(rows.map((row) => row.email.toLowerCase()));
-    const activeEmails = rows.filter((row) => !row.disabled_at).map((row) => row.email.toLowerCase());
+    const activeRows = rows.filter((row) => !row.disabled_at);
+    const activeEmails = activeRows.map((row) => row.email.toLowerCase());
+    // Users a domain or group rule admitted at sign-in (userIdentity.js): not written into the
+    // policy, unless the policy now lists them by address, which makes them the sync's own.
+    const listed = new Set(listedEmails(policy.include));
+    const byRule = activeRows.filter((row) => row.access_source === ACCESS_LOGIN_SOURCE).map((row) => row.email.toLowerCase());
+    const adopt = byRule.filter((email) => listed.has(email));
+    const unpinned = new Set(byRule.filter((email) => !listed.has(email)));
 
     // Both checks run before anything changes: a run either does all of it or nothing.
     const proposed = importCandidates({ policy, baseline: state.baseline, pinned });
@@ -157,11 +178,8 @@ export async function runAccessSync({
     }
 
     const { imported, errors } = toImport.length ? await importUsers(toImport) : { imported: [], errors: 0 };
-    if (imported.length) {
-      recordAudit(imported.map((user) => ({
-        actorEmail: ACCESS_SYNC_ACTOR, action: 'access.user_imported',
-        details: { userId: user.id, email: user.email, source: 'cloudflare_access' },
-      })));
+    if (adopt.length) {
+      await query("UPDATE users SET access_source = NULL WHERE lower(email) = ANY($1::text[]) AND access_source = 'login'", [adopt]);
     }
 
     const { disabled } = candidates.length
@@ -179,7 +197,7 @@ export async function runAccessSync({
 
     const turnedOff = new Set(disabled.map((user) => user.email.toLowerCase()));
     const desired = [...new Set([
-      ...activeEmails.filter((address) => !turnedOff.has(address)),
+      ...activeEmails.filter((address) => !turnedOff.has(address) && !unpinned.has(address)),
       ...imported.map((user) => user.email.toLowerCase()),
       ...pinned,
     ])].sort();

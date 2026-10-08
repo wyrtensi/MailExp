@@ -34,10 +34,10 @@ describe('access sync scheduler', () => {
     await vi.advanceTimersByTimeAsync(DEBOUNCE - 1);
     expect(run).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    expect(run.mock.calls).toEqual([['startup']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup']);
 
     await vi.advanceTimersByTimeAsync(2 * INTERVAL);
-    expect(run.mock.calls).toEqual([['startup'], ['schedule'], ['schedule']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup', 'schedule', 'schedule']);
     s.stop();
   });
 
@@ -51,7 +51,7 @@ describe('access sync scheduler', () => {
     s.request('b');
     s.request('c');
     await vi.advanceTimersByTimeAsync(DEBOUNCE);
-    expect(run.mock.calls).toEqual([['startup'], ['c']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup', 'c']);
     s.stop();
   });
 
@@ -67,7 +67,7 @@ describe('access sync scheduler', () => {
     expect(run).toHaveBeenCalledTimes(1);
 
     await finish();
-    expect(run.mock.calls).toEqual([['startup'], ['user_added']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup', 'user_added']);
     await finish();
     await vi.advanceTimersByTimeAsync(DEBOUNCE);
     expect(run).toHaveBeenCalledTimes(2);
@@ -130,12 +130,17 @@ describe('access sync scheduler', () => {
     const s = scheduler(run);
     s.start();
     await vi.advanceTimersByTimeAsync(DEBOUNCE);
-    expect(run.mock.calls).toEqual([['startup']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup']);
     await vi.advanceTimersByTimeAsync(4_999);
     expect(run).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(run.mock.calls).toEqual([['startup'], ['retry']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup', 'retry']);
+    // A started scheduler tells the run it can retry; a stopped one does not.
+    expect(run.mock.calls[0][1]).toEqual({ canRetry: true });
     s.stop();
+    await s.runNow('manual');
+    expect(run.mock.calls.at(-1)).toEqual(['manual', { canRetry: false }]);
+    run.mockClear();
 
     // A run that ends before the retry is due cancels it when it needs none.
     run.mockClear();
@@ -146,7 +151,7 @@ describe('access sync scheduler', () => {
     await vi.advanceTimersByTimeAsync(DEBOUNCE);
     await s.runNow('manual');
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(run.mock.calls).toEqual([['startup'], ['manual']]);
+    expect(run.mock.calls.map(([trigger]) => trigger)).toEqual(['startup', 'manual']);
     s.stop();
   });
 

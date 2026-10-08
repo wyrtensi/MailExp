@@ -191,7 +191,7 @@ describe('mailexpert access tombstones and allow', () => {
     const list = await cli(['access', 'tombstones', '--json']);
     expect(list.code).toBe(0);
     expect(list.json().tombstones).toEqual([
-      { email: 'gone@example.com', createdAt: expect.any(String), createdBy: 'admin@example.com', inPolicy: false },
+      { email: 'gone@example.com', createdAt: expect.any(String), createdBy: 'admin@example.com', reason: 'deleted', inPolicy: false },
     ]);
     expect((await cli(['access', 'status'])).out).toMatch(/deleted users \(tombstones\):\s+1/);
 

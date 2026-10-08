@@ -68,7 +68,7 @@ function installTransaction(handlers) {
   const client = {
     query: vi.fn(async (sql, params) => {
       calls.push([sql, params]);
-      for (const [re, result] of [...handlers, tombstones]) {
+      for (const [re, result] of [...handlers, ...DEFAULT_HANDLERS]) {
         if (re.test(sql)) return typeof result === 'function' ? result(params) : result;
       }
       throw new Error(`unexpected SQL: ${sql}`);
@@ -78,6 +78,12 @@ function installTransaction(handlers) {
 }
 // Tombstones (services/accessSync/tombstones.js): none cleared unless a test says otherwise.
 const tombstones = [/access_tombstones/, { rows: [], rowCount: 0 }];
+// The address locks taken before the admin guard (services/admin/users.js lockRowAddresses).
+const DEFAULT_HANDLERS = [
+  tombstones,
+  [/^SELECT email, username FROM users WHERE id = \$1$/, { rows: [{ email: 'user@example.com', username: 'user@example.com' }] }],
+  [/pg_advisory_xact_lock/, { rows: [] }],
+];
 const sqlCall = (re) => calls.find(([sql]) => re.test(sql));
 const lock = [/pg_advisory_xact_lock/, { rows: [] }];
 const target = (row) => [/SELECT id, email, is_admin, disabled_at FROM users WHERE id = \$1 FOR UPDATE/, { rows: row ? [row] : [] }];
@@ -255,6 +261,20 @@ describe('POST /api/admin/users/allow', () => {
   });
 });
 
+describe('POST /api/admin/users/allow when the user goes away meanwhile', () => {
+  it('answers not_found and rolls back instead of failing', async () => {
+    installTransaction([
+      [/DELETE FROM access_tombstones/, { rows: [], rowCount: 1 }],
+      [/^\s*SELECT .* FROM users WHERE lower\(email\) = \$1/, { rows: [{ ...USER_ROW, disabled_at: '2026-09-16T00:00:00.000Z' }] }],
+      [/UPDATE users SET disabled_at = NULL/, { rows: [] }],
+    ]);
+    expect(await send('POST', '/users/allow', { email: 'user@example.com' })).toEqual({
+      status: 404, body: { error: 'User not found', code: 'not_found' },
+    });
+    expect(recordAudit).not.toHaveBeenCalled();
+  });
+});
+
 describe('DELETE /api/admin/users/:id', () => {
   it('refuses a bootstrap admin and the last active admin', async () => {
     vi.stubEnv('BOOTSTRAP_ADMIN_EMAILS', 'user@example.com');
@@ -274,7 +294,7 @@ describe('DELETE /api/admin/users/:id', () => {
     expect(sqlCall(/DELETE FROM users/)).toEqual(['DELETE FROM users WHERE id = $1', [USER_ID]]);
     expect(imapManager.disconnectAccount).not.toHaveBeenCalled();
     // The email is tombstoned in the delete's transaction, naming who deleted it.
-    expect(sqlCall(/INSERT INTO access_tombstones/)[1]).toEqual(['user@example.com', ADMIN_ID, null]);
+    expect(sqlCall(/INSERT INTO access_tombstones/)[1]).toEqual(['user@example.com', ADMIN_ID, null, 'deleted']);
   });
 
   it('deletes under the admin-guard lock, in the transaction that checked the other admins', async () => {
@@ -284,7 +304,14 @@ describe('DELETE /api/admin/users/:id', () => {
     const order = calls.map(([sql]) => sql);
     expect(order.findIndex((sql) => /DELETE FROM users/.test(sql)))
       .toBeGreaterThan(order.findIndex((sql) => /COUNT/.test(sql)));
-    expect(order[0]).toMatch(/pg_advisory_xact_lock/);
+    // The address lock (shared with sign-in, import and allow-again), then the admin guard, then the row.
+    expect(order.slice(0, 4)).toEqual([
+      'SELECT email, username FROM users WHERE id = $1',
+      'SELECT pg_advisory_xact_lock(hashtext($1))',
+      "SELECT pg_advisory_xact_lock(hashtext('users-admin-guard'))",
+      expect.stringMatching(/FOR UPDATE/),
+    ]);
+    expect(calls[1][1]).toEqual(['user-email:user@example.com']);
     expect(query.mock.calls.some(([sql]) => /DELETE FROM users/.test(sql))).toBe(false);
   });
 });

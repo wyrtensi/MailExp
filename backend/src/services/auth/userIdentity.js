@@ -1,12 +1,13 @@
 import { query, withTransaction } from '../db.js';
 import { recordAudit } from '../auditLog.js';
 import { isTombstoned } from '../accessSync/tombstones.js';
+import { loadState } from '../accessSync/settings.js';
 
 // The journal's actor for an account created by a Cloudflare Access sign-in; the same name the
 // Access sync's own changes carry (accessSync/runner.js ACCESS_SYNC_ACTOR).
 const ACCESS_SIGN_IN_ACTOR = 'Cloudflare Access';
 
-export const USER_COLUMNS = 'id, username, email, is_admin, disabled_at, created_at';
+export const USER_COLUMNS = 'id, username, email, is_admin, disabled_at, access_source, created_at';
 export const SESSION_AUTH_METHODS = new Set(['cloudflare', 'google']);
 
 const EMAIL_PATTERN = /^[^\s@]{1,64}@[^\s@]{1,255}$/;
@@ -99,6 +100,16 @@ export async function resolveVerifiedUser({ email, source, settings }) {
       let { user } = claim;
       if (user.disabled_at) return { error: 'user_disabled' };
       if (fromAccess && (claim.created || claim.claimed)) {
+        // Admitted by a domain or group rule rather than by its own address in the policy (as of
+        // the sync's last successful run): the sync must not pin this address into the policy
+        // with an email rule (accessSync/runner.js). It adopts the user once the policy lists it.
+        const { policyEmails } = await loadState(client);
+        if (!policyEmails.includes(address)) {
+          ({ rows: [user] } = await client.query(
+            `UPDATE users SET access_source = 'login' WHERE id = $1 RETURNING ${USER_COLUMNS}`,
+            [user.id],
+          ));
+        }
         recordAudit({
           actorEmail: ACCESS_SIGN_IN_ACTOR, action: 'access.user_imported',
           details: { userId: user.id, email: user.email, source: 'sign_in' },
