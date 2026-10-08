@@ -56,10 +56,11 @@ export function apiErrorKey(code, keys = {}) {
 }
 
 // What to show for a failed request: the code explained, the busy mailbox text, else the server's
-// text, else `fallback`, else that the request failed.
+// text, else `fallback`, else that the request failed. A key may show the server's text as
+// {{detail}} where it is the useful part (an SMTP answer, a refused host).
 export function apiErrorText(err, t, { keys, fallback } = {}) {
   const key = apiErrorKey(err?.code, keys);
-  if (key) return t(key);
+  if (key) return t(key, { detail: err?.message ?? '' });
   if (isMailboxBusy(err)) return mailboxBusyText(err, t);
   return err?.message || fallback || t('common.actionFailed.body');
 }

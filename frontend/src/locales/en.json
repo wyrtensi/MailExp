@@ -1757,7 +1757,10 @@
       "errorLastAdmin": "At least one active administrator must remain. Make someone else an administrator first.",
       "errorEmailTaken": "Another user already has this email.",
       "errorFailed": "The action failed. Try again.",
-      "loadFailed": "Could not load users and invites: {{message}}"
+      "loadFailed": "Could not load users and invites: {{message}}",
+      "inviteErrorEmail": "Enter a valid email address for the invite.",
+      "inviteErrorAppUrl": "Invites need APP_URL: set it in the server's .env file, restart the panel and try again.",
+      "inviteErrorNotFound": "This invite no longer exists. Reload the page to see the current invites."
     },
     "ai": {
       "title": "AI Assistant",
@@ -1897,7 +1900,13 @@
       "testOk": "Connection successful",
       "testFail": "Connection failed",
       "saved": "System email settings saved",
-      "removed": "System email settings removed"
+      "removed": "System email settings removed",
+      "errorFieldsRequired": "The SMTP host and username are required.",
+      "errorHostRefused": "This SMTP host is not allowed: {{detail}}",
+      "errorNotConfigured": "No system email is set up yet. Save the settings first.",
+      "errorConfigCorrupted": "The saved system email settings cannot be read. Enter them again and save.",
+      "errorPasswordMissing": "No password is saved. Enter the password and save the settings first.",
+      "errorSmtpFailed": "The SMTP server refused: {{detail}}"
     },
     "sso": {
       "title": "Single Sign-On",
@@ -1964,7 +1973,16 @@
       "activeBadge": "Active",
       "disabledBadge": "Disabled",
       "errorRequired": "Name, slug, issuer URL and client ID are required.",
-      "errorSecretRequired": "Client secret is required."
+      "errorSecretRequired": "Client secret is required.",
+      "errorFieldsRequired": "Name, slug, issuer URL, client ID and client secret are required.",
+      "errorSlugInvalid": "The slug may contain only lowercase letters, digits and hyphens.",
+      "errorLoginMatchClaim": "The login match claim must be a claim name: letters, digits and . _ : - only.",
+      "errorIssuerNotHttps": "The issuer URL must use HTTPS (or allow insecure connections for a local provider).",
+      "errorIssuerHostRefused": "The issuer's host is not allowed (for example, a private or local address). Check the issuer URL.",
+      "errorIssuerInvalid": "The issuer URL is not a valid address.",
+      "errorSlugTaken": "Another provider already uses this slug. Choose another one.",
+      "errorNotFound": "This provider no longer exists. Reload the page to see the current providers.",
+      "errorLastProvider": "This is the last enabled SSO provider and password login is off. Turn password login back on first."
     },
     "integrations": {
       "title": "Integrations",
@@ -3508,6 +3526,17 @@
       "failAntispamNotWritten": "The tenant accepted the change, but the policy still shows another action",
       "failWorkerOutdated": "The tenant worker does not know this operation: rebuild the tenant-worker image",
       "failQuarantineNotAllowed": "The tenant worker releases only inbound spam and phishing"
+    },
+    "settingsError": {
+      "noSsoProvider": "Password login cannot be turned off: no SSO provider is enabled. Set up and enable an SSO provider first.",
+      "ssoIdentityRequired": "Password login cannot be turned off yet: link your account to an SSO provider first, so you can still sign in.",
+      "maxAttempts": "Failed attempts must be between 1 and 100.",
+      "windowMinutes": "The time window must be between 1 and 1440 minutes.",
+      "mfaEnforcement": "Choose whether two-factor authentication is required.",
+      "mfaDeviceTrust": "Choose how long a device stays trusted.",
+      "customCss": "The custom CSS could not be read. Reload the page and try again.",
+      "customCssTooLong": "The custom CSS is too long: 50,000 characters at most.",
+      "invalidField": "The setting has an invalid value. Reload the page and try again."
     }
   },
   "blockList": {
