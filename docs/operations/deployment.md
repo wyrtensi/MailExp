@@ -267,29 +267,29 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 
 | Группа | Команды |
 |---|---|
-| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>`, `deactivate <ADDRESS> --reason <TEXT>`, `reactivate <ADDRESS>`, `set-quota <ADDRESS> <MB>`, `set-rate-limit <ADDRESS> <N/h\|default>` |
-| `domain` | `list`, `show <DOMAIN>`, `add <DOMAIN> [--mailboxes <N>]`, `adopt <DOMAIN>`, `step <DOMAIN> <STEP>`, `ready <DOMAIN>`, `ack <DOMAIN> [--created <TIME>]`, `dns-expected <DOMAIN> [--mx ...] [--tenant-txt ...] [--dkim-cname1 ...] [--dkim-cname2 ...]`, `restart <DOMAIN>`, `sync <DOMAIN>`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN>`, `approve-alias-removal <DOMAIN>`, `dns-check [<DOMAIN>] [--wait]` |
-| `tenant` | `status`, `test`, `antispam`, `poll`, `connectors-reference` |
-| `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
+| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>`, `deactivate <ADDRESS> --reason <TEXT>`, `reactivate <ADDRESS>`, `set-quota <ADDRESS> <MB>`, `set-rate-limit <ADDRESS> <N/s\|N/m\|N/h\|N/d\|default>`, `oauth-reset <ADDRESS>` (OAuth-ящик Gmail или Outlook, не с узла) |
+| `domain` | `list`, `show <DOMAIN>`, `add <DOMAIN> [--mailboxes <N>]`, `adopt <DOMAIN>`, `step <DOMAIN> <STEP>`, `ready <DOMAIN>`, `ack <DOMAIN> [--created <TIME>]`, `dns-expected <DOMAIN> [--mx ...] [--tenant-txt ...] [--dkim-cname1 ...] [--dkim-cname2 ...]`, `restart <DOMAIN>`, `sync <DOMAIN> [--wait]`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN> [--wait]`, `approve-alias-removal <DOMAIN> [--wait]`, `dns-check [<DOMAIN>] [--wait]` (`--wait` — только без домена) |
+| `tenant` | `status`, `test [--wait]`, `antispam [--wait]`, `poll [--wait]`, `connectors-reference` |
+| `quarantine` | `status`, `list`, `release [--wait]`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
 | `access` | `status`, `config [--account <ID>] [--app <ID>] [--policy <ID>] [--enable\|--disable]`, `token` (токен только со stdin), `sync [--timeout <SEC>]` — синхронизация пользователей с политикой Cloudflare Access ([cloudflare.md, раздел 8](cloudflare.md)) |
-| `user` | `list`, `show <EMAIL>`, `create <EMAIL> [--admin]`, `set <EMAIL> [--admin\|--no-admin] [--disable\|--enable] [--email <NEW>]`, `delete <EMAIL>`, `totp-reset <EMAIL>` — пользователи панели, с защитой последнего администратора |
+| `user` | `list [--limit <N>] [--offset <N>]`, `show <EMAIL>`, `create <EMAIL> [--admin]`, `set <EMAIL> [--admin\|--no-admin] [--disable\|--enable] [--email <NEW>]`, `delete <EMAIL>`, `totp-reset <EMAIL>` — пользователи панели, с защитой последнего администратора |
 | `settings` | `get [<KEY>]`, `set <KEY> <VALUE>` — настройки экрана администратора (вход по паролю, регистрация, 2FA, лимиты входа, интервалы синхронизации, сетевые разрешения) |
 | `sso` | `list`, `add ...`, `set <ID\|SLUG> ...`, `remove <ID\|SLUG>` — SSO-провайдеры; секрет клиента только со stdin |
-| `integration` | `microsoft show\|set\|remove` — клиент Microsoft OAuth для ящиков Outlook; секрет только со stdin (`--secret`) |
+| `integration` | `microsoft show\|set\|remove` — клиент Microsoft OAuth для ящиков Outlook; секрет только со stdin (`--secret`). Приложения Google — не группа `mailexpert`, а отдельная обёртка `google-app.sh` ([google-oauth.md](google-oauth.md#управление-из-командной-строки)) |
 | `node` | `config show`, `config set [--mail-host <MAIL_HOST>] [--quota <MB>] [--delete-after-days <N>] [--disk-ping-url <URL>] [--panel-ips <LIST>] [--node-ip <IP>] [--api-key-stdin]` (ключ mailcow только со stdin), `apply [--domain <DOMAIN> [--confirm-dkim-delete]]`, `apply --prefilter` — настройки почтового узла и их применение |
 | `eop` | `show`, `set [--eop-host ...] [--licenses <N>] ...` (все поля экрана EOP), `budget` — настройки EOP и бюджет TERRL |
 | `seats` | `status`, `check [--wait]`, `set-hold <DAYS>`, `request <N>` — места EOP |
 | `agent` | `status`, `jobs [--limit <N>]`, `token issue [--out <TOKEN_FILE>\|--out -]`, `token revoke`, `run status\|backup\|update` — агент узла; токен печатается один раз (или пишется в файл 0600 на хосте) для `setup.sh --agent-token-file` |
 | `queue` | `list`, `show <QUEUE_ID> [--body]`, `flush`, `hold\|release\|deliver\|delete <QUEUE_ID>` — почтовая очередь узла |
 | `alerts` | `status`, `check [--wait]`, `set [--ping-url <URL>] [--deferred-count <N>] [--deferred-minutes <N>]` — оповещения узла |
-| `outage` | `list`, `show <ID>`, `letters <ID>`, `open --start <TIME> --reason <TEXT>`, `update <ID>`, `close <ID>`, `delete <ID>`, `trace [--wait]`, `settings show\|set` — простои узла и письма в них |
+| `outage` | `list`, `show <ID>`, `letters <ID>`, `open --start <TIME> [--end <TIME>] --reason <TEXT> [--planned]`, `update <ID> [--start <TIME>] [--end <TIME>] --reason <TEXT>`, `close <ID> [--end <TIME>] --reason <TEXT>`, `delete <ID> --reason <TEXT>`, `trace [--wait]`, `settings show\|set --retention-days <N>` — простои узла и письма в них |
 | `spam-quarantine` | `list`, `release\|learn-spam\|delete <ID>`, `settings show\|set --user-view on\|off`, `node-settings show\|apply` — карантин rspamd на узле (не EOP) |
-| `invite` | `list`, `create <EMAIL> --as <ADMIN_EMAIL>`, `revoke <ID>` — приглашения на регистрацию; письмо уходит через системную почту |
+| `invite` | `list [--limit <N>] [--offset <N>]`, `create <EMAIL> --as <ADMIN_EMAIL>`, `revoke <ID>` — приглашения на регистрацию; письмо уходит через системную почту |
 | `system-email` | `show`, `set [--host ...] [--user ...] [--password-stdin] ...` (пароль только со stdin), `test`, `remove` — SMTP системной почты панели |
-| `audit` | `list [--action <A>] [--since <T>] [--until <T>] [--account <ADDRESS>] [--user <EMAIL>] [--before <CURSOR>] [--limit <N>]`, `auth-events` — журнал и события входа |
-| `account` | `list [--user <EMAIL>]`, `create <ADDRESS> --imap-host ... --smtp-host ...` (пароль только со stdin), `set-connection <ADDRESS> ...` — ящики, настроенные вручную по IMAP/SMTP, с проверками политики подключений; у группы `mailbox` ещё `oauth-reset <ADDRESS>` |
-| `rule` | `list`, `show <ID>`, `create`, `set <ID>` (JSON правила со stdin), `enable <ID>`, `disable <ID>`, `delete <ID>`, `run --account <ADDRESS>\|--all` — правила входящих |
+| `audit` | `list [--action <A>] [--since <T>] [--until <T>] [--account <ADDRESS>] [--user <EMAIL>] [--before <CURSOR>] [--limit <N>]`, `auth-events [--limit <N>] [--offset <N>]` — журнал и события входа |
+| `account` | `list [--user <EMAIL>]`, `create <ADDRESS> --imap-host ... --smtp-host ...` (пароль только со stdin), `set-connection <ADDRESS> ... [--password-stdin\|--smtp-password-stdin]` — ящики, настроенные вручную по IMAP/SMTP, с проверками политики подключений |
+| `rule` | `list [--account <ADDRESS>] [--user <EMAIL>]`, `show <ID>`, `create`, `set <ID>` (JSON правила со stdin или `--file`; `--account`, `--user`), `enable <ID>`, `disable <ID>`, `delete <ID>` (`--user`), `run --account <ADDRESS>\|--all` — правила входящих |
 
 Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
 (`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`
@@ -302,31 +302,40 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 
 - `--json` — ответ в виде JSON, в тех же формах, что отвечает API панели; отказ —
   `{ "error": "...", "code": "..." }` на stdout (ошибки самой командной строки, код 2, — текстом в
-  stderr). С `--json` обёртка не даёт контейнеру терминал
+  stderr; `confirmation_required` — объектом). С `--json` обёртка не даёт контейнеру терминал
   (иначе stderr смешался бы со stdout), поэтому подтверждение тогда — только `--yes`.
-- `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
-  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `domain ready`, `domain ack`,
-  `quarantine pause`, `mailbox deactivate`, `node apply --prefilter`, `agent token issue` при ротации,
-  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`, `queue flush`, `queue delete`, `outage delete`,
-  `spam-quarantine release`, `spam-quarantine learn-spam`, `spam-quarantine delete`, `spam-quarantine node-settings apply`,
-  `invite revoke`, `system-email remove`, `mailbox oauth-reset`, `rule delete`, `rule run`. Без
-  терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
-  `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
+- `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `mailbox deactivate`,
+  `mailbox oauth-reset`, `domain ready`, `domain ack` (без `--created`), `domain restart`,
+  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `quarantine pause`,
+  `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`,
+  `node apply --prefilter`, `agent token issue` при ротации, `agent token revoke`, `queue flush`,
+  `queue delete`, `outage delete`, `spam-quarantine release`, `spam-quarantine learn-spam`,
+  `spam-quarantine delete`, `spam-quarantine node-settings apply`, `invite revoke`,
+  `system-email remove`, `rule delete`, `rule run`. Без терминала (конвейер, скрипт, `--json`) CLI
+  не ждёт ответа, а отказывает с кодом `confirmation_required` (код 2). Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,
   причина (`--reason`) обязательна.
 - `--as <ADMIN_EMAIL>` — записать действие в журнал от имени администратора (адрес или имя
   пользователя ровно одного включённого администратора панели, иначе отказ `admin_not_found`). Без него в журнале исполнитель `cli`; в обоих случаях
   `details.via = "cli"`. Так же подписаны записи заданий, которые CLI поставил (проверка
   соединения, исправление антиспам-политики). `--help` команды говорит, что она пишет в журнал.
-- `--wait [--timeout <SEC>]` у команд, которые ставят задание тенанта (`domain sync`,
-  `internal-relay`, `approve-alias-removal`, `tenant test`, `tenant antispam`,
-  `quarantine release`): дождаться, пока воркер backend выполнит задание (по умолчанию до
-  120 секунд). Сам CLI заданий не выполняет.
+- `--wait [--timeout <SEC>]` у команд, которые ставят задание: тенанта (`domain sync`,
+  `internal-relay`, `approve-alias-removal`, `tenant test`, `tenant antispam`, `tenant poll`,
+  `quarantine release`, `seats check`) и проверки узла (`domain dns-check` без домена,
+  `alerts check`, `outage trace`) — дождаться, пока воркер backend выполнит задание (по умолчанию
+  до 120 секунд, не больше 3600); задание закончилось неудачей или время вышло — код 3. `access sync`
+  ждёт всегда (только `--timeout`). Сам CLI заданий не выполняет.
+- Секреты — только stdin, никогда аргументом: `access token`, `sso add`, `sso set --secret`,
+  `integration microsoft set --secret`, `node config set --api-key-stdin`,
+  `system-email set --password-stdin`, `account create`,
+  `account set-connection --password-stdin|--smtp-password-stdin`. Обёртка передаёт stdin в
+  контейнер целиком.
 
 Коды выхода: `0` — сделано; `1` — отказ (печатается код ошибки API, например
-`domain_not_ready`), или ответ «нет» на вопрос; `2` — ошибка в командной строке или
-подтверждение, которое CLI не смог спросить; `3` — сбой почтового узла, тенанта, задания или
-самой панели. Обёртка возвращает код CLI как есть; её собственные ошибки (параметры, запуск не от
+`domain_not_ready`), ответ «нет» на вопрос (`cancelled`) или `admin_not_found` у `--as`; `2` —
+ошибка в командной строке или подтверждение, которое CLI не смог спросить; `3` — сбой почтового
+узла, тенанта, задания или самой панели (отказ со статусом 5xx, `wait_timeout`,
+`database_unavailable`, `internal_error`). Обёртка возвращает код CLI как есть; её собственные ошибки (параметры, запуск не от
 root, нет установки) — `2`; если docker не может выполнить CLI (контейнер `backend` не запущен,
 образ панели старее CLI — сначала обновите панель, ошибка docker 125-127) — `3`.
 
@@ -378,10 +387,147 @@ sudo /opt/mailexpert/app/scripts/deploy/update.sh latest          # или sha-<
 обновления `update.sh` печатает строки `next:` (шаги вне панели: скрипты почтового узла, образ
 Caddy) и `info:` (справка: что `install.sh` сделал сам и `info: migrations:` — были ли применены
 миграции, по числу записей в `schema_migrations` до и после: если нет, путь назад —
-`install.sh --version <old-sha>` без дампа). Изменённый файл в `backend/migrations/` сам по себе
-новой миграцией не считается: `status.sh --target` пишет `info: migrations:` только когда
-`pending_migrations` не пуст. Запускать его лучше
+`install.sh --version <old-sha>` без дампа; если обновление меняло образ Caddy, строка сначала
+велит вернуть `EDGE_IMAGE` в `/opt/mailexpert/edge/.env` на прежнее значение — `install.sh
+--version` его сам не возвращает, `rollback.sh` и автооткат возвращают). Изменённый файл в
+`backend/migrations/` сам по себе новой миграцией не считается: `status.sh --target` пишет
+`info: migrations:` только когда `pending_migrations` не пуст (называет эти версии), а если схему
+прочитать не удалось — предупреждает, что миграции неизвестны. Запускать его лучше
 отдельно от SSH-сессии, через `systemd-run` — [README.md, раздел 9](README.md).
+
+### 5.1. Включить обновления на боевом сервере
+
+Чтобы кнопка «Обновить» в панели и `update.sh latest` работали, нужно один раз: исполнитель на
+хосте, ruleset на тег `latest` в GitHub, продвинутая сборка. Бэкапы и служба почтового узла —
+рекомендуемые части того же пути.
+
+**1. Хост панели — делает `install.sh` сам.** Отдельной команды включения нет: всё ставит
+`install.sh` с systemd (без `--no-system`), если в установленном коммите есть
+`scripts/deploy/updater.sh`. На новой установке это происходит при первом успешном запуске, на
+существующей — при любом следующем `install.sh` или `update.sh` (он вызывает `install.sh` новой
+версии):
+
+- каталоги спула при каждом запуске (с systemd и без): `<PREFIX>/state/update-spool/request/` —
+  владелец uid процесса backend, `0700`; `<PREFIX>/state/update-spool/result/` — root, `0755`. Uid
+  `install.sh` спрашивает у образа backend и пишет в `<PREFIX>/state/spool-uid`; не получилось —
+  предупреждение «cannot ask ... for its uid» и прежнее значение или 1000. Путь спула для контейнера
+  — `UPDATE_SPOOL_HOST_DIR` в `.env`, его тоже пишет `install.sh`;
+- юниты `/etc/systemd/system/mailexpert-updater.path` (следит за `request/*.json`) и
+  `mailexpert-updater.service` (oneshot от root, `updater.sh --prefix <PREFIX>`, до 4 часов);
+  `.path` включается и перезапускается, `.service` запускается только по запросу;
+- `result/updater.json` (`{"installed": true, "version": ..., "rolledBack": ...}`) — по нему
+  карточка в панели знает, что исполнитель есть. В логе `install.sh` — строка
+  `updater: mailexpert-updater.path watches <PREFIX>/state/update-spool/request`.
+
+С `--no-system` юнитов нет и команды, которая поставила бы их отдельно, тоже нет: карточка пишет
+«механизм обновления не установлен», обновление — только `update.sh` по SSH.
+
+Сети: хосту панели нужен доступ к `github.com` (`git fetch` коммита и тега `latest`) и `ghcr.io`
+(сверка digest и скачивание образов); контейнеру backend — к `api.github.com`: оттуда карточка узнаёт,
+куда указывает `latest` и сколько коммитов до него. Без этого карточка не видит новую сборку.
+
+**2. GitHub — делает владелец репозитория, один раз.** Ruleset на тег `latest`, иначе любой с правом
+push тегов мог бы направить панели на другой коммит (хосты всё равно не ставят `latest` вне `main`
+или старее текущей версии и сверяют digest образов, но решение «что идёт в прод» должно оставаться
+за владельцем). Settings → Rules → Rulesets → New ruleset → **New tag ruleset**:
+
+| Поле | Значение |
+|---|---|
+| Ruleset name | например, `latest channel` |
+| Enforcement status | **Active** |
+| Bypass list → Add bypass | роль **Repository admin** (владелец) и приложение **GitHub Actions** (под ним `promote.yml` двигает тег токеном `GITHUB_TOKEN`), режим **Always allow** |
+| Target tags → Add a target → Include by pattern | `latest` |
+| Tag protections (rules) | **Restrict creations**, **Restrict updates**, **Restrict deletions** |
+
+Проверка: `gh api repos/wyrtensi/MailExpert/rulesets` — в списке есть этот ruleset. `dry_run` тег не
+двигает, поэтому, попал ли workflow в список обхода, покажет только первый **настоящий** запуск
+`promote.yml` после включения ruleset: отказ push тега (`GH013: Repository rule violations`) значит,
+что GitHub Actions в обходе нет. Если GitHub не даёт добавить приложение GitHub Actions в список
+обхода, другого пути в коде нет (workflow двигает тег только токеном `GITHUB_TOKEN`): это решение
+владельца — вопрос к проекту, а не обход ruleset.
+
+**3. Продвинуть сборку в `latest`** (владелец; workflow запускается только с `main`):
+
+```bash
+gh workflow run promote.yml --repo wyrtensi/MailExpert -f sha=<sha или sha-<12>> -f dry_run=true   # только проверка образов
+gh workflow run promote.yml --repo wyrtensi/MailExpert -f sha=<sha или sha-<12>>                   # пусто: голова main
+gh api repos/wyrtensi/MailExpert/git/ref/tags/latest --jq '.object.sha[0:12]'                       # куда указывает latest
+```
+
+Коммит должен быть на `main`, а его образы `sha-<12>` (backend, frontend, edge, tenant-worker) — в
+GHCR, то есть CI на `main` для него зелёный; иначе workflow останавливается, ничего не меняя.
+Workflow ставит образам тег `latest` на тот же digest, проверяет его и последним двигает git-тег.
+
+**4. Проверить исполнитель на хосте.** `status.sh` и `healthcheck.sh` исполнитель не проверяют —
+смотрите сами:
+
+```bash
+systemctl is-active mailexpert-updater.path                    # active
+cat <PREFIX>/state/update-spool/result/updater.json            # "installed":true, version = текущая
+sudo <PREFIX>/app/scripts/deploy/update.sh --check latest      # та же предпроверка, что у кнопки
+ls -t <PREFIX>/state/update-spool/result/ | head -3             # результаты последних запросов (<uuid>.json)
+journalctl -u mailexpert-updater.service -n 50 -o cat           # что исполнитель делал
+```
+
+Лог каждого запроса — `<PREFIX>/state/updater/<uuid>.log` (только root). Если `.path` в состоянии
+`failed` (предел запусков systemd) — `systemctl reset-failed mailexpert-updater.service
+mailexpert-updater.path && systemctl start mailexpert-updater.path` или повторный `install.sh`.
+
+**Что кнопка не ставит и почему.** Цель кнопки — только то, что владелец продвинул, и только вперёд:
+даже скомпрометированный администратор или контейнер backend не может поставить непродвинутую
+версию или откатить сервер. Исполнитель отказывает (сообщение — в карточке), если:
+
+- сервер в режиме standby (после бэкапа переезда) или уже идёт обновление, откат или восстановление;
+- не удался `git fetch` или скачивание тега `latest` (без свежего тега ничего не считается `latest`);
+- панель уже работает на этой версии;
+- версия — не та, на которую сейчас указывает `latest` (любая другая — `update.sh sha-<12>` по SSH);
+- `latest` указывает на коммит вне `main`;
+- версия не новее текущей (не потомок работающего коммита): откат — только `rollback.sh` по SSH;
+- с этой версии уже откатывались (`<PREFIX>/state/rolled-back-version`): её снова предложат только
+  после продвижения более новой сборки;
+- образы `latest` в реестре не совпадают с образами `sha-<12>` (продвижение не доделано или тег
+  сдвинут руками).
+
+Затем `status.sh --target`: любая `problem:` — обновление не начинается (итог `blocked`).
+
+**Откат после кнопки.** Автоматически — только если `update.sh` вышел с кодом 1 (новая версия не
+поднялась), предпроверка прочитала схему и новых миграций не было, и число записанных миграций до и
+после не изменилось: тогда исполнитель возвращает прежний образ Caddy (если обновление его меняло) и
+запускает `install.sh --version <старая>`, ничего не теряется. Во всех остальных случаях — итог
+«не удалось» без отката: откат через дамп теряет данные, записанные после обновления, решает человек
+(`rollback.sh`, [README.md, раздел 10](README.md)).
+
+**5. Бэкапы — рекомендуются.** `update.sh` (и кнопка) перед каждым обновлением делает дамп
+`backups/pre-update-<старая>.dump` (хранятся 3 последних) — на него опирается `rollback.sh`. С ключами
+restic (раздел 2) тот же бэкап уходит снимком `pre-update` во внешнее хранилище; без них
+`update.sh` предупреждает «backups are not configured: only the local dump ... is made» и
+продолжает: откат работает, но при потере сервера копии нет.
+
+**6. Почтовый узел — служба узла.** Чтобы скрипты узла и mailcow обновлялись вслед за панелью (та же
+кнопка, задание `update` на коммит панели), подключите службу узла
+([mail-node.md, раздел 7а](mail-node.md)):
+
+```bash
+# на хосте панели: токен — в новый файл 0600 (файл не должен существовать)
+sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh agent token issue --out /root/mailexpert-agent-token --yes
+# перенести файл на узел (scp), на панели удалить: shred -u /root/mailexpert-agent-token
+# на узле, в клоне /opt/mailexpert-node-src:
+sudo scripts/deploy/mail-node/setup.sh --panel-url https://<APP_HOST> --agent-token-file /root/mailexpert-agent-token
+sudo shred -u /root/mailexpert-agent-token
+systemctl is-active mailexpert-node-agent
+```
+
+Панель за Cloudflare Access — в тот же файл ещё service token Access (там же, в разделе 7а). Условия,
+без которых задание `update` откажет, не тронув узел: бэкап узла настроен (ключи restic в
+`/etc/mailexpert-node/node.env`, иначе `backup_not_configured`), `origin` клона узла — официальный
+репозиторий (`untrusted_origin`), в клоне нет изменённых отслеживаемых файлов (`local_changes`), коммит
+панели на `main` и не старее скриптов узла. Служба версии без задания `update` в первый раз
+обновляется вручную (раздел 7а, «Первый раз — вручную»).
+
+mailcow служба двигает только до версии из `deploy/mailcow-version` выпуска и только пока голова
+`master` официального mailcow — именно этот коммит: штатный `update.sh` mailcow умеет доводить лишь до
+головы `master`. Вышел более новый mailcow — шаг пропускается, mailcow остаётся на своей версии до
+выпуска MailExpert, который подтвердит новую; назад mailcow не откатывается.
 
 ### Откат обновления
 
