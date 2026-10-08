@@ -13,6 +13,26 @@ const router = Router();
 router.use(requireAuth);
 router.param('id', uuidParam('id'));
 
+const NOT_FOUND = { error: 'Contact not found', code: 'contact_not_found' };
+const EXISTS = { error: 'A contact with that email already exists', code: 'contact_exists' };
+
+// The fields the form sends, checked before they reach the vCard builder (a number or a null
+// entry there threw a TypeError, a 500): the text fields are strings, emails and phones are
+// lists of { value, type } with string values. Undefined fields are left alone (PATCH).
+const TEXT_FIELDS = ['displayName', 'firstName', 'lastName', 'organization', 'notes'];
+const isText = (v) => v === undefined || v === null || typeof v === 'string';
+const isEntry = (e) => !!e && typeof e === 'object' && !Array.isArray(e) && isText(e.value) && isText(e.type);
+function contactFieldError(body) {
+  for (const name of ['emails', 'phones']) {
+    const list = body[name];
+    if (list !== undefined && (!Array.isArray(list) || !list.every(isEntry))) {
+      return `${name} must be a list of { value, type } entries`;
+    }
+  }
+  const bad = TEXT_FIELDS.find((name) => !isText(body[name]));
+  return bad ? `${bad} must be text` : null;
+}
+
 // In-memory cache for Gravatar lookups (hash -> { buf, type } hit or { miss:true }).
 // Bounded + TTL'd so we don't re-hit Gravatar for every list render and so the number of
 // third-party requests stays minimal (a privacy consideration — see the /gravatar route).
@@ -189,7 +209,7 @@ router.get('/:id', async (req, res) => {
        WHERE c.id = $1`,
       [req.params.id]
     );
-    if (!result.rows.length) return res.status(404).json({ error: 'Contact not found' });
+    if (!result.rows.length) return res.status(404).json(NOT_FOUND);
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Contact get error:', err);
@@ -206,7 +226,7 @@ router.get('/:id/letters', async (req, res) => {
   try {
     const { limit = CONTACT_LETTERS_DEFAULT_LIMIT, offset = 0 } = req.query;
     const result = await contactLetters(req.params.id, { limit, offset });
-    if (!result) return res.status(404).json({ error: 'Contact not found' });
+    if (!result) return res.status(404).json(NOT_FOUND);
     res.json(result);
   } catch (err) {
     console.error('Contact letters error:', err);
@@ -222,17 +242,17 @@ router.post('/', async (req, res) => {
     organization, notes,
   } = req.body || {};
 
-  if (!Array.isArray(emails)) return res.status(400).json({ error: 'emails must be an array' });
-  if (!Array.isArray(phones)) return res.status(400).json({ error: 'phones must be an array' });
+  const fieldError = contactFieldError(req.body || {});
+  if (fieldError) return res.status(400).json({ error: fieldError, code: 'invalid_contact_field' });
   let urls;
-  try { urls = normalizeContactUrls(rawUrls); } catch (err) { return res.status(400).json({ error: err.message }); }
+  try { urls = normalizeContactUrls(rawUrls); } catch (err) { return res.status(400).json({ error: err.message, code: 'invalid_contact_url' }); }
 
   const primaryEmail = emails[0]?.value
     ? emails[0].value.toLowerCase().trim()
     : null;
 
   if (!displayName && !primaryEmail) {
-    return res.status(400).json({ error: 'A name or email address is required' });
+    return res.status(400).json({ error: 'A name or email address is required', code: 'contact_name_required' });
   }
 
   try {
@@ -260,7 +280,7 @@ router.post('/', async (req, res) => {
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'A contact with that email already exists' });
+    if (err.code === '23505') return res.status(409).json(EXISTS);
     console.error('Contact create error:', err);
     res.status(500).json({ error: 'Failed to create contact' });
   }
@@ -273,16 +293,16 @@ router.patch('/:id', async (req, res) => {
     emails, phones, urls: rawUrls, organization, notes,
   } = req.body || {};
 
-  if (emails !== undefined && !Array.isArray(emails)) return res.status(400).json({ error: 'emails must be an array' });
-  if (phones !== undefined && !Array.isArray(phones)) return res.status(400).json({ error: 'phones must be an array' });
+  const fieldError = contactFieldError(req.body || {});
+  if (fieldError) return res.status(400).json({ error: fieldError, code: 'invalid_contact_field' });
   let urls;
   if (rawUrls !== undefined) {
-    try { urls = normalizeContactUrls(rawUrls); } catch (err) { return res.status(400).json({ error: err.message }); }
+    try { urls = normalizeContactUrls(rawUrls); } catch (err) { return res.status(400).json({ error: err.message, code: 'invalid_contact_url' }); }
   }
 
   try {
     const cur = await query('SELECT * FROM contacts WHERE id = $1', [req.params.id]);
-    if (!cur.rows.length) return res.status(404).json({ error: 'Contact not found' });
+    if (!cur.rows.length) return res.status(404).json(NOT_FOUND);
     const c = cur.rows[0];
 
     const newEmails    = emails    !== undefined ? emails    : c.emails;
@@ -333,7 +353,7 @@ router.patch('/:id', async (req, res) => {
 
     res.json(result.rows[0]);
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'A contact with that email already exists' });
+    if (err.code === '23505') return res.status(409).json(EXISTS);
     console.error('Contact update error:', err);
     res.status(500).json({ error: 'Failed to update contact' });
   }
@@ -343,7 +363,7 @@ router.patch('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const result = await query('DELETE FROM contacts WHERE id = $1 RETURNING id', [req.params.id]);
-    if (!result.rows.length) return res.status(404).json({ error: 'Contact not found' });
+    if (!result.rows.length) return res.status(404).json(NOT_FOUND);
     res.json({ ok: true });
   } catch (err) {
     console.error('Contact delete error:', err);

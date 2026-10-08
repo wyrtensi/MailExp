@@ -62,7 +62,16 @@ describe('rules belong to one mailbox', () => {
 
   it('answers 404 for a mailbox that does not exist', async () => {
     query.mockImplementation(async () => ({ rows: [] }));
-    expect((await send('POST', '/', { ...RULE, accountId: MAILBOX })).status).toBe(404);
+    expect(await send('POST', '/', { ...RULE, accountId: MAILBOX })).toMatchObject({ status: 404, body: { code: 'account_not_found' } });
+  });
+
+  // Every refusal carries its code next to the text, so the screens can translate it.
+  it('answers each refusal with its code', async () => {
+    expect(await send('POST', '/', { ...RULE, accountId: 'nope' })).toMatchObject({ status: 400, body: { code: 'invalid_account' } });
+    expect(await send('POST', '/', { ...RULE, accountId: MAILBOX, conditions: 'x' })).toMatchObject({ status: 400, body: { code: 'not_arrays' } });
+    expect(await send('POST', '/', { ...RULE, accountId: MAILBOX, actions: [{ type: 'forward', value: 'not an address' }] })).toMatchObject({ status: 400, body: { code: 'invalid_action' } });
+    query.mockImplementation(async (sql) => (sql.startsWith('DELETE FROM inbox_rules') ? { rows: [] } : { rows: [{ id: MAILBOX }] }));
+    expect(await send('DELETE', '/11111111-1111-4111-8111-111111111111')).toMatchObject({ status: 404, body: { code: 'not_found', error: 'Rule not found' } });
   });
 
   it('stores the mailbox, the author and the move action', async () => {
