@@ -580,9 +580,12 @@ export async function handleReleaseJob(job, ctx, { now = Date.now() } = {}) {
     const failure = err instanceof TenantError
       ? { code: err.code, message: String(err.message ?? '').slice(0, TEXT_MAX) }
       : { code: 'tenant_failed', message: 'The release run failed; see the server log' };
-    if (!(err instanceof TenantError)) console.error(`Phish release run failed: ${err?.code || err?.name || 'error'}`);
+    if (!(err instanceof TenantError)) {
+      console.error(`Phish release run failed (job ${jobId}): ${err?.code || err?.name || 'error'}: ${String(err?.message ?? '').slice(0, TEXT_MAX)}`);
+    }
     await saveTenantState({ phishRelease: { at, ok: false, error: failure } });
-    return { error: failure.code };
+    // The job ends failed with the reason (jobs show, the panel's job card); the next slot runs again.
+    throw new JobError(failure.message || failure.code, { outcome: 'fail', code: failure.code });
   } finally {
     await unlockRun(jobId);
   }
