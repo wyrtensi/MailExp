@@ -70,6 +70,84 @@ describe('account order preferences', () => {
     assert.deepEqual(saved, [{ pinAccount: 'c' }, { pinAccount: 'a' }]);
   });
 
+  it('a pin the server refused is taken back, other pins stay, and the person is told', async () => {
+    const realSave = api.savePreferences;
+    useStore.setState({ notifications: [] });
+    useStore.getState().pinAccount('c');
+    api.savePreferences = (prefs) => { saved.push(prefs); return Promise.reject(new Error('offline')); };
+    try {
+      useStore.getState().pinAccount('a');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      api.savePreferences = realSave;
+    }
+    assert.deepEqual(useStore.getState().pinnedAccounts, ['c']);
+    const [note] = useStore.getState().notifications;
+    assert.equal(note?.type, 'error');
+    assert.equal(note?.title, 'Setting not saved');
+  });
+
+  it('an unpin the server refused puts the pin back where it was', async () => {
+    const realSave = api.savePreferences;
+    useStore.setState({ notifications: [] });
+    useStore.getState().setPinnedAccounts(['c', 'a', 'b']);
+    api.savePreferences = (prefs) => { saved.push(prefs); return Promise.reject(new Error('offline')); };
+    try {
+      useStore.getState().unpinAccount('a');
+      assert.deepEqual(useStore.getState().pinnedAccounts, ['c', 'b']);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      api.savePreferences = realSave;
+    }
+    assert.deepEqual(useStore.getState().pinnedAccounts, ['c', 'a', 'b']);
+    assert.equal(useStore.getState().notifications[0]?.title, 'Setting not saved');
+  });
+
+  it('a late failure of an older pin request does not undo the newer ones', async () => {
+    const realSave = api.savePreferences;
+    const answers = [];
+    api.savePreferences = (prefs) => {
+      saved.push(prefs);
+      return new Promise((resolve, reject) => answers.push({ resolve, reject }));
+    };
+    try {
+      useStore.getState().pinAccount('a'); // slow, will fail
+      useStore.getState().unpinAccount('a'); // succeeds
+      useStore.getState().pinAccount('a'); // succeeds
+      answers[1].resolve();
+      answers[2].resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      answers[0].reject(new Error('timeout'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      api.savePreferences = realSave;
+    }
+    assert.deepEqual(useStore.getState().pinnedAccounts, ['a']);
+  });
+
+  it('a late failure of an older unpin does not put back a pin removed again since', async () => {
+    const realSave = api.savePreferences;
+    const answers = [];
+    useStore.getState().setPinnedAccounts(['a']);
+    api.savePreferences = (prefs) => {
+      saved.push(prefs);
+      return new Promise((resolve, reject) => answers.push({ resolve, reject }));
+    };
+    try {
+      useStore.getState().unpinAccount('a'); // slow, will fail
+      useStore.getState().pinAccount('a'); // succeeds
+      useStore.getState().unpinAccount('a'); // succeeds
+      answers[1].resolve();
+      answers[2].resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      answers[0].reject(new Error('timeout'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      api.savePreferences = realSave;
+    }
+    assert.deepEqual(useStore.getState().pinnedAccounts, []);
+  });
+
   it('unpinning sends the one removal, never the whole list', () => {
     useStore.getState().setPinnedAccounts(['a', 'b']);
     useStore.getState().unpinAccount('a');

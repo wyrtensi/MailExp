@@ -6,6 +6,8 @@ import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import { newAiAction, AI_ACTION_LIMITS } from '../aiActions.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
+import { apiErrorKey, apiErrorText } from '../utils/apiErrors.js';
+import { saveConfirmedSwitch } from '../utils/confirmedSwitch.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { isValidFromValue } from '../utils/defaultSender.js';
 import {
@@ -35,6 +37,7 @@ import AccessSyncPanel from './AccessSyncPanel.jsx';
 import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
+import { adminUserErrorText } from '../utils/adminUsers.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
@@ -114,6 +117,9 @@ function isMicrosoftImapHost(host) {
   return h.includes('.outlook.com') || h.includes('office365.com') || h.includes('.hotmail.com') || h.includes('.live.com');
 }
 
+// A rule screen's own meaning of a shared code (not_found is also a panel update refusal).
+const RULE_ERROR_KEYS = { not_found: 'admin.rules.errorNotFound' };
+
 function AccountForm({ initial, onSave, onCancel }) {
   const { t } = useTranslation();
   const { categorizationEnabled, user } = useStore();
@@ -168,7 +174,8 @@ function AccountForm({ initial, onSave, onCancel }) {
     try {
       await onSave(form);
     } catch (err) {
-      setError(err.message);
+      // connection_admin_only, a disabled mailbox, a bad id: explained; anything else keeps its text.
+      setError(apiErrorText(err, t));
       setSaving(false);
     }
   };
@@ -710,8 +717,16 @@ export function AccountsTab() {
   };
 
   const handleReconnect = async (id) => {
-    await api.reconnectAccount(id);
-    updateAccount(id, { sync_error: null });
+    try {
+      await api.reconnectAccount(id);
+      updateAccount(id, { sync_error: null });
+    } catch (err) {
+      addNotification({
+        type: 'error',
+        title: t('common.actionFailed.reconnect'),
+        body: err?.code === 'mailbox_disabled' ? t('common.mailboxDisabled') : err.message,
+      });
+    }
   };
 
   const handleReindex = async (id) => {
@@ -812,7 +827,7 @@ export function AccountsTab() {
       const folders = await api.getFolders(account.id);
       setAvailableFolders(folders);
     } catch (err) {
-      addNotification({ type: 'error', title: 'Could not load folders', body: err.message });
+      addNotification({ type: 'error', title: t('common.actionFailed.folders'), body: err.message });
     } finally {
       setFoldersLoading(false);
     }
@@ -2854,7 +2869,7 @@ function IntegrationsTab() {
       setTodoistConnected(true);
       setTdToken('');
     } catch (err) {
-      setTdError(err.message);
+      setTdError(apiErrorText(err, t));
     } finally {
       setTdConnecting(false);
     }
@@ -2868,7 +2883,7 @@ function IntegrationsTab() {
       setTdConnected(false);
       setTodoistConnected(false);
     } catch (err) {
-      setTdError(err.message);
+      setTdError(apiErrorText(err, t));
     } finally {
       setTdDisconnecting(false);
     }
@@ -5060,6 +5075,10 @@ function UsersAndInvitesPanel() {
   const [copiedId, setCopiedId] = useState(null);
   const [copyFailedId, setCopyFailedId] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  // A failed action on a user, the registration switch or an invite, shown above the list.
+  const [actionError, setActionError] = useState('');
+  // The first load's failure, an Error explained at render.
+  const [usersLoadError, setUsersLoadError] = useState(null);
 
   useEffect(() => {
     Promise.all([
@@ -5072,7 +5091,7 @@ function UsersAndInvitesPanel() {
       setRegOpen(settingsData.settings.registration_open === 'true');
       setInvites(invitesData.invites);
       setInviteTotal(invitesData.total);
-    }).catch(console.error).finally(() => setLoading(false));
+    }).catch((err) => setUsersLoadError(err)).finally(() => setLoading(false));
   }, []);
 
   const handleLoadMoreUsers = async () => {
@@ -5082,7 +5101,7 @@ function UsersAndInvitesPanel() {
       setUsers(prev => [...prev, ...data.users]);
       setUserTotal(data.total);
     } catch (err) {
-      console.error(err);
+      setActionError(adminUserErrorText(err, t));
     } finally {
       setUsersLoadingMore(false);
     }
@@ -5095,17 +5114,31 @@ function UsersAndInvitesPanel() {
       setInvites(prev => [...prev, ...data.invites]);
       setInviteTotal(data.total);
     } catch (err) {
-      console.error(err);
+      setActionError(adminUserErrorText(err, t));
     } finally {
       setInvitesLoadingMore(false);
     }
   };
 
-  const handleToggleAdmin = async (u) => {
+  // Runs a user, registration or invite action; a refusal (the last admin, a bootstrap admin) is
+  // shown instead of the click silently doing nothing.
+  const runAction = async (action) => {
+    setActionError('');
+    try {
+      await action();
+    } catch (err) {
+      setActionError(adminUserErrorText(err, t));
+    }
+  };
+
+  // A refusal inside the confirm dialog: the code explained there, not the server's English text.
+  const explainUserError = (err) => new Error(adminUserErrorText(err, t), { cause: err });
+
+  const handleToggleAdmin = (u) => runAction(async () => {
     const newVal = !u.isAdmin;
     await api.admin.updateUser(u.id, { isAdmin: newVal });
     setUsers(us => us.map(x => x.id === u.id ? { ...x, isAdmin: newVal } : x));
-  };
+  });
 
   const handleDeleteUser = (u) => {
     setConfirmDialog({
@@ -5113,7 +5146,7 @@ function UsersAndInvitesPanel() {
       message: t('admin.users.deleteConfirmBody'),
       confirmLabel: t('admin.users.deleteConfirmLabel'),
       onConfirm: async () => {
-        await api.admin.deleteUser(u.id);
+        await api.admin.deleteUser(u.id).catch((err) => { throw explainUserError(err); });
         setUsers(us => us.filter(x => x.id !== u.id));
       },
     });
@@ -5125,17 +5158,17 @@ function UsersAndInvitesPanel() {
       message: t('admin.users.disable2faConfirmBody'),
       confirmLabel: t('admin.users.disable2faConfirmLabel'),
       onConfirm: async () => {
-        await api.admin.disableUserTotp(u.id);
+        await api.admin.disableUserTotp(u.id).catch((err) => { throw explainUserError(err); });
         setUsers(us => us.map(x => x.id === u.id ? { ...x, totpEnabled: false } : x));
       },
     });
   };
 
-  const handleToggleReg = async () => {
+  const handleToggleReg = () => runAction(async () => {
     const newVal = !regOpen;
     await api.admin.updateSettings({ registration_open: newVal });
     setRegOpen(newVal);
-  };
+  });
 
   const handleSendInvite = async () => {
     if (!inviteEmail.includes('@')) return;
@@ -5161,10 +5194,10 @@ function UsersAndInvitesPanel() {
     }
   };
 
-  const handleRevokeInvite = async (id) => {
+  const handleRevokeInvite = (id) => runAction(async () => {
     await api.admin.deleteInvite(id);
     setInvites(inv => inv.filter(i => i.id !== id));
-  };
+  });
 
   const copyInviteUrl = async (url, id) => {
     const { ok } = await copyToClipboard(url);
@@ -5190,6 +5223,13 @@ function UsersAndInvitesPanel() {
       <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 16 }}>
         {t('admin.users.description')}
       </div>
+
+      {(actionError || usersLoadError) && (
+        <div role="alert" style={{
+          padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 13,
+          background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', color: 'var(--red)',
+        }}>{usersLoadError ? t('admin.users.loadFailed', { message: usersLoadError.message || t('common.actionFailed.body') }) : actionError}</div>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 28 }}>
         {users.map(u => (
@@ -6063,6 +6103,9 @@ function RulesTab() {
   const [runningRules, setRunningRules] = useState(false);
   const [runResult, setRunResult] = useState(null);
   const [runError, setRunError] = useState('');
+  // A rule switched, deleted or reordered that the server refused, or the list that did not load.
+  const [ruleActionError, setRuleActionError] = useState('');
+  const [rulesLoadError, setRulesLoadError] = useState(null);
 
   // Drag-and-drop state for rules reorder
   const [ruleDragIdx, setRuleDragIdx] = useState(null);
@@ -6080,7 +6123,7 @@ function RulesTab() {
       // via the mailexpert:rules-run-complete window event below.
       await api.runRules();
     } catch (err) {
-      setRunError(err.message || t('admin.rules.runError'));
+      setRunError(apiErrorText(err, t, { keys: RULE_ERROR_KEYS, fallback: t('admin.rules.runError') }));
       setRunningRules(false);
     }
   }
@@ -6099,7 +6142,7 @@ function RulesTab() {
   useEffect(() => {
     api.getRules()
       .then(data => { setRules(data); setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch((err) => { setRulesLoadError(err); setLoading(false); });
   }, []);
 
   useEffect(() => {
@@ -6187,14 +6230,20 @@ function RulesTab() {
         stopProcessing: rule.stop_processing,
       });
       setRules(prev => prev.map(r => r.id === rule.id ? saved : r));
-    } catch { /* intentional */ }
+      setRuleActionError('');
+    } catch (err) {
+      setRuleActionError(t('admin.rules.errorToggle', { message: apiErrorText(err, t, { keys: RULE_ERROR_KEYS }) }));
+    }
   }
 
   async function handleDelete(id) {
     try {
       await api.deleteRule(id);
       setRules(prev => prev.filter(r => r.id !== id));
-    } catch { /* intentional */ }
+      setRuleActionError('');
+    } catch (err) {
+      setRuleActionError(t('admin.rules.errorDelete', { message: apiErrorText(err, t, { keys: RULE_ERROR_KEYS }) }));
+    }
     setConfirmDelete(null);
   }
 
@@ -6238,8 +6287,12 @@ function RulesTab() {
         setRules(prev => prev.map(r => r.id === formId ? updated : r));
       }
       closeForm();
-    } catch {
-      setFormError(t('admin.rules.errorSave'));
+    } catch (err) {
+      // The server says what is wrong with the rule (a folder that does not exist, an empty
+      // condition): keep that rather than a bare "failed".
+      const key = apiErrorKey(err?.code, RULE_ERROR_KEYS);
+      if (key) setFormError(t(key));
+      else setFormError(err?.message ? t('admin.rules.errorSaveReason', { message: err.message }) : t('admin.rules.errorSave'));
     } finally {
       setFormSaving(false);
     }
@@ -6253,7 +6306,10 @@ function RulesTab() {
 
     setRules(reordered);
 
-    api.reorderRules(reordered.map(r => r.id)).catch(() => { setRules(copy); })
+    api.reorderRules(reordered.map(r => r.id)).catch((err) => {
+      setRules(copy);
+      setRuleActionError(t('admin.rules.errorReorder', { message: apiErrorText(err, t, { keys: RULE_ERROR_KEYS }) }));
+    });
   }
 
   function setCondition(idx, key, val) {
@@ -6629,6 +6685,11 @@ function RulesTab() {
       {runError && (
         <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>{runError}</div>
       )}
+      {(ruleActionError || rulesLoadError) && (
+        <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>
+          {ruleActionError || t('admin.rules.errorLoad', { message: apiErrorText(rulesLoadError, t) })}
+        </div>
+      )}
 
       {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{t('common.loading')}</div>}
 
@@ -6771,18 +6832,22 @@ function BlockListTab() {
       const entry = await api.addToBlockList(selectedAccountId, email);
       setEntries(prev => [entry, ...prev]);
       setNewEmail('');
-    } catch {
-      setError(t('admin.blockList.errorAdd'));
+    } catch (err) {
+      // A mailbox that is gone or not valid is named; anything else stays the general failure.
+      setError(apiErrorKey(err?.code) ? apiErrorText(err, t) : t('admin.blockList.errorAdd'));
     } finally {
       setAdding(false);
     }
   }
 
   async function handleRemove(id) {
+    setError('');
     try {
       await api.removeFromBlockList(id);
       setEntries(prev => prev.filter(e => e.id !== id));
-    } catch { /* intentional */ }
+    } catch (err) {
+      setError(apiErrorKey(err?.code) ? apiErrorText(err, t) : t('admin.blockList.errorRemove'));
+    }
   }
 
   return (
@@ -7700,6 +7765,10 @@ function SecurityTab() {
   const [protectionSaving, setProtectionSaving] = useState(false);
   const [protectionSaved, setProtectionSaved] = useState(false);
   const [protectionError, setProtectionError] = useState('');
+  // A mail server policy switch the server did not save: the switch goes back and this says so.
+  const [mailPolicyError, setMailPolicyError] = useState('');
+  // The mail server policy values the server last confirmed: a refused switch goes back to these.
+  const mailPolicyConfirmed = useRef({ allow_private_hosts: false, allow_insecure_tls: false, allow_nonstandard_ports: false });
 
   // Admin-only: self-hosted mail server policy
   const [allowPrivateHosts, setAllowPrivateHosts] = useState(false);
@@ -7731,9 +7800,14 @@ function SecurityTab() {
         .then(d => {
           if (d.settings.auth_max_attempts) setMaxAttempts(parseInt(d.settings.auth_max_attempts));
           if (d.settings.auth_window_minutes) setWindowMins(parseInt(d.settings.auth_window_minutes));
-          setAllowPrivateHosts(d.settings.allow_private_hosts === 'true');
-          setAllowInsecureTls(d.settings.allow_insecure_tls === 'true');
-          setAllowNonstandardPorts(d.settings.allow_nonstandard_ports === 'true');
+          mailPolicyConfirmed.current = {
+            allow_private_hosts: d.settings.allow_private_hosts === 'true',
+            allow_insecure_tls: d.settings.allow_insecure_tls === 'true',
+            allow_nonstandard_ports: d.settings.allow_nonstandard_ports === 'true',
+          };
+          setAllowPrivateHosts(mailPolicyConfirmed.current.allow_private_hosts);
+          setAllowInsecureTls(mailPolicyConfirmed.current.allow_insecure_tls);
+          setAllowNonstandardPorts(mailPolicyConfirmed.current.allow_nonstandard_ports);
           if (d.settings.mfa_enforcement) setMfaEnforcement(d.settings.mfa_enforcement);
           if (d.settings.mfa_device_trust) setMfaDeviceTrust(d.settings.mfa_device_trust);
           if (d.settings.internal_auth_disabled === 'true') {
@@ -7785,8 +7859,16 @@ function SecurityTab() {
     }
   };
 
-  const toggleMailPolicy = async (key, newVal) => {
-    await api.admin.updateSettings({ [key]: newVal }).catch(console.error);
+  const toggleMailPolicy = async (key, newVal, set) => {
+    setMailPolicyError('');
+    try {
+      await saveConfirmedSwitch({
+        key, value: newVal, confirmed: mailPolicyConfirmed.current, apply: set,
+        save: () => api.admin.updateSettings({ [key]: newVal }),
+      });
+    } catch (err) {
+      setMailPolicyError(t('admin.security.mailPolicySaveFailed', { message: err.message || t('common.actionFailed.body') }));
+    }
   };
 
   const saveMfaSettings = async () => {
@@ -7981,7 +8063,7 @@ function SecurityTab() {
             <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14 }}>
               <button
                 type="button"
-                onClick={() => { const newVal = !val; set(newVal); toggleMailPolicy(key, newVal); }}
+                onClick={() => toggleMailPolicy(key, !val, set)}
                 role="switch" aria-checked={!!val} aria-label={label}
                 style={{
                   width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
@@ -8000,6 +8082,7 @@ function SecurityTab() {
               </div>
             </div>
           ))}
+          {mailPolicyError && <div role="alert" style={{ fontSize: 12, color: 'var(--red)' }}>{mailPolicyError}</div>}
         </div>
       )}
 

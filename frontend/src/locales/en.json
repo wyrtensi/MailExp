@@ -27,7 +27,37 @@
     "mailboxBusy": "The mailbox is busy, try again in a few seconds",
     "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.",
     "movePending": "The letter is still being moved, try again in a few seconds",
-    "close": "Close"
+    "close": "Close",
+    "actionFailed": {
+      "body": "The request to the server failed. Check the connection and try again.",
+      "star": "Star not changed",
+      "read": "Read status not changed",
+      "category": "Category not changed",
+      "sync": "Sync did not start",
+      "folders": "Could not load folders",
+      "openDraft": "Could not open the draft for editing",
+      "markAllRead": "Could not mark all as read",
+      "syncFolders": "Folder list not refreshed",
+      "reconnect": "Could not reconnect the mailbox",
+      "compose": "Could not open the reply or forward",
+      "openLetter": "Could not open the letter"
+    },
+    "mailboxDisabled": "This mailbox is turned off. Turn it on in its settings to connect.",
+    "prefSaveFailed": {
+      "title": "Setting not saved",
+      "body": "The change works on this device for now, but the server did not save it, so it may be undone after a reload. Check the connection and change it again.",
+      "pinBody": "The server did not save the pin, so the mailbox order may change after a reload. Try again."
+    },
+    "apiError": {
+      "invalidId": "The link or item is not valid. Reload the page and try again.",
+      "invalidJson": "The request was damaged on the way. Reload the page and try again.",
+      "requestTooLarge": "Too large to send: attachments may be 25 MiB in total at most.",
+      "internalError": "Something went wrong on the server. Try again; if it repeats, tell the administrator.",
+      "invalidAccount": "The mailbox is not valid. Reload the page and pick it again.",
+      "accountNotFound": "This mailbox no longer exists. Reload the page to see the current list.",
+      "accountRequired": "Choose a mailbox first.",
+      "draftDeleteFailed": "The draft could not be deleted on the mail server. Try again."
+    }
   },
   "login": {
     "google": {
@@ -193,7 +223,19 @@
       "aiApply": "Apply",
       "aiDismiss": "Dismiss",
       "aiGenerating": "Generating…",
-      "aiError": "AI error: {{message}}"
+      "aiError": "AI error: {{message}}",
+      "bold": "Bold",
+      "italic": "Italic",
+      "underline": "Underline",
+      "strikethrough": "Strikethrough",
+      "alignLeft": "Align left",
+      "alignCenter": "Align center",
+      "alignRight": "Align right",
+      "bulletList": "Bulleted list",
+      "numberedList": "Numbered list",
+      "htmlSource": "Edit HTML source",
+      "richText": "Back to rich text",
+      "removeLink": "Remove link"
     },
     "priority": "Priority",
     "priorityHigh": "High priority",
@@ -207,7 +249,11 @@
     "signatureHint": "Added at the end of the letter. In the plain-text copy a \"-- \" line goes before it, so mail programs recognise the signature and leave it out of quotes in replies.",
     "priorityHint": "Marks the letter as important or unimportant (X-Priority and Importance headers). Outlook and Thunderbird show the mark; Gmail does not.",
     "readOnlyOption": "read-only",
-    "disabledOption": "disabled"
+    "disabledOption": "disabled",
+    "draftSaveFailed": "Draft not saved",
+    "draftSaveFailedBody": "Check the connection and try saving again.",
+    "attachReadFailed": "Could not read the file, it was not attached",
+    "draftDeleteFailed": "Discarded draft is still in Drafts"
   },
   "message": {
     "find": {
@@ -541,7 +587,9 @@
           "other": "Another status"
         }
       }
-    }
+    },
+    "downloadAttachmentFailed": "Could not download the attachment",
+    "bodyFetchFailed": "Could not load the message text from the mail server. Try again."
   },
   "messageList": {
     "search": "Search…",
@@ -687,7 +735,13 @@
     "countFiltered": "Cached messages matching this filter",
     "countUnknown": "The mailbox count is not available yet",
     "countStale": "The last known mailbox count; waiting for the server to refresh it",
-    "countServer": "Messages reported by the mail server"
+    "countServer": "Messages reported by the mail server",
+    "empty": {
+      "inboxTitle": "Inbox is empty",
+      "inboxBody": "You're all caught up",
+      "folderTitle": "Nothing here",
+      "folderBody": "This folder has no messages"
+    }
   },
   "lockScreen": {
     "subtitle": "Enter your PIN to unlock",
@@ -818,7 +872,9 @@
       "copyRaw": "Copy raw",
       "copied": "Copied",
       "loading": "Loading headers…",
-      "noHeaders": "No headers available"
+      "noHeaders": "No headers available",
+      "loadFailed": "Could not load the headers: {{message}}",
+      "openFailed": "Could not open the headers"
     },
     "folders": {
       "back": "Move to folder",
@@ -947,7 +1003,21 @@
     }
   },
   "notifications": {
-    "newMessage": "New message"
+    "newMessage": "New message",
+    "desktop": {
+      "updateReady": "Update ready",
+      "updateDownloaded": "MailExpert downloaded the update.",
+      "updateVerified": "MailExpert downloaded and verified the update.",
+      "updateVerifiedCommand": "MailExpert downloaded and verified the update. Install it from a terminal with:\n{{command}}",
+      "install": "Install",
+      "copyAndQuit": "Copy & Quit",
+      "installFailed": "Install failed",
+      "installFailedBody": "The update was downloaded, but the installer could not be started. Restart MailExpert and try again.",
+      "copyFailed": "Copy failed",
+      "copyFailedBody": "The update command could not be copied. Restart MailExpert and try again.",
+      "syncStarted": "Sync started",
+      "syncStartedBody": "MailExpert is checking for new mail."
+    }
   },
   "signatureEditor": {
     "bold": "Bold (Ctrl+B)",
@@ -1090,7 +1160,18 @@
       "running": "Running…",
       "runResult": "Done — {{matched}} of {{processed}} messages matched",
       "runStarted": "Running in the background — you'll be notified when it finishes",
-      "runError": "Failed to run rules"
+      "runError": "Failed to run rules",
+      "errorSaveReason": "Rule not saved: {{message}}",
+      "errorToggle": "Could not switch the rule: {{message}}",
+      "errorDelete": "Could not delete the rule: {{message}}",
+      "errorReorder": "Rule order not saved: {{message}}",
+      "errorLoad": "Could not load rules: {{message}}",
+      "errorInvalid": "The rule could not be read. Reload the page and set it up again.",
+      "errorInvalidCondition": "One of the conditions is incomplete: fill in its value (and the header name for a header condition).",
+      "errorInvalidAction": "One of the actions is incomplete: check its folder, address or category.",
+      "errorMoveFolderNotFound": "The destination folder does not exist in this mailbox. Choose another folder.",
+      "errorAlreadyRunning": "Rules are already running. Wait for that run to finish.",
+      "errorNotFound": "This rule no longer exists. Reload the page to see the current rules."
     },
     "blockList": {
       "description": "Emails from blocked senders are automatically moved to trash.",
@@ -1098,7 +1179,8 @@
       "emailPlaceholder": "sender@example.com",
       "addButton": "Block",
       "removeButton": "Remove",
-      "errorAdd": "Failed to add to block list"
+      "errorAdd": "Failed to add to block list",
+      "errorRemove": "Could not remove the sender from the block list. Try again."
     },
     "accounts": {
       "title": "Email accounts",
@@ -1300,7 +1382,9 @@
         "errorAlready": "This mailbox is deactivated already.",
         "errorNot": "This mailbox is not deactivated.",
         "errorDeletionPending": "This mailbox is pending deletion: cancel the deletion first."
-      }
+      },
+      "errorConnectionAdminOnly": "Only an administrator can change the server settings of a mailbox. Ask an administrator.",
+      "errorOAuthMailboxNotFound": "This mailbox does not sign in with Google or Microsoft, so there is nothing to reset."
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -1590,7 +1674,8 @@
       "mfaSsoLockedNotice": "MFA enforcement is not applicable when password login is disabled. Users authenticate via SSO, which manages its own MFA requirements.",
       "recoveryEmailTitle": "Recovery email",
       "recoveryEmailDesc": "Receive a sign-in code by email if you lose access to your authenticator app.",
-      "recoveryEmailPh": "your@email.com"
+      "recoveryEmailPh": "your@email.com",
+      "mailPolicySaveFailed": "The setting was not saved: {{message}}"
     },
     "privacy": {
       "title": "Privacy",
@@ -1661,7 +1746,18 @@
       "deleteConfirmLabel": "Delete user",
       "disable2faConfirmTitle": "Disable 2FA for \"{{username}}\"?",
       "disable2faConfirmBody": "This will remove their authenticator app requirement. They can re-enable it themselves.",
-      "disable2faConfirmLabel": "Disable 2FA"
+      "disable2faConfirmLabel": "Disable 2FA",
+      "errorEmailInvalid": "Enter a valid email address.",
+      "errorUserExists": "A user with this email already exists.",
+      "errorUsernameTaken": "Another user already signs in with this address as a username.",
+      "errorInvalidField": "The change was not accepted: a value is invalid. Reload the page and try again.",
+      "errorSelfChange": "You cannot change your own account here. Ask another administrator.",
+      "errorNotFound": "This user no longer exists. Reload the page to see the current list.",
+      "errorBootstrapAdmin": "This administrator is set in BOOTSTRAP_ADMIN_EMAILS on the server and cannot be changed here. Change the server configuration instead.",
+      "errorLastAdmin": "At least one active administrator must remain. Make someone else an administrator first.",
+      "errorEmailTaken": "Another user already has this email.",
+      "errorFailed": "The action failed. Try again.",
+      "loadFailed": "Could not load users and invites: {{message}}"
     },
     "ai": {
       "title": "AI Assistant",
@@ -2171,7 +2267,10 @@
       "nodeHint": "The node part runs through the node agent (Settings, Mail node, Node agent): a pre-update backup, setup.sh at the panel commit, a rollback when it fails, then mailcow to the version the release confirms. \"Update node now\" there tries again.",
       "nodeNewer": "Node scripts newer than the panel",
       "nodeMailcow": "mailcow: {{node}} on the node, {{pinned}} confirmed by this release",
-      "nodeMailcowUnknown": "unknown"
+      "nodeMailcowUnknown": "unknown",
+      "errorInvalidTarget": "The version to install is not valid. Check for updates again.",
+      "errorConfirmMismatch": "The confirmation did not match the version. Check for updates again and confirm.",
+      "errorNotFound": "The server no longer knows this update request. Reload the page to see the panel's state."
     },
     "audit": {
       "description": "What users did with mailboxes, messages and users, newest first.",
@@ -3464,7 +3563,12 @@
       "show": "Show letters",
       "hide": "Hide letters",
       "showMore": "Show more"
-    }
+    },
+    "errorNotFound": "This contact no longer exists. Reload the list.",
+    "errorExists": "A contact with this email already exists.",
+    "errorNameRequired": "Enter a name or an email address.",
+    "errorInvalidUrl": "One of the links is not a valid web address.",
+    "errorInvalidField": "One of the fields is too long or not valid. Check the contact and save again."
   },
   "todoist": {
     "title": "Create Todoist Task",
@@ -3484,7 +3588,13 @@
     "create": "Create task",
     "creating": "Creating...",
     "taskCreated": "Task created in Todoist",
-    "openTask": "Open in Todoist"
+    "openTask": "Open in Todoist",
+    "errorNotConnected": "Todoist is not connected. Connect it in Settings, Integrations.",
+    "errorTokenRequired": "Enter the Todoist API token.",
+    "errorTokenInvalid": "Todoist did not accept the API token. Copy a new one from Todoist and connect again.",
+    "errorUnavailable": "Todoist is not answering right now. Try again later.",
+    "errorTitleRequired": "Enter a task title.",
+    "errorFailed": "The Todoist request failed. Try again."
   },
   "rightSidebar": {
     "hide": "Hide right sidebar",
@@ -3576,7 +3686,12 @@
       "auth": "The mail server did not accept the mailbox's credentials.",
       "reconnect": "Access to this mailbox was revoked or has expired. Reconnect it to send mail.",
       "authorDisabled": "Its author can no longer send mail.",
-      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. Do not send it again."
+      "deliveredUnrecorded": "The mail server accepted the letter, but it could not be recorded as sent. Do not send it again.",
+      "mailboxDisabled": "This mailbox is disabled and cannot send. An administrator can turn it back on in the mailbox settings.",
+      "mailboxReadOnly": "This mailbox is read-only (deactivated or waiting for deletion) and cannot send. Send from another mailbox or ask an administrator.",
+      "buildFailed": "The letter could not be put together for sending. Check the attachments and pictures in the text, then try again.",
+      "accountMissing": "The mailbox of this letter was deleted, so it cannot be sent.",
+      "letterMissing": "The content of this letter is gone, so it cannot be sent. Write it again."
     },
     "undoFailedTitle": "Could not undo",
     "undoTooLate": "The letter is already being sent and can no longer be stopped.",

@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useState, useRef
 import { useTranslation } from 'react-i18next';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { apiErrorText } from '../utils/apiErrors.js';
 import { deleteView, deleteViewFolder } from '../utils/deleteIntent.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { getEffectiveShortcuts, parseModKey, modCompactLabel } from '../utils/defaultShortcuts.js';
@@ -596,8 +597,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       })
       .catch(err => {
         if (cancelled) return;
-        // The code, not translated text: translated at render, so the effect need not depend on t.
-        setBodyError(isMailboxBusy(err) ? err.code : err.message);
+        // The code and text, not translated text: translated at render, so the effect need not
+        // depend on t.
+        setBodyError({ code: err.code, message: err.message });
       })
       .finally(() => {
         if (!cancelled) setLoadingBody(false);
@@ -1277,7 +1279,13 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
   const handleStarToggle = async () => {
     if (!message) return;
     const newVal = !message.is_starred;
-    await api.markStarred(message.id, newVal);
+    try {
+      await api.markStarred(message.id, newVal);
+    } catch (err) {
+      console.error('markStarred failed:', err.message);
+      addNotification({ type: 'error', title: t('common.actionFailed.star'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
+      return;
+    }
     updateMessage(message.id, { is_starred: newVal });
   };
 
@@ -1505,6 +1513,7 @@ ${bodyContent}
     } catch (err) {
       console.error('Download error:', err);
       if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
+      else addNotification({ type: 'error', title: t('message.downloadAttachmentFailed'), body: filename });
     } finally {
       setDownloadingPart(null);
     }
@@ -1521,6 +1530,8 @@ ${bodyContent}
     } catch (err) {
       console.error('Failed to load folders:', err);
       setMovePickerFolders([]);
+      setShowMovePicker(false);
+      addNotification({ type: 'error', title: t('common.actionFailed.folders'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
     } finally {
       setMovePickerLoading(false);
     }
@@ -1538,9 +1549,10 @@ ${bodyContent}
       updateMessage(message.id, { is_read: true });
       decrementUnread(message.account_id);
       adjustCategoryCount(message.category, -1);
+      addNotification({ type: 'error', title: t('common.actionFailed.read'), body: mailboxBusyOr(e, t, t('common.actionFailed.body')) });
     });
     if (isMobile) setSelectedMessage(null);
-  }, [message, updateMessage, incrementUnread, decrementUnread, adjustCategoryCount, isMobile, setSelectedMessage]);
+  }, [message, updateMessage, incrementUnread, decrementUnread, adjustCategoryCount, isMobile, setSelectedMessage, addNotification, t]);
 
   const handleEmailClick = useCallback((ev) => {
     const anchor = ev.target.closest('a[href]');
@@ -1899,6 +1911,7 @@ ${bodyContent}
             incrementUnread(message.account_id);
             adjustCategoryCount(message.category, 1);
             pendingMarkReadMap.delete(message.id);
+            addNotification({ type: 'error', title: t('common.actionFailed.read'), body: mailboxBusyOr(e, t, t('common.actionFailed.body')) });
           });
         }
         break;
@@ -1974,6 +1987,7 @@ ${bodyContent}
           api.getCategoryCounts(params).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
         } catch (err) {
           console.error('setCategory failed:', err?.message);
+          addNotification({ type: 'error', title: t('common.actionFailed.category'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
         }
         break;
       }
@@ -2025,9 +2039,12 @@ ${bodyContent}
           const { removeMessage, decrementUnread, restoreMessages, incrementUnread } = useStore.getState();
           removeMessage(msg.id);
           if (!msg.is_read) decrementUnread(msg.account_id);
-          api.deleteMessage(msg.id).catch(() => {
+          api.deleteMessage(msg.id).catch((err) => {
             restoreMessages([msg]);
             if (!msg.is_read) incrementUnread(msg.account_id);
+            useStore.getState().addNotification({
+              type: 'error', title: t('messageList.deleted.failTitle'), body: mailboxBusyOr(err, t, t('messageList.deleted.failBody')),
+            });
           });
         },
       });
@@ -3000,7 +3017,7 @@ ${bodyContent}
                 {t('message.loadingError')}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                {mailboxBusyOr({ code: bodyError }, t, bodyError)}
+                {apiErrorText(bodyError, t)}
               </div>
             </div>
             <button

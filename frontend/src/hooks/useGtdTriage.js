@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import {
-  openDeepLinkMessage, collectThreadReadIds, openGtdThreadWithAutoRead,
+  openDeepLinkMessage, applyGtdThreadRead, openGtdThreadWithAutoRead,
   classifyThread, unclassifyThread,
 } from '../utils/gtd.js';
 import { openReplyFromMessage, openForwardFromMessage, safeQuoteOptions } from '../utils/composeFromMessage.js';
@@ -97,22 +98,24 @@ export function useGtdTriage() {
   // unread, so marking READ acts on every message in the thread (collectThreadReadIds —
   // the same-message_id fan-out alone can't reach an INBOX-only sibling reply), while
   // marking UNREAD needs only the head copy. On failure, flip back.
-  const setRead = async (thread, read) => {
+  // `silent`: the auto-read on opening a row rolls back without a toast.
+  const setRead = async (thread, read, { silent = false } = {}) => {
     // Explicit mark-unread wins over a pending auto-read: cancel the timer before the no-op
     // guard so it can't later flip this just-opened thread back to read.
     if (!read) cancelAutoMarkReadFor(thread);
     if (!!thread.is_read === read) return;
-    const identity = thread.message_id || thread.id;
-    markGtdThreadRead(identity, read);
-    try {
-      await api.bulkRead(await collectThreadReadIds(thread, read, api.getThread), read);
+    await applyGtdThreadRead(thread, read, {
+      markRead: markGtdThreadRead,
+      bulkRead: api.bulkRead,
+      getThread: api.getThread,
       // Belt-and-braces under the WS read fan-out: reconcile the sidebar counts (the
       // debounce coalesces this with any gtd_sections_updated the mark triggers).
-      scheduleGtdSectionsFetch();
-    } catch (err) {
-      console.error('GTD read toggle failed:', err.message);
-      markGtdThreadRead(identity, !read);
-    }
+      onSaved: scheduleGtdSectionsFetch,
+      onFailed: (err) => addNotification({
+        type: 'error', title: t('common.actionFailed.read'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')),
+      }),
+      silent,
+    });
   };
 
   const openRow = (thread) => {
@@ -129,7 +132,7 @@ export function useGtdTriage() {
       }),
       isCancelled: () => !mountedRef.current,
       getPreferences: () => useStore.getState(),
-      readThread: setRead,
+      readThread: (row, read) => setRead(row, read, { silent: true }),
       publishTimer: timerHandle => {
         // Only a scheduled (delay-mode) timer has an identity/owner to guard;
         // immediate/manual publish null. mountedRef doubles as the per-instance
@@ -153,6 +156,7 @@ export function useGtdTriage() {
     } catch (err) {
       console.error('GTD star toggle failed:', err.message);
       markGtdThreadStarred(identity, !next);
+      addNotification({ type: 'error', title: t('common.actionFailed.star'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
     }
   };
 
@@ -235,6 +239,7 @@ export function useGtdTriage() {
           }
         } catch (err) {
           console.error('GTD compose prefill failed:', err.message);
+          addNotification({ type: 'error', title: t('common.actionFailed.compose'), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
           scheduleGtdSectionsFetch();
         }
         break;

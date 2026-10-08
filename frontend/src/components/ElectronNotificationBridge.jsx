@@ -5,6 +5,8 @@ import { manualSyncAccountIds } from '../utils/mailboxSync.js';
 import { installCapacitorNativeBridge } from '../utils/capacitorNativeBridge.js';
 import { createBoundedActionIdTracker, isTrustedNativeMessage } from '../utils/nativeActionSecurity.js';
 import { copyInstallCommandAndQuitOrWarn } from '../utils/updateInstall.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
+import i18n from '../i18n.js';
 
 function linuxInstructionPath(filePath) {
   const normalized = String(filePath || '').replace(/\\/g, '/');
@@ -94,21 +96,25 @@ export default function ElectronNotificationBridge() {
         || installCommand
         || (platform === 'linux' && (isLinuxPackagePath(filePath) || status?.data?.manual))
       );
+      const t = i18n.t.bind(i18n);
       addNotification({
         type: 'success',
-        title: 'Update ready',
+        title: t('notifications.desktop.updateReady'),
         body: manualInstall
-          ? `MailExpert downloaded and verified the update.${installCommand ? ` Install it from a terminal with:\n${installCommand}` : ''}`
-          : 'MailExpert downloaded the update.',
+          ? (installCommand
+            ? t('notifications.desktop.updateVerifiedCommand', { command: installCommand })
+            : t('notifications.desktop.updateVerified'))
+          : t('notifications.desktop.updateDownloaded'),
         allowWrap: true,
         persistent: true,
-        actionLabel: manualInstall ? 'Copy & Quit' : 'Install',
+        actionLabel: manualInstall ? i18n.t('notifications.desktop.copyAndQuit') : t('notifications.desktop.install'),
         onAction: async () => {
           if (manualInstall) {
             await copyInstallCommandAndQuitOrWarn(
               window.mailexpertNative?.updates,
               { installCommand, filePath },
               addNotification,
+              t,
             );
             return;
           }
@@ -117,16 +123,17 @@ export default function ElectronNotificationBridge() {
           if (result?.reason === 'manual-install-required' && result.installCommand) {
             addNotification({
               type: 'success',
-              title: 'Update ready',
-              body: `MailExpert downloaded and verified the update. Install it from a terminal with:\n${result.installCommand}`,
+              title: t('notifications.desktop.updateReady'),
+              body: t('notifications.desktop.updateVerifiedCommand', { command: result.installCommand }),
               allowWrap: true,
               persistent: true,
-              actionLabel: 'Copy & Quit',
+              actionLabel: i18n.t('notifications.desktop.copyAndQuit'),
               onAction: async () => {
                 await copyInstallCommandAndQuitOrWarn(
                   window.mailexpertNative?.updates,
                   { installCommand: result.installCommand, filePath },
                   addNotification,
+                  t,
                 );
               },
             });
@@ -136,8 +143,8 @@ export default function ElectronNotificationBridge() {
           if (result && result.installed === false) {
             addNotification({
               type: 'error',
-              title: 'Install failed',
-              body: 'The update was downloaded, but the installer could not be started.',
+              title: t('notifications.desktop.installFailed'),
+              body: t('notifications.desktop.installFailedBody'),
             });
           }
         },
@@ -260,7 +267,16 @@ export default function ElectronNotificationBridge() {
           const messageId = payload?.messageId;
           if (!messageId) return;
 
-          await api.deleteMessage(messageId);
+          try {
+            await api.deleteMessage(messageId);
+          } catch (err) {
+            addNotification({
+              type: 'error',
+              title: i18n.t('messageList.deleted.failTitle'),
+              body: mailboxBusyOr(err, i18n.t.bind(i18n), i18n.t('messageList.deleted.failBody')),
+            });
+            return;
+          }
           useStore.getState().removeMessage(messageId);
           window.dispatchEvent(new CustomEvent('mailexpert:refresh'));
           return;
@@ -270,7 +286,16 @@ export default function ElectronNotificationBridge() {
           const messageId = payload?.messageId;
           if (!messageId) return;
 
-          await api.markStarred(messageId, true);
+          try {
+            await api.markStarred(messageId, true);
+          } catch (err) {
+            addNotification({
+              type: 'error',
+              title: i18n.t('common.actionFailed.star'),
+              body: mailboxBusyOr(err, i18n.t.bind(i18n), i18n.t('common.actionFailed.body')),
+            });
+            return;
+          }
           useStore.getState().updateMessage(messageId, { is_starred: true });
           return;
         }
@@ -279,8 +304,8 @@ export default function ElectronNotificationBridge() {
           try {
             addNotification({
               type: 'info',
-              title: 'Sync started',
-              body: 'MailExpert is checking for new mail.',
+              title: i18n.t('notifications.desktop.syncStarted'),
+              body: i18n.t('notifications.desktop.syncStartedBody'),
             });
             // Sync is per mailbox: ask for every enabled IMAP mailbox.
             const { accounts } = useStore.getState();
@@ -288,8 +313,8 @@ export default function ElectronNotificationBridge() {
           } catch (error) {
             addNotification({
               type: 'error',
-              title: 'Sync failed',
-              body: error.message || 'Could not sync mail.',
+              title: i18n.t('common.actionFailed.sync'),
+              body: mailboxBusyOr(error, i18n.t.bind(i18n), error.message || i18n.t('common.actionFailed.body')),
             });
           }
         }

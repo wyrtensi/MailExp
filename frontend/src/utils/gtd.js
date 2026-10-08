@@ -401,6 +401,24 @@ export async function collectThreadReadIds(thread, read, getThread) {
   }
 }
 
+// Marks a section thread read or unread: the row flips at once and flips back if the server
+// refuses. `onFailed` tells the person, unless `silent` (the auto-read on opening a row, whose
+// failure only rolls back, as the message list does; a dead connection would toast on every open).
+export async function applyGtdThreadRead(thread, read, {
+  markRead, bulkRead, getThread, onSaved, onFailed, silent = false,
+}) {
+  const identity = thread.message_id || thread.id;
+  markRead(identity, read);
+  try {
+    await bulkRead(await collectThreadReadIds(thread, read, getThread), read);
+    onSaved?.();
+  } catch (err) {
+    console.error('GTD read toggle failed:', err?.message);
+    markRead(identity, !read);
+    if (!silent) onFailed?.(err);
+  }
+}
+
 export function scheduleGtdThreadAutoRead(thread, {
   markReadBehavior,
   markReadDelay,

@@ -760,7 +760,10 @@ export default function MessageList() {
       if (shouldSyncFolder({ accountId: selectedAccountId, folder: selectedFolder, force: true })) {
         folderSyncedAtRef.current.set(folderSyncKey(selectedAccountId, selectedFolder), Date.now());
         api.syncFolder(selectedAccountId, selectedFolder)
-          .catch(err => console.error('syncFolder failed:', err.message));
+          .catch((err) => {
+            console.error('syncFolder failed:', err.message);
+            notifyActionFailed('common.actionFailed.sync', err);
+          });
       }
       // A skipped request (a sync is running or has just finished) sends no sync_complete, so the
       // spinner stops here. Otherwise the server sends sync_complete via WebSocket, which triggers
@@ -771,6 +774,7 @@ export default function MessageList() {
     } catch (err) {
       console.error('Sync failed:', err);
       setSyncing(false);
+      notifyActionFailed('common.actionFailed.sync', err);
     }
   };
   // Always keep ref current so touch handlers never go stale
@@ -897,6 +901,14 @@ export default function MessageList() {
     }
   }, [threadMessages, setThreadMessages]);
 
+  // A flag change, a sync or a category the server refused: the row reverts, and this says so.
+  const notifyActionFailed = useCallback((titleKey, err) => {
+    addNotification({ type: 'error', title: t(titleKey), body: mailboxBusyOr(err, t, t('common.actionFailed.body')) });
+  }, [addNotification, t]);
+  // The shortcut effect is registered once; it reaches the current helper through this ref.
+  const notifyActionFailedRef = useRef(notifyActionFailed);
+  useEffect(() => { notifyActionFailedRef.current = notifyActionFailed; }, [notifyActionFailed]);
+
   const setMessagesReadState = useCallback(async (message, read) => {
     const isThreadRow = isThreadListRow(message);
     const unreadCount = Number.parseInt(message.unread_count, 10);
@@ -944,6 +956,7 @@ export default function MessageList() {
       }
       if (read && estimatedDelta > 0) { incrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, estimatedDelta); }
       else if (!read && estimatedDelta > 0) { decrementUnread(message.account_id, estimatedDelta); adjustCategoryCount(message.category, -estimatedDelta); }
+      addNotification({ type: 'error', title: t('messageList.threadLoadFailed.title'), body: t('messageList.threadLoadFailed.body') });
       return;
     }
 
@@ -993,6 +1006,7 @@ export default function MessageList() {
       }
     } catch (err) {
       console.error('markRead failed:', err);
+      notifyActionFailed('common.actionFailed.read', err);
       if (isThreadRow) {
         updateMessage(message.id, { is_read: !read, unread_count: read ? actualDelta : 0 });
         setCachedThreadRead(message, !read);
@@ -1009,7 +1023,7 @@ export default function MessageList() {
     }
   }, [
     resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadRead,
-    decrementUnread, incrementUnread, adjustCategoryCount,
+    decrementUnread, incrementUnread, adjustCategoryCount, addNotification, t, notifyActionFailed,
   ]);
 
   const handleMarkRead = (e, message) => {
@@ -1023,6 +1037,7 @@ export default function MessageList() {
       actionMessages = await resolveMessagesForThreadAction(message);
     } catch (err) {
       console.error('Failed to load thread for star state change:', err.message);
+      addNotification({ type: 'error', title: t('messageList.threadLoadFailed.title'), body: t('messageList.threadLoadFailed.body') });
       return;
     }
 
@@ -1036,8 +1051,9 @@ export default function MessageList() {
       console.error('markStarred failed:', err.message);
       updateMessage(message.id, { is_starred: !starred });
       if (isThreadRow) setCachedThreadStarred(message, !starred);
+      notifyActionFailed('common.actionFailed.star', err);
     }
-  }, [resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadStarred]);
+  }, [resolveMessagesForThreadAction, isThreadListRow, updateMessage, setCachedThreadStarred, addNotification, t, notifyActionFailed]);
 
   const handleStar = (e, message) => {
     e.stopPropagation();
@@ -1942,6 +1958,7 @@ export default function MessageList() {
       groups = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m)));
     } catch (err) {
       console.error('Failed to load thread for bulk read:', err.message);
+      addNotification({ type: 'error', title: t('messageList.threadLoadFailed.title'), body: t('messageList.threadLoadFailed.body') });
       return;
     }
     const actionMessages = [...new Map(groups.flat().map(m => [m.id, m])).values()];
@@ -1983,8 +2000,9 @@ export default function MessageList() {
       Object.entries(deltaByCategory).forEach(([cat, delta]) => {
         if (delta > 0) adjustCategoryCount(cat, markAsRead ? delta : -delta);
       });
+      notifyActionFailed('common.actionFailed.read', err);
     }
-  }, [updateMessage, decrementUnread, incrementUnread, adjustCategoryCount, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache]);
+  }, [updateMessage, decrementUnread, incrementUnread, adjustCategoryCount, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache, addNotification, t, notifyActionFailed]);
 
   // Bulk star (#434). Same optimistic shape as bulk mark-read, minus the unread-count
   // bookkeeping: stars never touch counts. Direction mirrors the single-message star and
@@ -1996,6 +2014,7 @@ export default function MessageList() {
       groups = await Promise.all(msgs.map(m => resolveMessagesForThreadAction(m)));
     } catch (err) {
       console.error('Failed to load thread for bulk star:', err.message);
+      addNotification({ type: 'error', title: t('messageList.threadLoadFailed.title'), body: t('messageList.threadLoadFailed.body') });
       return;
     }
     const actionMessages = [...new Map(groups.flat().map(m => [m.id, m])).values()];
@@ -2016,8 +2035,9 @@ export default function MessageList() {
       console.error('Bulk star failed:', err);
       previousStarred.forEach((starred, id) => updateMessage(id, { is_starred: starred }));
       cachedThreads.forEach((cached, key) => cached ? setThreadMessages(key, cached) : invalidateThreadCache(key));
+      notifyActionFailed('common.actionFailed.star', err);
     }
-  }, [updateMessage, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache]);
+  }, [updateMessage, resolveMessagesForThreadAction, isThreadListRow, threadMessages, setThreadMessages, invalidateThreadCache, addNotification, t, notifyActionFailed]);
 
   const autoMarkReadTimerRef = useRef(null);
   useEffect(() => () => clearTimeout(autoMarkReadTimerRef.current), []);
@@ -2160,13 +2180,24 @@ export default function MessageList() {
           .catch(err => {
             console.error('markRead failed:', err);
             pendingMarkReadMap.delete(selectedMessageId);
+            // Put the row and the counters back, as the click on the row does.
+            getState().updateMessage(selectedMessageId, { is_read: false });
+            getState().incrementUnread(msg.account_id);
+            getState().adjustCategoryCount(msg.category, 1);
+            notifyActionFailedRef.current('common.actionFailed.read', err);
           });
       } else {
         incrementUnread(msg.account_id);
         adjustCategoryCount(msg.category, 1);
         pendingMarkReadMap.delete(selectedMessageId);
         completedMarkReadMap.delete(selectedMessageId);
-        api.bulkRead([selectedMessageId], false).catch(console.error);
+        api.bulkRead([selectedMessageId], false).catch((err) => {
+          console.error('markUnread failed:', err);
+          getState().updateMessage(selectedMessageId, { is_read: true });
+          getState().decrementUnread(msg.account_id);
+          getState().adjustCategoryCount(msg.category, -1);
+          notifyActionFailedRef.current('common.actionFailed.read', err);
+        });
       }
     };
 
@@ -2244,10 +2275,12 @@ export default function MessageList() {
       setPickerFolders(Array.isArray(data) ? data : (data.folders || []));
     } catch (err) {
       console.error('Failed to load folders:', err);
+      setShowFolderPicker(false);
+      notifyActionFailed('common.actionFailed.folders', err);
     } finally {
       setPickerLoading(false);
     }
-  }, [showFolderPicker]);
+  }, [showFolderPicker, notifyActionFailed]);
   // ─────────────────────────────────────────────────────────────
 
   const handleContextAction = async (action, message, data) => {
@@ -2503,6 +2536,7 @@ export default function MessageList() {
           api.getCategoryCounts(countParams).then(d => setCategoryCounts(d.counts || {})).catch(() => {});
         } catch (err) {
           console.error('setCategory failed:', err?.message);
+          notifyActionFailed('common.actionFailed.category', err);
         }
         break;
       }
@@ -2587,6 +2621,8 @@ export default function MessageList() {
       });
     } catch (err) {
       console.error('Failed to open draft:', err.message);
+      // Shown read-only in the pane instead: say why the composer did not open.
+      notifyActionFailed('common.actionFailed.openDraft', err);
       setSelectedMessage(message.id);
     }
   };
@@ -4465,10 +4501,10 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
         )}
       </div>
       <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 6 }}>
-        {isInbox ? 'Inbox is empty' : 'Nothing here'}
+        {isInbox ? t('messageList.empty.inboxTitle') : t('messageList.empty.folderTitle')}
       </div>
       <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: isInbox ? 20 : 0 }}>
-        {isInbox ? "You're all caught up" : 'This folder has no messages'}
+        {isInbox ? t('messageList.empty.inboxBody') : t('messageList.empty.folderBody')}
       </div>
       {isInbox && (
         <button onClick={onCompose} style={{

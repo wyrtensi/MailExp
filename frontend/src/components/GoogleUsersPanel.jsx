@@ -4,6 +4,7 @@ import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
 import ConfirmOverlay from './ConfirmOverlay.jsx';
 import { localeTag } from '../utils/formatDate.js';
+import { adminUserErrorText } from '../utils/adminUsers.js';
 
 const PAGE_SIZE = 200;
 
@@ -30,13 +31,14 @@ export default function GoogleUsersPanel() {
   const [loading, setLoading] = useState(true);
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  // The last failed request (an Error with the server's code), explained at render.
+  const [error, setError] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
 
   useEffect(() => {
     api.admin.getUsers({ limit: PAGE_SIZE, offset: 0 })
       .then((data) => { setUsers(data.users); setTotal(data.total); })
-      .catch((err) => setError(err.message))
+      .catch((err) => setError(err))
       .finally(() => setLoading(false));
   }, []);
 
@@ -46,11 +48,12 @@ export default function GoogleUsersPanel() {
 
   const run = async (action) => {
     setBusy(true);
-    setError('');
+    setError(null);
     try {
       await action();
     } catch (err) {
-      setError(err.message);
+      // The last admin, a bootstrap admin, a taken email: explained rather than the server's text.
+      setError(err);
     } finally {
       setBusy(false);
     }
@@ -82,7 +85,7 @@ export default function GoogleUsersPanel() {
     message: t('admin.users.deleteConfirmBody'),
     confirmLabel: t('admin.users.deleteConfirmLabel'),
     onConfirm: async () => {
-      await api.admin.deleteUser(u.id);
+      await api.admin.deleteUser(u.id).catch((err) => { throw new Error(adminUserErrorText(err, t), { cause: err }); });
       setUsers((list) => list.filter((x) => x.id !== u.id));
       setTotal((count) => count - 1);
     },
@@ -134,7 +137,7 @@ export default function GoogleUsersPanel() {
         <div style={{
           padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 13,
           background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', color: 'var(--red)',
-        }}>{error}</div>
+        }}>{adminUserErrorText(error, t)}</div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

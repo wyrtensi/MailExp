@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { api } from '../utils/api.js';
+import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
 import {
   conversationFolders,
@@ -16,6 +17,8 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
   const { t } = useTranslation();
   const isMobile = useMobile();
   const [headers, setHeaders] = useState(null);
+  // Why the headers could not be read (an Error with the server's code), said in the UI language.
+  const [headersError, setHeadersError] = useState(null);
   const [resolvedSubject, setResolvedSubject] = useState(subject);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -34,7 +37,7 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
           onSubjectResolvedRef.current?.(data.subject);
         }
       })
-      .catch(err => setHeaders(`Error: ${err.message}`))
+      .catch(err => setHeadersError(err))
       .finally(() => setLoading(false));
   }, [messageId]);
 
@@ -245,7 +248,9 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
               whiteSpace: 'pre-wrap', wordBreak: 'break-word',
               lineHeight: 1.6, margin: 0, padding: '12px 16px',
             }}>
-              {headers || t('contextMenu.headers.noHeaders')}
+              {headers || (headersError
+                ? t('contextMenu.headers.loadFailed', { message: mailboxBusyOr(headersError, t, headersError.message) })
+                : t('contextMenu.headers.noHeaders'))}
             </pre>
           )}
         </div>
@@ -358,7 +363,9 @@ export default function MessageHeaderModal({ messageId, subject, onClose, onSubj
               fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'pre-wrap',
               lineHeight: 1.6, margin: 0,
             }}>
-              {headers || t('contextMenu.headers.noHeaders')}
+              {headers || (headersError
+                ? t('contextMenu.headers.loadFailed', { message: mailboxBusyOr(headersError, t, headersError.message) })
+                : t('contextMenu.headers.noHeaders'))}
             </pre>
           )}
         </div>

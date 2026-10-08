@@ -73,6 +73,15 @@ test('a letter the server accepted but that was not recorded is never offered to
   assert.equal(sendFailureKey('delivered_unrecorded'), 'scheduled.failure.deliveredUnrecorded');
 });
 
+test('a mailbox that cannot send, a letter that cannot be built or is gone are explained', () => {
+  // backend routes/send.js and services/sendQueue.js: refused at once or when the job runs.
+  assert.equal(sendFailureKey('mailbox_disabled'), 'scheduled.failure.mailboxDisabled');
+  assert.equal(sendFailureKey('mailbox_read_only'), 'scheduled.failure.mailboxReadOnly');
+  assert.equal(sendFailureKey('mail_build_failed'), 'scheduled.failure.buildFailed');
+  assert.equal(sendFailureKey('account_missing'), 'scheduled.failure.accountMissing');
+  assert.equal(sendFailureKey('letter_missing'), 'scheduled.failure.letterMissing');
+});
+
 test('failure codes map to their messages and statuses to outcomes', () => {
   assert.equal(sendFailureKey('send_uncertain'), 'scheduled.failure.uncertain');
   assert.equal(sendFailureKey('gmail_invalid_recipient'), 'compose.gmailInvalidRecipient');

@@ -46,6 +46,9 @@ const REQUEST_ERROR_KEYS = Object.freeze({
   updater_not_installed: 'admin.panelUpdate.errorNotInstalled',
   rolled_back: 'admin.panelUpdate.errorRolledBack',
   spool_not_writable: 'admin.panelUpdate.errorSpoolNotWritable',
+  invalid_target: 'admin.panelUpdate.errorInvalidTarget',
+  confirm_mismatch: 'admin.panelUpdate.errorConfirmMismatch',
+  not_found: 'admin.panelUpdate.errorNotFound',
 });
 
 export function isTerminalState(state) {
@@ -90,8 +93,13 @@ export function isRestartingError(err) {
   return err.status === 502 || err.status === 503 || err.status === 504;
 }
 
+// The refusal's `code` (backend routes/adminUpdate.js); an older backend sent the same token as
+// the error text only.
 export function requestErrorKey(err) {
-  return REQUEST_ERROR_KEYS[err?.message] ?? null;
+  for (const token of [err?.code, err?.message]) {
+    if (typeof token === 'string' && Object.hasOwn(REQUEST_ERROR_KEYS, token)) return REQUEST_ERROR_KEYS[token];
+  }
+  return null;
 }
 
 // The state of the update at a glance, for the headline.
