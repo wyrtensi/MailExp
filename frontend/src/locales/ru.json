@@ -212,7 +212,19 @@
       "aiApply": "Применить",
       "aiDismiss": "Отклонить",
       "aiGenerating": "Генерация…",
-      "aiError": "Ошибка ИИ: {{message}}"
+      "aiError": "Ошибка ИИ: {{message}}",
+      "bold": "Жирный",
+      "italic": "Курсив",
+      "underline": "Подчёркнутый",
+      "strikethrough": "Зачёркнутый",
+      "alignLeft": "По левому краю",
+      "alignCenter": "По центру",
+      "alignRight": "По правому краю",
+      "bulletList": "Маркированный список",
+      "numberedList": "Нумерованный список",
+      "htmlSource": "Редактировать HTML-код",
+      "richText": "Вернуться к визуальному редактору",
+      "removeLink": "Удалить ссылку"
     },
     "priority": "Приоритет",
     "priorityHigh": "Высокий приоритет",
@@ -741,7 +753,13 @@
     "countFiltered": "Письма из кэша, подходящие под фильтр",
     "countUnknown": "Число писем в ящике пока неизвестно",
     "countStale": "Последнее известное число писем; ждём обновления от сервера",
-    "countServer": "Писем на почтовом сервере"
+    "countServer": "Писем на почтовом сервере",
+    "empty": {
+      "inboxTitle": "Входящие пусты",
+      "inboxBody": "Новых писем нет",
+      "folderTitle": "Здесь пусто",
+      "folderBody": "В этой папке нет писем"
+    }
   },
   "lockScreen": {
     "subtitle": "Введите PIN-код для разблокировки",

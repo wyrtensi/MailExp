@@ -4501,10 +4501,10 @@ function EmptyState({ folderSyncing, searchQuery, searchError, unreadOnly, selec
         )}
       </div>
       <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 6 }}>
-        {isInbox ? 'Inbox is empty' : 'Nothing here'}
+        {isInbox ? t('messageList.empty.inboxTitle') : t('messageList.empty.folderTitle')}
       </div>
       <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: isInbox ? 20 : 0 }}>
-        {isInbox ? "You're all caught up" : 'This folder has no messages'}
+        {isInbox ? t('messageList.empty.inboxBody') : t('messageList.empty.folderBody')}
       </div>
       {isInbox && (
         <button onClick={onCompose} style={{

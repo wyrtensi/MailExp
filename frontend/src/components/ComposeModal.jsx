@@ -2900,10 +2900,10 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
       {isMobile ? (
         <>
           <div ref={mobileBarRef} style={{ borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', padding: '2px 0' }}>
-            {mtb(es.bold, 'Bold', e => { e.preventDefault(); editor.chain().focus().toggleBold().run(); }, <b>B</b>)}
-            {mtb(es.italic, 'Italic', e => { e.preventDefault(); editor.chain().focus().toggleItalic().run(); }, <i>I</i>)}
-            {mtb(es.underline, 'Underline', e => { e.preventDefault(); editor.chain().focus().toggleUnderline().run(); }, <u>U</u>)}
-            {mtb(es.strike, 'Strikethrough', e => { e.preventDefault(); editor.chain().focus().toggleStrike().run(); }, <s>S</s>)}
+            {mtb(es.bold, t('compose.toolbar.bold'), e => { e.preventDefault(); editor.chain().focus().toggleBold().run(); }, <b>B</b>)}
+            {mtb(es.italic, t('compose.toolbar.italic'), e => { e.preventDefault(); editor.chain().focus().toggleItalic().run(); }, <i>I</i>)}
+            {mtb(es.underline, t('compose.toolbar.underline'), e => { e.preventDefault(); editor.chain().focus().toggleUnderline().run(); }, <u>U</u>)}
+            {mtb(es.strike, t('compose.toolbar.strikethrough'), e => { e.preventDefault(); editor.chain().focus().toggleStrike().run(); }, <s>S</s>)}
             {onAttach && (
               <button title={t('compose.toolbar.attachFile')} onMouseDown={e => { e.preventDefault(); onAttach(); }}
                 style={{ background: 'none', border: 'none', borderRadius: 4, padding: '6px 4px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--text-secondary)', WebkitTapHighlightColor: 'transparent' }}>
@@ -2949,16 +2949,16 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
                 <span style={{ fontSize: 13, fontWeight: 700, color: '#1a1a1a', lineHeight: 1, background: es.backgroundColor || '#ffd43b', padding: '0 2px', borderRadius: 2, border: '1px solid rgba(0,0,0,0.2)' }}>A</span>
               </button>
               <Sep />
-              {mtb(es.alignLeft, 'Align left', e => { e.preventDefault(); editor.chain().focus().setTextAlign('left').run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>)}
-              {mtb(es.alignCenter, 'Align center', e => { e.preventDefault(); editor.chain().focus().setTextAlign('center').run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>)}
-              {mtb(es.alignRight, 'Align right', e => { e.preventDefault(); editor.chain().focus().setTextAlign('right').run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>)}
+              {mtb(es.alignLeft, t('compose.toolbar.alignLeft'), e => { e.preventDefault(); editor.chain().focus().setTextAlign('left').run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>)}
+              {mtb(es.alignCenter, t('compose.toolbar.alignCenter'), e => { e.preventDefault(); editor.chain().focus().setTextAlign('center').run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>)}
+              {mtb(es.alignRight, t('compose.toolbar.alignRight'), e => { e.preventDefault(); editor.chain().focus().setTextAlign('right').run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>)}
               <Sep />
-              {mtb(es.bulletList, 'Bullet list', e => { e.preventDefault(); editor.chain().focus().toggleBulletList().run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>)}
-              {mtb(es.orderedList, 'Numbered list', e => { e.preventDefault(); editor.chain().focus().toggleOrderedList().run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><text x="1" y="8" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">1.</text><text x="1" y="14" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">2.</text><text x="1" y="20" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">3.</text></svg>)}
+              {mtb(es.bulletList, t('compose.toolbar.bulletList'), e => { e.preventDefault(); editor.chain().focus().toggleBulletList().run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>)}
+              {mtb(es.orderedList, t('compose.toolbar.numberedList'), e => { e.preventDefault(); editor.chain().focus().toggleOrderedList().run(); }, <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><text x="1" y="8" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">1.</text><text x="1" y="14" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">2.</text><text x="1" y="20" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">3.</text></svg>)}
               {onToggleHtml && (
                 <>
                   <Sep />
-                  <button title={htmlMode ? 'Back to rich text' : 'Edit HTML source'} onMouseDown={e => { e.preventDefault(); onToggleHtml(); }}
+                  <button title={htmlMode ? t('compose.toolbar.richText') : t('compose.toolbar.htmlSource')} onMouseDown={e => { e.preventDefault(); onToggleHtml(); }}
                     style={{ background: htmlMode ? 'var(--accent-dim)' : 'none', border: 'none', borderRadius: 4, padding: '6px 10px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', color: htmlMode ? 'var(--accent)' : 'var(--text-secondary)', fontFamily: 'monospace', fontSize: 11, fontWeight: 600, letterSpacing: '-0.5px', WebkitTapHighlightColor: 'transparent' }}>{'</>'}</button>
                 </>
               )}
@@ -3027,10 +3027,10 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
 
         <Sep />
 
-        {tb(es.bold, 'Bold', e => { e.preventDefault(); editor.chain().focus().toggleBold().run(); }, <b>B</b>)}
-        {tb(es.italic, 'Italic', e => { e.preventDefault(); editor.chain().focus().toggleItalic().run(); }, <i>I</i>)}
-        {tb(es.underline, 'Underline', e => { e.preventDefault(); editor.chain().focus().toggleUnderline().run(); }, <u>U</u>)}
-        {tb(es.strike, 'Strikethrough', e => { e.preventDefault(); editor.chain().focus().toggleStrike().run(); }, <s>S</s>)}
+        {tb(es.bold, t('compose.toolbar.bold'), e => { e.preventDefault(); editor.chain().focus().toggleBold().run(); }, <b>B</b>)}
+        {tb(es.italic, t('compose.toolbar.italic'), e => { e.preventDefault(); editor.chain().focus().toggleItalic().run(); }, <i>I</i>)}
+        {tb(es.underline, t('compose.toolbar.underline'), e => { e.preventDefault(); editor.chain().focus().toggleUnderline().run(); }, <u>U</u>)}
+        {tb(es.strike, t('compose.toolbar.strikethrough'), e => { e.preventDefault(); editor.chain().focus().toggleStrike().run(); }, <s>S</s>)}
 
         <Sep />
 
@@ -3047,18 +3047,18 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
 
         <Sep />
 
-        {tb(es.alignLeft, 'Align left', e => { e.preventDefault(); editor.chain().focus().setTextAlign('left').run(); },
+        {tb(es.alignLeft, t('compose.toolbar.alignLeft'), e => { e.preventDefault(); editor.chain().focus().setTextAlign('left').run(); },
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>)}
-        {tb(es.alignCenter, 'Align center', e => { e.preventDefault(); editor.chain().focus().setTextAlign('center').run(); },
+        {tb(es.alignCenter, t('compose.toolbar.alignCenter'), e => { e.preventDefault(); editor.chain().focus().setTextAlign('center').run(); },
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>)}
-        {tb(es.alignRight, 'Align right', e => { e.preventDefault(); editor.chain().focus().setTextAlign('right').run(); },
+        {tb(es.alignRight, t('compose.toolbar.alignRight'), e => { e.preventDefault(); editor.chain().focus().setTextAlign('right').run(); },
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>)}
 
         <Sep />
 
-        {tb(es.bulletList, 'Bullet list', e => { e.preventDefault(); editor.chain().focus().toggleBulletList().run(); },
+        {tb(es.bulletList, t('compose.toolbar.bulletList'), e => { e.preventDefault(); editor.chain().focus().toggleBulletList().run(); },
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="4" cy="18" r="1.5" fill="currentColor" stroke="none"/></svg>)}
-        {tb(es.orderedList, 'Numbered list', e => { e.preventDefault(); editor.chain().focus().toggleOrderedList().run(); },
+        {tb(es.orderedList, t('compose.toolbar.numberedList'), e => { e.preventDefault(); editor.chain().focus().toggleOrderedList().run(); },
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><text x="1" y="8" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">1.</text><text x="1" y="14" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">2.</text><text x="1" y="20" fontSize="7" fill="currentColor" stroke="none" fontFamily="sans-serif">3.</text></svg>)}
 
         <Sep />
@@ -3114,7 +3114,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
         {onToggleHtml && (
           <>
             <Sep />
-            <button title={htmlMode ? 'Back to rich text' : 'Edit HTML source'} onMouseDown={e => { e.preventDefault(); onToggleHtml(); }}
+            <button title={htmlMode ? t('compose.toolbar.richText') : t('compose.toolbar.htmlSource')} onMouseDown={e => { e.preventDefault(); onToggleHtml(); }}
               style={{
                 background: htmlMode ? 'var(--accent-dim)' : 'none', border: 'none', borderRadius: 4,
                 padding: '3px 6px', cursor: 'pointer', display: 'inline-flex', alignItems: 'center',
@@ -3187,7 +3187,7 @@ function RichToolbar({ editor, onAttach, onInsertImage, htmlMode, onToggleHtml, 
           {es.link && (
             <button onMouseDown={e => { e.preventDefault(); editor.chain().focus().unsetLink().run(); setLinkPos(null); }}
               style={{ background: 'none', border: 'none', color: 'var(--red)', fontSize: 11, cursor: 'pointer', padding: 0, textAlign: 'left' }}>
-              Remove link
+              {t('compose.toolbar.removeLink')}
             </button>
           )}
         </div>

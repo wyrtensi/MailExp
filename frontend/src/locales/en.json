@@ -212,7 +212,19 @@
       "aiApply": "Apply",
       "aiDismiss": "Dismiss",
       "aiGenerating": "Generating…",
-      "aiError": "AI error: {{message}}"
+      "aiError": "AI error: {{message}}",
+      "bold": "Bold",
+      "italic": "Italic",
+      "underline": "Underline",
+      "strikethrough": "Strikethrough",
+      "alignLeft": "Align left",
+      "alignCenter": "Align center",
+      "alignRight": "Align right",
+      "bulletList": "Bulleted list",
+      "numberedList": "Numbered list",
+      "htmlSource": "Edit HTML source",
+      "richText": "Back to rich text",
+      "removeLink": "Remove link"
     },
     "priority": "Priority",
     "priorityHigh": "High priority",
@@ -709,7 +721,13 @@
     "countFiltered": "Cached messages matching this filter",
     "countUnknown": "The mailbox count is not available yet",
     "countStale": "The last known mailbox count; waiting for the server to refresh it",
-    "countServer": "Messages reported by the mail server"
+    "countServer": "Messages reported by the mail server",
+    "empty": {
+      "inboxTitle": "Inbox is empty",
+      "inboxBody": "You're all caught up",
+      "folderTitle": "Nothing here",
+      "folderBody": "This folder has no messages"
+    }
   },
   "lockScreen": {
     "subtitle": "Enter your PIN to unlock",
