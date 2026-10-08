@@ -120,12 +120,14 @@ checkout_code() {
   local commit=${CFG_VERSION#sha-} full
   if [ ! -d "$APP_DIR/.git" ]; then
     log "cloning $(redact_url "$CFG_REPO_URL")"
-    git clone --quiet "$CFG_REPO_URL" "$APP_DIR"
+    git clone --quiet "$CFG_REPO_URL" "$APP_DIR" ||
+      die "git clone of $(redact_url "$CFG_REPO_URL") into $APP_DIR failed (git's error is above): check the network and access to the repository"
   elif [ "$(git -C "$APP_DIR" remote get-url origin)" != "$CFG_REPO_URL" ]; then
     git -C "$APP_DIR" remote set-url origin "$CFG_REPO_URL"
   fi
   if ! git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" >/dev/null; then
-    git -C "$APP_DIR" fetch --quiet origin
+    git -C "$APP_DIR" fetch --quiet origin ||
+      die "git fetch in $APP_DIR failed (git's error is above): check the network and access to $(redact_url "$CFG_REPO_URL")"
   fi
   full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}") || die "commit $commit is not in $(redact_url "$CFG_REPO_URL")"
   if [ "$(git -C "$APP_DIR" rev-parse HEAD)" != "$full" ]; then
@@ -239,8 +241,13 @@ app_up() {
   if [ -f "$LOCAL_COMPOSE" ]; then log "with the local compose override $LOCAL_COMPOSE"; fi
   # --remove-orphans: a service dropped from the compose files or compose.local.yml stops. Only
   # containers of this compose project (-p) count; the edge and other projects are never touched.
-  timeout "$READY_TIMEOUT" "${APP_COMPOSE[@]}" up -d --quiet-pull --remove-orphans ||
+  local rc=0
+  timeout "$READY_TIMEOUT" "${APP_COMPOSE[@]}" up -d --quiet-pull --remove-orphans || rc=$?
+  if [ "$rc" = 124 ]; then
     die "the panel did not start within ${READY_TIMEOUT}s; see: docker compose -p $CFG_PROJECT logs backend"
+  elif [ "$rc" != 0 ]; then
+    die "docker compose up for $CFG_PROJECT failed (exit $rc; its error is above); see: docker compose -p $CFG_PROJECT ps --all and docker compose -p $CFG_PROJECT logs backend"
+  fi
   clear_standby
 }
 
@@ -262,7 +269,8 @@ edge_up() {
   fi
   if grep -qx cloudflared <<<"$services" && [ "$OPT_START" = 1 ]; then targets+=(cloudflared); fi
   [ "${#targets[@]}" -gt 0 ] || return 0
-  edge_compose up -d --quiet-pull "${targets[@]}"
+  edge_compose up -d --quiet-pull "${targets[@]}" ||
+    die "docker compose up for the edge ($CFG_EDGE_PROJECT: ${targets[*]}) failed (its error is above); see: docker compose -p $CFG_EDGE_PROJECT logs ${targets[0]}"
   grep -qx caddy <<<"$services" || return 0
   # Caddy's admin API is off: a changed Caddyfile is loaded by a restart. The record of what Caddy
   # loaded is written only afterwards, so a run that stops earlier leaves the restart to a rerun.

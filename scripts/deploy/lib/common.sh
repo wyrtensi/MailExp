@@ -11,6 +11,13 @@ redact_url() {
   printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'
 }
 
+# error_tail: reads a command's error output on stdin and prints its last non-empty line, without
+# the user information of any URL in it (git names the remote, which may carry a token), cut to
+# 200 characters: the cause a message names.
+error_tail() {
+  sed -e '/^[[:space:]]*$/d' | tail -n 1 | sed -E 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]*@#\1#g' | cut -c1-200
+}
+
 # die <message> [exit code, default 1]
 die() {
   printf '[mailexpert] error: %s\n' "$1" >&2

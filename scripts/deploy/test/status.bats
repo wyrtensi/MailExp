@@ -79,13 +79,44 @@ setup() {
 
 @test "update_notes: steps for a person are next, the rest info" {
   run update_notes 0 caddy,cloudflared <<<$'backend/migrations/0091_x.sql\nscripts/deploy/mail-node/setup.sh\ndeploy/edge/Dockerfile\ndeploy/edge/Caddyfile.tmpl\ndeploy/edge/compose.yml\ndeploy/systemd/mailexpert-health.timer'
-  [[ ${lines[0]} == "info migrations: "* ]]
-  [[ ${lines[1]} == "next mail node: "*"setup.sh --dry-run"* ]]
-  [[ ${lines[2]} == "info edge: the Caddy image changed; update.sh pulls the new one"*"edge-image.previous"* ]]
-  [[ ${lines[3]} == "info edge: the Caddyfile template changed"* ]]
-  [[ ${lines[4]} == "info edge: its compose file changed"* ]]
-  [[ ${lines[5]} == "info timers: "* ]]
-  [ "${#lines[@]}" -eq 6 ]
+  [[ ${lines[0]} == "next mail node: "*"setup.sh --dry-run"* ]]
+  [[ ${lines[1]} == "info edge: the Caddy image changed; update.sh pulls the new one"*"edge-image.previous"* ]]
+  [[ ${lines[2]} == "info edge: the Caddyfile template changed"* ]]
+  [[ ${lines[3]} == "info edge: its compose file changed"* ]]
+  [[ ${lines[4]} == "info timers: "* ]]
+  [ "${#lines[@]}" -eq 5 ]
+}
+
+@test "update_notes: a changed migration file says nothing about migrations (an applied one is not run again)" {
+  run update_notes 0 "" <<<"backend/migrations/0095_x.sql"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "pending_note: the pending versions, nothing when there are none" {
+  run pending_note <<<""
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run pending_note <<<$'0096_a\n0097_b'
+  [[ $output == "info migrations: the new version adds 2 database migration(s) the database has not applied (0096_a 0097_b); "*"pre-update dump"* ]]
+  run pending_note <<<"$(printf '%04d_m\n' 1 2 3 4 5 6 7)"
+  [[ $output == *"(0001_m 0002_m 0003_m 0004_m 0005_m and 2 more)"* ]]
+}
+
+@test "applied_note: none applied is a code-only way back, more needs the dump, unknown counts as applied" {
+  run applied_note 96 96 sha-aaaaaaaaaaaa /opt/me /opt/me/backups/pre-update-sha-aaaaaaaaaaaa.dump
+  [ "$output" = "info migrations: none was applied (96 before and after); going back to sha-aaaaaaaaaaaa needs no dump: install.sh --prefix /opt/me --version sha-aaaaaaaaaaaa" ]
+  run applied_note 96 98 sha-aaaaaaaaaaaa /opt/me /d.dump
+  [[ $output == "info migrations: 2 applied (96 before, 98 now); going back to sha-aaaaaaaaaaaa means restoring the pre-update dump /d.dump"* ]]
+  run applied_note "" 98 sha-aaaaaaaaaaaa /opt/me /d.dump
+  [[ $output == "info migrations: the applied ones cannot be compared (? before, 98 now): treat them as applied;"* ]]
+}
+
+@test "applied_note: a replaced Caddy image is put back before the code-only way back" {
+  run applied_note 96 96 sha-aaaaaaaaaaaa /opt/me /d.dump /opt/me/edge/.env ghcr.io/x/mailexpert-edge@sha256:abc
+  [ "$output" = "info migrations: none was applied (96 before and after); going back to sha-aaaaaaaaaaaa needs no dump: set EDGE_IMAGE in /opt/me/edge/.env back to ghcr.io/x/mailexpert-edge@sha256:abc, then install.sh --prefix /opt/me --version sha-aaaaaaaaaaaa" ]
+  run applied_note 96 96 sha-aaaaaaaaaaaa /opt/me /d.dump /opt/me/edge/.env ""
+  [[ $output == *"set EDGE_IMAGE in /opt/me/edge/.env back to empty (it was unpinned), then install.sh"* ]]
 }
 
 @test "update_notes: no Caddy lines without Caddy, no edge lines without an edge" {
@@ -291,11 +322,23 @@ cf_install() {
   [ "$(jq -r '.target.images["mailexpert-backend"]' <<<"$output")" = ok ]
   [ "$(jq -r '.target.commit_found' <<<"$output")" = true ]
   [ "$(jq -r '.next | map(select(startswith("mail node:"))) | length' <<<"$output")" = 1 ]
-  [ "$(jq -r '.info | map(select(startswith("migrations:"))) | length' <<<"$output")" = 1 ]
+  [ "$(jq -r '.info | map(select(startswith("migrations: the new version adds 1 database migration(s) the database has not applied (0002_b)"))) | length' <<<"$output")" = 1 ]
   [ "$(jq -r '.ready' <<<"$output")" = true ]
   [ "$(jq -r '.migrations_applied' <<<"$output")" = 1 ]
   grep -q "manifest inspect ghcr.io/wyrtensi/mailexpert-frontend:sha-${NEW:0:12}" "$DOCKER_LOG"
   ! grep -q "tenant-worker:sha-" "$DOCKER_LOG"
+}
+
+@test "--target: a changed migration file the database already applied is not called a new migration" {
+  stub_install
+  STUB_APPLIED=$'0001_a\n0002_b' run bash "$SCRIPT" --prefix "$P" --target "sha-${NEW:0:12}" --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.target.pending_migrations' <<<"$output")" = '[]' ]
+  [ "$(jq -r '.info | map(select(startswith("migrations:"))) | length' <<<"$output")" = 0 ]
+  # Unknown (the schema not read): the warning says so, no line claims new migrations.
+  STUB_PSQL=1 run bash "$SCRIPT" --prefix "$P" --target "sha-${NEW:0:12}" --json
+  [ "$(jq -r '.info | map(select(startswith("migrations:"))) | length' <<<"$output")" = 0 ]
+  [ "$(jq -r '.warnings | map(select(contains("pending migrations are unknown"))) | length' <<<"$output")" = 1 ]
 }
 
 @test "--target to the same commit: pending migrations is none in the text" {

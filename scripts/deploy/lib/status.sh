@@ -100,6 +100,38 @@ data_image_changes() {
   return 0
 }
 
+# pending_note: reads the versions the target has and the database does not (pending_migrations)
+# on stdin and prints "info <text>" when there are any, nothing when there are none. Changed files
+# under backend/migrations/ say nothing about it: an edit of an applied migration is not run again.
+pending_note() {
+  local versions count shown
+  versions=$(sed '/^$/d')
+  [ -n "$versions" ] || return 0
+  count=$(grep -c . <<<"$versions")
+  shown=$(head -n 5 <<<"$versions" | paste -sd' ' -)
+  if [ "$count" -gt 5 ]; then shown="$shown and $((count - 5)) more"; fi
+  echo "info migrations: the new version adds $count database migration(s) the database has not applied ($shown); they run when the backend starts, and going back means restoring the pre-update dump (runbook: \"Откат обновления\")"
+}
+
+# applied_note <applied before> <applied after> <old version> <prefix> <pre-update dump>: what an
+# update that became ready did to the schema, from the counts of applied migrations (empty: the
+# database did not answer), as "info <text>". [<edge env file> <previous EDGE_IMAGE>]: the update
+# replaced the Caddy image too (the file is empty otherwise); install.sh --version <old> does not put
+# the previous one back (rollback.sh does), so the code-only way back names that step first.
+applied_note() {
+  local before=$1 after=$2 old=$3 prefix=$4 dump=$5 edge_env=${6:-} edge_previous=${7:-} edge_step=''
+  if [ -n "$edge_env" ]; then
+    edge_step="set EDGE_IMAGE in $edge_env back to ${edge_previous:-empty (it was unpinned)}, then "
+  fi
+  if [[ $before =~ ^[0-9]+$ && $after =~ ^[0-9]+$ ]] && [ "$before" = "$after" ]; then
+    echo "info migrations: none was applied ($after before and after); going back to $old needs no dump: ${edge_step}install.sh --prefix $prefix --version $old"
+  elif [[ $before =~ ^[0-9]+$ && $after =~ ^[0-9]+$ ]] && [ "$after" -gt "$before" ]; then
+    echo "info migrations: $((after - before)) applied ($before before, $after now); going back to $old means restoring the pre-update dump $dump (rollback.sh --to $old, runbook: \"Откат обновления\")"
+  else
+    echo "info migrations: the applied ones cannot be compared (${before:-?} before, ${after:-?} now): treat them as applied; going back to $old means restoring the pre-update dump $dump (rollback.sh --to $old)"
+  fi
+}
+
 # update_notes <tenant profile on: 0|1> <edge services, comma-separated> [<systemd units: 0|1>]:
 # reads the paths changed between two versions (git diff --name-only) on stdin and prints one line
 # per part of the system the change touches outside the panel's images: "next <text>" for a step a
@@ -110,9 +142,6 @@ update_notes() {
   local tenant=$1 edge=",${2:-}," system=${3:-1}
   local paths
   paths=$(cat)
-  if grep -q '^backend/migrations/' <<<"$paths"; then
-    echo "info migrations: the new version adds database migrations; they run when the backend starts, and going back means restoring the pre-update dump (runbook: \"Откат обновления\")"
-  fi
   if grep -q '^scripts/deploy/mail-node/' <<<"$paths"; then
     echo "next mail node: its host scripts changed; on the node, check out the same commit and run scripts/deploy/mail-node/setup.sh --dry-run, then without --dry-run (docs/operations/mail-node.md, section 4)"
   fi

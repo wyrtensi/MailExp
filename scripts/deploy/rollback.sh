@@ -132,7 +132,7 @@ after_install() {
 
 main() {
   local prefix=/opt/mailexpert to='' dump='' confirm='' db scratch kept full stamp edge profiles answer
-  local from marker docker_root free_kb dump_bytes db_bytes problem swapped=0
+  local from marker docker_root free_kb dump_bytes db_bytes problem swapped=0 errors
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix | --to | --dump | --confirm)
@@ -171,7 +171,9 @@ main() {
   fi
   # 10 minutes: a backup holds the lock (shared) while it dumps the database.
   take_lock "$STATE_DIR/update.lock" 600 "another update.sh, rollback.sh or restore.sh, or a backup's database dump,"
-  git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warn "git fetch failed in $APP_DIR"
+  if ! errors=$(git -C "$APP_DIR" fetch --quiet origin 2>&1); then
+    warn "git fetch failed in $APP_DIR: $(error_tail <<<"$errors"); going on with the commits already fetched"
+  fi
   full=$(git -C "$APP_DIR" rev-parse --verify --quiet "${to#sha-}^{commit}") || die "commit ${to#sha-} is not in $(redact_url "$CFG_REPO_URL")" 2
   if git -C "$APP_DIR" show "$full:scripts/deploy/lib/app.sh" 2>/dev/null | local_compose_ignored; then
     local_compose_warning "$to"

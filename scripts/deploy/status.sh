@@ -228,7 +228,7 @@ image_state() {
 # collect_target <sha-XXXXXXXXXXXX>
 collect_target() {
   local target=$1 commit=${1#sha-} full head image state prefix=$CFG_IMAGE_PREFIX locked=0
-  local applied_file target_file changed line kind service from to
+  local applied_file target_file changed line kind service from to errors
   local -a images=(mailexpert-backend mailexpert-frontend)
   FACT[target]=$target
   FACT[target_commit]=0
@@ -238,7 +238,9 @@ collect_target() {
   fi
   # Never fetched next to a running update: it is switching this checkout.
   if [ "$locked" = 0 ] && ! git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" >/dev/null 2>&1; then
-    git -C "$APP_DIR" fetch --quiet origin 2>/dev/null || warning "target: git fetch failed in $APP_DIR"
+    if ! errors=$(git -C "$APP_DIR" fetch --quiet origin 2>&1); then
+      warning "target: git fetch failed in $APP_DIR: $(error_tail <<<"$errors"); only the commits already fetched are known"
+    fi
   fi
   if ! full=$(git -C "$APP_DIR" rev-parse --verify --quiet "$commit^{commit}" 2>/dev/null); then
     if [ "$locked" = 0 ]; then problem "target: commit $commit is not in $(redact_url "$CFG_REPO_URL")"; fi
@@ -273,6 +275,8 @@ collect_target() {
     if [ -n "$TARGET_UNKNOWN" ]; then
       problem "target: $target is older than the database schema ($(grep -c . <<<"$TARGET_UNKNOWN") migration(s) it does not know); old code on a new schema is not supported: go back with the pre-update dump (runbook: \"Откат обновления\")"
     fi
+    line=$(pending_note <<<"$TARGET_PENDING")
+    if [ -n "$line" ]; then info "${line#info }"; fi
   else
     warning "target: the database schema could not be read, so pending migrations are unknown: treat them as present (going back then needs the pre-update dump)"
   fi
