@@ -2,8 +2,16 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunNotes, accessSyncRunSummary,
-  accessSyncSaveErrorKey,
+  accessSyncSaveErrorKey, tombstoneReasonKey,
 } from './accessSync.js';
+
+describe('tombstoneReasonKey', () => {
+  it('names a deleted user and a replaced email, and treats anything else as deleted', () => {
+    assert.equal(tombstoneReasonKey('deleted'), 'admin.accessSync.tombstoneReasonDeleted');
+    assert.equal(tombstoneReasonKey('email_changed'), 'admin.accessSync.tombstoneReasonEmailChanged');
+    assert.equal(tombstoneReasonKey(undefined), 'admin.accessSync.tombstoneReasonDeleted');
+  });
+});
 
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';

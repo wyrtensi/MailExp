@@ -56,6 +56,7 @@ describe('accessStateBadge', () => {
   it('gives each access state a label and a tone, and nothing else a badge', () => {
     assert.deepEqual(accessStateBadge('in_access'), { key: 'admin.users.accessInAccess', tone: 'ok' });
     assert.deepEqual(accessStateBadge('pending'), { key: 'admin.users.accessPending', tone: 'muted' });
+    assert.deepEqual(accessStateBadge('admitted_by_rule'), { key: 'admin.users.accessByRule', tone: 'muted' });
     assert.deepEqual(accessStateBadge('removed_in_cloudflare'), { key: 'admin.users.accessRemovedInCloudflare', tone: 'warn' });
     assert.deepEqual(accessStateBadge('not_synced'), { key: 'admin.users.accessNotSynced', tone: 'muted' });
     assert.equal(accessStateBadge(null), null);

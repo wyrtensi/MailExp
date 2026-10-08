@@ -40,6 +40,7 @@ export function adminUserErrorText(err, t) {
 const ACCESS_STATE_BADGES = {
   in_access: { key: 'admin.users.accessInAccess', tone: 'ok' },
   pending: { key: 'admin.users.accessPending', tone: 'muted' },
+  admitted_by_rule: { key: 'admin.users.accessByRule', tone: 'muted' },
   removed_in_cloudflare: { key: 'admin.users.accessRemovedInCloudflare', tone: 'warn' },
   not_synced: { key: 'admin.users.accessNotSynced', tone: 'muted' },
 };

@@ -107,6 +107,16 @@ export function accessSyncRunNotes(lastRun, formatTime = (iso) => iso) {
   return notes;
 }
 
+// Why an address is tombstoned (backend accessSync/tombstones.js), as a translation key.
+const TOMBSTONE_REASON_KEYS = Object.freeze({
+  deleted: 'admin.accessSync.tombstoneReasonDeleted',
+  email_changed: 'admin.accessSync.tombstoneReasonEmailChanged',
+});
+
+export function tombstoneReasonKey(reason) {
+  return TOMBSTONE_REASON_KEYS[reason] ?? TOMBSTONE_REASON_KEYS.deleted;
+}
+
 // Why a manual run did nothing, or null when it ran.
 export function accessSyncIdleKey(result) {
   return IDLE_KEYS[result?.outcome] ?? null;

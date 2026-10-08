@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
   accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunNotes, accessSyncRunSummary,
-  accessSyncSaveErrorKey,
+  accessSyncSaveErrorKey, tombstoneReasonKey,
 } from '../utils/accessSync.js';
 import { adminUserErrorText } from '../utils/adminUsers.js';
 import { localeTag } from '../utils/formatDate.js';
@@ -221,9 +221,11 @@ export default function AccessSyncPanel() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{entry.email}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    {t(tombstoneReasonKey(entry.reason))}
+                    {' · '}
                     {entry.createdBy
                       ? t('admin.accessSync.tombstoneMeta', { date, by: entry.createdBy })
-                      : t('admin.accessSync.tombstoneMetaNoActor', { date })}
+                      : date}
                     {entry.inPolicy && ` · ${t('admin.accessSync.tombstoneInPolicy')}`}
                   </div>
                 </div>

@@ -1767,7 +1767,8 @@
       "accessNotSynced": "Not synced",
       "changeEmail": "Change email",
       "emailPh": "New email address",
-      "deleteConfirmBodyAccess": "The user is removed from the panel and from the Access policy. Their email is remembered: it is not imported from Cloudflare again and cannot sign in until you allow it again under Cloudflare Access, Deleted users."
+      "deleteConfirmBodyAccess": "The user is removed from the panel and from the Access policy. Their email is remembered: it is not imported from Cloudflare again and cannot sign in until you allow it again under Cloudflare Access, Deleted users.",
+      "accessByRule": "Via Access rule"
     },
     "ai": {
       "title": "AI Assistant",
@@ -2560,15 +2561,16 @@
       "importErrors": "Emails that could not be imported: {{count}} (another user already has the address as a username).",
       "nextRetry": "Next try at {{time}} (retry {{attempt}} of 3).",
       "retriesExhausted": "Retries are used up; the hourly run will try again.",
-      "tombstonesTitle": "Deleted users",
-      "tombstonesDesc": "These emails are not imported from the policy again, and signing in through Cloudflare Access with them is refused, even while Cloudflare still lists them. Allowing one again creates the user.",
-      "tombstonesEmpty": "No deleted users.",
-      "tombstoneMeta": "Deleted {{date}} by {{by}}",
-      "tombstoneMetaNoActor": "Deleted {{date}}",
+      "tombstonesTitle": "Deleted users and replaced emails",
+      "tombstonesDesc": "These addresses belonged to deleted users or were replaced by an administrator. They are not imported from the policy again, and signing in through Cloudflare Access with them is refused, even while Cloudflare still lists them. Allowing one again creates the user (or enables the one who has it).",
+      "tombstonesEmpty": "No deleted users or replaced emails.",
+      "tombstoneMeta": "{{date}}, by {{by}}",
       "tombstoneInPolicy": "still listed in the policy",
       "allowAgain": "Allow again",
       "allowed": "{{email}} can sign in again.",
-      "tombstonesLoadFailed": "Could not load the deleted users: {{message}}"
+      "tombstonesLoadFailed": "Could not load the deleted users: {{message}}",
+      "tombstoneReasonDeleted": "User deleted",
+      "tombstoneReasonEmailChanged": "Email replaced"
     },
     "mailNode": {
       "title": "Mail node",

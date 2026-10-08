@@ -3154,7 +3154,10 @@ export async function demoRequest(method, path, body = {}) {
     adminUsers = adminUsers.filter(item => item.id !== id);
     if (deleted?.email) {
       demoTombstones = [
-        { email: normalizeEmail(deleted.email), createdAt: new Date().toISOString(), createdBy: 'demo@mailexpert.local', inPolicy: true },
+        {
+          email: normalizeEmail(deleted.email), createdAt: new Date().toISOString(), createdBy: 'demo@mailexpert.local',
+          reason: 'deleted', inPolicy: true,
+        },
         ...demoTombstones.filter(t => t.email !== normalizeEmail(deleted.email)),
       ];
     }
