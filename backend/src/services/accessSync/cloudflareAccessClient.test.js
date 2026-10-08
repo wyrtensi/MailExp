@@ -145,13 +145,23 @@ describe('verifyToken', () => {
     expect(fetchImpl.mock.calls[1][0]).toBe(`${BASE}/accounts/${ACCOUNT}/tokens/verify`);
   });
 
-  it('reports the user endpoint\'s refusal when the account endpoint refuses too', async () => {
+  it('reports the user endpoint\'s refusal when the account endpoint refuses the token too', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(reply(401, { success: false, errors: [{ code: 1000 }] }))
-      .mockResolvedValueOnce(reply(404, { success: false, errors: [{ code: 7003 }] }));
+      .mockResolvedValueOnce(reply(401, { success: false, errors: [{ code: 1000 }] }));
     const err = await client(fetchImpl).verifyToken().catch((e) => e);
     expect(err).toBeInstanceOf(CloudflareAccessError);
     expect(err.status).toBe(401);
+  });
+
+  it('reports the account endpoint\'s 403 or 404: a wrong account ID or a token of another account', async () => {
+    for (const [userStatus, accountStatus] of [[401, 403], [401, 404], [403, 404], [400, 403]]) {
+      const fetchImpl = vi.fn()
+        .mockResolvedValueOnce(reply(userStatus, { success: false, errors: [{ code: 1000 }] }))
+        .mockResolvedValueOnce(reply(accountStatus, { success: false, errors: [{ code: 7003 }] }));
+      const err = await client(fetchImpl).verifyToken().catch((e) => e);
+      expect(err.status).toBe(accountStatus);
+    }
   });
 
   it('reports the account endpoint\'s own failure when it is not a refusal', async () => {

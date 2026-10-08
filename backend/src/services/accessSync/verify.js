@@ -42,13 +42,15 @@ export function failureCode(err) {
   return 'unavailable';
 }
 
-// The settings to check: the stored ones, with whatever the form gives in their place (an unsaved
-// token or ID). Nothing given here is stored. Throws AccessSyncVerifyError: invalid_id,
+// The settings to check: an ID the input carries replaces the stored one, an empty one included
+// (the form sends its fields as a save would store them); an ID it leaves out is the stored one
+// (the CLI checks the stored settings). The token is write-only, so a blank one means the stored
+// token. Nothing given here is stored. Throws AccessSyncVerifyError: invalid_id,
 // token_invalid, verify_incomplete (no account or no token), token_undecryptable (the stored token no
 // longer decrypts: ENCRYPTION_KEY changed).
 export async function resolveVerifyConfig(input = {}, { load = loadStoredConfig } = {}) {
   const stored = await load();
-  const pick = (field) => text(input?.[field]).toLowerCase() || stored[field] || '';
+  const pick = (field) => (typeof input?.[field] === 'string' ? text(input[field]).toLowerCase() : stored[field] || '');
   const config = { accountId: pick('accountId'), appId: pick('appId'), policyId: pick('policyId') };
   if ((config.accountId && !ACCOUNT_ID_RE.test(config.accountId))
     || (config.appId && !UUID_RE.test(config.appId))
@@ -72,12 +74,22 @@ export async function resolveVerifyConfig(input = {}, { load = loadStoredConfig 
 // Runs the checks. Answers { ok, checks: [{ id, status: 'ok'|'failed'|'skipped', code, ... }] }:
 // ok is true when no check failed. A skipped check needs something not given (an app ID, a
 // policy ID, CF_ACCESS_AUDIENCE) or a check before it that failed.
-export async function verifyAccessSyncConfig(config, { fetchImpl, audience = cloudflareEnvState().audience } = {}) {
-  const client = createCloudflareAccessClient({
+export async function verifyAccessSyncConfig(config, {
+  fetchImpl, audience = cloudflareEnvState().audience, createClient = createCloudflareAccessClient,
+} = {}) {
+  const client = createClient({
     accountId: config.accountId, appId: config.appId, apiToken: config.apiToken, ...(fetchImpl ? { fetchImpl } : {}),
   });
   const checks = [];
   const add = (check) => { checks.push(check); return check; };
+  // A failure that is not Cloudflare's answer is a bug or an outage of our own: the screen says
+  // "details in the server log", so it goes there. Cloudflare's own answers are not logged (their
+  // texts can quote account details), and the error never carries the token.
+  const failed = (id, err) => {
+    const code = failureCode(err);
+    if (code === 'unexpected') console.error(`[access-sync] verify ${id} failed:`, err);
+    return { id, status: 'failed', code };
+  };
 
   try {
     const token = await client.verifyToken();
@@ -85,7 +97,7 @@ export async function verifyAccessSyncConfig(config, { fetchImpl, audience = clo
       ? { id: 'token', status: 'ok', code: 'active', expiresOn: token.expiresOn, owner: token.owner }
       : { id: 'token', status: 'failed', code: `token_${token.status}`, expiresOn: token.expiresOn });
   } catch (err) {
-    add({ id: 'token', status: 'failed', code: failureCode(err) });
+    add(failed('token', err));
   }
 
   let app = null;
@@ -96,7 +108,7 @@ export async function verifyAccessSyncConfig(config, { fetchImpl, audience = clo
       app = await client.getApp();
       add({ id: 'app', status: 'ok', code: 'found', name: typeof app?.name === 'string' ? app.name : null });
     } catch (err) {
-      add({ id: 'app', status: 'failed', code: failureCode(err) });
+      add(failed('app', err));
     }
   }
 
@@ -113,7 +125,7 @@ export async function verifyAccessSyncConfig(config, { fetchImpl, audience = clo
         ? { id: 'policy', status: 'ok', code: 'found', reusable: policy.reusable === true }
         : { id: 'policy', status: 'failed', code: 'not_allow' });
     } catch (err) {
-      add({ id: 'policy', status: 'failed', code: failureCode(err) });
+      add(failed('policy', err));
     }
   }
 

@@ -239,6 +239,14 @@ describe('mailexpert access verify', () => {
     expect(text.err).toContain('lacks "Access: Apps and Policies"');
   });
 
+  it('names a wrong account ID when the account answers 403 for the token', async () => {
+    await configured();
+    fakeCloudflare({ status: 403 });
+    const result = await cli(['access', 'verify']);
+    expect(result.code).toBe(1);
+    expect(result.err).toMatch(/token:\s+failed: the account ID is wrong or the token was not issued for this account/);
+  });
+
   it('refuses when there is no token to verify', async () => {
     const result = await cli(['access', 'verify', '--json']);
     expect(result.code).toBe(1);

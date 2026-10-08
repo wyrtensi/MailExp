@@ -53,6 +53,13 @@ describe('resolveVerifyConfig', () => {
     expect(config).toMatchObject({ appId: other, apiToken: `${TOKEN}x`, tokenFromForm: true });
   });
 
+  it('treats an ID the form sends empty as not set, as a save would store it; only a blank token keeps the stored one', async () => {
+    const config = await resolveVerifyConfig({ accountId: ACCOUNT, appId: '', policyId: ' ', apiToken: '' }, { load: load() });
+    expect(config).toEqual({ accountId: ACCOUNT, appId: '', policyId: '', apiToken: TOKEN, tokenFromForm: false });
+    const emptied = await resolveVerifyConfig({ accountId: '' }, { load: load() }).catch((err) => err);
+    expect(emptied.code).toBe('verify_incomplete');
+  });
+
   it('refuses malformed IDs and tokens, and needs an account and a token', async () => {
     const codeOf = (input, stored) => resolveVerifyConfig(input, { load: load(stored) }).catch((err) => err);
     expect((await codeOf({ accountId: 'nope' })).code).toBe('invalid_id');
@@ -137,6 +144,44 @@ describe('verifyAccessSyncConfig', () => {
       { id: 'audience', status: 'skipped', code: 'not_configured' },
       { id: 'policy', status: 'skipped', code: 'no_policy_id' },
     ]);
+  });
+});
+
+describe('unexpected failures', () => {
+  it('logs an error that is not Cloudflare\'s on the server, without the token', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const fetchImpl = vi.fn(async () => { throw new Error('boom'); });
+      const broken = { verifyToken: fetchImpl, getApp: fetchImpl, getPolicy: fetchImpl };
+      const result = await verifyAccessSyncConfig(
+        { accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: TOKEN },
+        { audience: AUD, createClient: () => broken },
+      );
+      expect(result.checks.filter((check) => check.code === 'unexpected').map((check) => check.id)).toEqual(['token', 'app', 'policy']);
+      expect(logged).toHaveBeenCalledTimes(3);
+      expect(logged.mock.calls[0][0]).toContain('[access-sync] verify token');
+      expect(logged.mock.calls[0][1]).toBeInstanceOf(Error);
+      expect(JSON.stringify(logged.mock.calls.map((call) => String(call[0])))).not.toContain(TOKEN);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it('does not log Cloudflare\'s own refusals', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const refused = cloudflare({ '/tokens/verify': () => fail(401, 1000) });
+      await verifyAccessSyncConfig({ accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: TOKEN }, { fetchImpl: refused.fetchImpl, audience: AUD });
+      expect(logged).not.toHaveBeenCalled();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it('names a wrong account ID for the token check', async () => {
+    const other = cloudflare({ '/user/tokens/verify': () => fail(401, 1000), '/tokens/verify': () => fail(403, 9109) });
+    const result = await verifyAccessSyncConfig({ accountId: ACCOUNT, appId: '', policyId: '', apiToken: TOKEN }, { fetchImpl: other.fetchImpl, audience: AUD });
+    expect(result.checks[0]).toEqual({ id: 'token', status: 'failed', code: 'forbidden' });
   });
 });
 

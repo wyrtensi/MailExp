@@ -150,6 +150,8 @@ const CHECK_TEXT = Object.freeze({
   'token:active': 'active',
   'token:token_disabled': 'the token is disabled',
   'token:token_expired': 'the token has expired',
+  'token:forbidden': 'the account ID is wrong or the token was not issued for this account',
+  'token:not_found': 'the account ID is wrong or the token was not issued for this account',
   'app:no_app_id': 'skipped: no application ID',
   'audience:match': 'the aud tag of the application matches CF_ACCESS_AUDIENCE',
   'audience:mismatch': 'the aud tag of the application differs from CF_ACCESS_AUDIENCE: either the application ID is not the one guarding the panel, or CF_ACCESS_AUDIENCE (configure.sh) is wrong',

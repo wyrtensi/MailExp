@@ -68,8 +68,10 @@ export function createCloudflareAccessClient({
   return {
     // Whether Cloudflare takes the token at all, and its status and expiry. A user token answers
     // on /user/tokens/verify; an account-owned token is refused there and answers on the account's
-    // own endpoint. When both refuse, the user endpoint's refusal is the one reported; a failure
-    // of the account endpoint that is not a refusal (its 5xx, the network) is reported as is.
+    // own endpoint. When the account endpoint also refuses the token itself (400, 401), the user
+    // endpoint's refusal is reported; any other failure there is reported as is: a 403 or 404 says
+    // the account ID is wrong or the token belongs to another account, a 5xx or the network that
+    // Cloudflare could not tell.
     async verifyToken() {
       const answer = (result, owner) => ({
         status: typeof result?.status === 'string' ? result.status : 'unknown',
@@ -83,7 +85,7 @@ export function createCloudflareAccessClient({
         try {
           return answer(await call('verifyToken', 'GET', `${apiBase}/accounts/${accountId}/tokens/verify`), 'account');
         } catch (accountErr) {
-          throw REFUSED.has(accountErr.status) || accountErr.status === 404 ? err : accountErr;
+          throw accountErr.status === 400 || accountErr.status === 401 ? err : accountErr;
         }
       }
     },

@@ -2574,7 +2574,7 @@
       "verify": "Verify",
       "verifyOk": "Verified: the token and the IDs work.",
       "verifyFailed": "Problems found; the sync will not work with these settings:",
-      "verifyEditNote": "Verification only reads. The write permission (Edit) is confirmed by the first sync that changes the policy. Blank form fields are taken from the saved settings; verification saves nothing.",
+      "verifyEditNote": "Verification only reads. The write permission (Edit) is confirmed by the first sync that changes the policy. The IDs are checked as the form has them (an empty field is \"not set\", as Save would store it); a blank token field means the saved token. Verification saves nothing.",
       "verifyToken": "Token",
       "verifyApp": "Application",
       "verifyAudience": "AUD tag",
@@ -2612,7 +2612,8 @@
       "hostEdgeUnseen": "not visible to the panel (they belong to the tunnel and Caddy); status.sh shows their state",
       "hostViaAccess": "You signed in through Cloudflare Access: the tunnel and the Access application work.",
       "hostNotViaAccess": "This sign-in did not come through Cloudflare Access.",
-      "hostDocs": "Step by step, with the permissions each key needs: docs/operations/cloudflare.md."
+      "hostDocs": "Step by step, with the permissions each key needs: docs/operations/cloudflare.md.",
+      "checkTokenWrongAccount": "the account ID is wrong, or the token was not issued for this account"
     },
     "mailNode": {
       "title": "Mail node",

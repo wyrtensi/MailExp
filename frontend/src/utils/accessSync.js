@@ -125,15 +125,17 @@ export function accessSyncIdleKey(result) {
   return IDLE_KEYS[result?.outcome] ?? null;
 }
 
-// Body for POST /api/admin/access-sync/verify: only the fields the form fills in. The server takes
-// the stored value for each one left out, so "Проверить" works on the saved settings, on an
-// unsaved token, or on both; nothing sent here is stored.
+// Body for POST /api/admin/access-sync/verify: the IDs exactly as the form has them (an emptied
+// one is checked as not set, as Save would store it), and the token only when one is typed: the
+// token is write-only, so a blank field means the stored token. Nothing sent here is stored.
 export function accessSyncVerifyPayload(form) {
-  const body = {};
-  for (const field of ['accountId', 'appId', 'policyId', 'apiToken']) {
-    const value = String(form[field] ?? '').trim();
-    if (value) body[field] = value;
-  }
+  const body = {
+    accountId: String(form.accountId ?? '').trim(),
+    appId: String(form.appId ?? '').trim(),
+    policyId: String(form.policyId ?? '').trim(),
+  };
+  const token = String(form.apiToken ?? '').trim();
+  if (token) body.apiToken = token;
   return body;
 }
 
@@ -148,6 +150,8 @@ const VERIFY_LABEL_KEYS = Object.freeze({
 const VERIFY_CHECK_KEYS = Object.freeze({
   'token:token_disabled': 'admin.accessSync.checkTokenDisabled',
   'token:token_expired': 'admin.accessSync.checkTokenExpired',
+  'token:forbidden': 'admin.accessSync.checkTokenWrongAccount',
+  'token:not_found': 'admin.accessSync.checkTokenWrongAccount',
   'app:not_found': 'admin.accessSync.checkAppNotFound',
   'audience:match': 'admin.accessSync.checkAudienceOk',
   'audience:mismatch': 'admin.accessSync.checkAudienceMismatch',

@@ -122,8 +122,11 @@ describe('accessSyncRunNotes', () => {
 });
 
 describe('accessSyncVerifyPayload', () => {
-  it('sends only what the form fills in, so the rest comes from the stored settings', () => {
-    assert.deepEqual(accessSyncVerifyPayload({ enabled: true, accountId: ' ', appId: APP, policyId: '', apiToken: '' }), { appId: APP });
+  it('sends the IDs as the form has them (empty is not set), and the token only when one is typed', () => {
+    assert.deepEqual(
+      accessSyncVerifyPayload({ enabled: true, accountId: ' ', appId: APP, policyId: '', apiToken: '' }),
+      { accountId: '', appId: APP, policyId: '' },
+    );
     assert.deepEqual(
       accessSyncVerifyPayload({ enabled: false, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: ' tok ' }),
       { accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: 'tok' },
@@ -145,6 +148,8 @@ describe('accessSyncVerifyLine', () => {
     assert.equal(accessSyncVerifyLine({ id: 'app', status: 'failed', code: 'not_found' }).key, 'admin.accessSync.checkAppNotFound');
     assert.equal(accessSyncVerifyLine({ id: 'policy', status: 'failed', code: 'not_found' }).key, 'admin.accessSync.checkPolicyNotFound');
     assert.equal(accessSyncVerifyLine({ id: 'policy', status: 'skipped', code: 'no_policy_id' }).key, 'admin.accessSync.checkNoPolicyId');
+    assert.equal(accessSyncVerifyLine({ id: 'token', status: 'failed', code: 'forbidden' }).key, 'admin.accessSync.checkTokenWrongAccount');
+    assert.equal(accessSyncVerifyLine({ id: 'token', status: 'failed', code: 'not_found' }).key, 'admin.accessSync.checkTokenWrongAccount');
   });
 
   it('shows an unknown code as it is', () => {
