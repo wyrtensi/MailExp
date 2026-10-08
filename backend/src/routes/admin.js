@@ -13,7 +13,7 @@ import {
   ADMIN_USER_ERRORS, createUser, deleteUser, disableUserTotp, listUsers, updateUser,
 } from '../services/admin/users.js';
 import {
-  SYSTEM_SETTINGS_CODED, SYSTEM_SETTINGS_ERRORS, updateSystemSettings,
+  SYSTEM_SETTINGS_ERRORS, updateSystemSettings,
 } from '../services/admin/systemSettings.js';
 import {
   OIDC_PROVIDER_ERRORS, createOidcProvider, deleteOidcProvider, listOidcProviders, updateOidcProvider,
@@ -46,12 +46,17 @@ router.use('/update', adminUpdateRoutes);
 
 // ── Users ──────────────────────────────────────────────────────────────────────
 
-// A refusal of services/admin/users.js as the API answers it: the message and the code, or only the
-// message where these routes never answered a code.
-function sendUserRefusal(res, result, { withCode = true } = {}) {
-  const [status, message] = ADMIN_USER_ERRORS[result.error] ?? [500, result.error];
-  return res.status(status).json({ error: result.message ?? message, ...(withCode ? { code: result.error } : {}) });
+// A refusal from a service's catalogue (code -> [status, message]) as the API answers it: the
+// message (the service's own when it gave one) and the code the screens translate. A code missing
+// from the catalogue is a 500, with the code only where the route always answered it (users).
+function sendRefusal(res, catalog, result, { codeWhenUnknown = false } = {}) {
+  if (!catalog[result.error]) {
+    return res.status(500).json({ error: result.message ?? result.error, ...(codeWhenUnknown ? { code: result.error } : {}) });
+  }
+  const [status, message] = catalog[result.error];
+  return res.status(status).json({ error: result.message ?? message, code: result.error });
 }
+const sendUserRefusal = (res, result) => sendRefusal(res, ADMIN_USER_ERRORS, result, { codeWhenUnknown: true });
 
 // End every session and live socket of a user who just lost access.
 async function signOutEverywhere(userId) {
@@ -125,7 +130,7 @@ router.post('/users', async (req, res) => {
 router.post('/users/:id/totp/disable', async (req, res) => {
   const { id } = req.params;
   const result = await disableUserTotp(id, routeActor(req));
-  if (result.error) return sendUserRefusal(res, result, { withCode: false });
+  if (result.error) return sendUserRefusal(res, result);
   console.log(`[admin] ${req.session.username} disabled 2FA for user ${result.username} (${id})`);
   res.json({ ok: true });
 });
@@ -142,8 +147,7 @@ router.patch('/users/:id', async (req, res) => {
 router.delete('/users/:id', async (req, res) => {
   const { id } = req.params;
   const result = await deleteUser(id, routeActor(req));
-  // Refusing the actor's own account answered no code; the guard refusals do.
-  if (result.error) return sendUserRefusal(res, result, { withCode: result.error !== 'self_change' });
+  if (result.error) return sendUserRefusal(res, result);
   await applyEffects(result.effects);
   console.log(`[admin] ${req.session.userId} deleted user ${id}`);
   res.json({ ok: true });
@@ -178,13 +182,7 @@ router.get('/audit', async (req, res) => {
 router.patch('/settings', async (req, res) => {
   const result = await updateSystemSettings(req.body, routeActor(req));
   await applyEffects(result.effects);
-  if (result.error) {
-    const [status, message] = SYSTEM_SETTINGS_ERRORS[result.error] ?? [500, result.error];
-    return res.status(status).json({
-      error: result.message ?? message,
-      ...(SYSTEM_SETTINGS_CODED.has(result.error) ? { code: result.error } : {}),
-    });
-  }
+  if (result.error) return sendRefusal(res, SYSTEM_SETTINGS_ERRORS, result);
   res.json({ ok: true });
 });
 
@@ -196,12 +194,7 @@ router.get('/invites', async (req, res) => {
   res.json(await listInvites({ limit, offset }));
 });
 
-// services/admin/invites.js holds the checks and the letter; these routes answer a refusal by its
-// message only, as they always have.
-function sendRefusal(res, catalog, result) {
-  const [status, message] = catalog[result.error] ?? [500, result.error];
-  return res.status(status).json({ error: result.message ?? message });
-}
+// services/admin/invites.js holds the checks and the letter.
 
 router.post('/invites', async (req, res) => {
   const result = await createInvite(req.body?.email, req.session.userId);
@@ -240,11 +233,8 @@ router.delete('/system-email', async (req, res) => {
 
 // ── OIDC providers ─────────────────────────────────────────────────────────────
 
-// services/auth/oidcProviders.js holds the checks; these routes answer a refusal by its message.
-function sendOidcRefusal(res, result) {
-  const [status, message] = OIDC_PROVIDER_ERRORS[result.error] ?? [500, result.error];
-  return res.status(status).json({ error: result.message ?? message });
-}
+// services/auth/oidcProviders.js holds the checks.
+const sendOidcRefusal = (res, result) => sendRefusal(res, OIDC_PROVIDER_ERRORS, result);
 
 router.get('/oidc', async (req, res) => {
   res.json(await listOidcProviders());

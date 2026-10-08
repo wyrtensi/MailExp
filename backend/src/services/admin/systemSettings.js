@@ -33,8 +33,7 @@ export const SYSTEM_SETTING_TYPES = Object.freeze({
   categorization_enabled: 'boolean',
 });
 
-// code -> [HTTP status, message]. CODED: the refusals the route answers with their code; the others
-// it has always answered with the message only.
+// code -> [HTTP status, message]; the route answers each refusal with its code.
 export const SYSTEM_SETTINGS_ERRORS = Object.freeze({
   invalid_field: [400, 'Invalid setting'],
   no_sso_provider: [400, 'Cannot disable password login: no enabled SSO providers are configured.'],
@@ -46,7 +45,6 @@ export const SYSTEM_SETTINGS_ERRORS = Object.freeze({
   custom_css_invalid: [400, 'custom_css must be a string'],
   custom_css_too_long: [400, 'custom_css must not exceed 50,000 characters'],
 });
-export const SYSTEM_SETTINGS_CODED = Object.freeze(new Set(['invalid_field']));
 
 const refuse = (code, message) => ({ error: code, ...(message ? { message } : {}) });
 const actorLabel = (actor) => actor?.userId ?? actor?.via ?? 'unknown';
