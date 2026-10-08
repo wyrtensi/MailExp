@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { apiErrorText } from '../utils/apiErrors.js';
+import { SETTINGS_ERROR_KEYS } from '../utils/adminErrors.js';
 import { FOLDER_SYNC_INTERVAL_CHOICES_SEC, SYNC_INTERVAL_CHOICES_SEC, readSyncIntervals } from '../utils/mailboxSync.js';
 
 const SETTING_KEYS = { syncIntervalSec: 'sync_interval_sec', folderSyncIntervalSec: 'folder_sync_interval_sec' };
@@ -34,7 +36,7 @@ export default function MailboxSyncSettings() {
       if (field === 'syncIntervalSec') useStore.setState({ syncInterval: seconds });
     } catch (err) {
       setValues(previous);
-      setError(err.message);
+      setError(apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS }));
     }
   };
 
