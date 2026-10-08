@@ -17,6 +17,7 @@ const APP = '11111111-2222-4333-8444-555555555555';
 const POLICY = '66666666-7777-4888-9999-000000000000';
 const OTHER_POLICY = '66666666-7777-4888-9999-000000000001';
 const full = { enabled: true, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: 'tok-secret' };
+const EMPTY_STATE = { baseline: [], policyEmails: [], abortedCandidates: null, abortedImports: null, retryAttempt: 0 };
 
 // system_settings as a map, reached only through the two statements the module may use.
 let store;
@@ -54,7 +55,7 @@ describe('settings', () => {
     const config = await loadStoredConfig();
     expect(publicConfig(config)).toEqual({ enabled: false, accountId: '', appId: '', policyId: '', apiTokenSet: false });
     expect(await loadRunConfig()).toBeNull();
-    expect(await loadState()).toEqual({ baseline: [], abortedCandidates: null, lastRun: null });
+    expect(await loadState()).toEqual({ ...EMPTY_STATE, lastRun: null });
   });
 
   it('stores the token encrypted and never shows it', async () => {
@@ -90,7 +91,7 @@ describe('settings', () => {
     await saveConfig({ ...full, apiToken: '' });
     expect(stored(ACCESS_SYNC_STATE_KEY).baseline).toEqual(['a@example.com']);
     await saveConfig({ ...full, apiToken: '', policyId: OTHER_POLICY });
-    expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ baseline: [], abortedCandidates: null, lastRun: { outcome: 'updated' } });
+    expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ ...EMPTY_STATE, lastRun: { outcome: 'updated' } });
   });
 
   it('writes the state key before the config key when retargeting', async () => {
@@ -128,7 +129,7 @@ describe('settings', () => {
       throw new Error(`unexpected SQL: ${sql}`);
     });
     await expect(saveConfig({ ...full, apiToken: '', policyId: OTHER_POLICY })).rejects.toThrow('config write failed');
-    expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ baseline: [], abortedCandidates: null, lastRun: { outcome: 'updated' } });
+    expect(stored(ACCESS_SYNC_STATE_KEY)).toEqual({ ...EMPTY_STATE, lastRun: { outcome: 'updated' } });
     expect(stored(ACCESS_SYNC_CONFIG_KEY).policyId).toBe(POLICY);
   });
 
@@ -144,6 +145,6 @@ describe('settings', () => {
     store.set(ACCESS_SYNC_CONFIG_KEY, JSON.stringify({ ...full, apiToken: 'garbage' }));
     expect(await loadRunConfig()).toEqual({ accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: null });
     store.set(ACCESS_SYNC_STATE_KEY, 'not json');
-    expect(await loadState()).toEqual({ baseline: [], abortedCandidates: null, lastRun: null });
+    expect(await loadState()).toEqual({ ...EMPTY_STATE, lastRun: null });
   });
 });

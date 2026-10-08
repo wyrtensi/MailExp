@@ -37,7 +37,8 @@ export async function disableUsersByEmail(client, emails, { googleMode, bootstra
       continue;
     }
     const { rows: [row] } = await client.query(
-      'UPDATE users SET disabled_at = NOW(), disabled_by = NULL WHERE id = $1 RETURNING id, email, is_admin',
+      // disabled_source tells the users screen the email was removed in Cloudflare (migration 0097).
+      "UPDATE users SET disabled_at = NOW(), disabled_by = NULL, disabled_source = 'cloudflare_access' WHERE id = $1 RETURNING id, email, is_admin",
       [current.id],
     );
     disabled.push(row);

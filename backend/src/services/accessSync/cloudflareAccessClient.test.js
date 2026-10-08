@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CloudflareAccessError, cloudflareApiBase, createCloudflareAccessClient } from './cloudflareAccessClient.js';
+import {
+  CloudflareAccessError, cloudflareApiBase, createCloudflareAccessClient, parseRetryAfter,
+} from './cloudflareAccessClient.js';
 
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';
@@ -13,6 +15,29 @@ describe('cloudflareApiBase', () => {
   it('defaults to the public API and trims a trailing slash from an override', () => {
     expect(cloudflareApiBase({})).toBe('https://api.cloudflare.com/client/v4');
     expect(cloudflareApiBase({ CF_API_BASE: ' http://127.0.0.1:4010/ ' })).toBe('http://127.0.0.1:4010');
+  });
+});
+
+describe('retriable failures', () => {
+  it('reads Retry-After on a rate limit and marks network, timeout, 429 and 5xx as retriable', async () => {
+    const limited = { ...reply(429, { success: false, errors: [] }), headers: new Headers({ 'retry-after': '120' }) };
+    const err = await client(async () => limited).getPolicy(POLICY).catch((e) => e);
+    expect(err.status).toBe(429);
+    expect(err.retryAfter).toBe(120);
+    expect(err.retriable).toBe(true);
+    expect(new CloudflareAccessError('getPolicy', 'network').retriable).toBe(true);
+    expect(new CloudflareAccessError('getPolicy', 'timeout').retriable).toBe(true);
+    expect(new CloudflareAccessError('getPolicy', 502).retriable).toBe(true);
+    expect(new CloudflareAccessError('getPolicy', 403).retriable).toBe(false);
+    expect(new CloudflareAccessError('getPolicy', 'not_attached').retriable).toBe(false);
+  });
+
+  it('parses Retry-After as seconds or an HTTP date', () => {
+    const now = Date.parse('2026-10-09T10:00:00Z');
+    expect(parseRetryAfter('30', now)).toBe(30);
+    expect(parseRetryAfter('Fri, 09 Oct 2026 10:02:00 GMT', now)).toBe(120);
+    expect(parseRetryAfter('', now)).toBeNull();
+    expect(parseRetryAfter('soon', now)).toBeNull();
   });
 });
 

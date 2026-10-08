@@ -5,12 +5,30 @@ const TIMEOUT_MS = 10_000;
 const READ_ONLY_FIELDS = new Set(['id', 'uid', 'created_at', 'updated_at', 'reusable', 'app_count']);
 
 export class CloudflareAccessError extends Error {
-  constructor(action, status, codes = []) {
+  // retryAfter: the seconds of a Retry-After header (a 429 or a 5xx), or null.
+  constructor(action, status, codes = [], { retryAfter = null } = {}) {
     super(`Cloudflare ${action} failed (${status})${codes.length ? `: error ${codes.join(', ')}` : ''}`);
     this.name = 'CloudflareAccessError';
     this.status = status;
     this.codes = codes;
+    this.retryAfter = retryAfter;
   }
+
+  // A failure that may pass on its own: the network, a timeout, Cloudflare's own trouble (5xx) or
+  // its rate limit (429). Authentication, permissions and a wrong ID (4xx) wait for an operator.
+  get retriable() {
+    return this.status === 'network' || this.status === 'timeout' || this.status === 429
+      || (Number.isInteger(this.status) && this.status >= 500);
+  }
+}
+
+// Retry-After in seconds: a number of seconds or an HTTP date; null when absent or unreadable.
+export function parseRetryAfter(value, now = Date.now()) {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  if (/^\d+$/.test(text)) return Number(text);
+  const at = Date.parse(text);
+  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 // CF_API_BASE points the client at a test server; production uses the public API.
@@ -40,7 +58,7 @@ export function createCloudflareAccessClient({
       const codes = (Array.isArray(payload?.errors) ? payload.errors : [])
         .map((error) => error?.code)
         .filter(Number.isInteger);
-      throw new CloudflareAccessError(action, res.status, codes);
+      throw new CloudflareAccessError(action, res.status, codes, { retryAfter: parseRetryAfter(res.headers?.get?.('retry-after')) });
     }
     return payload.result;
   }

@@ -26,6 +26,14 @@ export function accessSyncMaxDisables(env = process.env) {
   return /^\d+$/.test(raw) ? Number(raw) : DEFAULT_MAX_DISABLES;
 }
 
+// ACCESS_SYNC_MAX_IMPORTS: the most emails one run may import from the policy as new users. 0
+// stops every run that would import anyone.
+export const DEFAULT_MAX_IMPORTS = 10;
+export function accessSyncMaxImports(env = process.env) {
+  const raw = String(env.ACCESS_SYNC_MAX_IMPORTS ?? '').trim();
+  return /^\d+$/.test(raw) ? Number(raw) : DEFAULT_MAX_IMPORTS;
+}
+
 // The settings and the state are read and written by more than one process: the backend (its
 // screen and its runs) and the panel CLI (`mailexpert access config|token`). Every change that
 // reads one of them and writes back runs in a transaction holding this advisory lock, so a run's
@@ -96,11 +104,21 @@ export async function isAccessSyncEnabled() {
   return (await loadStoredConfig()).enabled === true;
 }
 
+const emailList = (value) => (Array.isArray(value) ? value.filter((email) => typeof email === 'string') : []);
+
+// baseline: the emails MailExpert wrote to the policy last time (reconcile.js). policyEmails: every
+// email the policy listed after the last successful run, for the users screen's access state.
+// abortedCandidates / abortedImports: what a run stopped by the mass-change limit would have
+// disabled / imported, so the journal names each new set once. retryAttempt: how many retries in
+// a row a retriable failure has had (scheduler.js).
 export async function loadState(db = DEFAULT_DB) {
   const stored = await readJson(ACCESS_SYNC_STATE_KEY, db);
   return {
-    baseline: Array.isArray(stored?.baseline) ? stored.baseline.filter((email) => typeof email === 'string') : [],
+    baseline: emailList(stored?.baseline),
+    policyEmails: emailList(stored?.policyEmails),
     abortedCandidates: Array.isArray(stored?.abortedCandidates) ? stored.abortedCandidates : null,
+    abortedImports: Array.isArray(stored?.abortedImports) ? stored.abortedImports : null,
+    retryAttempt: Number.isInteger(stored?.retryAttempt) ? stored.retryAttempt : 0,
     lastRun: stored?.lastRun && typeof stored.lastRun === 'object' ? stored.lastRun : null,
   };
 }
@@ -157,7 +175,9 @@ async function writeConfig(input, stored, db) {
   if (token) next.apiToken = encrypt(token);
 
   if (next.accountId !== stored.accountId || next.appId !== stored.appId || next.policyId !== stored.policyId) {
-    await saveState({ ...(await loadState(db)), baseline: [], abortedCandidates: null }, db);
+    await saveState({
+      ...(await loadState(db)), baseline: [], policyEmails: [], abortedCandidates: null, abortedImports: null, retryAttempt: 0,
+    }, db);
   }
   await writeJson(ACCESS_SYNC_CONFIG_KEY, next, db);
   return next;

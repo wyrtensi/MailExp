@@ -3,15 +3,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 vi.mock('../auditLog.js', () => ({ recordAudit: vi.fn() }));
 vi.mock('../auth/userStatus.js', () => ({ disableUsersByEmail: vi.fn() }));
+vi.mock('./tombstones.js', () => ({ tombstonedAmong: vi.fn(), isTombstoned: vi.fn() }));
+vi.mock('../auth/userIdentity.js', async (importOriginal) => ({ ...(await importOriginal()), claimOrCreateUserByEmail: vi.fn() }));
 vi.mock('./settings.js', () => ({
   loadRunConfig: vi.fn(), loadState: vi.fn(), loadStoredConfig: vi.fn(), saveState: vi.fn(), accessSyncMaxDisables: vi.fn(),
+  accessSyncMaxImports: vi.fn(),
   withAccessSyncTransaction: vi.fn(async (fn) => fn('locked-db')),
 }));
 
 import { query, withTransaction } from '../db.js';
 import { recordAudit } from '../auditLog.js';
 import { disableUsersByEmail } from '../auth/userStatus.js';
-import { accessSyncMaxDisables, loadRunConfig, loadState, loadStoredConfig, saveState } from './settings.js';
+import { accessSyncMaxDisables, accessSyncMaxImports, loadRunConfig, loadState, loadStoredConfig, saveState } from './settings.js';
+import { isTombstoned, tombstonedAmong } from './tombstones.js';
+import { UserIdentityError, claimOrCreateUserByEmail } from '../auth/userIdentity.js';
 import { CloudflareAccessError } from './cloudflareAccessClient.js';
 import { runAccessSync } from './runner.js';
 
@@ -27,15 +32,19 @@ let createClient;
 const cloudflare = (policy) => {
   cf = { getPolicy: vi.fn(async () => structuredClone(policy)), updatePolicy: vi.fn(async () => ({})) };
 };
-const state = (baseline, abortedCandidates = null) => loadState.mockResolvedValue({ baseline, abortedCandidates, lastRun: null });
-const activeUsers = (...emails) => query.mockResolvedValue({ rows: emails.map((address) => ({ email: address })) });
+const state = (baseline, abortedCandidates = null, extra = {}) => loadState.mockResolvedValue({
+  baseline, policyEmails: [], abortedCandidates, abortedImports: null, retryAttempt: 0, lastRun: null, ...extra,
+});
+const activeUsers = (...emails) => query.mockResolvedValue({ rows: emails.map((address) => ({ email: address, disabled_at: null })) });
+const TX = { query: vi.fn(async () => ({ rows: [] })) };
 const run = (options = {}) => runAccessSync({
   trigger: 'test', signOutUser, createClient, settings: { mode: 'google', bootstrapAdminEmails: new Set() },
   env: {}, now: () => new Date(NOW), ...options,
 });
 const saved = () => saveState.mock.calls.at(-1)[0];
 const lastRun = (fields) => ({
-  trigger: 'test', startedAt: NOW, finishedAt: NOW, added: 0, removed: 0, disabled: 0, wouldDisable: 0, error: null, ...fields,
+  trigger: 'test', startedAt: NOW, finishedAt: NOW, added: 0, removed: 0, imported: 0, disabled: 0, wouldDisable: 0,
+  wouldImport: 0, errors: 0, error: null, retriable: false, retryAttempt: 0, nextRetryAt: null, ...fields,
 });
 
 beforeEach(() => {
@@ -45,7 +54,10 @@ beforeEach(() => {
   state([]);
   saveState.mockResolvedValue(undefined);
   accessSyncMaxDisables.mockReturnValue(10);
-  withTransaction.mockImplementation(async (fn) => fn('tx'));
+  accessSyncMaxImports.mockReturnValue(10);
+  tombstonedAmong.mockResolvedValue(new Set());
+  isTombstoned.mockResolvedValue(false);
+  withTransaction.mockImplementation(async (fn) => fn(TX));
   disableUsersByEmail.mockResolvedValue({ disabled: [], keptLastAdmin: [] });
   signOutUser = vi.fn(async () => {});
   createClient = vi.fn(() => cf);
@@ -61,14 +73,19 @@ describe('runAccessSync', () => {
   });
 
   it('adds approved users, keeps rules it does not own and remembers what it wrote', async () => {
+    // A tombstoned email stays in the policy as it is and is not imported.
+    tombstonedAmong.mockResolvedValue(new Set(['contractor@example.net']));
     cloudflare(policyWith([group, email('contractor@example.net')]));
     activeUsers('b@example.com', 'a@example.com');
     const result = await run();
     expect(createClient).toHaveBeenCalledWith(CONFIG);
     expect(cf.updatePolicy).toHaveBeenCalledWith(policyWith([group, email('contractor@example.net'), email('a@example.com'), email('b@example.com')]));
     expect(result).toEqual(lastRun({ outcome: 'updated', added: 2 }));
-    expect(saved()).toEqual({ baseline: ['a@example.com', 'b@example.com'], abortedCandidates: null, lastRun: result });
-    expect(query.mock.calls[0][0]).toBe('SELECT email FROM users WHERE disabled_at IS NULL AND email IS NOT NULL');
+    expect(saved()).toEqual({
+      baseline: ['a@example.com', 'b@example.com'], policyEmails: ['a@example.com', 'b@example.com', 'contractor@example.net'],
+      abortedCandidates: null, abortedImports: null, retryAttempt: 0, lastRun: result,
+    });
+    expect(query.mock.calls[0][0]).toBe('SELECT email, disabled_at FROM users WHERE email IS NOT NULL');
   });
 
   it('keeps the state of a policy the settings moved to while it ran (the CLI saves from another process)', async () => {
@@ -76,7 +93,7 @@ describe('runAccessSync', () => {
     activeUsers('a@example.com', 'b@example.com');
     // The run starts with no baseline; meanwhile the CLI points the sync at another policy and
     // saveConfig resets the state for it.
-    const reset = { baseline: [], abortedCandidates: null, lastRun: null };
+    const reset = { baseline: [], policyEmails: [], abortedCandidates: null, abortedImports: null, retryAttempt: 0, lastRun: null };
     loadState.mockResolvedValueOnce({ baseline: ['old@example.com'], abortedCandidates: null, lastRun: null }).mockResolvedValue(reset);
     loadStoredConfig.mockResolvedValue({ enabled: true, ...CONFIG, policyId: 'other-pol' });
     const result = await run();
@@ -110,7 +127,7 @@ describe('runAccessSync', () => {
     activeUsers('a@example.com', 'b@example.com');
     disableUsersByEmail.mockResolvedValue({ disabled: [{ id: 'u-b', email: 'b@example.com', is_admin: false }], keptLastAdmin: [] });
     expect(await run()).toEqual(lastRun({ outcome: 'unchanged', disabled: 1 }));
-    expect(disableUsersByEmail).toHaveBeenCalledWith('tx', ['b@example.com'], { googleMode: true, bootstrapAdminEmails: new Set() });
+    expect(disableUsersByEmail).toHaveBeenCalledWith(TX, ['b@example.com'], { googleMode: true, bootstrapAdminEmails: new Set() });
     expect(signOutUser).toHaveBeenCalledWith('u-b');
     expect(recordAudit).toHaveBeenCalledWith([{
       actorEmail: 'Cloudflare Access', action: 'user.disabled',
@@ -191,6 +208,7 @@ describe('runAccessSync', () => {
     expect(cf.updatePolicy).not.toHaveBeenCalled();
     expect(saved().baseline).toEqual(['a@example.com']);
 
+    tombstonedAmong.mockResolvedValue(new Set(['contractor@example.net']));
     cloudflare(policyWith([email('contractor@example.net'), email('a@example.com')]));
     expect(await run()).toEqual(lastRun({ outcome: 'updated', removed: 1 }));
     expect(cf.updatePolicy.mock.calls[0][0].include).toEqual([email('contractor@example.net')]);
@@ -233,5 +251,129 @@ describe('runAccessSync', () => {
     loadRunConfig.mockResolvedValue({ ...CONFIG, apiToken: null });
     expect(await run()).toEqual(lastRun({ outcome: 'failed', error: 'token_unreadable' }));
     expect(createClient).not.toHaveBeenCalled();
+  });
+
+  describe('import from Cloudflare', () => {
+    const created = (address, extra = {}) => ({
+      user: { id: `u-${address[0]}`, email: address, is_admin: false, disabled_at: null }, created: true, claimed: false, ...extra,
+    });
+
+    it('turns emails added in Cloudflare into users, journals them and owns them from then on', async () => {
+      cloudflare(policyWith([group, email('a@example.com'), email('new@example.com')]));
+      state(['a@example.com']);
+      activeUsers('a@example.com');
+      claimOrCreateUserByEmail.mockResolvedValue(created('new@example.com'));
+      const result = await run();
+      expect(result).toEqual(lastRun({ outcome: 'unchanged', imported: 1 }));
+      expect(claimOrCreateUserByEmail).toHaveBeenCalledWith(TX, 'new@example.com');
+      expect(isTombstoned).toHaveBeenCalledWith('new@example.com', TX);
+      expect(recordAudit).toHaveBeenCalledWith([{
+        actorEmail: 'Cloudflare Access', action: 'access.user_imported',
+        details: { userId: 'u-n', email: 'new@example.com', source: 'cloudflare_access' },
+      }]);
+      expect(cf.updatePolicy).not.toHaveBeenCalled();
+      expect(saved().baseline).toEqual(['a@example.com', 'new@example.com']);
+      expect(saved().policyEmails).toEqual(['a@example.com', 'new@example.com']);
+    });
+
+    it('skips emails with a user (active or disabled), a tombstone, an exclude rule or a bootstrap admin', async () => {
+      cloudflare(policyWith(
+        [email('a@example.com'), email('off@example.com'), email('gone@example.com'), email('ex@example.com'), email('boot@example.com')],
+        { exclude: [email('ex@example.com')] },
+      ));
+      state(['a@example.com']);
+      query.mockResolvedValue({ rows: [{ email: 'a@example.com', disabled_at: null }, { email: 'Off@example.com', disabled_at: new Date() }] });
+      tombstonedAmong.mockResolvedValue(new Set(['gone@example.com']));
+      const result = await run({ settings: { mode: 'google', bootstrapAdminEmails: new Set(['boot@example.com']) } });
+      expect(tombstonedAmong).toHaveBeenCalledWith(new Set(['gone@example.com']));
+      expect(claimOrCreateUserByEmail).not.toHaveBeenCalled();
+      expect(result.imported).toBe(0);
+      // The disabled user stays disabled; its email stays in the policy untouched.
+      expect(saved().baseline).toEqual(['a@example.com', 'boot@example.com']);
+    });
+
+    it('does not import an email tombstoned while the run worked, and counts refused addresses as errors', async () => {
+      cloudflare(policyWith([email('a@example.com'), email('late@example.com'), email('taken@example.com')]));
+      state(['a@example.com']);
+      activeUsers('a@example.com');
+      isTombstoned.mockImplementation(async (address) => address === 'late@example.com');
+      claimOrCreateUserByEmail.mockRejectedValue(new UserIdentityError('username_taken'));
+      const result = await run();
+      expect(claimOrCreateUserByEmail).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(lastRun({ outcome: 'unchanged', errors: 1 }));
+    });
+
+    it('stops above the import limit without changing anything and journals each new set once', async () => {
+      accessSyncMaxImports.mockReturnValue(1);
+      cloudflare(policyWith([email('a@example.com'), email('x@example.com'), email('y@example.com')]));
+      state(['a@example.com']);
+      activeUsers('a@example.com');
+      expect(await run()).toEqual(lastRun({ outcome: 'aborted', wouldImport: 2 }));
+      expect(claimOrCreateUserByEmail).not.toHaveBeenCalled();
+      expect(cf.updatePolicy).not.toHaveBeenCalled();
+      expect(recordAudit).toHaveBeenCalledWith({
+        actorEmail: 'Cloudflare Access', action: 'access.import_aborted',
+        details: { candidates: ['x@example.com', 'y@example.com'], maxImports: 1 },
+      });
+      expect(saved()).toMatchObject({ abortedImports: ['x@example.com', 'y@example.com'], abortedCandidates: null });
+
+      recordAudit.mockClear();
+      state(['a@example.com'], null, { abortedImports: ['x@example.com', 'y@example.com'] });
+      await run();
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+
+    it('does not import a claimed row that is disabled', async () => {
+      cloudflare(policyWith([email('a@example.com'), email('legacy@example.com')]));
+      state(['a@example.com']);
+      activeUsers('a@example.com');
+      claimOrCreateUserByEmail.mockResolvedValue({
+        user: { id: 'u-l', email: 'legacy@example.com', disabled_at: new Date() }, created: false, claimed: true,
+      });
+      expect((await run()).imported).toBe(0);
+      expect(recordAudit).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('retries', () => {
+    const at = (ms) => new Date(Date.parse(NOW) + ms).toISOString();
+
+    it('schedules a retry after a network failure, then backs off 1, 5 and 15 minutes', async () => {
+      cloudflare(policyWith([]));
+      cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 'network'));
+      expect(await run()).toEqual(lastRun({
+        outcome: 'failed', error: 'Cloudflare getPolicy failed (network)', retriable: true, retryAttempt: 1, nextRetryAt: at(60_000),
+      }));
+      expect(saved().retryAttempt).toBe(1);
+
+      state([], null, { retryAttempt: 1 });
+      expect((await run({ trigger: 'retry' })).nextRetryAt).toBe(at(5 * 60_000));
+      state([], null, { retryAttempt: 2 });
+      expect((await run({ trigger: 'retry' })).nextRetryAt).toBe(at(15 * 60_000));
+      state([], null, { retryAttempt: 3 });
+      expect(await run({ trigger: 'retry' })).toMatchObject({ retriable: true, retryAttempt: 0, nextRetryAt: null });
+    });
+
+    it('honours a longer Retry-After on 429 and 5xx', async () => {
+      cloudflare(policyWith([]));
+      cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 429, [], { retryAfter: 600 }));
+      expect((await run()).nextRetryAt).toBe(at(600_000));
+      cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 503, [], { retryAfter: 5 }));
+      expect((await run()).nextRetryAt).toBe(at(60_000));
+      // Later than the hourly run: left to it.
+      cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 503, [], { retryAfter: 7200 }));
+      expect((await run()).nextRetryAt).toBeNull();
+    });
+
+    it('does not retry authentication or configuration failures, and a success resets the count', async () => {
+      cloudflare(policyWith([]));
+      cf.getPolicy.mockRejectedValue(new CloudflareAccessError('getPolicy', 403, [10000]));
+      expect(await run()).toMatchObject({ retriable: false, nextRetryAt: null });
+      cloudflare(policyWith([email('a@example.com')]));
+      state(['a@example.com'], null, { retryAttempt: 2 });
+      activeUsers('a@example.com');
+      expect(await run({ trigger: 'retry' })).toMatchObject({ outcome: 'unchanged', retryAttempt: 0 });
+      expect(saved().retryAttempt).toBe(0);
+    });
   });
 });

@@ -123,6 +123,33 @@ describe('access sync scheduler', () => {
     errorSpy.mockRestore();
   });
 
+  it('runs a retry at the time a failed run asked for, and a later run replaces it', async () => {
+    const run = vi.fn(async (trigger) => (trigger === 'startup'
+      ? { outcome: 'failed', nextRetryAt: new Date(Date.now() + 5_000).toISOString() }
+      : { outcome: 'unchanged', nextRetryAt: null }));
+    const s = scheduler(run);
+    s.start();
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    expect(run.mock.calls).toEqual([['startup']]);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run.mock.calls).toEqual([['startup'], ['retry']]);
+    s.stop();
+
+    // A run that ends before the retry is due cancels it when it needs none.
+    run.mockClear();
+    run.mockImplementation(async (trigger) => (trigger === 'startup'
+      ? { outcome: 'failed', nextRetryAt: new Date(Date.now() + 5_000).toISOString() }
+      : { outcome: 'unchanged', nextRetryAt: null }));
+    s.start();
+    await vi.advanceTimersByTimeAsync(DEBOUNCE);
+    await s.runNow('manual');
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(run.mock.calls).toEqual([['startup'], ['manual']]);
+    s.stop();
+  });
+
   it('stops every timer', async () => {
     const run = instantRun();
     const s = scheduler(run);
