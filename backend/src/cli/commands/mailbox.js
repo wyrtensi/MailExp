@@ -7,6 +7,7 @@ import {
   listNodeMailboxes, onOtherMailHost, requestMailboxDeletion, setNodeMailboxNames,
 } from '../../services/mailNode/mailboxActions.js';
 import { listAliases } from '../../services/accountAliases.js';
+import { ACCOUNT_ERRORS, findAccount, resetOAuthSubject } from '../../services/accounts/manualAccounts.js';
 
 // mailexpert mailbox ...: the mail node's mailboxes (services/mailNode/mailboxActions.js, the same
 // actions as the panel's screens). A mailbox is named by its address or its ID.
@@ -262,8 +263,28 @@ const reactivate = {
   },
 };
 
+const oauthReset = {
+  name: 'oauth-reset',
+  journal: 'mailbox.oauth_subject_reset with the provider',
+  summary: 'forget which Google or Microsoft account an OAuth mailbox is bound to',
+  usage: 'mailbox oauth-reset <address|id>',
+  help: [
+    'Any OAuth mailbox (Gmail, Outlook), not one on the mail node: its next reconnect binds',
+    'whoever signs in with the mailbox\'s verified address. For a mailbox whose owner\'s provider',
+    'account was recreated, or one bound to the wrong account. Asks for confirmation (--yes).',
+    'Refused for a mailbox without OAuth or on the mail node (oauth_mailbox_not_found).',
+  ],
+  positionals: ['mailbox'],
+  async run(ctx) {
+    const { account } = unwrap(await findAccount(ctx.args.mailbox), ACCOUNT_ERRORS);
+    await confirm(ctx, `Forget the provider account ${account.email_address} is bound to? Its next reconnect binds a new one.`);
+    const result = unwrap(await resetOAuthSubject(account.id, ctx.actor), ACCOUNT_ERRORS);
+    return { data: { ok: true }, lines: [`${account.email_address}: the ${result.oauthProvider} account binding is forgotten`] };
+  },
+};
+
 export default {
   name: 'mailbox',
-  summary: 'the mail node\'s mailboxes: list, show, create, names, deletion, deactivation',
-  commands: [list, show, create, setNames, requestDelete, cancelDelete, deactivate, reactivate],
+  summary: 'the mail node\'s mailboxes: list, show, create, names, deletion, deactivation; OAuth reset',
+  commands: [list, show, create, setNames, requestDelete, cancelDelete, deactivate, reactivate, oauthReset],
 };

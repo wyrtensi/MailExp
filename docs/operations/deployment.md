@@ -281,6 +281,11 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `eop` | `show`, `set [--eop-host ...] [--licenses <N>] ...` (все поля экрана EOP), `budget` — настройки EOP и бюджет TERRL |
 | `seats` | `status`, `check [--wait]`, `set-hold <DAYS>`, `request <N>` — места EOP |
 | `agent` | `status`, `jobs [--limit <N>]`, `token issue [--out <TOKEN_FILE>\|--out -]`, `token revoke`, `run status\|backup\|update` — агент узла; токен печатается один раз (или пишется в файл 0600 на хосте) для `setup.sh --agent-token-file` |
+| `invite` | `list`, `create <EMAIL> --as <ADMIN_EMAIL>`, `revoke <ID>` — приглашения на регистрацию; письмо уходит через системную почту |
+| `system-email` | `show`, `set [--host ...] [--user ...] [--password-stdin] ...` (пароль только со stdin), `test`, `remove` — SMTP системной почты панели |
+| `audit` | `list [--action <A>] [--since <T>] [--until <T>] [--account <ADDRESS>] [--user <EMAIL>] [--before <CURSOR>] [--limit <N>]`, `auth-events` — журнал и события входа |
+| `account` | `list [--user <EMAIL>]`, `create <ADDRESS> --imap-host ... --smtp-host ...` (пароль только со stdin), `set-connection <ADDRESS> ...` — ящики, настроенные вручную по IMAP/SMTP, с проверками политики подключений; у группы `mailbox` ещё `oauth-reset <ADDRESS>` |
+| `rule` | `list`, `show <ID>`, `create`, `set <ID>` (JSON правила со stdin), `enable <ID>`, `disable <ID>`, `delete <ID>`, `run --account <ADDRESS>\|--all` — правила входящих |
 
 Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
 (`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`
@@ -298,7 +303,8 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 - `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
   `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `domain ready`, `domain ack`,
   `quarantine pause`, `mailbox deactivate`, `node apply --prefilter`, `agent token issue` при ротации,
-  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`. Без
+  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`,
+  `invite revoke`, `system-email remove`, `mailbox oauth-reset`, `rule delete`, `rule run`. Без
   терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,

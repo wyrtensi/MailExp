@@ -1,9 +1,10 @@
 import { enqueueAdminEffects } from '../services/admin/adminEffects.js';
 
-// The admin commands' (user, settings, sso, integration) way to the backend's process: what a
-// change still asks of it (sign-outs, the Access sync, the settings it keeps in memory) is queued
-// as an admin_effects job, which the backend's job worker applies with the hooks the admin routes
-// use (services/admin/adminEffects.js). The CLI never applies them itself.
+// The admin commands' (user, settings, sso, integration, account, rule) way to the backend's
+// process: what a change still asks of it (sign-outs, the Access sync, the settings it keeps in
+// memory) is queued as an admin_effects job, which the backend's job worker applies with the hooks
+// the admin routes use (services/admin/adminEffects.js); so are connecting a mailbox and running
+// rules on the inbox, which need the backend's IMAP connections. The CLI never applies them itself.
 
 const NAMES = Object.freeze({
   auth_limits: 'sign-in limits reloaded',
@@ -19,6 +20,8 @@ export function describeEffects(effects) {
   if (effects.userDeleted?.length) parts.push('plugin data removed');
   for (const name of effects.reload ?? []) parts.push(NAMES[name] ?? name);
   if (effects.accessSync) parts.push('Cloudflare Access sync asked for');
+  if (effects.reconnect?.length) parts.push(`${effects.reconnect.length === 1 ? 'mailbox' : `${effects.reconnect.length} mailboxes`} (re)connected`);
+  if (effects.runRules?.length) parts.push(`rules run on the inbox of ${effects.runRules.length === 1 ? 'the mailbox' : `${effects.runRules.length} mailboxes`}`);
   return parts.join(', ');
 }
 

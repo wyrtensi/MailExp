@@ -16,6 +16,7 @@ setup() {
   [ "$status" -eq 0 ]
   [[ $output == *"Usage: mailexpert-cli.sh"* ]]
   [[ $output == *"mailbox, domain"* && $output == *"jobs, access"* && $output == *"user, settings, sso, integration, node, eop, seats, agent"* ]]
+  [[ $output == *"invite, system-email, audit, account, rule"* ]]
 }
 
 @test "no group is an error" {

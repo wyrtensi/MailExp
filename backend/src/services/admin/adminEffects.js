@@ -15,6 +15,10 @@ import { enqueueJob, registerJobKind } from '../jobQueue.js';
 //   userDeleted: [userId]  deleted users, for the plugins' onUserDelete hook
 //   accessSync:  trigger   asks the Access sync for a run (google mode only, as requestAccessSync)
 //   reload:      [name]    RELOADS: process state to read again from the database
+//   reconnect:   [accountId] mailboxes to (re)connect from their stored row (a new or changed
+//                          connection: services/accounts/connection.js reconnectAccount)
+//   runRules:    [accountId] mailboxes whose enabled rules to run on the inbox, in the background
+//                          (services/rules/ruleActions.js; a mailbox being swept is skipped)
 // }
 
 export const ADMIN_EFFECTS_JOB_KIND = 'admin_effects';
@@ -29,30 +33,39 @@ const uniq = (list) => [...new Set(list)];
 
 // One effects object from several (null entries are skipped).
 export function mergeEffects(...list) {
-  const merged = { signOut: [], userDeleted: [], accessSync: null, reload: [] };
+  const merged = { signOut: [], userDeleted: [], accessSync: null, reload: [], reconnect: [], runRules: [] };
   for (const effects of list) {
     if (!effects) continue;
     merged.signOut.push(...(effects.signOut ?? []));
     merged.userDeleted.push(...(effects.userDeleted ?? []));
     merged.reload.push(...(effects.reload ?? []));
+    merged.reconnect.push(...(effects.reconnect ?? []));
+    merged.runRules.push(...(effects.runRules ?? []));
     if (effects.accessSync) merged.accessSync = effects.accessSync;
   }
-  return { ...merged, signOut: uniq(merged.signOut), userDeleted: uniq(merged.userDeleted), reload: uniq(merged.reload) };
+  return {
+    ...merged, signOut: uniq(merged.signOut), userDeleted: uniq(merged.userDeleted), reload: uniq(merged.reload),
+    reconnect: uniq(merged.reconnect), runRules: uniq(merged.runRules),
+  };
 }
 
 export function hasEffects(effects) {
-  return !!effects && (!!effects.signOut?.length || !!effects.userDeleted?.length || !!effects.accessSync || !!effects.reload?.length);
+  return !!effects && (!!effects.signOut?.length || !!effects.userDeleted?.length || !!effects.accessSync || !!effects.reload?.length
+    || !!effects.reconnect?.length || !!effects.runRules?.length);
 }
 
 // Applies the effects in this process. hooks: { signOutUser(id), onUserDelete(id),
-// requestAccessSync(trigger), reload: { name: fn } }; a hook not given is skipped. Sign-outs come
-// first, then the reloads, the plugins' clean-up and the Access sync last, as the routes always did.
+// requestAccessSync(trigger), reload: { name: fn }, reconnectAccount(id), runRules([id]) }; a hook
+// not given is skipped. Sign-outs come first, then the reloads, the plugins' clean-up and the
+// Access sync, as the routes always did; the mailbox reconnects and the rules run last.
 export async function applyAdminEffects(effects, hooks) {
   if (!hasEffects(effects)) return;
   for (const userId of effects.signOut ?? []) await hooks.signOutUser?.(userId);
   for (const name of effects.reload ?? []) await hooks.reload?.[name]?.();
   for (const userId of effects.userDeleted ?? []) await hooks.onUserDelete?.(userId);
   if (effects.accessSync) hooks.requestAccessSync?.(effects.accessSync);
+  for (const accountId of effects.reconnect ?? []) await hooks.reconnectAccount?.(accountId);
+  if (effects.runRules?.length) await hooks.runRules?.(effects.runRules);
 }
 
 // Queues the effects for the backend (the CLI). Answers the job row, or null when there is nothing

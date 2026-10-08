@@ -205,13 +205,15 @@ Gmail threadId. Копия в «Отправленных» (APPEND до 20 се�
 ## Последствия админских изменений из CLI
 
 Вид `admin_effects` (`backend/src/services/admin/adminEffects.js`) ставят группы CLI `user`,
-`settings`, `sso` и `integration`: то, что после изменения в базе должен сделать процесс backend —
-разлогинить пользователя (сессии в Redis, сокеты процесса), хук плагинов `onUserDelete`, запрос
-синхронизации с Access, перечитать лимиты входа, интервалы синхронизации, кэши и клиент Microsoft в
-`process.env`. `payload` — `{ effects: { signOut, userDeleted, accessSync, reload }, via }`, только ID
-пользователей и имена; секретов нет. Обработчик регистрирует только backend
+`settings`, `sso`, `integration`, `account` и `rule run`: то, что после изменения в базе должен сделать
+процесс backend — разлогинить пользователя (сессии в Redis, сокеты процесса), хук плагинов
+`onUserDelete`, запрос синхронизации с Access, перечитать лимиты входа, интервалы синхронизации, кэши и
+клиент Microsoft в `process.env`, подключить ящик заново (`reconnect`), прогнать правила по входящим
+(`runRules`). `payload` — `{ effects: { signOut, userDeleted, accessSync, reload, reconnect, runRules },
+via }`, только ID пользователей и ящиков и имена; секретов нет. Обработчик регистрирует только backend
 (`registerAdminEffectsJobKind(ADMIN_EFFECT_HOOKS)` в `index.js`), с теми же хуками, что маршруты
-применяют сразу. `max_attempts` 3: каждый хук можно повторить. `dedupe_key` нет.
+применяют сразу. `max_attempts` 3: каждый хук можно повторить; прогон правил идёт последним и не бросает
+исключений (он только запускается в фоне), поэтому повтор задания его не повторяет. `dedupe_key` нет.
 
 ## Синхронизация с Cloudflare Access из CLI
 
