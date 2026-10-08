@@ -2,32 +2,20 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { uuidParam } from '../utils/uuid.js';
-import { recordAudit } from '../services/auditLog.js';
-import {
-  QUARANTINE_NODE_SETTINGS,
-  deleteQuarantineItem,
-  getMailNodeConfig,
-  getQuarantineItem,
-  learnSpamQuarantineItem,
-  listQuarantine,
-  releaseQuarantineItem,
-  writeQuarantineSettings,
-} from '../services/mailNode/mailcow.js';
+import { routeActor } from '../services/actor.js';
+import { getMailNodeConfig, getQuarantineItem } from '../services/mailNode/mailcow.js';
 import {
   findHistoryEntry,
-  getQuarantineSettingsAppliedAt,
   getQuarantineUserView,
-  historyForQuarantine,
-  markQuarantineSettingsApplied,
   nodeDomainNames,
   panelNodeMailboxes,
   parseQuarantineLetter,
   readRspamdHistory,
-  setQuarantineUserView,
-  spamRowsFor,
-  topSymbols,
-  withDeadline,
 } from '../services/mailNode/quarantine.js';
+import {
+  QUARANTINE_ERRORS, applyQuarantineNodeSettings, listNodeQuarantine, parseQuarantineId, quarantineEntryAction,
+  quarantineSettingsView, setQuarantineUserViewAction,
+} from '../services/mailNode/quarantineActions.js';
 import { mailNodeFailure, onOtherMailHost } from './mailNode.js';
 import { getSpamRuleState } from '../services/mailNode/nodeApply.js';
 
@@ -44,28 +32,24 @@ const router = Router();
 router.param('id', uuidParam('id'));
 router.use(requireAuth);
 
-// The newest entries a listing returns.
-const MAX_LIST = 2000;
 // Symbols "why is this letter in Spam" shows.
 const MAX_VERDICT_SYMBOLS = 15;
-// How long a listing waits for rspamd's history before it answers without the symbols.
-const LIST_HISTORY_WAIT_MS = 4000;
-
-const ERRORS = {
-  mail_node_not_configured: [409, 'The mail node is not set up'],
-  quarantine_admin_only: [403, 'Only administrators see the quarantine'],
-  quarantine_item_invalid: [400, 'Quarantine entry must be a number'],
-  quarantine_item_not_found: [404, 'No such quarantine entry'],
-  quarantine_user_view_invalid: [400, 'userView must be true or false'],
-  quarantine_settings_unconfirmed: [400, 'Writing the quarantine settings needs { confirm: true }: it overwrites every quarantine setting in mailcow'],
-  message_not_found: [404, 'Message not found'],
-  message_not_mail_node: [400, 'The letter is not in a mail node mailbox'],
-  mail_node_host_mismatch: [409, 'The mailbox is on another mail host than the one in the mail node settings'],
-};
 
 function refuse(res, code) {
-  const [status, error] = ERRORS[code];
+  const [status, error] = QUARANTINE_ERRORS[code];
   return res.status(status).json({ error, code });
+}
+
+// A shared action's answer (services/mailNode/quarantineActions.js, which the panel CLI shares):
+// its refusal, the node's failure or its result.
+async function answer(res, run) {
+  let result;
+  try {
+    result = await run();
+  } catch (err) {
+    return mailNodeFailure(res, err);
+  }
+  return result.error ? refuse(res, result.error) : res.json(result);
 }
 
 async function isAdmin(req) {
@@ -85,12 +69,9 @@ async function viewer(req, res) {
 }
 
 function itemId(req, res) {
-  const raw = String(req.params.itemId ?? '');
-  if (!/^\d{1,10}$/.test(raw) || Number(raw) < 1) {
-    refuse(res, 'quarantine_item_invalid');
-    return null;
-  }
-  return Number(raw);
+  const id = parseQuarantineId(req.params.itemId);
+  if (id === null) refuse(res, 'quarantine_item_invalid');
+  return id;
 }
 
 async function nodeConfig(res) {
@@ -101,89 +82,28 @@ async function nodeConfig(res) {
 
 // The panel's own settings for the quarantine, and the mailcow settings it writes on request
 // (nodeSettings) with when it last did (nodeSettingsAppliedAt, null: never).
-async function settingsAnswer() {
-  return {
-    userView: await getQuarantineUserView(),
-    nodeSettingsAppliedAt: await getQuarantineSettingsAppliedAt(),
-    nodeSettings: QUARANTINE_NODE_SETTINGS,
-  };
-}
-
 router.get('/quarantine/settings', requireAdmin, async (req, res) => {
-  res.json(await settingsAnswer());
+  res.json(await quarantineSettingsView());
 });
 
-router.put('/quarantine/settings', requireAdmin, async (req, res) => {
-  const userView = req.body?.userView;
-  if (typeof userView !== 'boolean') return refuse(res, 'quarantine_user_view_invalid');
-  const before = await getQuarantineUserView();
-  if (before !== userView) {
-    await setQuarantineUserView(userView);
-    recordAudit({
-      actorUserId: req.session.userId, action: 'mail_node.config_changed', details: { settings: 'quarantine', fields: ['userView'] },
-    });
-  }
-  res.json({ ok: true, userView });
-});
+router.put('/quarantine/settings', requireAdmin, (req, res) => answer(res, () => (
+  setQuarantineUserViewAction(req.body?.userView, routeActor(req))
+)));
 
-// "Enable quarantine on this node" / "Re-apply": writes every quarantine setting of mailcow
-// (QUARANTINE_NODE_SETTINGS). mailcow cannot report them, and the call resets whatever it is not
-// given, so it runs only with { confirm: true } after the screen's warning, and is journaled.
-router.post('/quarantine/node-settings', requireAdmin, async (req, res) => {
-  if (req.body?.confirm !== true) return refuse(res, 'quarantine_settings_unconfirmed');
-  const cfg = await nodeConfig(res);
-  if (!cfg) return undefined;
-  const before = await getQuarantineSettingsAppliedAt();
-  try {
-    await writeQuarantineSettings(cfg);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  const at = await markQuarantineSettingsApplied();
-  const { max_size: maxSize, retention_size: retentionSize, max_age: maxAge, release_format: releaseFormat } = QUARANTINE_NODE_SETTINGS;
-  recordAudit({
-    actorUserId: req.session.userId,
-    action: 'mail_node.quarantine_settings_applied',
-    details: { reapplied: !!before, ...(before ? { previous: before } : {}), maxSize, retentionSize, maxAge, releaseFormat },
-  });
-  res.json({ ok: true, ...(await settingsAnswer()), nodeSettingsAppliedAt: at });
-});
+// "Enable quarantine on this node" / "Re-apply": writes every quarantine setting of mailcow. It
+// resets whatever it is not given, so it runs only with { confirm: true } after the screen's
+// warning, and is journaled.
+router.post('/quarantine/node-settings', requireAdmin, (req, res) => answer(res, () => (
+  applyQuarantineNodeSettings({ confirm: req.body?.confirm === true }, routeActor(req))
+)));
 
-// The entries, newest first, each with the panel's account id of its mailbox (null for a mailbox
-// the panel does not have) and, when rspamd's recent history still holds the scan, the symbols that
-// weighed most. A history that cannot be read in LIST_HISTORY_WAIT_MS leaves the symbols out, never
-// the list. For an administrator an empty quarantine comes with the number of letters the history
-// shows refused or marked as spam for the panel's mailboxes (spamInHistory): some means mailcow's
-// quarantine is probably off.
+// The entries, newest first, with the panel's account id of each mailbox and the symbols that
+// weighed most when rspamd's history still holds the scan; a user without administrator rights
+// sees only those addressed to the panel's node mailboxes.
 router.get('/quarantine', async (req, res) => {
   const who = await viewer(req, res);
   if (!who) return undefined;
-  const cfg = await nodeConfig(res);
-  if (!cfg) return undefined;
-  let items;
-  try {
-    items = await listQuarantine(cfg);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  if (!who.admin) items = items.filter((item) => who.mailboxes.has(item.rcpt));
-  const total = items.length;
-  items = items.slice(0, MAX_LIST);
-  const history = await withDeadline(readRspamdHistory(cfg).catch((err) => {
-    console.error(`Mail node rspamd history for the quarantine failed: ${err?.code || 'error'}`);
-    return null;
-  }), LIST_HISTORY_WAIT_MS);
-  res.json({
-    admin: who.admin,
-    total,
-    truncated: total > items.length,
-    historyRead: history !== null,
-    ...(who.admin && total === 0 && history ? { spamInHistory: spamRowsFor(history, who.mailboxes) } : {}),
-    items: items.map((item) => {
-      const row = history ? historyForQuarantine(item, history) : null;
-      return { ...item, accountId: who.mailboxes.get(item.rcpt) ?? null, topSymbols: row ? topSymbols(row.symbols) : null };
-    }),
-  });
+  return answer(res, () => listNodeQuarantine(who));
 });
 
 // One entry with its letter parsed for the safe text view. A user without administrator rights
@@ -217,56 +137,16 @@ router.get('/quarantine/:itemId', async (req, res) => {
   });
 });
 
-// The entry as the listing shows it, for the journal and to answer 404 before acting.
-async function listedItem(res, cfg, id) {
-  try {
-    const item = (await listQuarantine(cfg)).find((q) => q.id === id);
-    if (!item) refuse(res, 'quarantine_item_not_found');
-    return item ?? null;
-  } catch (err) {
-    mailNodeFailure(res, err);
-    return null;
-  }
-}
-
-async function journal(req, action, item, extra = {}) {
-  const accountId = (await panelNodeMailboxes()).get(item.rcpt) ?? null;
-  recordAudit({
-    actorUserId: req.session.userId,
-    action,
-    ...(accountId ? { accountId } : { accountEmail: item.rcpt || null }),
-    details: { id: item.id, qid: item.qid, rcpt: item.rcpt, sender: item.sender, score: item.score, action: item.action, ...extra },
-  });
-}
-
 // An administrator's action on one entry: answers 404 for an entry gone from the node, runs it,
 // journals it with what training did and what the node warned about.
-function entryAction(run, action) {
-  return async (req, res) => {
-    const id = itemId(req, res);
-    if (id === null) return undefined;
-    const cfg = await nodeConfig(res);
-    if (!cfg) return undefined;
-    const item = await listedItem(res, cfg, id);
-    if (!item) return undefined;
-    let result;
-    try {
-      result = (await run(cfg, id)) ?? null;
-    } catch (err) {
-      return mailNodeFailure(res, err);
-    }
-    const warnings = result?.warnings ?? [];
-    await journal(req, action, item, result ? { learned: result.learned, ...(warnings.length ? { warnings } : {}) } : {});
-    return res.json({ ok: true, ...(result ? { learned: result.learned, warnings } : {}) });
-  };
-}
+const entryAction = (kind) => (req, res) => answer(res, () => quarantineEntryAction(req.params.itemId, kind, routeActor(req)));
 
 // Release: the node delivers the letter to its mailbox past rspamd, removes the entry and trains
 // rspamd with it as ham (and its fuzzy hash as ham).
-router.post('/quarantine/:itemId/release', requireAdmin, entryAction(releaseQuarantineItem, 'mail_node.quarantine_released'));
+router.post('/quarantine/:itemId/release', requireAdmin, entryAction('release'));
 // "Delete and train as spam": the node removes the entry and trains rspamd with it as spam.
-router.post('/quarantine/:itemId/learn-spam', requireAdmin, entryAction(learnSpamQuarantineItem, 'mail_node.quarantine_learned_spam'));
-router.delete('/quarantine/:itemId', requireAdmin, entryAction(deleteQuarantineItem, 'mail_node.quarantine_deleted'));
+router.post('/quarantine/:itemId/learn-spam', requireAdmin, entryAction('learn_spam'));
+router.delete('/quarantine/:itemId', requireAdmin, entryAction('delete'));
 
 // "Why is this letter in Spam": rspamd's verdict on a letter of a node mailbox, found in the node's
 // recent history (the last letters rspamd checked, read at most once a minute) by its Message-ID,

@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { recordAudit } from '../services/auditLog.js';
 import { routeActor } from '../services/actor.js';
-import { TENANT_JOB_KINDS, takeConnectorReference } from '../services/tenant/tenantJobs.js';
+import { TENANT_JOB_KINDS } from '../services/tenant/tenantJobs.js';
 import {
   TENANT_ERRORS, approveAliasContactsRemoval, approveInternalRelay, enqueueTenantAction, getTenantJob,
-  phishReleaseStatus, runPhishReleaseNow, setDomainHold, setPhishRelease, syncDomainNow, tenantStatus,
+  phishReleaseStatus, runPhishReleaseNow, setDomainHold, setPhishRelease, syncDomainNow, takeConnectorReferenceAction, tenantStatus,
 } from '../services/tenant/tenantActions.js';
 
 // The Microsoft tenant (stage 7a: R-22, R-27, R-28), mounted at /api/mail-node next to
@@ -77,15 +76,9 @@ router.post('/tenant/domains/:domain/alias-contacts/remove', async (req, res) =>
   return res.status(202).json({ job: result.job });
 });
 
-router.post('/tenant/connectors/reference', async (req, res) => {
-  const result = await takeConnectorReference({ userId: req.session.userId });
-  if (result.error) return refuse(res, result.error);
-  recordAudit({
-    actorUserId: req.session.userId, action: 'tenant.connector_reference_taken',
-    details: { inbound: result.reference.inbound.map((c) => c.name), outbound: result.reference.outbound.map((c) => c.name) },
-  });
-  return res.json({ reference: result.reference });
-});
+router.post('/tenant/connectors/reference', async (req, res) => (
+  answer(res, await takeConnectorReferenceAction(routeActor(req)))
+));
 
 // Stage 7c, R-42: the high confidence phishing the panel releases from EOP's quarantine.
 //   GET  /tenant/phish-release        { enabled, changedAt, run, held, releases, job }

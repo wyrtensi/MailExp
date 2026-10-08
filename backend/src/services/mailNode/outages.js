@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { recordAudit } from '../auditLog.js';
+import { auditOf } from '../actor.js';
 import { parseWholeNumber } from './mailcow.js';
 import { SYSTEM_ACTOR } from './domains.js';
 
@@ -120,6 +121,9 @@ export async function getOutageState() {
 
 const iso = (value) => (value ? new Date(value).toISOString() : null);
 const actor = (userId) => (userId ? { actorUserId: userId } : { actorEmail: SYSTEM_ACTOR });
+// Who acts on a window by hand: a user id (as the tests and older callers pass it) or an actor
+// (services/actor.js: the route's user, or the panel CLI with details.via).
+const byOf = (who) => (who && typeof who === 'object' ? who : { userId: who ?? null });
 const minutesBetween = (from, to) => Math.max(0, Math.round((Date.parse(to) - Date.parse(from)) / 60000));
 
 // A window as the screens get it. counts: letters per outcome of the trace (outageTrace.js).
@@ -281,23 +285,27 @@ export async function getOutage(id) {
   return rows[0] ?? null;
 }
 
-export async function addOutage(values, userId) {
+export async function addOutage(values, who) {
+  const by = byOf(who);
+  const userId = by.userId ?? null;
   const { rows } = await query(
     `INSERT INTO mail_node_outages (started_at, ended_at, source, planned, reason, created_by, closed_by)
      VALUES ($1, $2, 'manual', $3, $4, $5, CASE WHEN $2::timestamptz IS NULL THEN NULL ELSE $5::uuid END) RETURNING *`,
     [new Date(values.startedAt).toISOString(), values.endedAt != null ? new Date(values.endedAt).toISOString() : null, values.planned, values.reason, userId],
   );
   const row = rows[0];
-  recordAudit({
-    actorUserId: userId, action: 'mail_node.outage_added',
+  recordAudit(auditOf(by, {
+    action: 'mail_node.outage_added',
     details: { outage: row.id, planned: row.planned, startedAt: iso(row.started_at), endedAt: iso(row.ended_at), reason: row.reason },
-  });
+  }));
   return row;
 }
 
 // Changes times or reason of a window (any source); { row } or { error }. A detected window keeps
 // its cause; the reason an administrator gives is journaled with the change.
-export async function updateOutage(id, values, userId) {
+export async function updateOutage(id, values, who) {
+  const by = byOf(who);
+  const userId = by.userId ?? null;
   const current = await getOutage(id);
   if (!current) return { error: 'outage_not_found' };
   const start = values.startedAt ?? Date.parse(current.started_at);
@@ -326,26 +334,26 @@ export async function updateOutage(id, values, userId) {
   }
   if ((current.reason ?? null) !== (row.reason ?? null)) fields.push('reason');
   if (fields.length) {
-    recordAudit({
-      actorUserId: userId, action: !current.ended_at && row.ended_at ? 'mail_node.outage_closed' : 'mail_node.outage_changed',
+    recordAudit(auditOf(by, {
+      action: !current.ended_at && row.ended_at ? 'mail_node.outage_closed' : 'mail_node.outage_changed',
       details: {
         outage: id, source: row.source, fields, startedAt: iso(row.started_at), endedAt: iso(row.ended_at), reason: row.reason ?? null,
         ...(row.ended_at ? { minutes: minutesBetween(row.started_at, row.ended_at) } : {}),
       },
-    });
+    }));
   }
   return { row };
 }
 
 // Deletes a window and what the trace found for it; the journal keeps its times and the reason.
-export async function deleteOutage(id, { reason }, userId) {
+export async function deleteOutage(id, { reason }, who) {
   const { rows } = await query('DELETE FROM mail_node_outages WHERE id = $1 RETURNING *', [id]);
   const row = rows[0];
   if (!row) return { error: 'outage_not_found' };
-  recordAudit({
-    actorUserId: userId, action: 'mail_node.outage_deleted',
+  recordAudit(auditOf(byOf(who), {
+    action: 'mail_node.outage_deleted',
     details: { outage: id, source: row.source, startedAt: iso(row.started_at), endedAt: iso(row.ended_at), reason },
-  });
+  }));
   return { row };
 }
 

@@ -13,7 +13,7 @@
 | `backend/src/cli/args.js` | разбор параметров без зависимостей, `EXIT` |
 | `backend/src/cli/common.js` | `CliError`, отказ по каталогу кодов, сбой узла, подтверждение, `--wait` |
 | `backend/src/cli/output.js` | таблицы и пары «ключ: значение» |
-| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access`, `user`, `settings`, `sso`, `integration`, `node`, `eop`, `seats`, `agent` |
+| `backend/src/cli/commands/*.js` | группы `mailbox`, `domain`, `tenant`, `quarantine`, `jobs`, `access`, `user`, `settings`, `sso`, `integration`, `node`, `eop`, `seats`, `agent`, `queue`, `alerts`, `outage`, `spam-quarantine` |
 | `backend/src/cli/effects.js` | постановка задания `admin_effects` для административных групп, чтение секрета со stdin |
 | `backend/src/services/admin/users.js` | пользователи: список, поиск по адресу, одобрение, правка, удаление, сброс 2FA (бывшие обработчики `/api/admin/users`) |
 | `backend/src/services/admin/systemSettings.js` | ключи и проверки `PATCH /api/admin/settings` |
@@ -28,6 +28,10 @@
 | `backend/src/services/mailNode/seatActions.js` | места EOP: сводка, сверка с Microsoft (задание), срок удержания |
 | `backend/src/services/mailNode/agentActions.js` | агент узла: состояние, выдача и отзыв токена, задания агента, каталог отказов `NODE_AGENT_ERRORS` |
 | `backend/src/services/mailNode/errors.js` | каталог отказов узла (бывший `ERRORS` маршрута) |
+| `backend/src/services/mailNode/nodeOpsActions.js` | почтовая очередь узла (список, письмо, flush, действия над письмом) и просмотр и настройки оповещений |
+| `backend/src/services/mailNode/outageActions.js` | окна простоя: просмотр, письма окна, добавление, правка, закрытие, удаление, настройки, проход трассировки; каталог `OUTAGE_ERRORS` |
+| `backend/src/services/mailNode/quarantineActions.js` | карантин rspamd узла: список, действия над записью, настройки панели и mailcow; каталог `QUARANTINE_ERRORS` |
+| `backend/src/services/mailNode/nodeChecks.js` | задание `mail_node_check`: проверки узла (DNS всех доменов, оповещения, трассировка простоев), которые CLI ставит для backend |
 | `backend/src/services/accountAliases.js` | алиасы ящика с правилом D-16 |
 | `backend/src/services/tenant/tenantActions.js` | действия тенанта: статус, задания кнопок, шаги домена, hold, Internal Relay, контакты псевдонимов, выпуск из карантина, задания |
 | `scripts/deploy/mailexpert-cli.sh` | обёртка на хосте: `docker compose exec backend node src/cli/mailexpert.js` |
@@ -96,6 +100,27 @@
 - Применения настроек узла (`applyNode`, `applyDomain`, `applyPrefilter`) кроме очереди внутри процесса
   держат сессионную advisory-блокировку PostgreSQL на отдельном соединении (`withSessionLock` в
   `db.js`): применение из CLI и из backend не пересекаются.
+
+## Операции узла из CLI
+
+Группы `queue`, `alerts`, `outage`, `spam-quarantine`, команды `mailbox set-quota` / `set-rate-limit`,
+`domain dns-check`, `tenant poll` и `tenant connectors-reference` идут через `nodeOpsActions.js`,
+`outageActions.js`, `quarantineActions.js`, `mailboxActions.js`, `dnsCheckJob.js` и
+`tenant/tenantActions.js`; маршруты `routes/mailNode.js`, `mailNodeOutages.js`, `mailNodeQuarantine.js`
+и `mailNodeTenant.js` вызывают те же функции, их ответы и записи журнала прежние. Записи от CLI несут
+`via: cli`: функции окон простоя (`addOutage`, `updateOutage`, `deleteOutage`) принимают `actor` вместо
+ID пользователя (ID по-прежнему принимается), проверки DNS и оповещений — необязательный `by`.
+
+Три проверки принадлежат процессу backend, и CLI их не выполняет: проверка DNS всех доменов и проверка
+оповещений присоединяются к идущему в процессе прогону, проверка оповещений после себя запускает
+трассировку простоев, не дожидаясь её, а трассировка ведёт бюджет запросов и паузу принудительного
+прохода в памяти процесса. Прогон в CLI работал бы мимо этих ограничений и оставлял бы фоновую работу
+при закрытии пула. Поэтому `domain dns-check` без домена, `alerts check` и `outage trace` ставят
+задание `mail_node_check` (`payload.check`: `dns`, `alerts`, `outage_trace`; одна попытка), которое
+backend регистрирует в `index.js`; обработчик вызывает `checkAllNow`, `checkAlertsNow` и
+`traceOutagesNow` с автором и `via` задания. `--wait` следит за заданием (`maybeWait` с
+`nodeCheckWait`), итог печатается из сохранённого состояния. Проверка одного домена
+(`domain dns-check <DOMAIN>`) общего состояния не держит и идёт в CLI сразу.
 
 ## Синхронизация с Cloudflare Access из CLI
 
@@ -200,6 +225,9 @@ CLI проходят как есть.
 - `cli/mailexpert.nodeOps.pglite.test.js` — группы `node`, `eop`, `seats`, `agent`, деактивация ящика
   и команды онбординга `domain` на PGlite с mailcow в памяти: записи и журнал от `cli`, ключ mailcow
   со stdin не печатается, применение к узлу до выхода, хеш выданного токена агента, файл `--out`.
+- `cli/mailexpert.nodeQueue.pglite.test.js` — проверка DNS, квота и лимит ящика, группы `queue`,
+  `alerts`, `outage`, `spam-quarantine` на PGlite с mailcow в памяти: записи и журнал от `cli`,
+  подтверждения, задания `mail_node_check` выполняет воркер теста.
 - `cli/mailexpert.access.pglite.test.js` — группа `access` на PGlite: токен со stdin хранится
   зашифрованным и нигде не печатается, частичные правки настроек, задание `access_sync` выполняет
   воркер теста против поддельного API Cloudflare (`fetch`), коды выхода итогов, журнал от `cli` и

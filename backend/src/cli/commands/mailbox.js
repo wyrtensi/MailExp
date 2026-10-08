@@ -4,7 +4,8 @@ import { fmtDate, keyValues, table } from '../output.js';
 import { getMailbox, getMailNodeConfig, parseHostName } from '../../services/mailNode/mailcow.js';
 import {
   MAILBOX_ERRORS, activateNodeMailbox, cancelMailboxDeletion, createNodeMailbox, deactivateNodeMailbox, findNodeMailbox,
-  listNodeMailboxes, onOtherMailHost, requestMailboxDeletion, setNodeMailboxNames,
+  listNodeMailboxes, onOtherMailHost, requestMailboxDeletion, setNodeMailboxNames, setNodeMailboxQuota,
+  setNodeMailboxRateLimit,
 } from '../../services/mailNode/mailboxActions.js';
 import { listAliases } from '../../services/accountAliases.js';
 
@@ -262,8 +263,49 @@ const reactivate = {
   },
 };
 
+const setQuota = {
+  name: 'set-quota',
+  journal: 'mailbox.quota_changed with the quota before',
+  summary: 'set a mailbox\'s quota on the node, in MB',
+  usage: 'mailbox set-quota <address|id> <MB>',
+  help: ['As the quota of the "Mail node" screen\'s mailbox list: the node takes it at once.'],
+  positionals: ['mailbox', 'mb'],
+  async run(ctx) {
+    const account = await mailboxRef(ctx.args.mailbox);
+    const result = unwrap(await nodeAction(() => setNodeMailboxQuota({ accountId: account.id, quotaMb: ctx.args.mb }, ctx.actor)), MAILBOX_ERRORS);
+    return { data: result, lines: [`${account.email_address}: quota ${result.quotaMb} MB`] };
+  },
+};
+
+// A send limit as the CLI takes it: N/s, N/m, N/h or N/d, or "default".
+function parseLimit(text) {
+  if (text === 'default') return { value: null };
+  const match = /^(\d+)\/([smhd])$/.exec(String(text));
+  if (!match) throw new UsageError('<limit> must be messages per time frame such as 100/h (s, m, h or d), or "default"');
+  return { value: match[1], frame: match[2] };
+}
+
+const setRateLimit = {
+  name: 'set-rate-limit',
+  journal: 'mailbox.rate_limit_changed with the limit before',
+  summary: 'set a mailbox\'s own send limit on the node, or go back to the default',
+  usage: 'mailbox set-rate-limit <address|id> <N/s|N/m|N/h|N/d|default>',
+  help: [
+    'The node takes the limit first; the panel keeps it after, so every later apply keeps it too.',
+    '"default" removes the mailbox\'s own limit: it gets its domain\'s, or the EOP settings\' one.',
+  ],
+  positionals: ['mailbox', 'limit'],
+  async run(ctx) {
+    const limit = parseLimit(ctx.args.limit);
+    const account = await mailboxRef(ctx.args.mailbox);
+    const result = unwrap(await nodeAction(() => setNodeMailboxRateLimit({ accountId: account.id, ...limit }, ctx.actor)), MAILBOX_ERRORS);
+    const { value, frame } = result.rateLimit;
+    return { data: result, lines: [`${account.email_address}: send limit ${value}/${frame} (${result.rateLimitOverride ? 'own' : 'default'})`] };
+  },
+};
+
 export default {
   name: 'mailbox',
-  summary: 'the mail node\'s mailboxes: list, show, create, names, deletion, deactivation',
-  commands: [list, show, create, setNames, requestDelete, cancelDelete, deactivate, reactivate],
+  summary: 'the mail node\'s mailboxes: list, show, create, names, deletion, deactivation, quota, send limit',
+  commands: [list, show, create, setNames, requestDelete, cancelDelete, deactivate, reactivate, setQuota, setRateLimit],
 };

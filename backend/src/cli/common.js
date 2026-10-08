@@ -1,6 +1,7 @@
 import { EXIT, UsageError, parseCount } from './args.js';
 import { MailNodeError } from '../services/mailNode/mailcow.js';
 import { TENANT_ERRORS, getTenantJob } from '../services/tenant/tenantActions.js';
+import { NODE_CHECK_ERRORS, getNodeCheckJob } from '../services/mailNode/nodeChecks.js';
 
 // What the panel CLI's commands share: the error an action answers, confirmation and waiting for a
 // queued job.
@@ -70,19 +71,21 @@ export const WAIT_HELP = [
 
 // Follows the job (an answer of jobAnswer) until it ends, when --wait is given: the job's final
 // answer, or the queued one without --wait. A job that failed or needs attention is exit 3.
-export async function maybeWait(ctx, job) {
+// read(id): { job } or { error } with errors its catalog (a tenant job by default); follow: what to
+// run to follow the job after a timeout.
+export async function maybeWait(ctx, job, { read = getTenantJob, errors = TENANT_ERRORS, follow = null } = {}) {
   if (!ctx.flags.wait || !job) return job;
   const seconds = parseCount(ctx.flags.timeout, { name: 'timeout', min: 1, max: 3600, fallback: 120 });
   const deadline = ctx.now() + seconds * 1000;
   let current = job;
   while (!FINISHED.has(current.status)) {
     if (ctx.now() >= deadline) {
-      throw new CliError('wait_timeout', `Job ${current.id} is still ${current.status} after ${seconds} s: follow it with "jobs show ${current.id}"`, {
+      throw new CliError('wait_timeout', `Job ${current.id} is still ${current.status} after ${seconds} s: follow it with "${follow ?? `jobs show ${current.id}`}"`, {
         exit: EXIT.failed, details: { job: current },
       });
     }
     await ctx.sleep(ctx.pollMs);
-    current = unwrap(await getTenantJob(current.id), TENANT_ERRORS).job;
+    current = unwrap(await read(current.id), errors).job;
   }
   if (current.status !== 'done') {
     throw new CliError(current.errorCode ?? `job_${current.status}`, current.error ?? `Job ${current.id} ended ${current.status}`, {
@@ -91,6 +94,10 @@ export async function maybeWait(ctx, job) {
   }
   return current;
 }
+
+// How --wait follows a node check the backend runs (services/mailNode/nodeChecks.js); follow: the
+// command that shows its result once it is done.
+export const nodeCheckWait = (follow) => ({ read: getNodeCheckJob, errors: NODE_CHECK_ERRORS, follow });
 
 // One line about a queued job, for the human output.
 export function jobLine(job, created) {
