@@ -48,13 +48,15 @@ router.use('/update', adminUpdateRoutes);
 
 // A refusal from a service's catalogue (code -> [status, message]) as the API answers it: the
 // message (the service's own when it gave one) and the code the screens translate. A code missing
-// from the catalogue is a 500 with no code.
-function sendRefusal(res, catalog, result) {
-  if (!catalog[result.error]) return res.status(500).json({ error: result.message ?? result.error });
+// from the catalogue is a 500, with the code only where the route always answered it (users).
+function sendRefusal(res, catalog, result, { codeWhenUnknown = false } = {}) {
+  if (!catalog[result.error]) {
+    return res.status(500).json({ error: result.message ?? result.error, ...(codeWhenUnknown ? { code: result.error } : {}) });
+  }
   const [status, message] = catalog[result.error];
   return res.status(status).json({ error: result.message ?? message, code: result.error });
 }
-const sendUserRefusal = (res, result) => sendRefusal(res, ADMIN_USER_ERRORS, result);
+const sendUserRefusal = (res, result) => sendRefusal(res, ADMIN_USER_ERRORS, result, { codeWhenUnknown: true });
 
 // End every session and live socket of a user who just lost access.
 async function signOutEverywhere(userId) {

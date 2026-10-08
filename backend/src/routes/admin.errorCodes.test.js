@@ -3,6 +3,15 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 
 vi.mock('../services/db.js', () => ({ query: vi.fn(), withTransaction: vi.fn() }));
+// One users action answering a reason missing from its catalogue: the uncatalogued 500 path.
+const unknownReason = vi.hoisted(() => ({ on: false }));
+vi.mock('../services/admin/users.js', async (importActual) => {
+  const actual = await importActual();
+  return {
+    ...actual,
+    disableUserTotp: async (...args) => (unknownReason.on ? { error: 'mystery' } : actual.disableUserTotp(...args)),
+  };
+});
 vi.mock('../middleware/auth.js', () => ({ requireAdmin: (_req, _res, next) => next() }));
 vi.mock('../index.js', () => ({
   imapManager: { disconnectAccount: vi.fn(async () => {}), wss: { clients: new Set() } },
@@ -26,7 +35,7 @@ vi.mock('../services/accessSync/index.js', () => ({
 
 import express from 'express';
 import adminRoutes from './admin.js';
-import { query } from '../services/db.js';
+import { query, withTransaction } from '../services/db.js';
 
 const ADMIN_ID = '00000000-0000-0000-0000-00000000000a';
 const USER_ID = '00000000-0000-0000-0000-00000000000b';
@@ -52,7 +61,22 @@ afterAll(async () => {
 
 beforeEach(() => {
   query.mockReset().mockResolvedValue({ rows: [] });
+  withTransaction.mockReset();
+  unknownReason.on = false;
+  vi.unstubAllEnvs();
 });
+
+// A transaction whose statements answer by pattern.
+function installTransaction(handlers) {
+  withTransaction.mockImplementation(async (fn) => fn({
+    query: async (sql, params) => {
+      for (const [re, result] of handlers) if (re.test(sql)) return typeof result === 'function' ? result(params) : result;
+      throw new Error(`unexpected SQL: ${sql}`);
+    },
+  }));
+}
+const lock = [/pg_advisory_xact_lock/, { rows: [] }];
+const USER_ROW = { id: USER_ID, username: 'user@example.com', email: 'user@example.com', is_admin: true, disabled_at: null };
 
 const call = (method, path, body) => fetch(`${base}/api/admin${path}`, {
   method,
@@ -95,6 +119,39 @@ describe('admin refusal codes', () => {
 
   it('DELETE /users/:id of the own account answers self_change', async () => {
     expect(await call('DELETE', `/users/${ADMIN_ID}`)).toEqual({ status: 400, body: { error: 'Cannot delete your own account', code: 'self_change' } });
+  });
+
+  it('the users routes answer user_exists, last_admin and invalid_field', async () => {
+    installTransaction([lock, [/^\s*SELECT .* FROM users WHERE lower\(email\) = \$1/, { rows: [USER_ROW] }]]);
+    expect(await call('POST', '/users', { email: 'user@example.com' })).toMatchObject({ status: 409, body: { code: 'user_exists' } });
+    installTransaction([lock,
+      [/SELECT id, email, is_admin, disabled_at FROM users WHERE id = \$1 FOR UPDATE/, { rows: [USER_ROW] }],
+      [/SELECT COUNT\(\*\)::int AS count FROM users/, { rows: [{ count: 0 }] }]]);
+    expect(await call('PATCH', `/users/${USER_ID}`, { isAdmin: false })).toEqual({
+      status: 409, body: { error: 'At least one active admin must remain', code: 'last_admin' },
+    });
+    expect(await call('PATCH', `/users/${USER_ID}`, { isAdmin: 'yes' })).toMatchObject({ status: 400, body: { code: 'invalid_field' } });
+  });
+
+  // The users routes always answered the reason as the code, a reason the catalogue misses too.
+  it('a users refusal missing from the catalogue is a 500 that keeps its code', async () => {
+    unknownReason.on = true;
+    expect(await call('POST', `/users/${USER_ID}/totp/disable`)).toEqual({ status: 500, body: { error: 'mystery', code: 'mystery' } });
+  });
+
+  it('POST /invites without APP_URL answers a 500 app_url_missing', async () => {
+    vi.stubEnv('APP_URL', '');
+    expect(await call('POST', '/invites', { email: 'new@example.com' })).toMatchObject({ status: 500, body: { code: 'app_url_missing' } });
+  });
+
+  it('DELETE /oidc/:id of the last provider while password login is off answers last_provider', async () => {
+    query.mockImplementation(async (sql) => {
+      if (/internal_auth_disabled/.test(sql)) return { rows: [{ value: 'true' }] };
+      if (/COUNT\(\*\) AS count FROM oidc_providers/.test(sql)) return { rows: [{ count: '0' }] };
+      return { rows: [] };
+    });
+    expect(await call('DELETE', `/oidc/${USER_ID}`)).toMatchObject({ status: 400, body: { code: 'last_provider' } });
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM oidc_providers/.test(sql))).toBe(false);
   });
 
   it('POST /invites with a bad address answers email_invalid', async () => {
