@@ -1145,7 +1145,12 @@
       "running": "Running…",
       "runResult": "Done — {{matched}} of {{processed}} messages matched",
       "runStarted": "Running in the background — you'll be notified when it finishes",
-      "runError": "Failed to run rules"
+      "runError": "Failed to run rules",
+      "errorSaveReason": "Rule not saved: {{message}}",
+      "errorToggle": "Could not switch the rule: {{message}}",
+      "errorDelete": "Could not delete the rule: {{message}}",
+      "errorReorder": "Rule order not saved: {{message}}",
+      "errorLoad": "Could not load rules: {{message}}"
     },
     "blockList": {
       "description": "Emails from blocked senders are automatically moved to trash.",
@@ -1153,7 +1158,8 @@
       "emailPlaceholder": "sender@example.com",
       "addButton": "Block",
       "removeButton": "Remove",
-      "errorAdd": "Failed to add to block list"
+      "errorAdd": "Failed to add to block list",
+      "errorRemove": "Could not remove the sender from the block list. Try again."
     },
     "accounts": {
       "title": "Email accounts",
@@ -1645,7 +1651,8 @@
       "mfaSsoLockedNotice": "MFA enforcement is not applicable when password login is disabled. Users authenticate via SSO, which manages its own MFA requirements.",
       "recoveryEmailTitle": "Recovery email",
       "recoveryEmailDesc": "Receive a sign-in code by email if you lose access to your authenticator app.",
-      "recoveryEmailPh": "your@email.com"
+      "recoveryEmailPh": "your@email.com",
+      "mailPolicySaveFailed": "The setting was not saved: {{message}}"
     },
     "privacy": {
       "title": "Privacy",

@@ -6097,6 +6097,9 @@ function RulesTab() {
   const [runningRules, setRunningRules] = useState(false);
   const [runResult, setRunResult] = useState(null);
   const [runError, setRunError] = useState('');
+  // A rule switched, deleted or reordered that the server refused, or the list that did not load.
+  const [ruleActionError, setRuleActionError] = useState('');
+  const [rulesLoadError, setRulesLoadError] = useState(null);
 
   // Drag-and-drop state for rules reorder
   const [ruleDragIdx, setRuleDragIdx] = useState(null);
@@ -6133,7 +6136,7 @@ function RulesTab() {
   useEffect(() => {
     api.getRules()
       .then(data => { setRules(data); setLoading(false); })
-      .catch(() => setLoading(false));
+      .catch((err) => { setRulesLoadError(err); setLoading(false); });
   }, []);
 
   useEffect(() => {
@@ -6221,14 +6224,20 @@ function RulesTab() {
         stopProcessing: rule.stop_processing,
       });
       setRules(prev => prev.map(r => r.id === rule.id ? saved : r));
-    } catch { /* intentional */ }
+      setRuleActionError('');
+    } catch (err) {
+      setRuleActionError(t('admin.rules.errorToggle', { message: err.message || t('common.actionFailed.body') }));
+    }
   }
 
   async function handleDelete(id) {
     try {
       await api.deleteRule(id);
       setRules(prev => prev.filter(r => r.id !== id));
-    } catch { /* intentional */ }
+      setRuleActionError('');
+    } catch (err) {
+      setRuleActionError(t('admin.rules.errorDelete', { message: err.message || t('common.actionFailed.body') }));
+    }
     setConfirmDelete(null);
   }
 
@@ -6272,8 +6281,10 @@ function RulesTab() {
         setRules(prev => prev.map(r => r.id === formId ? updated : r));
       }
       closeForm();
-    } catch {
-      setFormError(t('admin.rules.errorSave'));
+    } catch (err) {
+      // The server says what is wrong with the rule (a folder that does not exist, an empty
+      // condition): keep that rather than a bare "failed".
+      setFormError(err?.message ? t('admin.rules.errorSaveReason', { message: err.message }) : t('admin.rules.errorSave'));
     } finally {
       setFormSaving(false);
     }
@@ -6287,7 +6298,10 @@ function RulesTab() {
 
     setRules(reordered);
 
-    api.reorderRules(reordered.map(r => r.id)).catch(() => { setRules(copy); })
+    api.reorderRules(reordered.map(r => r.id)).catch((err) => {
+      setRules(copy);
+      setRuleActionError(t('admin.rules.errorReorder', { message: err.message || t('common.actionFailed.body') }));
+    });
   }
 
   function setCondition(idx, key, val) {
@@ -6663,6 +6677,11 @@ function RulesTab() {
       {runError && (
         <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>{runError}</div>
       )}
+      {(ruleActionError || rulesLoadError) && (
+        <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>
+          {ruleActionError || t('admin.rules.errorLoad', { message: rulesLoadError.message || t('common.actionFailed.body') })}
+        </div>
+      )}
 
       {loading && <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>{t('common.loading')}</div>}
 
@@ -6813,10 +6832,13 @@ function BlockListTab() {
   }
 
   async function handleRemove(id) {
+    setError('');
     try {
       await api.removeFromBlockList(id);
       setEntries(prev => prev.filter(e => e.id !== id));
-    } catch { /* intentional */ }
+    } catch {
+      setError(t('admin.blockList.errorRemove'));
+    }
   }
 
   return (
@@ -7734,6 +7756,8 @@ function SecurityTab() {
   const [protectionSaving, setProtectionSaving] = useState(false);
   const [protectionSaved, setProtectionSaved] = useState(false);
   const [protectionError, setProtectionError] = useState('');
+  // A mail server policy switch the server did not save: the switch goes back and this says so.
+  const [mailPolicyError, setMailPolicyError] = useState('');
 
   // Admin-only: self-hosted mail server policy
   const [allowPrivateHosts, setAllowPrivateHosts] = useState(false);
@@ -7819,8 +7843,14 @@ function SecurityTab() {
     }
   };
 
-  const toggleMailPolicy = async (key, newVal) => {
-    await api.admin.updateSettings({ [key]: newVal }).catch(console.error);
+  const toggleMailPolicy = async (key, newVal, set) => {
+    setMailPolicyError('');
+    try {
+      await api.admin.updateSettings({ [key]: newVal });
+    } catch (err) {
+      set(!newVal);
+      setMailPolicyError(t('admin.security.mailPolicySaveFailed', { message: err.message || t('common.actionFailed.body') }));
+    }
   };
 
   const saveMfaSettings = async () => {
@@ -8015,7 +8045,7 @@ function SecurityTab() {
             <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14 }}>
               <button
                 type="button"
-                onClick={() => { const newVal = !val; set(newVal); toggleMailPolicy(key, newVal); }}
+                onClick={() => { const newVal = !val; set(newVal); toggleMailPolicy(key, newVal, set); }}
                 role="switch" aria-checked={!!val} aria-label={label}
                 style={{
                   width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
@@ -8034,6 +8064,7 @@ function SecurityTab() {
               </div>
             </div>
           ))}
+          {mailPolicyError && <div role="alert" style={{ fontSize: 12, color: 'var(--red)' }}>{mailPolicyError}</div>}
         </div>
       )}
 
