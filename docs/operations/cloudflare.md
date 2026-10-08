@@ -19,7 +19,8 @@ Access уже созданы, тогда `install.sh` сразу провери�
 | `<APP_HTTP_PORT>` | порт панели на loopback сервера, `install.sh --http-port`, по умолчанию `8080` | `8080` |
 | `<ADMIN_EMAIL>` | адрес Google первого администратора | `admin@example.com` |
 
-Порядок такой: разделы 1-5 в Cloudflare и Google, раздел 6 — `install.sh` и `configure.sh`
+Коротко, по кликам — раздел «Подключение Cloudflare — просто»; для агента — «Для агента»; какие
+права у какого ключа — «Ключи и права». Полный порядок: разделы 1-5 в Cloudflare и Google, раздел 6 — `install.sh` и `configure.sh`
 ([quickstart.md](quickstart.md)), раздел 7 — проверка, раздел 8 — синхронизация пользователей
 после первого входа. Какие шаги нужны для какого режима:
 
@@ -39,6 +40,173 @@ Access уже созданы, тогда `install.sh` сразу провери�
 каждого шага есть вызов API, пути и поля сверены с
 [документацией API Cloudflare](https://developers.cloudflare.com/api/). Что сверить не удалось,
 помечено «не проверено».
+
+## Подключение Cloudflare — просто
+
+Короткий путь для человека, по кликам, для режимов `cf` и `both`. Подробности каждого шага — в
+разделах 1-8 ниже; здесь только порядок.
+
+1. **Команда Zero Trust.** [dash.cloudflare.com](https://dash.cloudflare.com) → **Zero Trust**. Мастер
+   спросит имя команды — это `<TEAM>`; план **Free**. Адрес команды — `https://<TEAM>.cloudflareaccess.com`.
+2. **Вход через Google.** В Google Cloud Console создайте OAuth-клиент «Web application» с redirect URI
+   `https://<TEAM>.cloudflareaccess.com/cdn-cgi/access/callback`. В Zero Trust → **Integrations** →
+   **Identity providers** → **Add new** → **Google**: вставьте Client ID и Client secret → **Test**
+   (раздел 1).
+3. **Туннель.** **Networking** → **Tunnels** → **Create a tunnel** → **Cloudflared** → имя `mailexpert`.
+   Из показанной команды скопируйте только значение `eyJ...` — это `TUNNEL_TOKEN`; команду не
+   запускайте. Вкладка **Routes** → **Add route** → **Published application**: имя `<CF_HOST>`, Service
+   URL `http://127.0.0.1:<APP_HTTP_PORT>` (раздел 2).
+4. **Приложение Access с одной Allow-политикой.** Zero Trust → **Access controls** → **Applications** →
+   **Create new application** → **Self-hosted**: имя `MailExpert`, адрес ровно `<CF_HOST>`. Политика —
+   одна: **Allow**, имя `MailExpert users`, Include → **Emails** → `<ADMIN_EMAIL>`. Способ входа —
+   Google. После сохранения: **Configure** → **Additional settings** → **Application Audience (AUD)
+   Tag** — это `CF_ACCESS_AUDIENCE`; адрес команды из шага 1 — `CF_ACCESS_ISSUER` (раздел 3).
+5. **Ключи сервера.** На сервере, от root, файл `cloudflare.env` (только строки нужного режима):
+
+   ```
+   TUNNEL_TOKEN=<из шага 3>
+   CF_ACCESS_ISSUER=https://<TEAM>.cloudflareaccess.com
+   CF_ACCESS_AUDIENCE=<AUD из шага 4>
+   DNS_API_TOKEN=<только для both: раздел 4>
+   ```
+
+   ```bash
+   chmod 600 cloudflare.env
+   /opt/mailexpert/app/scripts/deploy/configure.sh < cloudflare.env && shred -u cloudflare.env
+   /opt/mailexpert/app/scripts/deploy/install.sh        # первая установка — с параметрами из quickstart.md
+   ```
+
+6. **Первый вход.** Откройте `https://<CF_HOST>`, войдите через Google как `<ADMIN_EMAIL>` — вы
+   администратор.
+7. **Токен синхронизации** (по желанию: без него вход работает, но пользователей панели и политику
+   придётся вести по отдельности). My Profile → **API Tokens** → **Create Token** → **Custom token**:
+   Permissions — **Account · Access: Apps and Policies · Edit**, и больше ничего; Account Resources —
+   **Include → ваш аккаунт** (не «All accounts»). По желанию — фильтр по IP сервера и срок действия.
+   **Create Token** → скопируйте значение: Cloudflare показывает его один раз.
+8. **Ввод в панели.** Настройки администратора → **Синхронизация с Access**: ID аккаунта, ID приложения,
+   ID политики (где взять — раздел 5), API-токен в поле токена. Нажмите **Проверить**: панель спросит
+   Cloudflare (только чтение) и покажет по строке на токен, приложение, AUD и политику — зелёным, что
+   работает, красным, что нет и почему («у токена нет права „Access: Apps and Policies“…», «AUD не
+   совпадает с CF_ACCESS_AUDIENCE сервера» и т. д.). Когда всё зелёное — галочка «Синхронизировать…» →
+   **Сохранить настройки** → **Синхронизировать сейчас**.
+9. **Что видно в панели.** Токен после сохранения не показывается никогда — только «Токен сохранён».
+   Ниже, в блоке **Задаётся на сервере**: `CF_ACCESS_ISSUER`, задан ли `CF_ACCESS_AUDIENCE` и вошли ли
+   вы через Access. `TUNNEL_TOKEN` и `DNS_API_TOKEN` панель не видит: их состояние показывает
+   `status.sh` (раздел 7).
+
+## Для агента
+
+Агент настраивает и проверяет Cloudflare, **не видя ни одного токена**.
+
+**Никогда:**
+
+- не просить токен, секрет или содержимое `.env` в чат и не принимать их оттуда; если человек всё же
+  вставил токен в чат — попросить отозвать его и выпустить новый;
+- не передавать токен аргументом команды, в URL, в переменной окружения на командной строке, в лог, в
+  коммит, issue или PR; не выводить файлы с токенами (`cat`, `jq .`, `env`);
+- не выпускать токены шире таблицы «Ключи и права» и не запрашивать «All accounts» / «All zones»;
+- не менять и не удалять чужие приложения, политики, туннели и записи DNS; не привязывать политику
+  панели к другим приложениям и не добавлять приложению панели вторую Allow-политику;
+- не запускать на сервере команду установки `cloudflared` из Zero Trust (коннектор ставит `install.sh`).
+
+**Куда идут токены** (вносит человек, агент только называет команду):
+
+| Значение | Куда |
+|---|---|
+| токен синхронизации | поле «API-токен» в панели или `mailexpert access token < файл` (stdin) |
+| `TUNNEL_TOKEN`, `DNS_API_TOKEN`, `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE` | файл `KEY=VALUE` → `configure.sh < файл` → `install.sh` |
+| `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` (узел за Access) | файл токена узла → `setup.sh --agent-token-file` ([mail-node.md](mail-node.md)) |
+
+**Что спросить у человека:** режим (`cf`, `both`); `<CF_HOST>`, `<TEAM>`, `<ADMIN_EMAIL>`; ID аккаунта,
+приложения и политики (это не секреты, их можно в чат); подтверждение, что токены внесены. Шаги в
+панели Cloudflare — по разделу «просто» выше, шаги через API — разделы 0-4 (их запускает человек со
+своим временным токеном).
+
+**Что агент делает сам** (на сервере панели, от root; ни одна команда не печатает токен):
+
+```bash
+D=/opt/mailexpert/app/scripts/deploy
+M=$D/mailexpert-cli.sh
+$D/status.sh --json | jq .cf_access          # {"state": "ok", "team": "<TEAM>.cloudflareaccess.com"}
+sudo $M access status --json | jq '{config, host}'   # ID, задан ли токен, CF_ACCESS_ISSUER, задан ли AUD
+sudo $M access verify --json | jq .          # токен, приложение, AUD, политика: только чтение
+sudo $M access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID>
+sudo $M access config --enable && sudo $M access sync
+```
+
+Как читать `access verify` (поле `checks`, у каждой проверки `id`, `status`, `code`):
+
+| `id` / `code` | Что значит | Что делать |
+|---|---|---|
+| `token` / `refused` | Cloudflare не принимает токен: неверный, отозван, истёк | человек выпускает новый и вносит в панели или `access token` |
+| `token` / `token_disabled`, `token_expired` | токен отключён или просрочен | то же |
+| `app` или `policy` / `forbidden` | у токена нет «Access: Apps and Policies» на этот аккаунт, или ID аккаунта чужой | права токена по таблице ниже; ID аккаунта — раздел 5 |
+| `app` / `not_found` | нет приложения с таким ID в аккаунте | ID приложения — раздел 5 |
+| `audience` / `mismatch` | `aud` приложения не равен `CF_ACCESS_AUDIENCE` сервера | либо ID приложения не того, что закрывает `<CF_HOST>`, либо AUD на сервере неверный (`configure.sh`) |
+| `audience` / `not_configured` | `CF_ACCESS_AUDIENCE` на сервере не задан | шаг 5 раздела «просто» |
+| `policy` / `not_found`, `not_attached`, `not_allow` | нет такой политики у приложения; переиспользуемая не привязана; не Allow | раздел 3 и 5 |
+| любая / `unreachable`, `unavailable` | сеть сервера или сбой Cloudflare | повторить позже |
+
+Право **Edit** без записи не проверить: его подтверждает первый прогон, который меняет политику
+(`access sync` → `updated`; ошибка `Cloudflare updatePolicy failed (403)` значит, что у токена только Read).
+
+Если всё же нужен прямой вызов API на сервере (например, прочитать `aud`), токен передаётся curl из
+файла заголовков, а не командной строкой: человек кладёт строку `Authorization: Bearer <токен>` в
+`/root/cf-auth.txt` (`chmod 600`), агент вызывает
+
+```bash
+curl -fsS -H @/root/cf-auth.txt https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/access/apps/<APP_ID> \
+  | jq '{name: .result.name, aud: .result.aud, domain: .result.domain}'
+```
+
+и после работы — `shred -u /root/cf-auth.txt`.
+
+## Ключи и права
+
+Какие значения Cloudflare нужны MailExpert, где каждое живёт, какие права у токенов и какие вызовы
+API делает код. Права названы, как в мастере токенов (**тип · группа · уровень**); в списке групп API
+то же называется `Access: Apps and Policies Write`, `DNS Write`, `Zone Read`.
+
+| Значение | Что это | Где хранится, как вносится | Права в Cloudflare и ресурс | Обязательно |
+|---|---|---|---|---|
+| токен синхронизации | API-токен | база панели, зашифрован (`ENCRYPTION_KEY`); поле в панели или `access token` (stdin); обратно не отдаётся, видно только «сохранён» | **Account · Access: Apps and Policies · Edit** на один аккаунт `<ACCOUNT_ID>`. Больше ничего | только для синхронизации пользователей |
+| ID аккаунта, приложения, политики | не секреты | база панели; панель или `access config` | — | вместе с токеном синхронизации |
+| `CF_ACCESS_ISSUER` | адрес команды, не секрет | `<prefix>/.env` через `configure.sh`; в панели — только показ | токен не нужен | `cf`, `both` |
+| `CF_ACCESS_AUDIENCE` | AUD-тег приложения, не секрет | `<prefix>/.env` через `configure.sh`; в панели — только «задан / не задан» | токен не нужен | `cf`, `both` |
+| `TUNNEL_TOKEN` | ключ коннектора одного туннеля, **не** API-токен | `<prefix>/edge/.env` через `configure.sh`; читает контейнер `cloudflared` | групп прав нет: кто знает ключ, может подключить коннектор этого туннеля — храните как секрет | `cf`, `both` |
+| `DNS_API_TOKEN` | API-токен | `<prefix>/edge/.env` через `configure.sh`; читает Caddy | **Zone · DNS · Edit** и **Zone · Zone · Read** на одну зону `example.com` | `direct`, `both` (кроме `--edge-tls internal`) |
+| `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` | service token Access, **не** API-токен | `agent.env` почтового узла через `setup.sh --agent-token-file` | групп прав нет; в приложении Access панели — политика с действием **Service Auth**, которая его пускает | только если узел ходит к панели через Access |
+| временный широкий токен | API-токен | только машина человека, отозвать после настройки | раздел 0 | только для настройки через API |
+
+Не давайте токену синхронизации: `Access: Organizations, Identity Providers, and Groups`, `Access: Service
+Tokens`, `Cloudflare Tunnel`, `Account Settings`, любые права на зону. Код их не использует.
+
+Вызовы API по токенам — ровно те, что делает код:
+
+| Токен | Вызов | Кто и когда | Нужное право |
+|---|---|---|---|
+| синхронизации | `GET /user/tokens/verify`, для токена аккаунта — `GET /accounts/<ACCOUNT_ID>/tokens/verify` | «Проверить», `access verify` | никакого: токен проверяет сам себя |
+| синхронизации | `GET /accounts/<ACCOUNT_ID>/access/apps/<APP_ID>` | «Проверить», `access verify` (сверка `aud`) | Access: Apps and Policies · Read (входит в Edit) |
+| синхронизации | `GET /accounts/<ACCOUNT_ID>/access/apps/<APP_ID>/policies/<POLICY_ID>` | каждый прогон, «Проверить» | Read (входит в Edit) |
+| синхронизации | `GET /accounts/<ACCOUNT_ID>/access/policies/<POLICY_ID>` | только если предыдущий ответил 404: есть ли политика в аккаунте, но не у приложения | Read (входит в Edit) |
+| синхронизации | `PUT /accounts/<ACCOUNT_ID>/access/apps/<APP_ID>/policies/<POLICY_ID>`, для переиспользуемой — `PUT /accounts/<ACCOUNT_ID>/access/policies/<POLICY_ID>` | прогон, когда список адресов изменился | **Edit** |
+| — | `GET https://<TEAM>.cloudflareaccess.com/cdn-cgi/access/certs` | backend, проверка подписи токена Access при входе | без токена: ключи публичные |
+| `DNS_API_TOKEN` | поиск зоны и запись/удаление TXT `_acme-challenge` | модуль `caddy-dns/cloudflare` в Caddy при выпуске и продлении сертификата (не код MailExpert) | Zone Read, DNS Edit |
+| `TUNNEL_TOKEN` | соединение коннектора с Cloudflare (исходящие 7844) | контейнер `cloudflared` | — |
+
+**Почему часть значений вносится только на сервере.** Токен синхронизации и три ID панель хранит сама и
+применяет без перезапуска: следующий прогон берёт новые значения, ошибка в них ломает только
+синхронизацию, а «Проверить» ловит её до сохранения. Остальное — на сервере, и это сознательно:
+
+- `CF_ACCESS_ISSUER` и `CF_ACCESS_AUDIENCE` решают, чьей подписи панель верит при каждом входе. Ошибка
+  в них закрывает вход всем, включая администратора, который мог бы её исправить, а возможность менять
+  их из панели позволила бы украденной сессии администратора подставить чужую команду Access и
+  входить под любым адресом. Их же сверяют с Cloudflare `install.sh` и `status.sh` — из файла на
+  сервере. Применяются перезапуском: `configure.sh`, затем `install.sh`.
+- `TUNNEL_TOKEN` и `DNS_API_TOKEN` читают контейнеры края (`cloudflared`, Caddy), а не backend; панель
+  их не видит и перезапустить край не может. Канал «панель → хост» для обновлений принимает только
+  проверенный номер сборки и никогда — данные, которые доходят до файлов или команд root, поэтому
+  секреты края через него не передаются.
 
 ## 0. Токены: временный широкий → узкие → отзыв
 
@@ -276,7 +444,9 @@ curl -fsS -X POST "$CF_API/zones/<ZONE_ID>/dns_records" \
 
 ## 5. Токен и три ID для синхронизации
 
-Можно отложить до первого входа (раздел 8), но собрать удобно сейчас.
+Можно отложить до первого входа (раздел 8), но собрать удобно сейчас. Вносятся они в панели
+(раздел «Синхронизация с Access», кнопка «Проверить» сверяет их с Cloudflare до сохранения) или
+командами `access token` и `access config`; права токена — в разделе «Ключи и права».
 
 | Что | Где взять |
 |---|---|
@@ -381,7 +551,10 @@ Access: редирект на `https://<TEAM>.cloudflareaccess.com/...`. Ком�
   на экране и в `mailexpert access status`; после трёх неудач дальше пробует ежечасный прогон.
 
 В панели: настройки администратора, раздел «Синхронизация с Access»: ID аккаунта, приложения и
-политики, API-токен, галочка «Синхронизировать…», «Сохранить настройки», «Синхронизировать сейчас»;
+политики, API-токен, галочка «Синхронизировать…», «Сохранить настройки», «Проверить» (сверяет
+токен, приложение, AUD и политику с Cloudflare, только чтение, ничего не сохраняя; пустые поля
+берутся из сохранённых), «Синхронизировать сейчас»; блок «Задаётся на сервере» показывает
+`CF_ACCESS_ISSUER`, задан ли `CF_ACCESS_AUDIENCE` и вошли ли вы через Access;
 ниже — итог последнего прогона (добавлено и удалено в политике, добавлено из Cloudflare, отключено,
 ошибки, следующая попытка) и «Удалённые пользователи». На экране «Пользователи» у каждого — метка:
 «В Access», «Ещё не в Access» (запишется следующим прогоном), «По правилу Access» (вошёл по правилу
@@ -393,7 +566,9 @@ Access: редирект на `https://<TEAM>.cloudflareaccess.com/...`. Ком�
 ```bash
 M=/opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh
 $M access token < /root/access-sync-token.txt && shred -u /root/access-sync-token.txt
-$M access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID> --enable
+$M access config --account <ACCOUNT_ID> --app <APP_ID> --policy <POLICY_ID>
+$M access verify                   # токен, приложение, AUD, политика: только чтение
+$M access config --enable
 $M access sync                     # прогон в backend и его итог: updated / unchanged
 $M access status                   # последний прогон: добавлено из Cloudflare, ошибки, следующая попытка
 $M access tombstones               # удалённые пользователи
@@ -437,7 +612,9 @@ $M access allow <EMAIL>            # разрешить удалённого с�
 | `redirect_elsewhere` | имя перенаправляет не на Access (правило Redirect, другой сервис) | уберите перенаправление, создайте приложение Access |
 | Caddy не получает сертификат `<DIRECT_HOST>` | у `DNS_API_TOKEN` нет DNS Edit или Zone Read на эту зону, или токен на другую зону | шаг 4; `docker compose -p edge logs caddy` |
 | `configure.sh`: `TUNNEL_TOKEN: must be the token of a remotely managed tunnel` | скопирована вся команда, кавычки или токен туннеля, управляемого локально | только значение `eyJ...` после `install` или `--token`, шаг 2 |
-| Синхронизация: `policy_not_allow`, `policy_not_attached`, `Cloudflare getPolicy failed (403)` | не Allow-политика; политика не привязана к приложению; у токена нет «Access: Apps and Policies Edit» | раздел 5; `mailexpert access status` |
+| Синхронизация: `policy_not_allow`, `policy_not_attached`, `Cloudflare getPolicy failed (403)` | не Allow-политика; политика не привязана к приложению; у токена нет «Access: Apps and Policies Edit» | раздел 5; «Проверить» в панели или `mailexpert access verify` называет, что именно не так |
+| «Проверить» зелёное, а прогон: `Cloudflare updatePolicy failed (403)` | у токена Access: Apps and Policies только Read | выпустите токен с Edit (раздел «Ключи и права») |
+| «Проверить»: AUD не совпадает | ID приложения не того, что закрывает `<CF_HOST>`, или `CF_ACCESS_AUDIENCE` на сервере неверный | сверьте ID приложения (раздел 5) и AUD (шаг 3.5); AUD меняется только `configure.sh` + `install.sh` |
 
 Ссылки: [туннель через API](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel-api/),
 [приложение Access](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/),

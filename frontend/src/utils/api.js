@@ -357,6 +357,7 @@ export const api = {
     getAccessSync: () => request('GET', '/admin/access-sync'),
     saveAccessSync: (data) => request('PUT', '/admin/access-sync', data),
     runAccessSync: () => request('POST', '/admin/access-sync/run'),
+    verifyAccessSync: (data) => request('POST', '/admin/access-sync/verify', data),
     getAccessSyncTombstones: () => request('GET', '/admin/access-sync/tombstones'),
     // Update of the panel from the admin UI (the host's updater does the work; see utils/panelUpdate.js).
     // refresh: asks the backend to look at GitHub's `latest` now instead of its 6-hour cache (the

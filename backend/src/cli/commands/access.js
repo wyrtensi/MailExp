@@ -4,7 +4,7 @@ import { fmtDate, keyValues, table } from '../output.js';
 import { queueEffects } from '../effects.js';
 import {
   ACCESS_SYNC_ERRORS, accessSyncSnapshot, accessSyncTombstones, enqueueAccessSync, getAccessSyncJob, journalSyncRequested,
-  patchAccessSyncConfig, setAccessSyncToken,
+  patchAccessSyncConfig, setAccessSyncToken, verifyAccessSync,
 } from '../../services/accessSync/actions.js';
 import { ADMIN_USER_ERRORS, allowEmail } from '../../services/admin/users.js';
 
@@ -64,6 +64,8 @@ function configLines(snapshot) {
     ['policy', config.policyId],
     ['api token', config.apiTokenSet ? 'set' : 'not set'],
     ['sign-in mode google', snapshot.googleMode],
+    ['CF_ACCESS_ISSUER (host)', snapshot.host.issuer ?? 'not set'],
+    ['CF_ACCESS_AUDIENCE (host)', snapshot.host.audienceSet ? 'set' : 'not set'],
     ['max disables per run', snapshot.maxDisables],
     ['max imports per run', snapshot.maxImports],
     ['deleted users (tombstones)', snapshot.tombstones],
@@ -130,6 +132,63 @@ const token = {
     const value = await ctx.readStdin();
     const result = unwrap(await setAccessSyncToken(value, ctx.actor, { onEnabled: () => enqueueAccessSync(ctx.actor) }), ACCESS_SYNC_ERRORS);
     return savedLines(result);
+  },
+};
+
+// What each verify check found, in words (services/accessSync/verify.js codes).
+const FAILURE_TEXT = Object.freeze({
+  refused: 'Cloudflare refused the token: it is wrong, revoked or expired',
+  forbidden: 'the token lacks "Access: Apps and Policies" on this account, or the account ID is not the one the token is for',
+  not_found: 'not found: check the ID',
+  not_attached: 'the reusable policy exists but is not attached to this application',
+  not_allow: 'the policy is not an Allow policy',
+  unavailable: 'Cloudflare did not answer properly (its own trouble or a rate limit): try again later',
+  unreachable: 'Cloudflare could not be reached from the server (network or timeout)',
+  unexpected: 'unexpected failure',
+});
+const CHECK_TEXT = Object.freeze({
+  'token:active': 'active',
+  'token:token_disabled': 'the token is disabled',
+  'token:token_expired': 'the token has expired',
+  'app:no_app_id': 'skipped: no application ID',
+  'audience:match': 'the aud tag of the application matches CF_ACCESS_AUDIENCE',
+  'audience:mismatch': 'the aud tag of the application differs from CF_ACCESS_AUDIENCE: either the application ID is not the one guarding the panel, or CF_ACCESS_AUDIENCE (configure.sh) is wrong',
+  'audience:not_configured': 'skipped: CF_ACCESS_AUDIENCE is not set on the server',
+  'audience:no_app': 'skipped: the application was not read',
+  'policy:no_app_id': 'skipped: no application ID',
+  'policy:no_policy_id': 'skipped: no policy ID',
+});
+
+function checkText(check) {
+  if (check.id === 'app' && check.code === 'found') return `found${check.name ? ` (${check.name})` : ''}`;
+  if (check.id === 'policy' && check.code === 'found') return check.reusable ? 'found (reusable, attached to the application)' : 'found';
+  const text = CHECK_TEXT[`${check.id}:${check.code}`] ?? FAILURE_TEXT[check.code] ?? check.code;
+  return check.id === 'token' && check.expiresOn ? `${text}, expires ${fmtDate(check.expiresOn)}` : text;
+}
+
+const verify = {
+  name: 'verify',
+  summary: 'check the stored token and IDs against Cloudflare, writing nothing',
+  usage: 'access verify',
+  help: [
+    'Reads only: the token (GET /user/tokens/verify, or the endpoint of the account for an',
+    'account-owned token), the application (GET .../access/apps/<app>, compared with',
+    'CF_ACCESS_AUDIENCE) and the policy (GET .../policies/<policy>, must be Allow). Edit, which a',
+    'run needs to write the policy, cannot be checked without a write: the first run that changes',
+    'the policy confirms it. Works with the sync off. Exit 0 when nothing failed, 1 otherwise.',
+  ],
+  async run() {
+    const { result } = unwrap(await verifyAccessSync({}), ACCESS_SYNC_ERRORS);
+    const lines = [
+      ...keyValues(result.checks.map((check) => [check.id, `${check.status}: ${checkText(check)}`])),
+      'edit: not checked (the first run that changes the policy confirms it)',
+    ];
+    if (!result.ok) {
+      throw new CliError('verify_failed', `${lines.join('\n')}\nthe settings do not work yet: see docs/operations/cloudflare.md`, {
+        exit: EXIT.refused, details: result,
+      });
+    }
+    return { data: result, lines };
   },
 };
 
@@ -230,5 +289,5 @@ const allow = {
 export default {
   name: 'access',
   summary: 'the two-way sync of the panel\'s users with a Cloudflare Access policy',
-  commands: [status, config, token, sync, tombstones, allow],
+  commands: [status, config, token, verify, sync, tombstones, allow],
 };

@@ -226,6 +226,11 @@ test('the demo Access sync keeps the token hidden and reports a manual run', asy
   assert.equal(ran.result.outcome, 'unchanged');
   assert.equal(ran.lastRun.trigger, 'manual');
   assert.deepEqual(ran.config, { ...initial.config, enabled: true });
+
+  const verified = await demoRequest('POST', '/admin/access-sync/verify', { apiToken: 'demo-token' });
+  assert.equal(verified.ok, true);
+  assert.deepEqual(verified.checks.map((check) => check.id), ['token', 'app', 'audience', 'policy']);
+  assert.equal(JSON.stringify(verified).includes('demo-token'), false);
 });
 
 test('the demo audit log shows a stopped Access sync', async () => {

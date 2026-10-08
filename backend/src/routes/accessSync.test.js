@@ -21,6 +21,7 @@ import { listTombstones } from '../services/accessSync/tombstones.js';
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';
 const POLICY = '66666666-7777-4888-9999-000000000000';
+const AUD = 'a'.repeat(64);
 const STORED = { enabled: true, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: 'enc:tok-secret' };
 const LAST_RUN = {
   trigger: 'schedule', startedAt: '2026-09-17T09:00:00.000Z', finishedAt: '2026-09-17T09:00:01.000Z',
@@ -32,7 +33,7 @@ let base;
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
-  app.use((req, _res, next) => { req.session = { userId: 'admin-id' }; next(); });
+  app.use((req, _res, next) => { req.session = { userId: 'admin-id', authMethod: 'cloudflare' }; next(); });
   app.use('/api/admin/access-sync', accessSyncRoutes);
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => res.status(500).json({ error: err.message }));
@@ -47,6 +48,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.stubEnv('AUTH_MODE', 'google');
   vi.stubEnv('ACCESS_SYNC_MAX_DISABLES', '5');
+  vi.stubEnv('CF_ACCESS_ISSUER', 'https://example-team.cloudflareaccess.com/');
+  vi.stubEnv('CF_ACCESS_AUDIENCE', AUD);
   loadStoredConfig.mockResolvedValue(STORED);
   // The real updateConfig reads, builds and saves in one locked transaction; here it is built on
   // the two mocks so the tests can still say what was read and what was saved.
@@ -59,7 +62,7 @@ beforeEach(() => {
   });
   listTombstones.mockResolvedValue([{ email: 'gone@example.com', createdAt: '2026-10-01T00:00:00.000Z', createdBy: 'admin@example.com' }]);
 });
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 const send = async (method, path, body) => {
   const res = await fetch(`${base}/api/admin/access-sync${path}`, {
@@ -77,6 +80,8 @@ const journaled = () => query.mock.calls
 const SNAPSHOT = {
   config: { enabled: true, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiTokenSet: true },
   lastRun: LAST_RUN, maxDisables: 5, maxImports: 10, tombstones: 1, googleMode: true,
+  host: { issuer: 'https://example-team.cloudflareaccess.com', audienceSet: true },
+  signedInViaAccess: true,
 };
 
 describe('Access sync admin API', () => {
@@ -143,5 +148,33 @@ describe('Access sync admin API', () => {
     saveConfig.mockResolvedValue(STORED);
     await send('PUT', '', { enabled: true });
     expect(journaled()).toEqual([]);
+  });
+
+  it('verifies the stored settings against Cloudflare with reads only, journaling nothing', async () => {
+    // The test's own requests to the route go through the real fetch; Cloudflare's are faked.
+    const realFetch = globalThis.fetch;
+    const fetchImpl = vi.fn(async (url, init) => {
+      if (String(url).startsWith(base)) return realFetch(url, init);
+      const path = new URL(url).pathname;
+      if (path.endsWith('/user/tokens/verify')) return Response.json({ success: true, result: { status: 'active' } });
+      if (path.endsWith(`/access/apps/${APP}`)) return Response.json({ success: true, result: { id: APP, name: 'MailExpert', aud: AUD } });
+      return Response.json({ success: true, result: { id: POLICY, decision: 'allow' } });
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const { status, body } = await send('POST', '/verify', {});
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.checks.map((check) => `${check.id}:${check.code}`)).toEqual(['token:active', 'app:found', 'audience:match', 'policy:found']);
+    const cloudflareCalls = fetchImpl.mock.calls.filter(([url]) => !String(url).startsWith(base));
+    expect(cloudflareCalls).toHaveLength(3);
+    expect(cloudflareCalls.every(([, init]) => init.method === 'GET')).toBe(true);
+    expect(saveConfig).not.toHaveBeenCalled();
+    expect(journaled()).toEqual([]);
+  });
+
+  it('refuses to verify without an account or a token, and a malformed token from the form', async () => {
+    loadStoredConfig.mockResolvedValue({ enabled: false, accountId: '', appId: '', policyId: '', apiToken: null });
+    expect(await send('POST', '/verify', {})).toMatchObject({ status: 400, body: { code: 'verify_incomplete' } });
+    expect(await send('POST', '/verify', { accountId: ACCOUNT, apiToken: 'short' })).toMatchObject({ status: 400, body: { code: 'token_invalid' } });
   });
 });

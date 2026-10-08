@@ -3,6 +3,8 @@
 const DEFAULT_API_BASE = 'https://api.cloudflare.com/client/v4';
 const TIMEOUT_MS = 10_000;
 const READ_ONLY_FIELDS = new Set(['id', 'uid', 'created_at', 'updated_at', 'reusable', 'app_count']);
+// Statuses with which a token-verify endpoint refuses a token it does not own.
+const REFUSED = new Set([400, 401, 403]);
 
 export class CloudflareAccessError extends Error {
   // retryAfter: the seconds of a Retry-After header (a 429 or a 5xx), or null.
@@ -64,6 +66,33 @@ export function createCloudflareAccessClient({
   }
 
   return {
+    // Whether Cloudflare takes the token at all, and its status and expiry. A user token answers
+    // on /user/tokens/verify; an account-owned token is refused there and answers on the account's
+    // own endpoint. When both refuse, the user endpoint's refusal is the one reported; a failure
+    // of the account endpoint that is not a refusal (its 5xx, the network) is reported as is.
+    async verifyToken() {
+      const answer = (result, owner) => ({
+        status: typeof result?.status === 'string' ? result.status : 'unknown',
+        expiresOn: typeof result?.expires_on === 'string' ? result.expires_on : null,
+        owner,
+      });
+      try {
+        return answer(await call('verifyToken', 'GET', `${apiBase}/user/tokens/verify`), 'user');
+      } catch (err) {
+        if (!REFUSED.has(err.status)) throw err;
+        try {
+          return answer(await call('verifyToken', 'GET', `${apiBase}/accounts/${accountId}/tokens/verify`), 'account');
+        } catch (accountErr) {
+          throw REFUSED.has(accountErr.status) || accountErr.status === 404 ? err : accountErr;
+        }
+      }
+    },
+
+    // The Access application, with its aud tag; needs "Access: Apps and Policies" Read.
+    getApp() {
+      return call('getApp', 'GET', `${accessUrl}/apps/${appId}`);
+    },
+
     async getPolicy(policyId) {
       try {
         return await call('getPolicy', 'GET', `${accessUrl}/apps/${appId}/policies/${policyId}`);

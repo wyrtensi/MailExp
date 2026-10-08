@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { authSettingsError, getAuthSettings } from './authSettings.js';
+import { authSettingsError, cloudflareEnvState, getAuthSettings } from './authSettings.js';
 
 describe('getAuthSettings', () => {
   it('defaults to local mode without sign-in providers', () => {
@@ -47,5 +47,14 @@ describe('authSettingsError', () => {
   it('rejects an unknown mode and google mode without a sign-in path', () => {
     expect(authSettingsError(getAuthSettings({ AUTH_MODE: 'ldap' }))).toMatch(/AUTH_MODE must be/);
     expect(authSettingsError(getAuthSettings({ AUTH_MODE: 'google' }))).toMatch(/AUTH_MODE=google needs/);
+  });
+});
+
+describe('cloudflareEnvState', () => {
+  it('answers each Access value on its own, the issuer without a trailing slash', () => {
+    expect(cloudflareEnvState({})).toEqual({ issuer: null, audience: null });
+    expect(cloudflareEnvState({ CF_ACCESS_ISSUER: ' https://team.cloudflareaccess.com/ ' }))
+      .toEqual({ issuer: 'https://team.cloudflareaccess.com', audience: null });
+    expect(cloudflareEnvState({ CF_ACCESS_AUDIENCE: 'f'.repeat(64) })).toEqual({ issuer: null, audience: 'f'.repeat(64) });
   });
 });

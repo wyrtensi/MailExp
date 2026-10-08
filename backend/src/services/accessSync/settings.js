@@ -8,7 +8,9 @@ export const ACCESS_SYNC_CONFIG_KEY = 'access_sync_config';
 export const ACCESS_SYNC_STATE_KEY = 'access_sync_state';
 export const DEFAULT_MAX_DISABLES = 10;
 
-const ACCOUNT_ID_RE = /^[0-9a-f]{32}$/;
+export const ACCOUNT_ID_RE = /^[0-9a-f]{32}$/;
+// The shape of a Cloudflare API token: one line, no spaces.
+export const API_TOKEN_RE = /^[A-Za-z0-9._~+/=-]{20,512}$/;
 const EMPTY_CONFIG = Object.freeze({ enabled: false, accountId: '', appId: '', policyId: '', apiToken: null });
 
 export class AccessSyncConfigError extends Error {

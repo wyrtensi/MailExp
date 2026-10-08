@@ -53,6 +53,7 @@ Status: under active development; what is done and what comes next is in [ROADMA
 | let an AI agent install or update it | [AGENTS.md](AGENTS.md) and the [`mailexpert-rollout` skill](.claude/skills/mailexpert-rollout/SKILL.md) |
 | learn the screens | [User guide](docs/user-guide/README.md) (in Russian) |
 | run the admin CLI | [CLI reference](docs/operations/cli.md) (in Russian) |
+| connect Cloudflare (tunnel, Access sign-in, user sync) and see which permissions each key needs | [Cloudflare](docs/operations/cloudflare.md) (in Russian): a click-by-click path, an agent's path and the permissions table |
 | set up Gmail / Microsoft mailboxes | [Google apps](docs/operations/google-oauth.md), [Microsoft](docs/operations/microsoft-oauth.md) (in Russian) |
 | run mailboxes on my own domains | [Mail node](docs/operations/mail-node.md) (in Russian) |
 | understand the code | [Codebase map](docs/architecture/codebase-file-map.md), [deployment system](docs/architecture/deployment-system.md), [job queue](docs/architecture/job-queue.md) |

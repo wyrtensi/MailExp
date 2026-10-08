@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
 import {
   accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunNotes, accessSyncRunSummary,
-  accessSyncSaveErrorKey, tombstoneReasonKey,
+  accessSyncSaveErrorKey, accessSyncVerifyLine, accessSyncVerifyPayload, tombstoneReasonKey,
 } from '../utils/accessSync.js';
 import { adminUserErrorText } from '../utils/adminUsers.js';
 import { localeTag } from '../utils/formatDate.js';
@@ -25,9 +25,23 @@ const ID_FIELDS = [
   { field: 'policyId', labelKey: 'admin.accessSync.policyId' },
 ];
 
+const VERIFY_STATUS_COLOR = { ok: 'var(--green)', failed: 'var(--red)', skipped: 'var(--text-tertiary)' };
+
+// The host-level keys by their names in configure.sh (not translated: they are what to type).
+const HOST_KEYS = { issuer: 'CF_ACCESS_ISSUER', audience: 'CF_ACCESS_AUDIENCE', edge: 'TUNNEL_TOKEN, DNS_API_TOKEN' };
+
+// On the panel's server, as root: store the host-level Cloudflare values (KEY=VALUE lines in a
+// file, never as arguments), apply them, then check the edge. docs/operations/cloudflare.md.
+const HOST_COMMANDS = [
+  '/opt/mailexpert/app/scripts/deploy/configure.sh < cloudflare.env',
+  '/opt/mailexpert/app/scripts/deploy/install.sh',
+  '/opt/mailexpert/app/scripts/deploy/status.sh --json | jq .cf_access',
+].join('\n');
+
 // Cloudflare Access sync settings, the last run and the deleted users the sync does not import
 // again (AUTH_MODE=google). The API token is only ever sent to the server; the form learns just
-// whether one is stored.
+// whether one is stored. "Проверить" checks the form against Cloudflare (reads only, nothing
+// stored). The block below shows what the host owns (configure.sh): the panel cannot change it.
 export default function AccessSyncPanel() {
   const { t } = useTranslation();
   const [data, setData] = useState(null);
@@ -38,6 +52,7 @@ export default function AccessSyncPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [verifyResult, setVerifyResult] = useState(null);
 
   const apply = (next) => {
     setData(next);
@@ -65,6 +80,7 @@ export default function AccessSyncPanel() {
 
   const update = (field, value) => {
     setNotice('');
+    setVerifyResult(null);
     setForm((current) => ({ ...current, [field]: value }));
   };
 
@@ -85,6 +101,12 @@ export default function AccessSyncPanel() {
   const save = () => act(async () => {
     apply(await api.admin.saveAccessSync(accessSyncPayload(form)));
     setNotice(t('admin.accessSync.saved'));
+  });
+
+  // Checks the form (its blank fields: the stored values) against Cloudflare; stores nothing.
+  const verify = () => act(async () => {
+    setVerifyResult(null);
+    setVerifyResult(await api.admin.verifyAccessSync(accessSyncVerifyPayload(form)));
   });
 
   // A manual run refreshes the status but keeps unsaved edits in the form.
@@ -164,11 +186,40 @@ export default function AccessSyncPanel() {
           <button type="submit" disabled={busy || !!formErrorKey} style={primaryButtonStyle}>
             {t('admin.accessSync.save')}
           </button>
+          <button type="button" onClick={verify} disabled={busy} style={buttonStyle}>
+            {t('admin.accessSync.verify')}
+          </button>
           <button type="button" onClick={runNow} disabled={busy} style={buttonStyle}>
             {busy ? t('admin.accessSync.running') : t('admin.accessSync.runNow')}
           </button>
         </div>
       </form>
+
+      {verifyResult && (
+        <div
+          style={{
+            marginTop: 16, padding: '12px 14px', borderRadius: 8, background: 'var(--bg-tertiary)',
+            border: '1px solid var(--border-subtle)', fontSize: 13, maxWidth: 520, boxSizing: 'border-box',
+          }}
+        >
+          <div style={{ fontWeight: 500, color: verifyResult.ok ? 'var(--text-primary)' : 'var(--red)', marginBottom: 6 }}>
+            {t(verifyResult.ok ? 'admin.accessSync.verifyOk' : 'admin.accessSync.verifyFailed')}
+          </div>
+          {verifyResult.checks.map((check) => {
+            const line = accessSyncVerifyLine(check);
+            const values = line.values.date ? { ...line.values, date: new Date(line.values.date).toLocaleDateString(localeTag()) } : line.values;
+            return (
+              <div key={check.id} style={{ display: 'flex', gap: 8, marginTop: 4, overflowWrap: 'anywhere' }}>
+                <span style={{ minWidth: 90, color: 'var(--text-secondary)' }}>{t(line.labelKey)}</span>
+                <span style={{ color: VERIFY_STATUS_COLOR[line.status] ?? 'var(--text-primary)' }}>
+                  {line.key ? t(line.key, values) : line.raw}
+                </span>
+              </div>
+            );
+          })}
+          <div style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 6 }}>{t('admin.accessSync.verifyEditNote')}</div>
+        </div>
+      )}
 
       <div
         style={{
@@ -192,6 +243,39 @@ export default function AccessSyncPanel() {
         <div style={{ color: 'var(--text-tertiary)', fontSize: 12, marginTop: 6 }}>
           {t('admin.accessSync.limit', { max: data.maxDisables, maxImports: data.maxImports })}
         </div>
+      </div>
+
+      <div style={{ marginTop: 24, maxWidth: 520 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+          {t('admin.accessSync.hostTitle')}
+        </div>
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 10 }}>
+          {t('admin.accessSync.hostDesc')}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+          {[
+            [HOST_KEYS.issuer, data.host?.issuer ?? t('admin.accessSync.hostNotSet')],
+            [HOST_KEYS.audience, t(data.host?.audienceSet ? 'admin.accessSync.hostSet' : 'admin.accessSync.hostNotSet')],
+            [HOST_KEYS.edge, t('admin.accessSync.hostEdgeUnseen')],
+          ].map(([name, value]) => (
+            <div key={name} style={{ display: 'flex', gap: 8, overflowWrap: 'anywhere' }}>
+              <code style={{ color: 'var(--text-secondary)', flexShrink: 0 }}>{name}</code>
+              <span style={{ color: 'var(--text-primary)', minWidth: 0 }}>{value}</span>
+            </div>
+          ))}
+          <div style={{ color: 'var(--text-secondary)' }}>
+            {t(data.signedInViaAccess ? 'admin.accessSync.hostViaAccess' : 'admin.accessSync.hostNotViaAccess')}
+          </div>
+        </div>
+        <pre
+          style={{
+            margin: '10px 0 0', padding: '8px 10px', borderRadius: 7, background: 'var(--bg-tertiary)',
+            border: '1px solid var(--border-subtle)', fontSize: 12, color: 'var(--text-primary)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+          }}
+        >
+          {HOST_COMMANDS}
+        </pre>
+        <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 6 }}>{t('admin.accessSync.hostDocs')}</div>
       </div>
 
       <div style={{ marginTop: 24, maxWidth: 520 }}>

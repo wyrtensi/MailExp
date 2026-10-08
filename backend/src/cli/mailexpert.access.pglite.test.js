@@ -24,6 +24,7 @@ const ACCOUNT = '0123456789abcdef0123456789abcdef';
 const APP = '11111111-2222-4333-8444-555555555555';
 const POLICY = '66666666-7777-4888-9999-000000000000';
 const TOKEN = 'cf-token-AbCdEf0123456789xyzXYZ_-0123';
+const AUD = 'c'.repeat(64);
 let db;
 let cloudflare;
 
@@ -67,6 +68,8 @@ function fakeCloudflare({ status = 200 } = {}) {
   const fetchImpl = vi.fn(async (url, init = {}) => {
     state.calls.push({ url: String(url), method: init.method, authorization: init.headers?.authorization });
     if (status !== 200) return new Response(JSON.stringify({ success: false, errors: [{ code: 10000 }] }), { status });
+    if (String(url).endsWith('/user/tokens/verify')) return Response.json({ success: true, result: { status: 'active' } });
+    if (String(url).endsWith(`/access/apps/${APP}`)) return Response.json({ success: true, result: { id: APP, name: 'MailExpert', aud: AUD } });
     if (init.method === 'PUT') state.policy = { ...JSON.parse(init.body), id: POLICY };
     return new Response(JSON.stringify({ success: true, result: state.policy }), { status: 200 });
   });
@@ -88,6 +91,8 @@ beforeEach(async () => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.stubEnv('AUTH_MODE', 'google');
   vi.stubEnv('BOOTSTRAP_ADMIN_EMAILS', '');
+  vi.stubEnv('CF_ACCESS_ISSUER', '');
+  vi.stubEnv('CF_ACCESS_AUDIENCE', '');
   await db.exec("DELETE FROM jobs; DELETE FROM mailbox_audit_log; DELETE FROM system_settings WHERE key LIKE 'access_sync%';");
   cloudflare = fakeCloudflare();
 });
@@ -114,6 +119,7 @@ describe('mailexpert access status', () => {
     expect(json).toEqual({
       config: { enabled: false, accountId: '', appId: '', policyId: '', apiTokenSet: false },
       lastRun: null, maxDisables: 10, maxImports: 10, tombstones: 0, googleMode: true,
+      host: { issuer: null, audienceSet: false },
     });
   });
 });
@@ -202,6 +208,41 @@ describe('mailexpert access tombstones and allow', () => {
     const actions = (await auditSettled(2)).map((e) => e.action);
     expect(actions).toEqual(expect.arrayContaining(['access.tombstone_cleared', 'user.added']));
     await db.query("DELETE FROM users WHERE email = 'gone@example.com'");
+  });
+});
+
+describe('mailexpert access verify', () => {
+  it('checks the stored settings with reads only, before the sync is on, and journals nothing', async () => {
+    vi.stubEnv('CF_ACCESS_AUDIENCE', AUD);
+    expect((await cli(['access', 'token'], { stdin: TOKEN })).code).toBe(0);
+    expect((await cli(['access', 'config', '--account', ACCOUNT, '--app', APP, '--policy', POLICY])).code).toBe(0);
+    await db.exec('DELETE FROM mailbox_audit_log;');
+    const result = await cli(['access', 'verify']);
+    expect(result.code).toBe(0);
+    expect(result.out).toMatch(/token:\s+ok: active/);
+    expect(result.out).toMatch(/audience:\s+ok: the aud tag of the application matches/);
+    expect(result.out).toMatch(/policy:\s+ok: found/);
+    expect(result.out).not.toContain(TOKEN);
+    expect(cloudflare.calls.every((call) => call.method === 'GET' && call.authorization === `Bearer ${TOKEN}`)).toBe(true);
+    expect(await audit()).toEqual([]);
+    expect(await accessJobs()).toEqual([]);
+  });
+
+  it('exits 1 and names the missing permission when Cloudflare refuses', async () => {
+    await configured();
+    fakeCloudflare({ status: 403 });
+    const result = await cli(['access', 'verify', '--json']);
+    expect(result.code).toBe(1);
+    expect(result.json()).toMatchObject({ code: 'verify_failed', ok: false });
+    expect(result.out).not.toContain(TOKEN);
+    const text = await cli(['access', 'verify']);
+    expect(text.err).toContain('lacks "Access: Apps and Policies"');
+  });
+
+  it('refuses when there is no token to verify', async () => {
+    const result = await cli(['access', 'verify', '--json']);
+    expect(result.code).toBe(1);
+    expect(result.json()).toMatchObject({ code: 'verify_incomplete' });
   });
 });
 

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   accessSyncForm, accessSyncFormError, accessSyncIdleKey, accessSyncPayload, accessSyncRunNotes, accessSyncRunSummary,
-  accessSyncSaveErrorKey, tombstoneReasonKey,
+  accessSyncSaveErrorKey, accessSyncVerifyLine, accessSyncVerifyPayload, tombstoneReasonKey,
 } from './accessSync.js';
 
 describe('tombstoneReasonKey', () => {
@@ -118,5 +118,46 @@ describe('accessSyncRunNotes', () => {
       { key: 'admin.accessSync.retriesExhausted', values: {} },
     ]);
     assert.deepEqual(accessSyncRunNotes({ outcome: 'failed', retriable: false }), []);
+  });
+});
+
+describe('accessSyncVerifyPayload', () => {
+  it('sends only what the form fills in, so the rest comes from the stored settings', () => {
+    assert.deepEqual(accessSyncVerifyPayload({ enabled: true, accountId: ' ', appId: APP, policyId: '', apiToken: '' }), { appId: APP });
+    assert.deepEqual(
+      accessSyncVerifyPayload({ enabled: false, accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: ' tok ' }),
+      { accountId: ACCOUNT, appId: APP, policyId: POLICY, apiToken: 'tok' },
+    );
+  });
+});
+
+describe('accessSyncVerifyLine', () => {
+  it('labels each check and turns its code into a sentence key', () => {
+    assert.deepEqual(accessSyncVerifyLine({ id: 'token', status: 'ok', code: 'active', expiresOn: null }), {
+      labelKey: 'admin.accessSync.verifyToken', key: 'admin.accessSync.checkTokenOk', values: {}, status: 'ok',
+    });
+    assert.equal(accessSyncVerifyLine({ id: 'token', status: 'ok', code: 'active', expiresOn: '2027-01-01T00:00:00Z' }).key, 'admin.accessSync.checkTokenOkExpires');
+    assert.deepEqual(accessSyncVerifyLine({ id: 'app', status: 'ok', code: 'found', name: 'MailExpert' }).values, { name: 'MailExpert' });
+    assert.equal(accessSyncVerifyLine({ id: 'audience', status: 'failed', code: 'mismatch' }).key, 'admin.accessSync.checkAudienceMismatch');
+    assert.equal(accessSyncVerifyLine({ id: 'policy', status: 'ok', code: 'found', reusable: true }).key, 'admin.accessSync.checkPolicyOkReusable');
+    assert.equal(accessSyncVerifyLine({ id: 'policy', status: 'failed', code: 'not_attached' }).key, 'admin.accessSync.checkNotAttached');
+    assert.equal(accessSyncVerifyLine({ id: 'app', status: 'failed', code: 'forbidden' }).key, 'admin.accessSync.checkForbidden');
+    assert.equal(accessSyncVerifyLine({ id: 'app', status: 'failed', code: 'not_found' }).key, 'admin.accessSync.checkAppNotFound');
+    assert.equal(accessSyncVerifyLine({ id: 'policy', status: 'failed', code: 'not_found' }).key, 'admin.accessSync.checkPolicyNotFound');
+    assert.equal(accessSyncVerifyLine({ id: 'policy', status: 'skipped', code: 'no_policy_id' }).key, 'admin.accessSync.checkNoPolicyId');
+  });
+
+  it('shows an unknown code as it is', () => {
+    assert.deepEqual(accessSyncVerifyLine({ id: 'token', status: 'failed', code: 'token_weird' }), {
+      labelKey: 'admin.accessSync.verifyToken', key: null, values: {}, status: 'failed', raw: 'token_weird',
+    });
+  });
+});
+
+describe('verify refusals', () => {
+  it('names the codes the verify endpoint refuses with', () => {
+    assert.equal(accessSyncSaveErrorKey('verify_incomplete'), 'admin.accessSync.errorVerifyIncomplete');
+    assert.equal(accessSyncSaveErrorKey('token_invalid'), 'admin.accessSync.errorTokenInvalid');
+    assert.equal(accessSyncSaveErrorKey('token_undecryptable'), 'admin.accessSync.errorTokenUnreadableVerify');
   });
 });
