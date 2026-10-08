@@ -94,7 +94,8 @@ const create = {
   journal: 'mailbox.added',
   help: [
     'The IMAP password is read from stdin only (a file or a pipe; in a terminal, paste it and press',
-    'Ctrl-D) and stored encrypted; SMTP signs in with the same password. A separate SMTP password:',
+    'Ctrl-D) and stored encrypted, spaces kept and one final line end dropped; SMTP signs in with',
+    'the same password. A separate SMTP password:',
     '"account set-connection <address> --smtp-login LOGIN --smtp-password-stdin" afterwards.',
     'Defaults as the panel\'s form: ports 993 and 587, STARTTLS, name and login the address.',
     ...SERVER_HELP,
@@ -124,7 +125,7 @@ const create = {
       smtp_tls: tlsMode(flags['smtp-tls']) ?? 'STARTTLS',
       auth_user: flags.login ?? address,
     };
-    body.auth_pass = await readSecret(ctx, 'IMAP password');
+    body.auth_pass = await readSecret(ctx, 'IMAP password', { exact: true });
     if (!body.auth_pass) throw new CliError('password_missing', 'No password on stdin');
     const { account } = unwrap(await createManualAccount(body, ctx.actor), ACCOUNT_ERRORS);
     const queued = await queueEffects(ctx, { reconnect: [account.id] });
@@ -178,7 +179,7 @@ const setConnection = {
     }
     const { account: current } = unwrap(await findAccount(ctx.args.mailbox), ACCOUNT_ERRORS);
     if (flags['password-stdin'] || flags['smtp-password-stdin']) {
-      const secret = await readSecret(ctx, flags['password-stdin'] ? 'IMAP password' : 'SMTP password');
+      const secret = await readSecret(ctx, flags['password-stdin'] ? 'IMAP password' : 'SMTP password', { exact: true });
       if (!secret) throw new CliError('password_missing', 'No password on stdin');
       updates[flags['password-stdin'] ? 'auth_pass' : 'smtp_auth_pass'] = secret;
     }

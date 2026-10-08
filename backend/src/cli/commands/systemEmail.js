@@ -44,8 +44,8 @@ const set = {
     'Changes the fields given; the others keep their stored values (the first save needs --host,',
     '--user and a password). Defaults as the screen\'s: port 587, tls STARTTLS, sender name',
     'MailExpert, sender address the login.',
-    '--password-stdin   read the password from stdin (never an argument, never printed); without',
-    '                   it the stored password stays',
+    '--password-stdin   read the password from stdin (never an argument, never printed), spaces',
+    '                   kept, one final line end dropped; without it the stored password stays',
     'The host passes the "Allow private / local hosts" policy (host_refused).',
     '"system-email test" checks the saved settings.',
   ],
@@ -67,7 +67,7 @@ const set = {
     const body = { ...(stored ?? {}), pass: undefined };
     for (const [key, value] of Object.entries(given)) if (value !== undefined) body[key] = value;
     if (flags['password-stdin']) {
-      body.pass = await readSecret(ctx, 'SMTP password');
+      body.pass = await readSecret(ctx, 'SMTP password', { exact: true });
       if (!body.pass) throw new CliError('password_missing', 'No password on stdin');
     }
     unwrap(await saveSystemEmail(body), SYSTEM_EMAIL_ERRORS);

@@ -4,7 +4,7 @@ import { UsageError } from '../args.js';
 import { fmtDate, fmtValue, keyValues, table } from '../output.js';
 import { queueEffects } from '../effects.js';
 import {
-  RULE_ERRORS, createRule, deleteRule, getRule, listRules, recordRulesRun, rulesRunTargets, updateRule,
+  RULE_ERRORS, createRule, deleteRule, getRule, listRules, rulesRunTargets, updateRule,
 } from '../../services/rules/ruleActions.js';
 import { ACCOUNT_ERRORS, findAccount } from '../../services/accounts/manualAccounts.js';
 import { ADMIN_USER_ERRORS, findUser } from '../../services/admin/users.js';
@@ -215,7 +215,7 @@ const runRules = {
   name: 'run',
   summary: 'run the enabled rules on the mail already in a mailbox\'s inbox (or every mailbox\'s)',
   usage: 'rule run (--account ADDRESS|ID | --all)',
-  journal: 'rule.run per mailbox, with the rules it runs',
+  journal: 'rule.run per mailbox, with the rules it runs, written by the backend when the run starts',
   help: [
     'As the panel\'s "Run rules on inbox": every enabled rule of the mailbox, not one rule. The',
     'rules move, delete and forward letters already received, so it asks for confirmation (--yes).',
@@ -229,8 +229,8 @@ const runRules = {
     const { accountIds } = unwrap(await rulesRunTargets(accountId), RULE_ERRORS);
     if (!accountIds.length) throw new CliError('account_not_found', 'There are no mailboxes');
     await confirm(ctx, `Run the enabled rules on the inbox of ${ctx.flags.all ? `all ${accountIds.length} mailboxes` : ctx.flags.account}? They act on mail already received.`);
-    await recordRulesRun(accountIds, ctx.actor, { allMailboxes: !accountId });
-    const queued = await queueEffects(ctx, { runRules: accountIds });
+    // rule.run is journaled by the backend once it claims the mailboxes (not for a mailbox it skips).
+    const queued = await queueEffects(ctx, { runRules: accountIds, runRulesAll: !accountId });
     return { data: { ok: true, started: true, job: queued.job }, lines: queued.lines.length ? queued.lines : [fmtValue(queued.job)] };
   },
 };

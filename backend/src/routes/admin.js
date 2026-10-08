@@ -27,7 +27,7 @@ import adminUpdateRoutes from './adminUpdate.js';
 import { requestAccessSync } from '../services/accessSync/index.js';
 import { loadSyncSettings } from '../services/syncSettings.js';
 import { reconnectAccount } from '../services/accounts/connection.js';
-import { claimRulesRun, runClaimedRules } from '../services/rules/ruleActions.js';
+import { claimRulesRun, recordRulesRun, runClaimedRules } from '../services/rules/ruleActions.js';
 import { listAuditEntries } from '../services/admin/auditQuery.js';
 import { listAuthEvents } from '../services/authEvents.js';
 import { INVITE_ERRORS, createInvite, listInvites, revokeInvite } from '../services/admin/invites.js';
@@ -85,12 +85,15 @@ export const ADMIN_EFFECT_HOOKS = Object.freeze({
   // A mailbox the CLI added or whose connection it changed.
   reconnectAccount: (accountId) => reconnectAccount(imapManager, accountId, { onlyActive: true }),
   // The CLI's "rule run": the sweep runs in the background, as POST /api/rules/run's does; a
-  // mailbox already being swept is left to that run.
-  runRules(accountIds) {
+  // mailbox already being swept is left to that run. rule.run is journaled once the mailboxes are
+  // claimed, for whoever queued the job, as the route journals a run it starts.
+  runRules(accountIds, { allMailboxes = false, actor = null } = {}) {
     if (!claimRulesRun(accountIds)) {
       console.warn('[admin] rules run skipped: a run is already sweeping one of these mailboxes');
       return;
     }
+    recordRulesRun(accountIds, actor, { allMailboxes })
+      .catch((err) => console.error('[admin] rules run audit failed:', err.message));
     runClaimedRules(accountIds, imapManager).then((result) => {
       console.log(`[admin] rules run ${result.ok ? `done: ${result.processed} processed, ${result.matched} matched` : 'failed'}`);
     });

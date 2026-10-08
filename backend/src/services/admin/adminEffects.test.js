@@ -11,7 +11,7 @@ describe('admin effects', () => {
       null,
       { signOut: ['a', 'b'], reload: ['auth_limits'], accessSync: 'user_changed' },
     )).toEqual({
-      signOut: ['a', 'b'], userDeleted: [], accessSync: 'user_changed', reload: ['auth_limits'], reconnect: [], runRules: [],
+      signOut: ['a', 'b'], userDeleted: [], accessSync: 'user_changed', reload: ['auth_limits'], reconnect: [], runRules: [], runRulesAll: false,
     });
   });
 
@@ -40,10 +40,10 @@ describe('admin effects', () => {
     const hooks = {
       requestAccessSync: (trigger) => { order.push(`sync:${trigger}`); },
       reconnectAccount: async (id) => { order.push(`reconnect:${id}`); },
-      runRules: async (ids) => { order.push(`rules:${ids.join(',')}`); },
+      runRules: async (ids, { allMailboxes, actor }) => { order.push(`rules:${ids.join(',')}:${allMailboxes}:${actor.via}`); },
     };
-    const effects = mergeEffects({ reconnect: ['m1'], runRules: ['m1'] }, { reconnect: ['m1', 'm2'], runRules: ['m2'], accessSync: 'x' });
-    await applyAdminEffects(effects, hooks);
-    expect(order).toEqual(['sync:x', 'reconnect:m1', 'reconnect:m2', 'rules:m1,m2']);
+    const effects = mergeEffects({ reconnect: ['m1'], runRules: ['m1'] }, { reconnect: ['m1', 'm2'], runRules: ['m2'], runRulesAll: true, accessSync: 'x' });
+    await applyAdminEffects(effects, hooks, { actor: { userId: null, via: 'cli' } });
+    expect(order).toEqual(['sync:x', 'reconnect:m1', 'reconnect:m2', 'rules:m1,m2:true:cli']);
   });
 });

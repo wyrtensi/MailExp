@@ -178,6 +178,11 @@ describe('mailexpert system-email', () => {
     expect(decrypt(after.pass)).toBe('smtp-pass');
   });
 
+  it('keeps the spaces around a password, dropping only the line end', async () => {
+    await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'relay', '--password-stdin'], { stdin: '  pass word \r\n' });
+    expect(decrypt(JSON.parse(await setting('system_email_config')).pass)).toBe('  pass word ');
+  });
+
   it('refuses what the screen refuses', async () => {
     expect(await cli(['system-email', 'set', '--host', 'smtp.example.com'])).toMatchObject({ code: 1, err: expect.stringContaining('(fields_required)') });
     hostState.refuse.add('10.0.0.5');
@@ -288,6 +293,7 @@ describe('mailexpert account', () => {
     expect(await create(['--imap-port', '1143'])).toMatchObject({ code: 1, err: expect.stringContaining('IMAP: Port 1143 is not allowed') });
     expect(await create(['--name', 'Team\r\nBcc: x'])).toMatchObject({ code: 1, err: expect.stringContaining('(name_email_control_chars)') });
     expect(await create([], '')).toMatchObject({ code: 1, err: expect.stringContaining('(password_missing)') });
+    expect(await create([], '\n')).toMatchObject({ code: 1, err: expect.stringContaining('(password_missing)') });
     expect((await create(['--smtp-tls', 'maybe'])).code).toBe(2);
     expect((await db.query('SELECT id FROM email_accounts')).rows).toEqual([]);
 
@@ -320,9 +326,9 @@ describe('mailexpert account', () => {
 
     // SMTP-only changes need no reconnect.
     hooks.reconnectAccount.mockClear();
-    const smtpOnly = await cli(['account', 'set-connection', id, '--smtp-port', '465', '--smtp-tls', 'SSL', '--smtp-password-stdin', '--json'], { stdin: 'smtp-pass' });
+    const smtpOnly = await cli(['account', 'set-connection', id, '--smtp-port', '465', '--smtp-tls', 'SSL', '--smtp-password-stdin', '--json'], { stdin: ' smtp pass \n' });
     expect(smtpOnly.json().job).toBeNull();
-    expect(decrypt((await account(id)).smtp_auth_pass)).toBe('smtp-pass');
+    expect(decrypt((await account(id)).smtp_auth_pass)).toBe(' smtp pass ');
 
     expect((await cli(['account', 'set-connection', id])).code).toBe(2);
     expect((await cli(['account', 'set-connection', id, '--password-stdin', '--smtp-password-stdin'])).code).toBe(2);

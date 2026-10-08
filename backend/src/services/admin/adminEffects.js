@@ -19,6 +19,7 @@ import { enqueueJob, registerJobKind } from '../jobQueue.js';
 //                          connection: services/accounts/connection.js reconnectAccount)
 //   runRules:    [accountId] mailboxes whose enabled rules to run on the inbox, in the background
 //                          (services/rules/ruleActions.js; a mailbox being swept is skipped)
+//   runRulesAll: boolean   the run was asked for every mailbox (its rule.run entries say so)
 // }
 
 export const ADMIN_EFFECTS_JOB_KIND = 'admin_effects';
@@ -33,7 +34,7 @@ const uniq = (list) => [...new Set(list)];
 
 // One effects object from several (null entries are skipped).
 export function mergeEffects(...list) {
-  const merged = { signOut: [], userDeleted: [], accessSync: null, reload: [], reconnect: [], runRules: [] };
+  const merged = { signOut: [], userDeleted: [], accessSync: null, reload: [], reconnect: [], runRules: [], runRulesAll: false };
   for (const effects of list) {
     if (!effects) continue;
     merged.signOut.push(...(effects.signOut ?? []));
@@ -42,6 +43,7 @@ export function mergeEffects(...list) {
     merged.reconnect.push(...(effects.reconnect ?? []));
     merged.runRules.push(...(effects.runRules ?? []));
     if (effects.accessSync) merged.accessSync = effects.accessSync;
+    if (effects.runRulesAll) merged.runRulesAll = true;
   }
   return {
     ...merged, signOut: uniq(merged.signOut), userDeleted: uniq(merged.userDeleted), reload: uniq(merged.reload),
@@ -55,17 +57,21 @@ export function hasEffects(effects) {
 }
 
 // Applies the effects in this process. hooks: { signOutUser(id), onUserDelete(id),
-// requestAccessSync(trigger), reload: { name: fn }, reconnectAccount(id), runRules([id]) }; a hook
-// not given is skipped. Sign-outs come first, then the reloads, the plugins' clean-up and the
-// Access sync, as the routes always did; the mailbox reconnects and the rules run last.
-export async function applyAdminEffects(effects, hooks) {
+// requestAccessSync(trigger), reload: { name: fn }, reconnectAccount(id), runRules([id],
+// { allMailboxes, actor }) }; a hook not given is skipped. Sign-outs come first, then the reloads,
+// the plugins' clean-up and the Access sync, as the routes always did; the mailbox reconnects and
+// the rules run last. context.actor: who asked for the effects (the job's creator and via), for the
+// journal entries a hook writes.
+export async function applyAdminEffects(effects, hooks, context = {}) {
   if (!hasEffects(effects)) return;
   for (const userId of effects.signOut ?? []) await hooks.signOutUser?.(userId);
   for (const name of effects.reload ?? []) await hooks.reload?.[name]?.();
   for (const userId of effects.userDeleted ?? []) await hooks.onUserDelete?.(userId);
   if (effects.accessSync) hooks.requestAccessSync?.(effects.accessSync);
   for (const accountId of effects.reconnect ?? []) await hooks.reconnectAccount?.(accountId);
-  if (effects.runRules?.length) await hooks.runRules?.(effects.runRules);
+  if (effects.runRules?.length) {
+    await hooks.runRules?.(effects.runRules, { allMailboxes: !!effects.runRulesAll, actor: context.actor ?? null });
+  }
 }
 
 // Queues the effects for the backend (the CLI). Answers the job row, or null when there is nothing
@@ -86,7 +92,8 @@ export function registerAdminEffectsJobKind(hooks) {
   registerJobKind(ADMIN_EFFECTS_JOB_KIND, {
     maxAttempts: ADMIN_EFFECTS_MAX_ATTEMPTS,
     async handler(job) {
-      await applyAdminEffects(job.payload?.effects ?? {}, hooks);
+      const actor = { userId: job.created_by ?? null, ...(job.payload?.via ? { via: job.payload.via } : {}) };
+      await applyAdminEffects(job.payload?.effects ?? {}, hooks, { actor });
     },
   });
 }

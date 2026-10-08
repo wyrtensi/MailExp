@@ -186,14 +186,16 @@ describe('mailexpert rule', () => {
     const result = await cli(['rule', 'run', '--account', 'box@example.com', '--yes', '--json']);
     expect(result.code).toBe(0);
     expect(result.json()).toMatchObject({ ok: true, started: true, job: { kind: 'admin_effects' } });
-    const [, entry] = await auditSettled(2);
-    expect(entry).toMatchObject({ action: 'rule.run', account_id: box, details: { allMailboxes: false, via: 'cli' } });
+    // rule.run is the backend's to journal once it has claimed the mailbox (the hook), not the CLI's.
+    await new Promise((resolve) => { setTimeout(resolve, 30); });
+    expect((await audit()).map((e) => e.action)).toEqual(['rule.created']);
     await runEffects();
-    expect(hooks.runRules).toHaveBeenCalledWith([box]);
+    expect(hooks.runRules).toHaveBeenCalledWith([box], { allMailboxes: false, actor: { userId: null, via: 'cli' } });
 
     hooks.runRules.mockClear();
-    expect((await cli(['rule', 'run', '--all', '--yes'])).code).toBe(0);
+    expect((await cli(['rule', 'run', '--all', '--yes', '--as', 'admin@example.com'])).code).toBe(0);
     await runEffects();
     expect(hooks.runRules.mock.calls[0][0].sort()).toEqual([box, other].sort());
+    expect(hooks.runRules.mock.calls[0][1]).toEqual({ allMailboxes: true, actor: { userId: ADMIN, via: 'cli' } });
   });
 });

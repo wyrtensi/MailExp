@@ -35,8 +35,11 @@ export async function queueEffects(ctx, effects) {
   };
 }
 
-// A secret a command takes, from stdin only: never an argument, never printed.
-export async function readSecret(ctx, what) {
+// A secret a command takes, from stdin only: never an argument, never printed. Keys and tokens
+// are trimmed; a password (exact: true) keeps its spaces and loses only one line end, which a file
+// or echo adds.
+export async function readSecret(ctx, what, { exact = false } = {}) {
   if (ctx.stdinIsTerminal) ctx.note(`paste the ${what}, then press Ctrl-D`);
-  return String(await ctx.readStdin()).trim();
+  const text = String(await ctx.readStdin());
+  return exact ? text.replace(/\r?\n$/, '') : text.trim();
 }
