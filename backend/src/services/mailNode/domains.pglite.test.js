@@ -351,20 +351,18 @@ describe('no automatic removal of domain rows', () => {
     const { join } = await import('node:path');
     const root = fileURLToPath(new URL('../../', import.meta.url));
     const files = (await readdir(root, { recursive: true })).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'));
-    const offenders = [];
-    for (const file of files) {
-      const text = await readFile(join(root, file), 'utf8');
-      if (/DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains/i.test(text)) offenders.push(file);
-    }
+    // Read every file at once: the walk is I/O-bound, and a sequential await per file (a few hundred
+    // files) is what a busy full-suite run stretched. The pattern checks are unchanged.
+    const offendersIn = async (dir, names, pattern) => (await Promise.all(names.map(async (file) => (
+      pattern.test(await readFile(join(dir, file), 'utf8')) ? file : null
+    )))).filter(Boolean);
+    const offenders = await offendersIn(root, files, /DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains/i);
     expect(files.length).toBeGreaterThan(50);
     // The migrations too: the table is new (0079), so no migration may delete its rows.
     const migrations = fileURLToPath(new URL('../../../migrations/', import.meta.url));
     const sqlFiles = (await readdir(migrations)).filter((f) => f.endsWith('.sql'));
     expect(sqlFiles).toContain('0079_mail_node_domains.sql');
-    for (const file of sqlFiles) {
-      const text = await readFile(join(migrations, file), 'utf8');
-      if (/DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains|DROP\s+TABLE[^;]*mail_node_domains/i.test(text)) offenders.push(file);
-    }
+    offenders.push(...await offendersIn(migrations, sqlFiles, /DELETE\s+FROM\s+mail_node_domains|TRUNCATE[^;]*mail_node_domains|DROP\s+TABLE[^;]*mail_node_domains/i));
     expect(offenders).toEqual([]);
   });
 });
