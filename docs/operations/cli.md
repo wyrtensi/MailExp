@@ -343,7 +343,7 @@ CLI сохраняет тем же действием, что и экран (`se
 | `access config [--account ID] [--app ID] [--policy ID] [--enable \| --disable]` | Меняет только названные поля, остальные остаются. ID аккаунта — 32 шестнадцатеричных символа, ID приложения и политики — UUID (`invalid_id`); включить можно только с тремя ID и токеном (`incomplete`). Смена аккаунта, приложения или политики забывает, что синхронизация писала в старую. Если синхронизация после сохранения включена, ставится прогон (в ответе — ID задания). Без параметров или с `--enable --disable` — код 2. | `access.config_changed`: изменённые поля, ID, включена ли |
 | `access token` | Читает API-токен Cloudflare **только со stdin** (файл или конвейер; в терминале — вставить и нажать Ctrl-D), не из аргументов, и нигде его не печатает. Пробелы по краям и перевод строки отбрасываются; токен — одна строка из 20-512 символов без пробелов, иначе `token_invalid`. Хранится зашифрованным. Остальные настройки не меняются; если синхронизация включена, ставится прогон. Права токена — «Access: Apps and Policies» Edit на один аккаунт. | `access.config_changed` с `tokenChanged: true` (без значения) |
 | `access sync [--timeout SEC]` | Ставит прогон и ждёт его итога (по умолчанию до 120 секунд). | `access.sync_requested`; сам прогон пишет `access.user_imported`, `user.disabled`, `access.sync_aborted` и `access.import_aborted` от «Cloudflare Access» |
-| `access tombstones` | Адреса удалённых пользователей: когда и кем удалён, есть ли адрес ещё в политике (по последнему удачному прогону). Синхронизация их не возвращает, вход через Access с ними отклоняется (`user_deleted`). | нет |
+| `access tombstones` | Адреса удалённых пользователей (причина `deleted`) и прежние адреса пользователей, которым администратор сменил или убрал email (`email_changed`): причина, когда и кем, есть ли адрес ещё в политике (по последнему удачному прогону). Синхронизация их не возвращает, вход через Access с ними отклоняется (`user_deleted`). | нет |
 | `access allow <email>` | Снимает запрет с адреса удалённого пользователя и одобряет его: новый пользователь (или включает существующего с этим адресом). Backend просит прогон синхронизации. То же делает `user create <email>`. | `access.tombstone_cleared`, `user.added` или `user.enabled` |
 
 Итог `access sync` и код выхода:
@@ -395,10 +395,10 @@ backend подключить ящик заново (`reconnect`), а `rule run` 
 
 | Команда | Что делает | Журнал |
 |---|---|---|
-| `user list [--limit N] [--offset N]` | Пользователи, старые первыми (по 100, не больше 200): адрес, имя, администратор (`bootstrap` для адресов из `BOOTSTRAP_ADMIN_EMAILS`), 2FA, отключён ли, место в политике Access (`in_access`, `pending` — ещё не записан, `removed_in_cloudflare`, `not_synced` — синхронизация выключена), создан. | нет |
+| `user list [--limit N] [--offset N]` | Пользователи, старые первыми (по 100, не больше 200): адрес, имя, администратор (`bootstrap` для адресов из `BOOTSTRAP_ADMIN_EMAILS`), 2FA, отключён ли, место в политике Access (`in_access`, `pending` — ещё не записан, `admitted_by_rule` — вошёл по правилу домена или группы и в политику не пишется, `removed_in_cloudflare`, `not_synced` — синхронизация выключена), создан. | нет |
 | `user show <email>` | Один пользователь. | нет |
 | `user create <email> [--admin]` | Одобряет адрес: новый пользователь или существующий, у которого это имя пользователя. В `AUTH_MODE=google` именно это пускает человека войти. С `--admin` — сразу администратор. Адрес удалённого пользователя снова разрешается (`access tombstones`). Backend просит прогон синхронизации с Access. | `user.added`; с `--admin` ещё `user.admin_changed`; для удалённого адреса `access.tombstone_cleared` |
-| `user set <email> [--admin \| --no-admin] [--disable \| --enable] [--email NEW]` | Делает администратором или нет, отключает или включает, меняет адрес (`--email ""` убирает его). Кто потерял вход (отключён или сменился адрес, под которым открыты сессии) — backend разлогинивает его везде. Без параметров или с противоречащими — код 2. | `user.admin_changed`, `user.disabled`, `user.enabled` — что изменилось |
+| `user set <email> [--admin \| --no-admin] [--disable \| --enable] [--email NEW]` | Делает администратором или нет, отключает или включает, меняет адрес (`--email ""` убирает его; прежний адрес запоминается, как у удалённого пользователя: `access tombstones`). Кто потерял вход (отключён или сменился адрес, под которым открыты сессии) — backend разлогинивает его везде. Без параметров или с противоречащими — код 2. | `user.admin_changed`, `user.disabled`, `user.enabled` — что изменилось |
 | `user delete <email>` | Удаляет пользователя и всё его (просит подтверждения, `--yes`). Backend разлогинивает его, плагины удаляют свои данные, просится прогон синхронизации с Access. Адрес запоминается: синхронизация не вернёт его из политики, вход через Access с ним отклоняется, пока его не разрешат снова (`access allow`, `user create`). | `user.deleted` |
 | `user totp-reset <email>` | Выключает 2FA пользователя, потерявшего устройство (просит подтверждения). Он входит по паролю и заново подключает 2FA, где она обязательна. | нет (как и у кнопки экрана) |
 
@@ -769,7 +769,7 @@ error: The domain is at the first step with nothing to clear (domain_nothing_to_
 `{ "job": { "id", "status", "result", "errorCode", "error" } }`, где `result` — итог прогона
 (`outcome`, `added`, `removed`, `imported`, `disabled`, `wouldDisable`, `wouldImport`, `errors`, `error`,
 `retriable`, `retryAttempt`, `nextRetryAt`, `trigger`, `startedAt`, `finishedAt`). `access tombstones` — то же,
-что `GET /api/admin/access-sync/tombstones`: `{ "tombstones": [ { "email", "createdAt", "createdBy", "inPolicy" } ] }`;
+что `GET /api/admin/access-sync/tombstones`: `{ "tombstones": [ { "email", "createdAt", "createdBy", "reason", "inPolicy" } ] }`;
 `access allow` — `{ "user", "created", "enabled", "tombstoneCleared", "job" }`.
 
 `user list` — то же, что `GET /api/admin/users`: `{ "users": [ { "id", "username", "email", "isAdmin",
