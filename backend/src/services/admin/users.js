@@ -100,7 +100,7 @@ export async function findUser(login) {
       ORDER BY (lower(email) = $1) DESC NULLS LAST, created_at ASC LIMIT 1`,
     [name],
   );
-  return rows[0] ? { user: publicUser(rows[0]) } : refuse('not_found');
+  return rows[0] ? { user: await screenUser(rows[0]) } : refuse('not_found');
 }
 
 const tombstoneClearedEntry = (actor, email) => auditOf(actor, { action: 'access.tombstone_cleared', details: { email } });
