@@ -70,6 +70,23 @@ describe('account order preferences', () => {
     assert.deepEqual(saved, [{ pinAccount: 'c' }, { pinAccount: 'a' }]);
   });
 
+  it('a pin the server refused is taken back, other pins stay, and the person is told', async () => {
+    const realSave = api.savePreferences;
+    useStore.setState({ notifications: [] });
+    useStore.getState().pinAccount('c');
+    api.savePreferences = (prefs) => { saved.push(prefs); return Promise.reject(new Error('offline')); };
+    try {
+      useStore.getState().pinAccount('a');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      api.savePreferences = realSave;
+    }
+    assert.deepEqual(useStore.getState().pinnedAccounts, ['c']);
+    const [note] = useStore.getState().notifications;
+    assert.equal(note?.type, 'error');
+    assert.equal(note?.title, 'Setting not saved');
+  });
+
   it('unpinning sends the one removal, never the whole list', () => {
     useStore.getState().setPinnedAccounts(['a', 'b']);
     useStore.getState().unpinAccount('a');

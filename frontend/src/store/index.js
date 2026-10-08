@@ -44,8 +44,16 @@ const _prefQueue = createPrefSaveQueue({
     // reverted on the next load, when loadPreferences overwrote localStorage with the older
     // server value. Naming the keys makes that diagnosable instead of a mystery.
     console.error(`Failed to save preference(s): ${keys.join(', ')}`, err?.message || err);
+    notifyPrefSaveFailed();
   },
 });
+
+// A setting the server did not save: it holds on this device for now but would come back to the
+// old value on the next load, so the person is told rather than finding out later. Called at
+// run time, after useStore below exists.
+function notifyPrefSaveFailed(body = i18n.t('common.prefSaveFailed.body')) {
+  useStore.getState().addNotification({ type: 'error', title: i18n.t('common.prefSaveFailed.title'), body });
+}
 
 function schedulePrefSave(prefs) {
   _prefQueue.schedule(prefs);
@@ -910,7 +918,10 @@ export const useStore = create((set, get) => ({
     const previous = get().categorizationEnabled;
     set({ categorizationEnabled: val });
     api.admin.updateSettings({ categorization_enabled: val })
-      .catch(() => set({ categorizationEnabled: previous }));
+      .catch((err) => {
+        set({ categorizationEnabled: previous });
+        get().addNotification({ type: 'error', title: i18n.t('common.prefSaveFailed.title'), body: err?.message || i18n.t('common.actionFailed.body') });
+      });
   },
 
   // Unread counts per category for the tab bar badges { primary: N, newsletter: N, ... }
@@ -1034,7 +1045,7 @@ export const useStore = create((set, get) => ({
     const value = slug || null;
     set({ gtdPetSlug: value });
     // '' is the explicit "clear" sentinel the prefs allow-list understands.
-    api.savePreferences({ gtdPetSlug: value || '' }).catch(() => {});
+    api.savePreferences({ gtdPetSlug: value || '' }).catch(() => notifyPrefSaveFailed());
   },
 
   // Layout
@@ -1120,7 +1131,7 @@ export const useStore = create((set, get) => ({
   shortcuts: {},
   setShortcuts: (overrides) => {
     set({ shortcuts: overrides });
-    return api.savePreferences({ shortcuts: overrides }).catch(() => {});
+    return api.savePreferences({ shortcuts: overrides }).catch(() => notifyPrefSaveFailed());
   },
 
   // User-defined AI actions (#202), synced across devices. Each: { id, label, prompt }.
@@ -1128,14 +1139,14 @@ export const useStore = create((set, get) => ({
   aiActions: null,
   setAiActions: (actions) => {
     set({ aiActions: actions });
-    return api.savePreferences({ aiActions: actions }).catch(() => {});
+    return api.savePreferences({ aiActions: actions }).catch(() => notifyPrefSaveFailed());
   },
 
   // Hidden folders — { [accountId]: [path, ...] }
   hiddenFolders: {},
   setHiddenFolders: (hf) => {
     set({ hiddenFolders: hf });
-    return api.savePreferences({ hiddenFolders: hf }).catch(() => {});
+    return api.savePreferences({ hiddenFolders: hf }).catch(() => notifyPrefSaveFailed());
   },
 
   // Custom per-account folder display order — { [accountId]: [path, ...] }
@@ -1171,13 +1182,21 @@ export const useStore = create((set, get) => ({
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
     setPinnedAccounts(pinAccountIds(current, accountId));
-    api.savePreferences({ pinAccount: accountId }).catch(err => console.error('Failed to save the pin:', err?.message || err));
+    api.savePreferences({ pinAccount: accountId }).catch(err => {
+      console.error('Failed to save the pin:', err?.message || err);
+      // Undo only this pin: other pins made meanwhile stay.
+      get().setPinnedAccounts(unpinAccountIds(get().pinnedAccounts, accountId));
+      notifyPrefSaveFailed(i18n.t('common.prefSaveFailed.pinBody'));
+    });
   },
   unpinAccount: (accountId) => {
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
     setPinnedAccounts(unpinAccountIds(current, accountId));
-    api.savePreferences({ unpinAccount: accountId }).catch(err => console.error('Failed to save the unpin:', err?.message || err));
+    api.savePreferences({ unpinAccount: accountId }).catch(err => {
+      console.error('Failed to save the unpin:', err?.message || err);
+      notifyPrefSaveFailed(i18n.t('common.prefSaveFailed.pinBody'));
+    });
   },
   // Move up / down among the pinned mailboxes: the whole new order is the change.
   reorderPinnedAccounts: (ids) => {

@@ -40,7 +40,12 @@
       "syncFolders": "Folder list not refreshed",
       "reconnect": "Could not reconnect the mailbox"
     },
-    "mailboxDisabled": "This mailbox is turned off. Turn it on in its settings to connect."
+    "mailboxDisabled": "This mailbox is turned off. Turn it on in its settings to connect.",
+    "prefSaveFailed": {
+      "title": "Setting not saved",
+      "body": "The change works on this device for now, but the server did not save it, so it may be undone after a reload. Check the connection and change it again.",
+      "pinBody": "The server did not save the pin, so the mailbox order may change after a reload. Try again."
+    }
   },
   "login": {
     "google": {
