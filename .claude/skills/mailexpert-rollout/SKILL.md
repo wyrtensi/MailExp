@@ -35,7 +35,7 @@ hand-rolled docker commands), verify, report what the commands printed.
   (below) only when the human agrees to it. A channel is always resolved to its `sha-<12>` first
   (`update.sh latest` and `status.sh --target latest` do it): servers only ever run `sha-<12>`
   images. Never run `promote.yml` yourself unless the owner explicitly asks for that promotion (it
-  runs only from main and needs a tag ruleset on `latest`, see docs/operations/README.md, section 9).
+  runs only from main, owner only; there is no tag ruleset, see docs/operations/deployment.md, section 5.1).
 - For the mail node: `<MAIL_HOST>` SSH target. For a first install: sign-in mode, hosts, admin
   emails (see `docs/operations/deployment.md`, sections 1-3).
 - Which components are in scope (panel only, panel + node, tenant).

@@ -6,10 +6,10 @@ name: Promote to latest
 # CI published as sha-<12> get the tag `latest` (same digest) and the git tag `latest` moves to the
 # commit. Servers keep running sha-<12>.
 #
-# Required repository setting: a tag ruleset on `latest` that lets only this workflow (GitHub
-# Actions) and the owner create, move or delete it. Anyone else who can push tags could otherwise
-# point panels at another commit; hosts still refuse a `latest` outside main or older than what
-# they run, and compare the images' digests (deployment-system.md, section 9).
+# No tag ruleset on `latest`: this is a personal repository, where GitHub rejects the GitHub Actions
+# bypass actor (422), and a ruleset without it would block this workflow. Only the owner moves the
+# tag, by running this workflow from main (dry run first). Hosts refuse a `latest` outside main or
+# older than what they run and compare the images' digests (deployment-system.md, section 9).
 on:
   workflow_dispatch:
     inputs:
