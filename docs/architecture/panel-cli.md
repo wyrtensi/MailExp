@@ -22,7 +22,7 @@
 | `backend/src/services/accountAliases.js` | алиасы ящика с правилом D-16 |
 | `backend/src/services/tenant/tenantActions.js` | действия тенанта: статус, задания кнопок, шаги домена, hold, Internal Relay, контакты псевдонимов, выпуск из карантина, задания |
 | `scripts/deploy/mailexpert-cli.sh` | обёртка на хосте: `docker compose exec backend node src/cli/mailexpert.js` |
-| `backend/src/cli/googleApp.js`, `scripts/deploy/google-app.sh` | отдельная команда для Google-приложений (добавить из JSON клиента, список); не группа `mailexpert` ([google-oauth.md](../operations/google-oauth.md)) |
+| `backend/src/cli/googleApp.js`, `scripts/deploy/google-app.sh` | отдельная команда для Google-приложений (добавить из JSON клиента, список, show, enable/close/disable, delete, set-limit, set-label, replace-secret); не группа `mailexpert` ([google-oauth.md](../operations/google-oauth.md)) |
 
 ## Один путь для экрана и CLI
 
