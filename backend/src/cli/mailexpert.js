@@ -2,11 +2,13 @@
 // The panel CLI: the panel's administrator actions from the command line, for when the screens are
 // inconvenient. It runs inside the backend container, next to the panel, and calls the same
 // services as the HTTP routes (services/mailNode/mailboxActions.js, domainActions.js,
-// services/tenant/tenantActions.js, services/accessSync/actions.js): the same checks, the same
-// refusal codes, the same journal.
+// services/tenant/tenantActions.js, services/accessSync/actions.js, services/admin/users.js,
+// systemSettings.js, services/auth/oidcProviders.js, services/integrations/microsoft.js): the same
+// checks, the same refusal codes, the same journal.
 // Whoever reaches the container is an administrator; the journal names the actor "cli", or the
 // administrator given with --as. Work for the tenant is queued for the backend's job worker; the
-// CLI never runs it itself.
+// CLI never runs it itself. So is what an admin change asks of the backend's process (sign-outs,
+// settings it keeps in memory: services/admin/adminEffects.js).
 //
 //   docker compose ... exec backend node src/cli/mailexpert.js <group> <command> [options]
 //
@@ -29,8 +31,15 @@ import tenant from './commands/tenant.js';
 import quarantine from './commands/quarantine.js';
 import jobs from './commands/jobs.js';
 import access from './commands/access.js';
+import user from './commands/user.js';
+import settings from './commands/settings.js';
+import sso from './commands/sso.js';
+import integration from './commands/integration.js';
 
-export const GROUPS = Object.freeze([mailbox, domain, tenant, quarantine, jobs, access]);
+export const GROUPS = Object.freeze([
+  mailbox, domain, tenant, quarantine, jobs, access,
+  user, settings, sso, integration,
+]);
 
 const GLOBAL_HELP = [
   'Global options:',

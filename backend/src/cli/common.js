@@ -20,15 +20,16 @@ export class CliError extends Error {
 // The exit code of a refusal by its HTTP status: a 5xx is a failure (3), anything else a refusal (1).
 const exitOf = (status) => (status >= 500 ? EXIT.failed : EXIT.refused);
 
-// A refusal from an action's catalog (code -> [status, message]).
-export function refusal(catalog, code) {
+// A refusal from an action's catalog (code -> [status, message]); an action may give the refusal
+// its own message (the catalog's then only names the status).
+export function refusal(catalog, code, ownMessage = null) {
   const [status, message] = catalog[code] ?? [500, code];
-  return new CliError(code, message, { exit: exitOf(status), status });
+  return new CliError(code, ownMessage ?? message, { exit: exitOf(status), status });
 }
 
 // The action's answer, or its refusal thrown.
 export function unwrap(result, catalog) {
-  if (result?.error) throw refusal(catalog, result.error);
+  if (result?.error) throw refusal(catalog, result.error, result.message ?? null);
   return result;
 }
 
