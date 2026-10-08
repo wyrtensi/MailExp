@@ -44,9 +44,10 @@ CREATE INDEX IF NOT EXISTS idx_mail_node_seat_requests_open
   ON mail_node_seat_requests (requested_at) WHERE closed_at IS NULL;
 
 -- The mailboxes that exist today, once: a seat each by creation order; one already pending deletion
--- has its seat on hold for the default 90 days from the request.
+-- has its seat on hold for the default 90 days from the request. created_at is nullable: such a
+-- mailbox is seated last and dated now.
 INSERT INTO mail_node_seat_assignments (seat_no, account_id, email, assigned_at, released_at, release_reason, free_from)
-SELECT row_number() OVER (ORDER BY created_at, id), id, lower(email_address), created_at,
+SELECT row_number() OVER (ORDER BY created_at NULLS LAST, id), id, lower(email_address), COALESCE(created_at, NOW()),
        CASE WHEN delete_after IS NOT NULL THEN COALESCE(deletion_requested_at, NOW()) END,
        CASE WHEN delete_after IS NOT NULL THEN 'deletion_requested' END,
        CASE WHEN delete_after IS NOT NULL THEN COALESCE(deletion_requested_at, NOW()) + interval '90 days' END
