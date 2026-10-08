@@ -1661,7 +1661,18 @@
       "deleteConfirmLabel": "Delete user",
       "disable2faConfirmTitle": "Disable 2FA for \"{{username}}\"?",
       "disable2faConfirmBody": "This will remove their authenticator app requirement. They can re-enable it themselves.",
-      "disable2faConfirmLabel": "Disable 2FA"
+      "disable2faConfirmLabel": "Disable 2FA",
+      "errorEmailInvalid": "Enter a valid email address.",
+      "errorUserExists": "A user with this email already exists.",
+      "errorUsernameTaken": "Another user already signs in with this address as a username.",
+      "errorInvalidField": "The change was not accepted: a value is invalid. Reload the page and try again.",
+      "errorSelfChange": "You cannot change your own account here. Ask another administrator.",
+      "errorNotFound": "This user no longer exists. Reload the page to see the current list.",
+      "errorBootstrapAdmin": "This administrator is set in BOOTSTRAP_ADMIN_EMAILS on the server and cannot be changed here. Change the server configuration instead.",
+      "errorLastAdmin": "At least one active administrator must remain. Make someone else an administrator first.",
+      "errorEmailTaken": "Another user already has this email.",
+      "errorFailed": "The action failed. Try again.",
+      "loadFailed": "Could not load users and invites: {{message}}"
     },
     "ai": {
       "title": "AI Assistant",

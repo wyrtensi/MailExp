@@ -35,6 +35,7 @@ import AccessSyncPanel from './AccessSyncPanel.jsx';
 import MailboxSyncSettings from './MailboxSyncSettings.jsx';
 import AuditLogTab from './AuditLogTab.jsx';
 import { isGoogleAuthMode } from '../utils/authMode.js';
+import { adminUserErrorText } from '../utils/adminUsers.js';
 import GoogleAppsSection from './GoogleAppsSection.jsx';
 import MailNodeSection from './MailNodeSection.jsx';
 import EopSection from './EopSection.jsx';
@@ -5060,6 +5061,10 @@ function UsersAndInvitesPanel() {
   const [copiedId, setCopiedId] = useState(null);
   const [copyFailedId, setCopyFailedId] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  // A failed action on a user, the registration switch or an invite, shown above the list.
+  const [actionError, setActionError] = useState('');
+  // The first load's failure, an Error explained at render.
+  const [usersLoadError, setUsersLoadError] = useState(null);
 
   useEffect(() => {
     Promise.all([
@@ -5072,7 +5077,7 @@ function UsersAndInvitesPanel() {
       setRegOpen(settingsData.settings.registration_open === 'true');
       setInvites(invitesData.invites);
       setInviteTotal(invitesData.total);
-    }).catch(console.error).finally(() => setLoading(false));
+    }).catch((err) => setUsersLoadError(err)).finally(() => setLoading(false));
   }, []);
 
   const handleLoadMoreUsers = async () => {
@@ -5082,7 +5087,7 @@ function UsersAndInvitesPanel() {
       setUsers(prev => [...prev, ...data.users]);
       setUserTotal(data.total);
     } catch (err) {
-      console.error(err);
+      setActionError(adminUserErrorText(err, t));
     } finally {
       setUsersLoadingMore(false);
     }
@@ -5095,17 +5100,31 @@ function UsersAndInvitesPanel() {
       setInvites(prev => [...prev, ...data.invites]);
       setInviteTotal(data.total);
     } catch (err) {
-      console.error(err);
+      setActionError(adminUserErrorText(err, t));
     } finally {
       setInvitesLoadingMore(false);
     }
   };
 
-  const handleToggleAdmin = async (u) => {
+  // Runs a user, registration or invite action; a refusal (the last admin, a bootstrap admin) is
+  // shown instead of the click silently doing nothing.
+  const runAction = async (action) => {
+    setActionError('');
+    try {
+      await action();
+    } catch (err) {
+      setActionError(adminUserErrorText(err, t));
+    }
+  };
+
+  // A refusal inside the confirm dialog: the code explained there, not the server's English text.
+  const explainUserError = (err) => new Error(adminUserErrorText(err, t), { cause: err });
+
+  const handleToggleAdmin = (u) => runAction(async () => {
     const newVal = !u.isAdmin;
     await api.admin.updateUser(u.id, { isAdmin: newVal });
     setUsers(us => us.map(x => x.id === u.id ? { ...x, isAdmin: newVal } : x));
-  };
+  });
 
   const handleDeleteUser = (u) => {
     setConfirmDialog({
@@ -5113,7 +5132,7 @@ function UsersAndInvitesPanel() {
       message: t('admin.users.deleteConfirmBody'),
       confirmLabel: t('admin.users.deleteConfirmLabel'),
       onConfirm: async () => {
-        await api.admin.deleteUser(u.id);
+        await api.admin.deleteUser(u.id).catch((err) => { throw explainUserError(err); });
         setUsers(us => us.filter(x => x.id !== u.id));
       },
     });
@@ -5125,17 +5144,17 @@ function UsersAndInvitesPanel() {
       message: t('admin.users.disable2faConfirmBody'),
       confirmLabel: t('admin.users.disable2faConfirmLabel'),
       onConfirm: async () => {
-        await api.admin.disableUserTotp(u.id);
+        await api.admin.disableUserTotp(u.id).catch((err) => { throw explainUserError(err); });
         setUsers(us => us.map(x => x.id === u.id ? { ...x, totpEnabled: false } : x));
       },
     });
   };
 
-  const handleToggleReg = async () => {
+  const handleToggleReg = () => runAction(async () => {
     const newVal = !regOpen;
     await api.admin.updateSettings({ registration_open: newVal });
     setRegOpen(newVal);
-  };
+  });
 
   const handleSendInvite = async () => {
     if (!inviteEmail.includes('@')) return;
@@ -5161,10 +5180,10 @@ function UsersAndInvitesPanel() {
     }
   };
 
-  const handleRevokeInvite = async (id) => {
+  const handleRevokeInvite = (id) => runAction(async () => {
     await api.admin.deleteInvite(id);
     setInvites(inv => inv.filter(i => i.id !== id));
-  };
+  });
 
   const copyInviteUrl = async (url, id) => {
     const { ok } = await copyToClipboard(url);
@@ -5190,6 +5209,13 @@ function UsersAndInvitesPanel() {
       <div style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 16 }}>
         {t('admin.users.description')}
       </div>
+
+      {(actionError || usersLoadError) && (
+        <div role="alert" style={{
+          padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 13,
+          background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', color: 'var(--red)',
+        }}>{usersLoadError ? t('admin.users.loadFailed', { message: adminUserErrorText(usersLoadError, t) }) : actionError}</div>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 28 }}>
         {users.map(u => (
