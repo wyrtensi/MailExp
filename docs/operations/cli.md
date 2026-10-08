@@ -121,7 +121,8 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 Спрашивают: `domain restart`, `domain allow-authoritative`, `domain internal-relay`,
 `domain approve-alias-removal`, `quarantine pause`, `user delete`, `user totp-reset`, `sso remove`,
 `integration microsoft remove`, `invite revoke`, `system-email remove`, `mailbox oauth-reset`,
-`rule delete`, `rule run`. Не спрашивают: `domain hold`, `domain sync`,
+`rule delete`, `rule run`, `queue flush`, `queue delete`, `outage delete`, `spam-quarantine release`,
+`spam-quarantine learn-spam`, `spam-quarantine delete`, `spam-quarantine node-settings apply`. Не спрашивают: `domain hold`, `domain sync`,
 `quarantine resume`, `quarantine release`, `tenant test`, `tenant antispam`, `mailbox ...` (кроме
 `delete`), все команды чтения.
 
