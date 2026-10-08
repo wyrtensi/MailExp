@@ -90,6 +90,9 @@ describe('GET /messages/:id/body when the account is busy', () => {
     imapManager.fetchMessageBody.mockRejectedValue(new Error('Mailbox does not exist'));
     const res = await fetch(`${ctx.base}/api/mail/messages/${MESSAGE_ID}/body`);
     expect(res.status).toBe(500);
-    expect((await res.json()).busy).toBeUndefined();
+    const body = await res.json();
+    expect(body.busy).toBeUndefined();
+    // The server's own text stays in the log; the screen gets a code to translate.
+    expect(body).toEqual({ error: 'Failed to load the message body', code: 'body_fetch_failed' });
   });
 });
