@@ -398,15 +398,15 @@ const dnsCheck = {
     }
     const queued = unwrap(await enqueueNodeCheck('dns', ctx.actor), NODE_CHECK_ERRORS);
     const job = await maybeWait(ctx, queued.job, nodeCheckWait('domain list'));
-    const lines = [jobLine(job)];
+    const lines = [jobLine(job, queued.created)];
     if (ctx.flags.wait) {
       const node = await getNodeDnsCheck();
       const rows = await listDomainRows();
       lines.push(...dnsLines('node', node));
       for (const row of rows) lines.push(...dnsLines(row.domain, row.dns_check));
-      return { data: { job, node, domains: rows.map((row) => ({ domain: row.domain, ...(row.dns_check ?? {}) })) }, lines };
+      return { data: { job, created: queued.created, node, domains: rows.map((row) => ({ domain: row.domain, ...(row.dns_check ?? {}) })) }, lines };
     }
-    return { data: { job }, lines };
+    return { data: { job, created: queued.created }, lines };
   },
 };
 

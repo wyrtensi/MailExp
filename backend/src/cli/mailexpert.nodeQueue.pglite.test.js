@@ -9,6 +9,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // worker for them.
 
 const dbState = vi.hoisted(() => ({ db: null, closed: false }));
+// The advisory locks held right now, by name (db.js withSessionLock), so a test sees what a write ran
+// under.
+const locks = vi.hoisted(() => ({ held: [] }));
 const fake = vi.hoisted(() => ({ current: null }));
 vi.mock('../services/db.js', () => ({
   query: (sql, params) => (dbState.closed
@@ -16,7 +19,14 @@ vi.mock('../services/db.js', () => ({
     : dbState.db.query(sql, params)),
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
   pool: { end: async () => { dbState.closed = true; } },
-  withSessionLock: (_name, fn) => fn(),
+  withSessionLock: async (name, fn) => {
+    locks.held.push(name);
+    try {
+      return await fn();
+    } finally {
+      locks.held.splice(locks.held.lastIndexOf(name), 1);
+    }
+  },
 }));
 vi.mock('../services/encryption.js', () => ({
   encrypt: (v) => `enc:${v}`,
@@ -32,6 +42,7 @@ const { getAlertSettings } = await import('../services/mailNode/nodeAlerts.js');
 const { getOutageSettings } = await import('../services/mailNode/outages.js');
 const { getQuarantineUserView } = await import('../services/mailNode/quarantine.js');
 const { NODE_CHECK_JOB_KIND, registerNodeCheckJobKind } = await import('../services/mailNode/nodeChecks.js');
+const { APPLY_LOCK } = await import('../services/mailNode/nodeApply.js');
 const { setTenantDriver } = await import('../services/tenant/driver.js');
 const { claimDueJobs, runJob } = await import('../services/jobQueue.js');
 const { run } = await import('./mailexpert.js');
@@ -172,7 +183,34 @@ describe('mailexpert mailbox set-quota and set-rate-limit', () => {
   });
 
   it('sets an own send limit, and "default" goes back to the default', async () => {
-    const own = await cli(['mailbox', 'set-rate-limit', 'anna@example.com', '50/h', '--json']);
+    // The node's limit and the panel's row are written under the apply's lock, so an apply of the
+    // node never interleaves with them.
+    const underLock = [];
+    const node = mc;
+    fake.current = {
+      fetch: (url, options) => {
+        if (url.endsWith('/edit/rl-mbox')) underLock.push([...locks.held]);
+        return node.fetch(url, options);
+      },
+    };
+    const query = dbState.db.query.bind(dbState.db);
+    const db0 = dbState.db;
+    dbState.db = Object.create(db0, {
+      query: {
+        value: (sql, params) => {
+          if (/UPDATE email_accounts SET node_rl_value/.test(sql)) underLock.push([...locks.held]);
+          return query(sql, params);
+        },
+      },
+    });
+    let own;
+    try {
+      own = await cli(['mailbox', 'set-rate-limit', 'anna@example.com', '50/h', '--json']);
+    } finally {
+      dbState.db = db0;
+      fake.current = node;
+    }
+    expect(underLock).toEqual([[APPLY_LOCK], [APPLY_LOCK]]);
     expect(own.code, own.err).toBe(0);
     expect(own.json()).toEqual({ ok: true, rateLimit: { value: 50, frame: 'h' }, rateLimitOverride: { value: 50, frame: 'h' } });
     expect(mc.node.mailboxes[0].rl).toEqual({ value: '50', frame: 'h' });
@@ -257,6 +295,22 @@ describe('mailexpert alerts', () => {
     expect(result.json()).toMatchObject({ job: { kind: NODE_CHECK_JOB_KIND, status: 'done' }, state: { trigger: 'manual' } });
     expect((await jobs())[0]).toMatchObject({ payload: { check: 'alerts', via: 'cli' }, status: 'done' });
   });
+
+  it('answers a check of the same kind still queued instead of queuing a second one', async () => {
+    const first = (await cli(['alerts', 'check', '--json'])).json();
+    expect(first).toMatchObject({ created: true, job: { status: 'queued' } });
+    const second = (await cli(['alerts', 'check', '--json'])).json();
+    expect(second).toMatchObject({ created: false, job: { id: first.job.id } });
+    // Another kind is another check.
+    const dns = (await cli(['domain', 'dns-check', '--json'])).json();
+    expect(dns).toMatchObject({ created: true });
+    expect((await jobs()).map((j) => j.payload.check)).toEqual(['alerts', 'dns']);
+    // Once the queued one ran, a new check is queued again.
+    await runDue();
+    const third = (await cli(['alerts', 'check', '--json'])).json();
+    expect(third).toMatchObject({ created: true });
+    expect(third.job.id).not.toBe(first.job.id);
+  });
 });
 
 describe('mailexpert outage', () => {
@@ -314,20 +368,25 @@ describe('mailexpert spam-quarantine', () => {
     expect((await cli(['spam-quarantine', 'list', '--json'])).json()).toMatchObject({ total: 1, items: [{ id: 7, accountId: ACCOUNT }] });
   });
 
-  it('releases, trains as spam and, after confirmation, deletes an entry, journaled as the panel does', async () => {
-    expect((await cli(['spam-quarantine', 'release', '7', '--json'])).json()).toEqual({ ok: true, learned: true, warnings: [] });
+  it('releases, trains as spam and deletes an entry, each after confirmation, journaled as the panel does', async () => {
+    expect((await cli(['spam-quarantine', 'release', '7'])).code).toBe(2);
+    expect((await cli(['spam-quarantine', 'release', '7'], { interactive: true, answers: ['n'] })).code).toBe(1);
+    expect(mc.node.quarantine).toHaveLength(1);
+    expect((await cli(['spam-quarantine', 'release', '7', '--yes', '--json'])).json()).toEqual({ ok: true, learned: true, warnings: [] });
     expect(await entry('mail_node.quarantine_released')).toMatchObject({
       account_id: ACCOUNT, actor_email: 'cli', details: { id: 7, qid: 'QID7', learned: true, via: 'cli' },
     });
-    expect((await cli(['spam-quarantine', 'release', '7'])).err).toContain('(quarantine_item_not_found)');
+    expect((await cli(['spam-quarantine', 'release', '7', '--yes'])).err).toContain('(quarantine_item_not_found)');
     mc.node.quarantine = [{ ...QITEM, id: 8 }, { ...QITEM, id: 9, rcpt: 'stranger@example.com' }];
-    expect((await cli(['spam-quarantine', 'learn-spam', '8'])).code).toBe(0);
+    expect((await cli(['spam-quarantine', 'learn-spam', '8'])).code).toBe(2);
+    expect(mc.node.quarantine).toHaveLength(2);
+    expect((await cli(['spam-quarantine', 'learn-spam', '8', '--yes'])).code).toBe(0);
     expect((await cli(['spam-quarantine', 'delete', '9'])).code).toBe(2);
     expect((await cli(['spam-quarantine', 'delete', '9', '--yes'])).code).toBe(0);
     expect(mc.node.quarantine).toEqual([]);
     const deleted = await entry('mail_node.quarantine_deleted', 3);
     expect(deleted).toMatchObject({ account_id: null, account_email: 'stranger@example.com', details: { id: 9, via: 'cli' } });
-    expect((await cli(['spam-quarantine', 'release', 'x'])).err).toContain('(quarantine_item_invalid)');
+    expect((await cli(['spam-quarantine', 'release', 'x', '--yes'])).err).toContain('(quarantine_item_invalid)');
   });
 
   it('shows and sets whether users see the quarantine, and writes mailcow\'s settings after confirmation', async () => {

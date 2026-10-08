@@ -154,7 +154,8 @@ docker exec -it me-stage docker exec -it stage-backend node src/cli/mailexpert.j
 `outage trace`), CLI тоже не выполняет сам: он ставит задание `mail_node_check` (одна попытка), его
 выполняет воркер backend теми же функциями, что кнопки экрана. `--wait` работает так же; при таймауте
 подсказка называет команду, которая показывает результат (`domain list`, `alerts status`, `outage list`):
-`jobs` эти задания не показывает. Коды ошибок такого задания: `dns_check_failed`, `alert_check_failed`,
+`jobs` эти задания не показывает. Если проверка того же вида ещё стоит в очереди, CLI отвечает ею
+(`already queued`, `created: false`), а не ставит вторую. Коды ошибок такого задания: `dns_check_failed`, `alert_check_failed`,
 `trace_cooldown`.
 
 ### Журнал аудита
@@ -502,8 +503,8 @@ mailcow (`spam-quarantine list`). Письмо целиком CLI не печа�
 | Команда | Что делает | Подтверждение | Журнал |
 |---|---|---|---|
 | `spam-quarantine list` | Записи, новые первыми: действие rspamd, оценка, получатель (и есть ли его ящик в панели), отправитель, тема; при пустом карантине — сколько писем история rspamd показывает отклонёнными (карантин mailcow, вероятно, выключен). | нет | нет |
-| `spam-quarantine release <ID>` | Узел доставляет письмо в ящик мимо rspamd, удаляет запись и обучает rspamd на нём как на ham. | нет | `mail_node.quarantine_released` с итогом обучения |
-| `spam-quarantine learn-spam <ID>` | Удаляет запись и обучает rspamd на письме как на спаме. | нет | `mail_node.quarantine_learned_spam` |
+| `spam-quarantine release <ID>` | Узел доставляет письмо в ящик мимо rspamd, удаляет запись и обучает rspamd на нём как на ham; отменить нельзя. | да | `mail_node.quarantine_released` с итогом обучения |
+| `spam-quarantine learn-spam <ID>` | Удаляет запись и обучает rspamd на письме как на спаме. | да | `mail_node.quarantine_learned_spam` |
 | `spam-quarantine delete <ID>` | Удаляет запись: письма больше нет. | да | `mail_node.quarantine_deleted` |
 | `spam-quarantine settings show` / `settings set --user-view on\|off` | Видят ли все пользователи записи для ящиков панели. | нет | `mail_node.config_changed` (`quarantine`), когда меняется |
 | `spam-quarantine node-settings show` / `node-settings apply` | Настройки карантина, которые панель пишет в mailcow, и когда писала; `apply` («Enable quarantine on this node») пишет их все: mailcow не умеет их показать и сбрасывает неназванные. | да, у `apply` | `mail_node.quarantine_settings_applied` |
@@ -512,7 +513,7 @@ mailcow (`spam-quarantine list`). Письмо целиком CLI не печа�
 sudo $M queue list && sudo $M queue delete <QUEUE_ID> --yes
 sudo $M alerts check --wait
 sudo $M outage open --start 2026-10-01T10:00:00Z --reason "Disk replacement" --planned
-sudo $M spam-quarantine release <ID>
+sudo $M spam-quarantine release <ID> --yes
 ```
 
 ## 4. Коды выхода

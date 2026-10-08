@@ -108,9 +108,11 @@ export default {
   commands: [
     list,
     entryCommand('release', 'release', 'deliver the letter to its mailbox past rspamd and train rspamd with it as ham',
-      'mail_node.quarantine_released with what training did'),
+      'mail_node.quarantine_released with what training did',
+      (id) => `Release quarantine entry ${id}? The letter is delivered to its mailbox past the spam filter; this cannot be undone.`),
     entryCommand('learn-spam', 'learn_spam', 'delete the entry and train rspamd with it as spam',
-      'mail_node.quarantine_learned_spam with what training did'),
+      'mail_node.quarantine_learned_spam with what training did',
+      (id) => `Delete quarantine entry ${id} and train the spam filter with it as spam? The letter is gone for good.`),
     entryCommand('delete', 'delete', 'delete the entry: the letter is gone',
       'mail_node.quarantine_deleted', (id) => `Delete quarantine entry ${id}? The letter is gone for good.`),
     settings,

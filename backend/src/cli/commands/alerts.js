@@ -55,9 +55,9 @@ const check = {
   async run(ctx) {
     const queued = unwrap(await enqueueNodeCheck('alerts', ctx.actor), NODE_CHECK_ERRORS);
     const job = await maybeWait(ctx, queued.job, nodeCheckWait('alerts status'));
-    if (!ctx.flags.wait) return { data: { job }, lines: [jobLine(job)] };
+    if (!ctx.flags.wait) return { data: { job, created: queued.created }, lines: [jobLine(job, queued.created)] };
     const state = await getAlertState();
-    return { data: { job, state }, lines: [jobLine(job), ...stateLines(state)] };
+    return { data: { job, created: queued.created, state }, lines: [jobLine(job, queued.created), ...stateLines(state)] };
   },
 };
 

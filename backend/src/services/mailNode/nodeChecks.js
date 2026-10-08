@@ -1,3 +1,4 @@
+import { query } from '../db.js';
 import { JobError, enqueueJob, getJob, registerJobKind } from '../jobQueue.js';
 import { jobBy } from '../actor.js';
 import { getMailNodeConfig } from './mailcow.js';
@@ -24,18 +25,25 @@ export const NODE_CHECK_ERRORS = Object.freeze({
   node_check_job_not_found: [404, 'No such node check job'],
 });
 
-// Queues the check: { job } (jobAnswer), or { error } without a mail node (the outage trace needs
-// none: it reads the message trace and keeps going without the node's log).
+// Queues the check: { job (jobAnswer), created }, or { error } without a mail node (the outage trace
+// needs none: it reads the message trace and keeps going without the node's log). A check of the
+// same kind still queued is answered instead of a second one (created: false), as the tenant's
+// buttons do; one already running is not: it may have read the node before the ask.
 export async function enqueueNodeCheck(check, actor) {
   if (!NODE_CHECKS.includes(check)) throw new Error(`Unknown node check: ${check}`);
   if (check !== 'outage_trace' && !(await getMailNodeConfig())) return { error: 'mail_node_not_configured' };
+  const { rows: [waiting] } = await query(
+    `SELECT * FROM jobs WHERE kind = $1 AND status = 'queued' AND payload->>'check' = $2 ORDER BY id LIMIT 1`,
+    [NODE_CHECK_JOB_KIND, check],
+  );
+  if (waiting) return { job: jobAnswer(waiting), created: false };
   const { job } = await enqueueJob({
     kind: NODE_CHECK_JOB_KIND,
     payload: { check, ...(actor?.via ? { via: actor.via } : {}) },
     createdBy: actor?.userId ?? null,
     maxAttempts: MAX_ATTEMPTS,
   });
-  return { job: jobAnswer(job) };
+  return { job: jobAnswer(job), created: true };
 }
 
 // The job as the CLI follows it: { job } or { error }.

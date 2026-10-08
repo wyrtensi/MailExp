@@ -1,4 +1,4 @@
-import { query, withTransaction } from '../db.js';
+import { query, withSessionLock, withTransaction } from '../db.js';
 import { encrypt } from '../encryption.js';
 import { recordAudit } from '../auditLog.js';
 import { auditOf, jobBy } from '../actor.js';
@@ -21,7 +21,7 @@ import { MAX_SEND_LIMIT_PER_HOUR, getEopSettings } from './eopSettings.js';
 import {
   confirmSeat, dropPendingSeat, getHoldDays, lockSeats, releaseSeat, reserveSeat, returnSeat, seatAvailableFor, seatSupply,
 } from './eopSeats.js';
-import { defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';
+import { APPLY_LOCK, defaultRateLimit, newMailboxRateLimit } from './nodeApply.js';
 import { MIRRORED_STATES, kickDomainSync } from '../tenant/tenantDomains.js';
 
 // Kept here for the callers that import it from the actions.
@@ -611,13 +611,17 @@ export async function setNodeMailboxRateLimit({ accountId, value: rawValue, fram
   const { row, cfg } = found;
   const email = row.email_address.toLowerCase();
   const limit = clear ? (await defaultLimits([email]))(email) : { value, frame };
-  const result = await setMailboxRateLimit(cfg, [email], limit);
-  if (result.failed.length) throw new MailNodeError('mail_node_refused', `The mail node refused: ${result.reason ?? 'refused'}`);
-  // Every row of the address: two rows for one mailcow mailbox share its limit.
-  await query(
-    'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
-    [email, value, frame],
-  );
+  // Under the apply's lock (nodeApply.js, across processes): an apply of the node reads the rows'
+  // limits and writes them to the node, so it must not run between the node's write and the row's.
+  await withSessionLock(APPLY_LOCK, async () => {
+    const result = await setMailboxRateLimit(cfg, [email], limit);
+    if (result.failed.length) throw new MailNodeError('mail_node_refused', `The mail node refused: ${result.reason ?? 'refused'}`);
+    // Every row of the address: two rows for one mailcow mailbox share its limit.
+    await query(
+      'UPDATE email_accounts SET node_rl_value = $2, node_rl_frame = $3 WHERE mail_node = true AND lower(email_address) = $1',
+      [email, value, frame],
+    );
+  });
   recordAudit(auditOf(actor, {
     accountId, action: 'mailbox.rate_limit_changed', details: { ...limit, override: !clear, from: overrideOf(row) },
   }));

@@ -213,7 +213,7 @@ token issue --out <TOKEN_FILE> --yes` (a 0600 file on the panel host, moved to t
 human); never print it into the transcript. Node checks over SSH (`docs/operations/cli.md`, sections
 3.15-3.18, read-only unless named): `mailexpert-cli.sh domain dns-check --wait`, `alerts check --wait`,
 `queue list`, `outage list`, `spam-quarantine list`; `queue flush|delete`, `outage delete` and
-`spam-quarantine delete|node-settings apply` change the node and ask for `--yes` (GATE).
+`spam-quarantine release|learn-spam|delete|node-settings apply` change the node and ask for `--yes` (GATE).
 
 ## Reading status.sh
 

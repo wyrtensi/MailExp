@@ -158,7 +158,7 @@ const trace = {
   async run(ctx) {
     const queued = unwrap(await enqueueNodeCheck('outage_trace', ctx.actor), NODE_CHECK_ERRORS);
     const job = await maybeWait(ctx, queued.job, nodeCheckWait('outage list'));
-    return { data: { job }, lines: [jobLine(job)] };
+    return { data: { job, created: queued.created }, lines: [jobLine(job, queued.created)] };
   },
 };
 

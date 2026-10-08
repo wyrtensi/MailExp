@@ -303,7 +303,7 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
   `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `domain ready`, `domain ack`,
   `quarantine pause`, `mailbox deactivate`, `node apply --prefilter`, `agent token issue` при ротации,
   `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`, `queue flush`, `queue delete`, `outage delete`,
-  `spam-quarantine delete`, `spam-quarantine node-settings apply`. Без
+  `spam-quarantine release`, `spam-quarantine learn-spam`, `spam-quarantine delete`, `spam-quarantine node-settings apply`. Без
   терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,

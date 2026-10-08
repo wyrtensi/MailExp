@@ -4,6 +4,8 @@ const session = vi.hoisted(() => ({ isAdmin: true }));
 // The GET /domains admin check reads users.is_admin; every other query answers no rows.
 vi.mock('../services/db.js', () => ({
   query: vi.fn(async (sql) => (sql.includes('is_admin') ? { rows: [{ is_admin: session.isAdmin }] } : { rows: [] })),
+  // One process here: the cross-process lock of the apply is nodeApply.lock.pglite.test.js's.
+  withSessionLock: (_name, fn) => fn(),
 }));
 vi.mock('../services/auditLog.js', () => ({ recordAudit: vi.fn(async () => {}) }));
 vi.mock('../middleware/auth.js', () => ({
