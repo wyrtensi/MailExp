@@ -14,6 +14,8 @@ vi.mock('../services/db.js', () => ({
     : dbState.db.query(sql, params)),
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
   pool: { end: async () => { dbState.closed = true; } },
+  // One process here: the cross-process lock of the apply runs is nodeApply.lock.pglite.test.js's.
+  withSessionLock: (_name, fn) => fn(),
 }));
 vi.mock('../services/encryption.js', () => ({
   encrypt: (v) => `enc:${v}`,

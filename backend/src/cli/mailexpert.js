@@ -35,10 +35,15 @@ import user from './commands/user.js';
 import settings from './commands/settings.js';
 import sso from './commands/sso.js';
 import integration from './commands/integration.js';
+import node from './commands/node.js';
+import eop from './commands/eop.js';
+import seats from './commands/seats.js';
+import agent from './commands/agent.js';
 
 export const GROUPS = Object.freeze([
   mailbox, domain, tenant, quarantine, jobs, access,
   user, settings, sso, integration,
+  node, eop, seats, agent,
 ]);
 
 const GLOBAL_HELP = [

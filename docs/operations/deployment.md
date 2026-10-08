@@ -267,8 +267,8 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 
 | Группа | Команды |
 |---|---|
-| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>` |
-| `domain` | `list`, `show <DOMAIN>`, `restart <DOMAIN>`, `sync <DOMAIN>`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN>`, `approve-alias-removal <DOMAIN>` |
+| `mailbox` | `list [--domain <DOMAIN>]`, `show <ADDRESS>`, `create <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `set-names <ADDRESS> [--name ...] [--sender-name ...] [--second-sender-name ...]`, `delete <ADDRESS> --reason <TEXT> [--confirm-address <ADDRESS>]`, `cancel-deletion <ADDRESS>`, `deactivate <ADDRESS> --reason <TEXT>`, `reactivate <ADDRESS>` |
+| `domain` | `list`, `show <DOMAIN>`, `add <DOMAIN> [--mailboxes <N>]`, `adopt <DOMAIN>`, `step <DOMAIN> <STEP>`, `ready <DOMAIN>`, `ack <DOMAIN> [--created <TIME>]`, `dns-expected <DOMAIN> [--mx ...] [--tenant-txt ...] [--dkim-cname1 ...] [--dkim-cname2 ...]`, `restart <DOMAIN>`, `sync <DOMAIN>`, `hold <DOMAIN>`, `allow-authoritative <DOMAIN>`, `internal-relay <DOMAIN>`, `approve-alias-removal <DOMAIN>` |
 | `tenant` | `status`, `test`, `antispam` |
 | `quarantine` | `status`, `list`, `release`, `pause`, `resume` |
 | `jobs` | `list [--status <STATUS>\|problems] [--kind <KIND>] [--limit <N>]`, `show <ID>` |
@@ -277,6 +277,10 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
 | `settings` | `get [<KEY>]`, `set <KEY> <VALUE>` — настройки экрана администратора (вход по паролю, регистрация, 2FA, лимиты входа, интервалы синхронизации, сетевые разрешения) |
 | `sso` | `list`, `add ...`, `set <ID\|SLUG> ...`, `remove <ID\|SLUG>` — SSO-провайдеры; секрет клиента только со stdin |
 | `integration` | `microsoft show\|set\|remove` — клиент Microsoft OAuth для ящиков Outlook; секрет только со stdin (`--secret`) |
+| `node` | `config show`, `config set [--mail-host <MAIL_HOST>] [--quota <MB>] [--delete-after-days <N>] [--disk-ping-url <URL>] [--panel-ips <LIST>] [--node-ip <IP>] [--api-key-stdin]` (ключ mailcow только со stdin), `apply [--domain <DOMAIN> [--confirm-dkim-delete]]`, `apply --prefilter` — настройки почтового узла и их применение |
+| `eop` | `show`, `set [--eop-host ...] [--licenses <N>] ...` (все поля экрана EOP), `budget` — настройки EOP и бюджет TERRL |
+| `seats` | `status`, `check [--wait]`, `set-hold <DAYS>`, `request <N>` — места EOP |
+| `agent` | `status`, `jobs [--limit <N>]`, `token issue [--out <TOKEN_FILE>\|--out -]`, `token revoke`, `run status\|backup\|update` — агент узла; токен печатается один раз (или пишется в файл 0600 на хосте) для `setup.sh --agent-token-file` |
 
 Ящик называется адресом или ID; если у адреса две строки в панели, CLI просит ID
 (`mailbox_ambiguous`). `--sender-name` (синоним `--ru`) — имя отправителя, `--second-sender-name`
@@ -292,8 +296,9 @@ sudo /opt/mailexpert/app/scripts/deploy/mailexpert-cli.sh --prefix <PREFIX> doma
   stderr). С `--json` обёртка не даёт контейнеру терминал
   (иначе stderr смешался бы со stdout), поэтому подтверждение тогда — только `--yes`.
 - `--yes` (`-y`) — подтвердить необратимое действие без вопроса: `domain restart`,
-  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `quarantine pause`, `user delete`,
-  `user totp-reset`, `sso remove`, `integration microsoft remove`. Без
+  `allow-authoritative`, `internal-relay`, `approve-alias-removal`, `domain ready`, `domain ack`,
+  `quarantine pause`, `mailbox deactivate`, `node apply --prefilter`, `agent token issue` при ротации,
+  `agent token revoke`, `user delete`, `user totp-reset`, `sso remove`, `integration microsoft remove`. Без
   терминала (конвейер, скрипт, `--json`) CLI не ждёт ответа, а отказывает с кодом
   `confirmation_required`. Удаление ящика, как в интерфейсе, подтверждается вводом адреса
   ящика (в терминале — на вопрос, иначе `--confirm-address <ADDRESS>`); `--yes` его не заменяет,
@@ -326,6 +331,8 @@ sudo $cli jobs list --status problems --json | jq '.jobs[].id'
 sudo $cli quarantine release --wait --as <ADMIN_EMAIL>
 sudo $cli access token < /root/access-sync-token.txt                     # токен — только stdin
 sudo $cli access sync
+sudo $cli node config set --api-key-stdin < /root/mailcow-api-key.txt     # ключ — только stdin
+sudo $cli agent token issue --out <TOKEN_FILE> --yes                     # файл 0600 на хосте
 ```
 
 ## 5. Обновление

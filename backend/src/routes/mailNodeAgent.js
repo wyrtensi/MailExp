@@ -1,47 +1,33 @@
 import { Router } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth.js';
-import { recordAudit } from '../services/auditLog.js';
+import { routeActor } from '../services/actor.js';
 import { consume as rlConsume, peek as rlPeek } from '../services/rateLimiter.js';
 import {
   MAX_POLL_WAIT_MS,
   NodeAgentError,
   authenticateAgent,
   bearerToken,
-  enqueueJob,
-  enqueueNodeUpdate,
   failOrphanedJobs,
-  getAgentState,
-  issueToken,
   listJobs,
-  panelCommit,
-  pinnedMailcow,
   recordStatus,
   reportJob,
-  revokeToken,
   waitForJob,
 } from '../services/mailNode/nodeAgent.js';
+import {
+  NODE_AGENT_ERRORS, agentView, issueAgentToken, requestAgentJob, revokeAgentToken,
+} from '../services/mailNode/agentActions.js';
 
 // The mail node's agent (services/mailNode/nodeAgent.js), two routers:
 // - the default export, mounted at /api/mail-node next to routes/mailNode.js, for administrators:
 //   the agent's state and last status report, its token (issued or rotated, shown once; revoked),
 //   its recent jobs, "Back up mail now" and "Update node now" (the node's scripts to the panel's
-//   own commit). Every change is journaled.
+//   own commit). Every change is journaled (services/mailNode/agentActions.js, which the panel CLI
+//   shares).
 // - agentRouter, mounted at /api/node-agent before the session, the identity gate and the CSRF
 //   check (index.js): the agent on the node, authenticated only by its bearer token. It long-polls
 //   for the next job, reports a job's progress and result, and sends its status report.
-const ERRORS = {
-  agent_unauthorized: [401, 'Unauthorized'],
-  agent_not_set_up: [409, 'The node agent is not connected: issue its token first'],
-  job_active: [409, 'A job of this kind, a backup or an update is already waiting or running'],
-  panel_version_unknown: [409, 'This panel build does not know its commit: the node cannot be updated to it'],
-  job_kind_invalid: [400, 'Unknown job kind'],
-  job_state_invalid: [400, 'Invalid job state'],
-  job_not_found: [404, 'No such job'],
-  job_not_running: [409, 'The job is not running'],
-};
-
 function refuse(res, code) {
-  const [status, error] = ERRORS[code] ?? [500, 'Node agent error'];
+  const [status, error] = NODE_AGENT_ERRORS[code] ?? [500, 'Node agent error'];
   return res.status(status).json({ error, code });
 }
 
@@ -60,10 +46,7 @@ const router = Router();
 router.use(requireAuth);
 
 router.get('/agent', requireAdmin, handle(async (_req, res) => {
-  const [state, jobs] = await Promise.all([getAgentState(), listJobs(10)]);
-  // panelCommit: what "Update node now" brings the node's scripts to (null on a build without one);
-  // pinnedMailcow: the mailcow version this release is tested with (deploy/mailcow-version).
-  res.json({ ...state, panelCommit: panelCommit(), pinnedMailcow: pinnedMailcow(), jobs });
+  res.json(await agentView());
 }));
 
 router.get('/agent/jobs', requireAdmin, handle(async (req, res) => {
@@ -72,28 +55,17 @@ router.get('/agent/jobs', requireAdmin, handle(async (req, res) => {
 
 // The token is in this answer only; the database keeps its hash.
 router.post('/agent/token', requireAdmin, handle(async (req, res) => {
-  const { token, createdAt, rotated } = await issueToken(req.session.userId);
-  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.agent_token_issued', details: { rotated } });
+  const issued = await issueAgentToken(routeActor(req));
   res.set('Cache-Control', 'no-store');
-  res.status(201).json({ token, createdAt, rotated });
+  res.status(201).json(issued);
 }));
 
 router.delete('/agent/token', requireAdmin, handle(async (req, res) => {
-  const revoked = await revokeToken();
-  if (revoked) recordAudit({ actorUserId: req.session.userId, action: 'mail_node.agent_token_revoked', details: {} });
-  res.json({ revoked });
+  res.json(await revokeAgentToken(routeActor(req)));
 }));
 
 router.post('/agent/jobs', requireAdmin, handle(async (req, res) => {
-  const kind = req.body?.kind;
-  // An update's commit is the panel's own; nothing of the request reaches the agent's parameters.
-  const job = kind === 'update'
-    ? await enqueueNodeUpdate({ createdBy: req.session.userId })
-    : await enqueueJob({ kind, params: kind === 'backup' ? { tag: 'manual' } : {}, createdBy: req.session.userId });
-  const details = { kind, jobId: job.id };
-  if (kind === 'update') details.sha = job.params.sha;
-  recordAudit({ actorUserId: req.session.userId, action: 'mail_node.agent_job_requested', details });
-  res.status(202).json({ job });
+  res.status(202).json(await requestAgentJob(req.body?.kind, routeActor(req)));
 }));
 
 export default router;

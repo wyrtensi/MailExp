@@ -205,7 +205,12 @@ Mail node (separate plan, GATE per step): `docs/operations/mail-node.md`, sectio
 `generate_config.sh` is interactive: the human runs it. The node's MailExpert scripts are cloned
 to `/opt/mailexpert-node-src` at the **panel's commit**, then `setup.sh --dry-run` (show the diff)
 and `setup.sh` with `--panel-ip <PANEL_IP>`; the API key and the node settings are entered by the
-human in "Настройки → Администрирование → Почтовый узел".
+human in "Настройки → Администрирование → Почтовый узел", or over SSH with the panel CLI
+(`docs/operations/cli.md`, sections 3.11-3.14): `mailexpert-cli.sh node config set --mail-host
+<MAIL_HOST> --api-key-stdin < file` (stdin only, run by the human), `eop set ...`, `domain add`,
+`node apply`. The agent token for `setup.sh --agent-token-file` comes from `mailexpert-cli.sh agent
+token issue --out <TOKEN_FILE> --yes` (a 0600 file on the panel host, moved to the node by the
+human); never print it into the transcript.
 
 ## Reading status.sh
 

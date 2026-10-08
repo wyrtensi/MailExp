@@ -4,66 +4,38 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js';
 import { uuidParam } from '../utils/uuid.js';
 import { recordAudit } from '../services/auditLog.js';
 import { MAIL_NODE_ERRORS } from '../services/mailNode/errors.js';
-import { adminDomainList, restartDomain } from '../services/mailNode/domainActions.js';
+import {
+  acknowledgeDomainIdentity, addNodeDomain, adminDomainList, adoptNodeDomain, applyDomainNow, confirmDomainStep,
+  markDomainReady, restartDomain, setDomainDnsExpected,
+} from '../services/mailNode/domainActions.js';
+import {
+  eopBudgetNow, eopSettingsView, nodeConfigView, saveEopConfig, saveNodeConfig,
+} from '../services/mailNode/settingsActions.js';
 import { defaultLimits, listNodeMailboxes, onOtherMailHost, overrideOf } from '../services/mailNode/mailboxActions.js';
 import { routeActor } from '../services/actor.js';
-import { checkMailNodeDisk } from '../services/mailNode/diskWatch.js';
 import {
-  DEFAULT_DELETE_AFTER_DAYS,
-  DEFAULT_DOMAIN_MAILBOXES,
-  DEFAULT_QUOTA_MB,
-  MAX_DELETE_AFTER_DAYS,
-  MAX_DOMAIN_MAILBOXES,
   MAX_QUOTA_MB,
-  DKIM_KEY_SIZE,
   MailNodeError,
   RATE_LIMIT_FRAMES,
-  addDomain,
   getMailbox,
   getMailNodeConfig,
   listDomains,
   parseHostName,
-  parseNetworkList,
-  parsePingUrl,
   parseWholeNumber,
-  saveMailNodeConfig,
   setMailboxQuota,
   setMailboxRateLimit,
 } from '../services/mailNode/mailcow.js';
 import {
-  acknowledgeNodeIdentity,
-  adoptDomain,
   bindNodeIdentities,
   canCreateMailboxes,
-  confirmStep,
-  getDomainRow,
   listDomainRows,
-  markReady,
   mergeDomains,
-  nodeRefusal,
-  parseExpectedValues,
-  recordCreatedDomain,
-  setExpectedValues,
 } from '../services/mailNode/domains.js';
 import { checkDomainNow, getNodeDnsCheck, startCheckAll } from '../services/mailNode/dnsCheckJob.js';
-import { getTenantDriver } from '../services/tenant/driver.js';
-import { DRIVER_STEPS, kickDomainSync } from '../services/tenant/tenantDomains.js';
+import { MAX_SEND_LIMIT_PER_HOUR } from '../services/mailNode/eopSettings.js';
 import {
-  EOP_FIELDS,
-  MAX_SEND_LIMIT_PER_HOUR,
-  eopSettingsConflict,
-  getEopSettings,
-  parseEopSettings,
-  saveEopSettings,
-  tenantConfigured,
-  tenantDriverActive,
-} from '../services/mailNode/eopSettings.js';
-import {
-  applyDomain,
   applyNode,
   applyPrefilter,
-  applyInBackground,
-  applyQuietly,
   getNodeApplyResult,
 } from '../services/mailNode/nodeApply.js';
 import {
@@ -76,9 +48,6 @@ import {
   queueAction,
 } from '../services/mailNode/mailcow.js';
 import { parsePostcat, postcatGone, summarizeQueue } from '../services/mailNode/mailQueue.js';
-import { readPostfixLog } from '../services/mailNode/postfixLog.js';
-import { TERRL_WINDOW_MS, aliasDomainsOf, computeTerrlBudget } from '../services/mailNode/terrl.js';
-import { closeFulfilledRequests, seatSupply, withSeatLicenses } from '../services/mailNode/eopSeats.js';
 import {
   ALERT_DEFAULTS,
   checkAlertsNow,
@@ -96,10 +65,6 @@ import {
 // administrators.
 const router = Router();
 router.param('id', uuidParam('id'));
-
-// Sent instead of the stored API key; posting it back keeps the stored key.
-const REDACTED_SECRET = '••••••••';
-
 
 export function refuse(res, code) {
   const [status, error] = MAIL_NODE_ERRORS[code];
@@ -130,76 +95,23 @@ function configAudit(req, settings, fields) {
   recordAudit({ actorUserId: req.session.userId, action: 'mail_node.config_changed', details: { settings, fields } });
 }
 
-// nodeIp: the node's public address, kept with the EOP settings (one stored value, shown with both
-// forms) so that moving the node changes its name and its address in one place.
+// The node settings (services/mailNode/settingsActions.js, which the panel CLI shares): the API key
+// is never sent back, a placeholder stands for it.
 router.get('/config', requireAdmin, async (req, res) => {
-  const cfg = await getMailNodeConfig();
-  const { nodeIp } = await getEopSettings();
-  res.json({
-    configured: !!cfg,
-    mailHost: cfg?.mailHost ?? '',
-    apiKey: cfg ? REDACTED_SECRET : '',
-    quotaMb: cfg?.quotaMb ?? DEFAULT_QUOTA_MB,
-    diskPingUrl: cfg?.diskPingUrl ?? '',
-    deleteAfterDays: cfg?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS,
-    panelIps: cfg?.panelIps ?? [],
-    nodeIp: nodeIp ?? '',
-  });
+  res.json(await nodeConfigView());
 });
 
-// Saves only settings the node accepts: the key is checked by listing the domains first.
+// Saves only settings the node accepts: the key is checked by listing the domains first. Another
+// node, key or panel address: the node gets the panel's settings right after the answer, so the save
+// never waits for a node that does not answer; the result shows on the next load.
 router.put('/config', requireAdmin, async (req, res) => {
-  const mailHost = parseHostName(req.body?.mailHost);
-  if (!mailHost) return refuse(res, 'mail_host_invalid');
-  const quotaMb = parseWholeNumber(req.body?.quotaMb ?? DEFAULT_QUOTA_MB, 1, MAX_QUOTA_MB);
-  if (!quotaMb) return refuse(res, 'quota_invalid');
-  const rawPing = typeof req.body?.diskPingUrl === 'string' ? req.body.diskPingUrl.trim() : '';
-  const diskPingUrl = rawPing ? parsePingUrl(rawPing) : null;
-  if (rawPing && !diskPingUrl) return refuse(res, 'ping_url_invalid');
-  const sent = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
-  const current = await getMailNodeConfig();
-  // Days a mailbox asked to be deleted keeps working. A new value applies to deletions asked for
-  // from now on: dates already set stay as they are.
-  const deleteAfterDays = parseWholeNumber(
-    req.body?.deleteAfterDays ?? current?.deleteAfterDays ?? DEFAULT_DELETE_AFTER_DAYS, 1, MAX_DELETE_AFTER_DAYS,
-  );
-  if (!deleteAfterDays) return refuse(res, 'delete_after_days_invalid');
-  // The panel's own addresses for the node's fail2ban whitelist; left out, the stored ones stay.
-  const ips = req.body?.panelIps === undefined ? { networks: current?.panelIps ?? [] } : parseNetworkList(req.body.panelIps);
-  if (ips.error) return refuse(res, ips.error);
-  const panelIps = ips.networks;
-  // The node's address, left out to keep the stored one; checked as the EOP settings check it.
-  const address = req.body?.nodeIp === undefined ? { settings: {} } : parseEopSettings({ nodeIp: req.body.nodeIp });
-  if (address.error) return refuse(res, address.error);
-  let apiKey = sent;
-  if (!sent || sent === REDACTED_SECRET) {
-    // The stored key goes only to the host it was entered for: a new host needs the key again.
-    if (!current?.apiKey || current.mailHost !== mailHost) return refuse(res, 'api_key_required');
-    apiKey = current.apiKey;
-  }
-  const cfg = { mailHost, apiKey, quotaMb, diskPingUrl, deleteAfterDays, panelIps };
+  let result;
   try {
-    await listDomains(cfg);
+    result = await saveNodeConfig(req.body, routeActor(req));
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  await saveMailNodeConfig(cfg);
-  const changed = Object.keys(cfg).filter((field) => JSON.stringify(current?.[field]) !== JSON.stringify(cfg[field]));
-  if ('nodeIp' in address.settings) {
-    const { nodeIp: storedIp } = await getEopSettings();
-    if (address.settings.nodeIp !== storedIp) {
-      await saveEopSettings(address.settings);
-      changed.push('nodeIp');
-    }
-  }
-  configAudit(req, 'node', changed);
-  // Read the disk (and ping) right away instead of at the next scheduled run.
-  checkMailNodeDisk().catch((err) => console.error('Mail node disk check failed:', err.message));
-  // Another node, key or panel address: the node gets the panel's settings right after the answer,
-  // so the save never waits for a node that does not answer; the result shows on the next load.
-  const applying = changed.some((field) => ['mailHost', 'apiKey', 'panelIps'].includes(field));
-  res.json({ ok: true, ...(applying ? { applying } : {}) });
-  if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'node_settings' }));
+  return result.error ? refuse(res, result.error) : res.json(result);
 });
 
 // The node's domains with the panel's onboarding state of each ('unknown' for a domain the panel
@@ -231,132 +143,38 @@ router.get('/domains', async (req, res) => {
   });
 });
 
-// A domain's node settings applied by themselves after it was added, adopted or started over. The
-// answer carries the result; a failure stays in it and never fails the action.
-const applyDomainQuietly = (req, domain, trigger) => applyQuietly(() => applyDomain({ domain, userId: req.session.userId, trigger }));
-
-// Creates the domain on the node, with a DKIM key only when mailcow signs (the EOP settings' DKIM
-// mode), and applies its node settings (relayhost, DKIM); its onboarding starts at node_created.
-// DNS and the EOP connectors stay manual (runbook) and are confirmed step by step.
-router.post('/domains', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.body?.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  const mailboxes = parseWholeNumber(req.body?.mailboxes ?? DEFAULT_DOMAIN_MAILBOXES, 1, MAX_DOMAIN_MAILBOXES);
-  if (!mailboxes) return refuse(res, 'mailboxes_invalid');
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuse(res, 'mail_node_not_configured');
-  const { dkimMode } = await getEopSettings();
+// A domain action's answer: its refusal, the node's failure or its result
+// (services/mailNode/domainActions.js, which the panel CLI shares).
+async function domainAction(res, run) {
+  let result;
   try {
-    await addDomain(cfg, { domain, mailboxes, dkimKeySize: dkimMode === 'mailcow' ? DKIM_KEY_SIZE : 0 });
+    result = await run();
   } catch (err) {
     return mailNodeFailure(res, err);
   }
-  // A domain the panel knew already (removed on the node and added again) starts over: the journal
-  // keeps the state and the confirmed steps it had.
-  const before = await recordCreatedDomain({ domain, userId: req.session.userId, maxMailboxes: mailboxes });
-  recordAudit({
-    actorUserId: req.session.userId, action: 'mail_node.domain_added',
-    details: { domain, mailboxes, ...(before?.from ? { from: before.from, steps: before.steps ?? {} } : {}) },
-  });
-  const apply = await applyDomainQuietly(req, domain, 'domain_added');
-  // With the tenant driver, the domain goes into the tenant now (its verification TXT, R-23).
-  kickDomainSync(domain, { userId: req.session.userId });
-  res.json({ ok: true, domain, state: 'node_created', ...(apply ? { apply } : {}) });
-});
-
-// Takes in a domain made on the node by hand that the panel has no row for: it starts at
-// node_created like a new one, bound to the node's identity of the domain.
-router.post('/domains/:domain/adopt', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  const cfg = await getMailNodeConfig();
-  if (!cfg) return refuse(res, 'mail_node_not_configured');
-  let onNode;
-  try {
-    onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-  if (!onNode) return refuse(res, 'domain_not_on_node');
-  if (!(await adoptDomain({ domain, userId: req.session.userId, nodeCreated: onNode.created }))) return refuse(res, 'domain_known');
-  recordAudit({
-    actorUserId: req.session.userId, action: 'mail_node.domain_adopted',
-    details: { domain, state: 'node_created', origin: 'adopted' },
-  });
-  const apply = await applyDomainQuietly(req, domain, 'domain_adopted');
-  kickDomainSync(domain, { userId: req.session.userId });
-  res.json({ ok: true, domain, state: 'node_created', ...(apply ? { apply } : {}) });
-});
-
-// The node's record of one domain for a route that acts on a known row: answers the refusal and
-// returns null when the panel has no row, the node is not set up or cannot be read, or the node
-// does not list the domain. A refusal never changes the row.
-async function nodeDomainFor(res, domain) {
-  const row = await getDomainRow(domain);
-  if (!row) {
-    refuse(res, 'domain_not_found');
-    return null;
-  }
-  const cfg = await getMailNodeConfig();
-  if (!cfg) {
-    refuse(res, 'mail_node_not_configured');
-    return null;
-  }
-  let onNode;
-  try {
-    onNode = (await listDomains(cfg)).find((d) => d.domain === domain);
-  } catch (err) {
-    mailNodeFailure(res, err);
-    return null;
-  }
-  const why = nodeRefusal(onNode);
-  if (why) {
-    refuse(res, why);
-    return null;
-  }
-  return { row, onNode };
+  return result.error ? refuse(res, result.error) : res.json(result);
 }
 
-// Answers the refusal and returns true when "Done" or "mark ready" may not move the row: see
-// nodeDomainFor. A node creation time other than the bound one is only a warning and moves on.
-async function refusedByNode(res, domain) {
-  return !(await nodeDomainFor(res, domain));
-}
+// Creates the domain on the node and applies its node settings; its onboarding starts at
+// node_created. DNS and the EOP connectors stay manual (runbook) and are confirmed step by step.
+router.post('/domains', requireAdmin, (req, res) => domainAction(res, () => (
+  addNodeDomain({ domain: req.body?.domain, mailboxes: req.body?.mailboxes }, routeActor(req))
+)));
 
-function stateChanged(req, res, domain, result, how) {
-  if (result.error) return refuse(res, result.error);
-  recordAudit({
-    actorUserId: req.session.userId, action: 'mail_node.domain_state_changed',
-    details: { domain, from: result.from, to: result.to, how, ...(result.steps ? { steps: result.steps } : {}) },
-  });
-  // The tenant driver takes it on from here (verify after dns_ok, the mirror after ready).
-  kickDomainSync(domain, { userId: req.session.userId });
-  return res.json({ ok: true, domain, state: result.to });
-}
+// Takes in a domain made on the node by hand that the panel has no row for.
+router.post('/domains/:domain/adopt', requireAdmin, (req, res) => domainAction(res, () => (
+  adoptNodeDomain(req.params.domain, routeActor(req))
+)));
 
 // "Done": a person confirms the domain's next onboarding step.
-router.post('/domains/:domain/steps/:step', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  // With the tenant driver, its steps are confirmed by what the tenant answers, not by a person: a
-  // "Done" could skip Set-AcceptedDomain InternalRelay (R-24).
-  if (DRIVER_STEPS.includes(req.params.step) && tenantDriverActive(await getEopSettings())) return refuse(res, 'step_by_tenant_driver');
-  if (await refusedByNode(res, domain)) return undefined;
-  const result = await confirmStep({ domain, step: req.params.step, userId: req.session.userId });
-  return stateChanged(req, res, domain, result, 'step_confirmed');
-});
+router.post('/domains/:domain/steps/:step', requireAdmin, (req, res) => domainAction(res, () => (
+  confirmDomainStep(req.params.domain, req.params.step, routeActor(req))
+)));
 
 // A pilot or a test stand without a tenant: the domain takes mailboxes without the other steps.
-router.post('/domains/:domain/ready', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  // With the tenant driver, "ready" without the tenant steps would skip Internal Relay and the
-  // connector (I3 of the 7b review).
-  if (tenantDriverActive(await getEopSettings())) return refuse(res, 'mark_ready_by_tenant_driver');
-  if (await refusedByNode(res, domain)) return undefined;
-  const result = await markReady({ domain, userId: req.session.userId });
-  return stateChanged(req, res, domain, result, 'marked_ready');
-});
+router.post('/domains/:domain/ready', requireAdmin, (req, res) => domainAction(res, () => (
+  markDomainReady(req.params.domain, routeActor(req))
+)));
 
 // "Restart onboarding": the domain goes back to node_created with no confirmed steps and nothing the
 // node or the tenant held, keeping the owner's DKIM mode and send limit. Its mailboxes stay as they
@@ -370,18 +188,9 @@ router.post('/domains/:domain/restart', requireAdmin, async (req, res) => {
 
 // "Apply settings" for one domain: its relayhost, DKIM key and the send limits of its mailboxes.
 // { confirmDkimDelete: true } lets it delete mailcow's DKIM key of a domain the tenant signs for.
-router.post('/domains/:domain/apply', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  if (!(await nodeDomainFor(res, domain))) return undefined;
-  try {
-    return res.json(await applyDomain({
-      domain, userId: req.session.userId, trigger: 'manual', confirmDkimDelete: req.body?.confirmDkimDelete === true,
-    }));
-  } catch (err) {
-    return mailNodeFailure(res, err);
-  }
-});
+router.post('/domains/:domain/apply', requireAdmin, (req, res) => domainAction(res, () => (
+  applyDomainNow(req.params.domain, routeActor(req), { confirmDkimDelete: req.body?.confirmDkimDelete === true })
+)));
 
 // The node's last "apply" (each domain's comes with GET /domains).
 router.get('/apply', requireAdmin, async (req, res) => {
@@ -435,90 +244,32 @@ router.post('/domains/:domain/dns-check', requireAdmin, async (req, res) => {
 
 // The values a domain must publish that the panel cannot read until the tenant driver exists: its
 // MX, the tenant's verification TXT and the EOP DKIM selector CNAMEs. Journaled by the names of the
-// fields that changed; the domain's DNS is checked again right away (a failure stays in the
-// result, the save holds).
-router.put('/domains/:domain/dns-expected', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  const { values, error } = parseExpectedValues(req.body);
-  if (error) return refuse(res, error);
-  const result = await setExpectedValues({ domain, values });
-  if (result.error) return refuse(res, result.error);
-  if (result.fields.length) {
-    recordAudit({
-      actorUserId: req.session.userId, action: 'mail_node.config_changed',
-      details: { settings: 'domain_dns', domain, fields: result.fields },
-    });
-  }
-  const dns = await checkDomainNow({ domain, userId: req.session.userId, trigger: 'expected_changed' })
-    .catch((err) => {
-      console.error('Mail node DNS check after saving the expected values failed:', err?.code || 'error');
-      return null;
-    });
-  return res.json({ ok: true, domain, fields: result.fields, ...(dns ? { dns } : {}) });
-});
+// fields that changed; the domain's DNS is checked again right away (a failure stays in the result,
+// the save holds).
+router.put('/domains/:domain/dns-expected', requireAdmin, (req, res) => domainAction(res, () => (
+  setDomainDnsExpected(req.params.domain, req.body, routeActor(req))
+)));
 
 // The administrator accepts the creation time the node reports now for a domain whose time differs
 // from the one the panel is bound to (the warning in the domain list). The body names the time the
 // administrator saw ({ created }); if the node reports another one by now, nothing is accepted. The
 // state stays as it is.
-router.post('/domains/:domain/acknowledge', requireAdmin, async (req, res) => {
-  const domain = parseHostName(req.params.domain);
-  if (!domain) return refuse(res, 'domain_invalid');
-  const seen = typeof req.body?.created === 'string' ? req.body.created : '';
-  if (!seen) return refuse(res, 'node_created_required');
-  const found = await nodeDomainFor(res, domain);
-  if (!found) return undefined;
-  if (!found.onNode.created) return refuse(res, 'domain_not_recreated');
-  if (found.onNode.created !== seen) return refuse(res, 'domain_node_changed');
-  const result = await acknowledgeNodeIdentity({ domain, nodeCreated: found.onNode.created });
-  if (result.error) return refuse(res, result.error);
-  recordAudit({
-    actorUserId: req.session.userId, action: 'mail_node.domain_identity_acknowledged',
-    details: { domain, from: result.from, to: result.to },
-  });
-  return res.json({ ok: true, domain });
-});
+router.post('/domains/:domain/acknowledge', requireAdmin, (req, res) => domainAction(res, () => (
+  acknowledgeDomainIdentity(req.params.domain, typeof req.body?.created === 'string' ? req.body.created : '', routeActor(req))
+)));
 
-// tenantDriver: the tenant driver the backend runs with ('worker', 'fake' or null), for the
-// "Microsoft tenant" part of the screen (routes/mailNodeTenant.js).
-function eopAnswer(settings) {
-  return {
-    ...settings, tenantConfigured: tenantConfigured(settings), tenantDriverActive: tenantDriverActive(settings),
-    tenantDriver: getTenantDriver()?.kind ?? null,
-  };
-}
-
+// The EOP settings (services/mailNode/settingsActions.js, which the panel CLI shares). tenantDriver:
+// the tenant driver the backend runs with ('worker', 'fake' or null), for the "Microsoft tenant"
+// part of the screen (routes/mailNodeTenant.js).
 router.get('/eop', requireAdmin, async (req, res) => {
-  res.json(eopAnswer(await getEopSettings()));
+  res.json(await eopSettingsView());
 });
-
-// The fields the node gets: a change applies the node settings at once.
-const NODE_APPLIED_FIELDS = Object.freeze(['eopHost', 'tlsPolicy', 'tlsPolicyParameters', 'dkimMode', 'sendLimitPerHour']);
 
 // Checked and kept; the next hop, its TLS, the DKIM mode and the send limit are applied to the node
-// (a run that never deletes a DKIM key nor writes the spam filing rule). TLS policy parameters must
-// fit the policy (eopSettingsConflict). The tenant fields are kept; the tenant jobs read them
-// (services/tenant/tenantJobs.js).
+// right after the answer, as for the node settings.
 router.put('/eop', requireAdmin, async (req, res) => {
-  const { settings, error } = parseEopSettings(req.body);
-  if (error) return refuse(res, error);
-  const current = await getEopSettings();
-  const merged = { ...current, ...settings };
-  const conflict = eopSettingsConflict(merged);
-  if (conflict) return refuse(res, conflict);
-  await saveEopSettings(settings);
-  // EOP seats in manual mode: a larger Licenses number closes the seat requests it covers.
-  if (settings.licenses != null) {
-    const supply = await seatSupply();
-    if (supply.source === 'manual') await closeFulfilledRequests(supply.purchased);
-  }
-  const changed = EOP_FIELDS.filter((field) => field in settings && settings[field] !== current[field]);
-  configAudit(req, 'eop', changed);
-  // Applied right after the answer, as for the node settings.
-  const applying = changed.some((field) => NODE_APPLIED_FIELDS.includes(field)) && !!(await getMailNodeConfig());
-  res.json({ ...eopAnswer(merged), ...(applying ? { applying } : {}) });
-  if (applying) applyInBackground(() => applyNode({ userId: req.session.userId, trigger: 'eop_settings' }));
+  const result = await saveEopConfig(req.body, routeActor(req));
+  return result.error ? refuse(res, result.error) : res.json(result);
 });
 
 // The node mailboxes MailExpert knows, with quota and usage as the node reports them, and the send
@@ -718,23 +469,10 @@ router.put('/alerts/settings', requireAdmin, async (req, res) => {
   return res.json({ settings: { ...current, ...settings } });
 });
 
-// The TERRL budget now: unique external recipients of the last 24 hours against the limit
-// (services/mailNode/terrl.js). The node's log is read for what the journal does not see, through
-// the shared read of the alert job (a minute's cache, one read at a time), so opening the EOP
-// screen does not ask the node for 10000 lines each time; when the node does not answer, the
-// journal alone counts (log.read: false). The licenses are the purchased EOP seats
-// (services/mailNode/eopSeats.js): Graph's number when the tenant gives it, else the Licenses field.
+// The TERRL budget now (services/mailNode/settingsActions.js eopBudgetNow, which the panel CLI
+// shares): unique external recipients of the last 24 hours against the limit.
 router.get('/eop/budget', requireAdmin, async (req, res) => {
-  const now = Date.now();
-  const [eop, cfg] = await Promise.all([getEopSettings(), getMailNodeConfig()]);
-  const log = cfg
-    ? await readPostfixLog(cfg, { since: now - TERRL_WINDOW_MS }).catch((err) => {
-      if (err instanceof MailNodeError) return null;
-      throw err;
-    })
-    : null;
-  const aliasDomains = cfg ? await aliasDomainsOf(cfg) : [];
-  res.json(await computeTerrlBudget({ eop: await withSeatLicenses(eop), log, aliasDomains, now }));
+  res.json(await eopBudgetNow());
 });
 
 export default router;

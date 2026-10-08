@@ -75,7 +75,12 @@ export function createFakeMailcow(initial = {}) {
       } : {};
     }
     if (path === 'get/status/vmail') return node.disk ?? { used_percent: '12%', used: '1.2G', total: '10G' };
-    if (path === 'get/domain/all') return Object.keys(node.domains).map((d) => ({ domain_name: d, active: '1', relayhost: String(node.domains[d].relayhost) }));
+    if (path === 'get/domain/all') {
+      return Object.keys(node.domains).map((d) => ({
+        domain_name: d, active: '1', relayhost: String(node.domains[d].relayhost),
+        ...(node.domains[d].created ? { created: node.domains[d].created } : {}),
+      }));
+    }
     if (path.startsWith('get/domain/')) {
       const d = decodeURIComponent(path.slice('get/domain/'.length));
       return node.domains[d] ? { domain_name: d, relayhost: String(node.domains[d].relayhost) } : {};
@@ -135,6 +140,11 @@ export function createFakeMailcow(initial = {}) {
         node.mailboxes.push({ username: email, rl: body.rl_value ? { value: body.rl_value, frame: body.rl_frame } : null });
         return [success('mailbox_added', email)];
       }
+      case 'add/domain':
+        if (node.domains[body.domain]) return [danger('domain_exists', body.domain)];
+        node.domains[body.domain] = { relayhost: 0, created: '2026-10-08 10:00:00' };
+        if (body.key_size) node.dkim[body.domain] = { pub: `KEY${body.key_size}${'A'.repeat(380)}`, selector: body.dkim_selector };
+        return [success('domain_added', body.domain)];
       case 'edit/domain':
         node.domains[body.items[0]].relayhost = Number(body.attr.relayhost);
         return [success('domain_modified', body.items[0])];
