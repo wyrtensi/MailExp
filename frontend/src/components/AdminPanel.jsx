@@ -7,6 +7,7 @@ import { newAiAction, AI_ACTION_LIMITS } from '../aiActions.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
 import { apiErrorKey, apiErrorText } from '../utils/apiErrors.js';
+import { saveConfirmedSwitch } from '../utils/confirmedSwitch.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { isValidFromValue } from '../utils/defaultSender.js';
 import {
@@ -7766,6 +7767,8 @@ function SecurityTab() {
   const [protectionError, setProtectionError] = useState('');
   // A mail server policy switch the server did not save: the switch goes back and this says so.
   const [mailPolicyError, setMailPolicyError] = useState('');
+  // The mail server policy values the server last confirmed: a refused switch goes back to these.
+  const mailPolicyConfirmed = useRef({ allow_private_hosts: false, allow_insecure_tls: false, allow_nonstandard_ports: false });
 
   // Admin-only: self-hosted mail server policy
   const [allowPrivateHosts, setAllowPrivateHosts] = useState(false);
@@ -7797,9 +7800,14 @@ function SecurityTab() {
         .then(d => {
           if (d.settings.auth_max_attempts) setMaxAttempts(parseInt(d.settings.auth_max_attempts));
           if (d.settings.auth_window_minutes) setWindowMins(parseInt(d.settings.auth_window_minutes));
-          setAllowPrivateHosts(d.settings.allow_private_hosts === 'true');
-          setAllowInsecureTls(d.settings.allow_insecure_tls === 'true');
-          setAllowNonstandardPorts(d.settings.allow_nonstandard_ports === 'true');
+          mailPolicyConfirmed.current = {
+            allow_private_hosts: d.settings.allow_private_hosts === 'true',
+            allow_insecure_tls: d.settings.allow_insecure_tls === 'true',
+            allow_nonstandard_ports: d.settings.allow_nonstandard_ports === 'true',
+          };
+          setAllowPrivateHosts(mailPolicyConfirmed.current.allow_private_hosts);
+          setAllowInsecureTls(mailPolicyConfirmed.current.allow_insecure_tls);
+          setAllowNonstandardPorts(mailPolicyConfirmed.current.allow_nonstandard_ports);
           if (d.settings.mfa_enforcement) setMfaEnforcement(d.settings.mfa_enforcement);
           if (d.settings.mfa_device_trust) setMfaDeviceTrust(d.settings.mfa_device_trust);
           if (d.settings.internal_auth_disabled === 'true') {
@@ -7854,9 +7862,11 @@ function SecurityTab() {
   const toggleMailPolicy = async (key, newVal, set) => {
     setMailPolicyError('');
     try {
-      await api.admin.updateSettings({ [key]: newVal });
+      await saveConfirmedSwitch({
+        key, value: newVal, confirmed: mailPolicyConfirmed.current, apply: set,
+        save: () => api.admin.updateSettings({ [key]: newVal }),
+      });
     } catch (err) {
-      set(!newVal);
       setMailPolicyError(t('admin.security.mailPolicySaveFailed', { message: err.message || t('common.actionFailed.body') }));
     }
   };
@@ -8053,7 +8063,7 @@ function SecurityTab() {
             <div key={key} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14 }}>
               <button
                 type="button"
-                onClick={() => { const newVal = !val; set(newVal); toggleMailPolicy(key, newVal, set); }}
+                onClick={() => toggleMailPolicy(key, !val, set)}
                 role="switch" aria-checked={!!val} aria-label={label}
                 style={{
                   width: 36, height: 20, borderRadius: 10, border: 'none', cursor: 'pointer', padding: 0,
