@@ -49,6 +49,8 @@ const NO_ANSWER_CODES = new Set(['dns_lookup_failed', 'dns_resolver_invalid']);
 let timer = null;
 let firstRun = null;
 let running = null;
+// Why the last run failed ({ code, message }), for the job that waited on it (nodeChecks.js).
+let lastError = null;
 
 // The values a domain must publish that are entered by hand until the tenant driver reads them
 // (stored in mail_node_domains.tenant).
@@ -195,7 +197,7 @@ async function runDomain(cfg, eop, row, resolver, failure) {
     const result = await checkOneDomain(cfg, eop, row, resolver);
     return { ...result, failure: failureOf(result) };
   } catch (err) {
-    console.error(`Mail node DNS check of a domain failed: ${err?.code || err?.name || 'error'}`);
+    console.error(`Mail node DNS check of ${row.domain} failed: ${err?.code || err?.name || 'error'}: ${String(err?.message ?? '').slice(0, 300)}`);
     return { failure: noAnswer('check_failed', err?.code || err?.name || 'error') };
   }
 }
@@ -250,7 +252,7 @@ async function runAll({ userId, by = null, trigger, deadlineMs = RUN_DEADLINE_MS
     node = failure ? { failure } : await checkNode(cfg, eop, resolver);
     if (!node.failure) node.failure = failureOf(node);
   } catch (err) {
-    console.error(`Mail node DNS check of the node failed: ${err?.code || err?.name || 'error'}`);
+    console.error(`Mail node DNS check of the node failed: ${err?.code || err?.name || 'error'}: ${String(err?.message ?? '').slice(0, 300)}`);
     node = { failure: noAnswer('check_failed', err?.code || err?.name || 'error') };
   }
   const nodeSaved = await saveNodeOutcome({ at, trigger, ...node });
@@ -291,9 +293,11 @@ async function runAll({ userId, by = null, trigger, deadlineMs = RUN_DEADLINE_MS
 // panel CLI's actor, whose check the backend runs (services/mailNode/nodeChecks.js).
 export function startCheckAll({ userId = null, by = null, trigger = 'manual', deadlineMs } = {}) {
   if (running) return { started: false, promise: running };
+  lastError = null;
   running = runAll({ userId, by, trigger, deadlineMs })
     .catch((err) => {
-      console.error('Mail node DNS check failed:', err?.code || err?.message || 'error');
+      lastError = runFailureOf(err);
+      console.error(`Mail node DNS check (${trigger}) failed: ${[lastError.code, lastError.message].filter(Boolean).join(': ')}`);
       return null;
     })
     .finally(() => { running = null; });
@@ -301,6 +305,16 @@ export function startCheckAll({ userId = null, by = null, trigger = 'manual', de
 }
 
 // The same, waited for: the run's answer, or null when it failed.
+// The reason the last run failed, or null when it did not.
+export function lastCheckAllError() {
+  return lastError;
+}
+
+function runFailureOf(err) {
+  const code = typeof err?.code === 'string' ? err.code : null;
+  return { code, message: String(err?.message || err?.name || 'error').slice(0, 300) };
+}
+
 export function checkAllNow(options = {}) {
   return startCheckAll(options).promise;
 }

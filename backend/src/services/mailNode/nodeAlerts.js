@@ -124,6 +124,8 @@ const FAILED_EVENTS = new Set(['deferred', 'bounced', 'expired', 'undeliverable'
 let timer = null;
 let firstRun = null;
 let running = null;
+// Why the last run failed ({ code, message }), for the job that waited on it (nodeChecks.js).
+let lastError = null;
 
 const sample = (line) => ({
   at: line.at, queueId: line.queueId, to: line.to, relay: line.relay, dsn: line.dsn, status: line.status,
@@ -643,13 +645,20 @@ function summaryOf(alert) {
 // failed (logged).
 export function checkAlertsNow(options = {}) {
   if (running) return running;
+  lastError = null;
   running = runAlertCheck(options)
     .catch((err) => {
-      console.error('Mail node alert check failed:', err?.code || err?.message || 'error');
+      lastError = { code: typeof err?.code === 'string' ? err.code : null, message: String(err?.message || err?.name || 'error').slice(0, 300) };
+      console.error(`Mail node alert check (${options.trigger ?? 'manual'}) failed: ${[lastError.code, lastError.message].filter(Boolean).join(': ')}`);
       return null;
     })
     .finally(() => { running = null; });
   return running;
+}
+
+// The reason the last run failed, or null when it did not.
+export function lastAlertCheckError() {
+  return lastError;
 }
 
 async function scheduledRun() {

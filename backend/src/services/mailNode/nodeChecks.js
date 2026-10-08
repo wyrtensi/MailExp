@@ -2,8 +2,8 @@ import { query } from '../db.js';
 import { JobError, enqueueJob, getJob, registerJobKind } from '../jobQueue.js';
 import { jobBy } from '../actor.js';
 import { getMailNodeConfig } from './mailcow.js';
-import { checkAllNow } from './dnsCheckJob.js';
-import { checkAlertsNow } from './nodeAlerts.js';
+import { checkAllNow, lastCheckAllError } from './dnsCheckJob.js';
+import { checkAlertsNow, lastAlertCheckError } from './nodeAlerts.js';
 import { traceOutagesNow } from './outageActions.js';
 import { jobAnswer } from '../tenant/tenantActions.js';
 
@@ -56,6 +56,12 @@ export async function getNodeCheckJob(id) {
 
 // Runs one queued check in this process. A run that failed or was refused ends the job failed, with
 // the code the panel's button answers.
+// "The DNS check failed: <code>: <message>" when the run left its reason, the plain text otherwise.
+function failedText(text, failure) {
+  const reason = failure ? [failure.code, failure.message].filter(Boolean).join(': ') : '';
+  return reason ? `${text}: ${reason}` : text;
+}
+
 export async function runNodeCheck(job) {
   const userId = job.created_by ?? null;
   const by = jobBy({ userId, via: job.payload?.via ?? null });
@@ -63,12 +69,12 @@ export async function runNodeCheck(job) {
   switch (job.payload?.check) {
     case 'dns':
       if (!(await checkAllNow({ userId, by: actor, trigger: 'manual' }))) {
-        throw new JobError('The DNS check failed', { outcome: 'fail', code: 'dns_check_failed' });
+        throw new JobError(failedText('The DNS check failed', lastCheckAllError()), { outcome: 'fail', code: 'dns_check_failed' });
       }
       return;
     case 'alerts':
       if (!(await checkAlertsNow({ userId, by: actor, trigger: 'manual' }))) {
-        throw new JobError('The alert check failed', { outcome: 'fail', code: 'alert_check_failed' });
+        throw new JobError(failedText('The alert check failed', lastAlertCheckError()), { outcome: 'fail', code: 'alert_check_failed' });
       }
       return;
     case 'outage_trace': {
