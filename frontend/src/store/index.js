@@ -55,6 +55,15 @@ function notifyPrefSaveFailed(body = i18n.t('common.prefSaveFailed.body')) {
   useStore.getState().addNotification({ type: 'error', title: i18n.t('common.prefSaveFailed.title'), body });
 }
 
+// The latest pin or unpin request per mailbox: a failure rolls back only while its request is
+// still the latest one, so a slow refusal cannot undo a pin or unpin made after it.
+const pinRequestSeq = new Map();
+function nextPinRequest(accountId) {
+  const seq = (pinRequestSeq.get(accountId) ?? 0) + 1;
+  pinRequestSeq.set(accountId, seq);
+  return () => pinRequestSeq.get(accountId) === seq;
+}
+
 function schedulePrefSave(prefs) {
   _prefQueue.schedule(prefs);
 }
@@ -1182,20 +1191,31 @@ export const useStore = create((set, get) => ({
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
     const wasPinned = current.includes(accountId);
+    const isLatest = nextPinRequest(accountId);
     setPinnedAccounts(pinAccountIds(current, accountId));
     api.savePreferences({ pinAccount: accountId }).catch(err => {
       console.error('Failed to save the pin:', err?.message || err);
-      // Undo only this pin (not one that was already there): other pins made meanwhile stay.
-      if (!wasPinned) get().setPinnedAccounts(unpinAccountIds(get().pinnedAccounts, accountId));
+      // Undo only this pin (not one that was already there, nor one a later request decided):
+      // other pins made meanwhile stay.
+      if (!wasPinned && isLatest()) get().setPinnedAccounts(unpinAccountIds(get().pinnedAccounts, accountId));
       notifyPrefSaveFailed(i18n.t('common.prefSaveFailed.pinBody'));
     });
   },
   unpinAccount: (accountId) => {
     const { pinnedAccounts, accounts, accountsReady, setPinnedAccounts } = get();
     const current = accountsReady && accounts.length ? prunePinnedIds(pinnedAccounts, accounts) : pinnedAccounts;
+    const index = current.indexOf(accountId);
+    const isLatest = nextPinRequest(accountId);
     setPinnedAccounts(unpinAccountIds(current, accountId));
     api.savePreferences({ unpinAccount: accountId }).catch(err => {
       console.error('Failed to save the unpin:', err?.message || err);
+      // Put the pin back at its place, unless it was not pinned or a later request decided.
+      const now = get().pinnedAccounts;
+      if (index >= 0 && isLatest() && !now.includes(accountId)) {
+        const restored = [...now];
+        restored.splice(Math.min(index, restored.length), 0, accountId);
+        get().setPinnedAccounts(restored);
+      }
       notifyPrefSaveFailed(i18n.t('common.prefSaveFailed.pinBody'));
     });
   },
