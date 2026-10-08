@@ -2,7 +2,6 @@
 // the detail of an unexpected error stays in the server log.
 
 // Right after the body parsers: a body they refuse is the client's mistake, not a 500.
-// eslint-disable-next-line no-unused-vars
 export function bodyErrorHandler(err, req, res, next) {
   if (err.type === 'entity.too.large') {
     return res.status(413).json({

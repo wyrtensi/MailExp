@@ -188,7 +188,7 @@ describe('running', () => {
     expect(await getJob(job.id)).toMatchObject({ status: 'failed', last_error: 'ETIMEDOUT' });
 
     await db.exec('DELETE FROM jobs');
-    registerJobKind('test', { handler: async () => { throw 'plain text'; }, maxAttempts: 1 }); // eslint-disable-line no-throw-literal
+    registerJobKind('test', { handler: async () => { throw 'plain text'; }, maxAttempts: 1 });
     ({ job } = await due());
     await runDueJobs({ wait: true });
     expect(await getJob(job.id)).toMatchObject({ status: 'failed', last_error: 'plain text' });
