@@ -23,7 +23,8 @@
 #
 # After an update it lists, from the files that changed between the two commits, the steps a
 # person takes outside the panel ("next:": the mail node's host scripts) and context ("info:":
-# migrations, the edge image, what install.sh did by itself).
+# whether migrations ran, by the count of applied ones before and after; the edge image; what
+# install.sh did by itself).
 #
 # Exit codes:
 #   0 updated (or already at that version);
@@ -111,10 +112,14 @@ check_index_warning() {
   if [ -n "$line" ]; then warn "$line"; fi
 }
 
-# print_update_notes <old commit> <new commit>: "next:" for the steps a person takes outside
-# update.sh, "info:" for context.
+# print_update_notes <old commit> <new commit> <applied migrations before> <old version> <dump>:
+# "next:" for the steps a person takes outside update.sh, "info:" for context. Whether migrations
+# ran comes from the count of applied ones before and now, not from the files that changed (an
+# edit of an applied migration runs nothing).
 print_update_notes() {
   local changed tenant=0 profiles line
+  line=$(applied_note "$3" "$(applied_migrations)" "$4" "$OPT_PREFIX" "$5")
+  log "info: ${line#info }"
   changed=$(git -C "$APP_DIR" diff --name-only "$1" "$2" 2>/dev/null) || return 0
   profiles=$(env_get "$ENV_FILE" COMPOSE_PROFILES) || profiles=''
   if has_profile "$profiles" tenant; then tenant=1; fi
@@ -196,7 +201,8 @@ main() {
   # rollback or restore holds it exclusively, and the updater does not start one then.
   take_lock "$STATE_DIR/update.lock" 600 "another update.sh, rollback.sh or restore.sh, or a backup's database dump," UPDATE_LOCK_FD
   panel_ready || die "the panel is not ready now; fix that before updating" 2
-  git -C "$APP_DIR" fetch --quiet origin
+  git -C "$APP_DIR" fetch --quiet origin ||
+    die "git fetch in $APP_DIR failed (git's error is above): check the network and access to $(redact_url "$CFG_REPO_URL"), then run update.sh again"
   git -C "$APP_DIR" rev-parse --verify --quiet "${target#sha-}^{commit}" >/dev/null ||
     die "commit ${target#sha-} is not in $(redact_url "$CFG_REPO_URL")" 2
   if git -C "$APP_DIR" show "${target#sha-}:scripts/deploy/lib/app.sh" 2>/dev/null | local_compose_ignored; then
@@ -217,7 +223,8 @@ main() {
     ensure_image "$edge_image"
   fi
   free_kb=$(df -Pk "$OPT_PREFIX" | awk 'NR == 2 {print $4}')
-  bytes=$(estimate_dump_bytes)
+  bytes=$(estimate_dump_bytes) ||
+    die "cannot estimate the size of the pre-update dump: $STATE_DIR/backup-last.json has no dump size and the database did not answer (is postgres running? docker compose -p $CFG_PROJECT ps)"
   problem=$(space_problem "$free_kb" "$bytes")
   [ -z "$problem" ] || die "$problem" 2
 
@@ -257,7 +264,7 @@ main() {
   check_index_warning "$since"
   send_ping "$url" success "updated to $target"
   log "updated to $target; the pre-update dump is $dump"
-  print_update_notes "$old_head" "${target#sha-}"
+  print_update_notes "$old_head" "${target#sha-}" "$before" "$old" "$dump"
 }
 
 # One line: install.sh checks out another commit, which rewrites this file while it runs.

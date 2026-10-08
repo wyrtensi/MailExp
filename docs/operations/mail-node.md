@@ -177,7 +177,10 @@ Caddy панели, а скрипты развёртывания не умеют
    `update.sh` mailcow умеет обновлять только ветку, а не тег, и служба узла потом доводит mailcow до
    следующей закреплённой версии им же (раздел 7а). Когда тег и есть голова `master` (обычно так),
    команда ничего не меняет. Клон на теге без ветки (detached HEAD) служба при первом обновлении
-   переводит на `master` сама, файлы при этом не меняются.
+   переводит на `master` сама, файлы при этом не меняются. Клону одного тега
+   (`git clone --branch <тег> --single-branch`, в `remote.origin.fetch` только этот тег) она
+   добавляет в `remote.origin.fetch` штатное `+refs/heads/*:refs/remotes/origin/*` (и пишет об этом
+   в журнал), иначе `master` не может следить за `origin/master`.
 3. Настройки хоста — скриптом
    [`scripts/deploy/mail-node/setup.sh`](../../scripts/deploy/mail-node/README.md) из копии репозитория
    MailExpert на узле, до первого `docker compose up` (тогда смена `mailcow.conf` не требует

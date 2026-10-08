@@ -30,6 +30,14 @@ setup() {
 #!/usr/bin/env bash
 case "$*" in
   "compose ps -a --format"*) printf '%b' "$MOCK_CONTAINERS" ;;
+  "compose up -d"*)
+    if [ -n "${MOCK_UP_FAIL:-}" ]; then
+      printf 'docker %s (in %s)\n' "$*" "$PWD" >>"$MOCK_DIR/calls"
+      printf '%b' "$MOCK_UP_FAIL" >&2
+      exit 1
+    fi
+    exec "$BATS_TEST_TMPDIR/bin/docker" "$@"
+    ;;
   *) exec "$BATS_TEST_TMPDIR/bin/docker" "$@" ;;
 esac
 EOF
@@ -106,6 +114,16 @@ clone_mailcow() {
   rm -rf "$tmp"
 }
 
+# clone_mailcow_single <tag>: a clone of the tag alone (git clone --branch <tag> --single-branch):
+# origin's fetch names that tag, no branch.
+clone_mailcow_single() {
+  local tmp=$BATS_TEST_TMPDIR/clone
+  rm -rf "$MC/.git"
+  git clone -q --single-branch --branch "$1" "$MAILEXPERT_MAILCOW_UPSTREAM" "$tmp"
+  cp -a "$tmp/." "$MC/"
+  rm -rf "$tmp"
+}
+
 # pin <tag>: the node's MailExpert checkout pins that mailcow release; its setup.sh is a mock that
 # puts ENABLE_IPV6=false back.
 pin() {
@@ -149,6 +167,43 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   [[ $output == *"local changes update.sh commits before its merge: local.cf"* ]]
   [[ $output == *"mailcow updated to 2026-09a"* ]]
   lacks 'not-a-real-password' <<<"$output"
+}
+
+@test "mailcow: a single-branch clone of a tag gets origin's branches in its fetch, then is updated" {
+  clone_mailcow_single 2026-09
+  [ "$(git -C "$MC" config --get-all remote.origin.fetch)" = '+refs/tags/2026-09:refs/tags/2026-09' ]
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ $output == *"origin fetched no branches (a clone of one tag); its fetch now maps them too: +refs/heads/*:refs/remotes/origin/*"* ]]
+  git -C "$MC" config --get-all remote.origin.fetch | grep -qxF '+refs/heads/*:refs/remotes/origin/*'
+  [ "$(git -C "$MC" rev-parse --abbrev-ref master@{upstream})" = origin/master ]
+  [ "$(base)" = "$(commit_of 2026-09a)" ]
+  [[ $output == *"mailcow updated to 2026-09a"* ]]
+  lacks 'could not make master track' <<<"$output"
+}
+
+@test "mailcow: a clone that fetches origin's branches already is left as it is" {
+  run_hook
+  [ "$status" -eq 0 ]
+  lacks 'origin fetched no branches' <<<"$output"
+  [ "$(git -C "$MC" config --get-all remote.origin.fetch)" = '+refs/heads/*:refs/remotes/origin/*' ]
+}
+
+@test "mailcow: a failed docker compose up -d names compose's error and the containers that do not run" {
+  export MOCK_UP_FAIL=' Container mailcowdockerized-unbound-mailcow-1  Waiting\n Container mailcowdockerized-unbound-mailcow-1  Error\ndependency failed to start: container mailcowdockerized-unbound-mailcow-1 is unhealthy\n'
+  export MOCK_CONTAINERS='postfix-mailcow\trunning\thealthy\nunbound-mailcow\trunning\tunhealthy\nnginx-mailcow\tcreated\t\n'
+  run_hook
+  [ "$status" -eq 1 ]
+  [[ $output == *"mailcow: docker compose up -d failed (exit 1): dependency failed to start: container mailcowdockerized-unbound-mailcow-1 is unhealthy; not running or unhealthy: unbound-mailcow: unhealthy, nginx-mailcow: created; next: docker compose logs"* ]]
+  # compose's own output stays in the log.
+  [[ $output == *"unbound-mailcow-1  Waiting"* ]]
+}
+
+@test "compose_error: the last error line, else the last line" {
+  run bash -c '. "$1"; compose_error <<<"$2"' _ "$NODE_SCRIPTS/node-update.sh" $' Container a  Started\n Error response from daemon: port is already allocated\n Container b  Started\n'
+  [ "$output" = "Error response from daemon: port is already allocated" ]
+  run bash -c '. "$1"; compose_error <<<"$2"' _ "$NODE_SCRIPTS/node-update.sh" $' Container a  Started\n Container b  Created\n'
+  [ "$output" = "Container b  Created" ]
 }
 
 @test "mailcow: at the pin already, nothing runs" {
@@ -222,7 +277,7 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   export MOCK_CONTAINERS='postfix-mailcow\trunning\thealthy\ndovecot-mailcow\trunning\tunhealthy\nsogo-mailcow\texited\t\n'
   run_hook
   [ "$status" -eq 1 ]
-  [[ $output == *"not healthy after 0s: dovecot-mailcow: unhealthy, sogo-mailcow: exited"* ]]
+  [[ $output == *"not healthy after 0s: dovecot-mailcow: unhealthy, sogo-mailcow: exited; next: docker compose ps"* ]]
 }
 
 @test "mailcow: a host name without a subdomain stops before update.sh, without printing it" {

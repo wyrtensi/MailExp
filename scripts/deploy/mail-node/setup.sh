@@ -289,7 +289,8 @@ setup_node_backups() {
 end_standby() {
   rm -f "$(node_standby_file)"
   mailcow_restart_policy "$MAILCOW_DIR" always "${STANDBY_SERVICES[@]}" || die "docker update --restart=always failed for ${STANDBY_SERVICES[*]}"
-  (cd "$MAILCOW_DIR" && docker compose up -d >/dev/null) || die "docker compose up -d failed in $MAILCOW_DIR"
+  (cd "$MAILCOW_DIR" && docker compose up -d >/dev/null) ||
+    die "docker compose up -d failed in $MAILCOW_DIR (its error is above); the node is no longer standby; fix the container it names (docker compose ps --all there), run docker compose up -d there, then setup.sh again"
   log "standby ended: ${STANDBY_SERVICES[*]} restart again, mailcow is up, the mail ports open with the firewall below"
 }
 

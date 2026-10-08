@@ -376,7 +376,11 @@ sudo /opt/mailexpert/app/scripts/deploy/update.sh latest          # или sha-<
 миграции: если нет, путь назад — `install.sh --version <old-sha>` без восстановления дампа. С
 профилем `tenant` образ `mailexpert-tenant-worker` той же версии скачивается до бэкапа. После
 обновления `update.sh` печатает строки `next:` (шаги вне панели: скрипты почтового узла, образ
-Caddy) и `info:` (справка: новые миграции, что `install.sh` сделал сам). Запускать его лучше
+Caddy) и `info:` (справка: что `install.sh` сделал сам и `info: migrations:` — были ли применены
+миграции, по числу записей в `schema_migrations` до и после: если нет, путь назад —
+`install.sh --version <old-sha>` без дампа). Изменённый файл в `backend/migrations/` сам по себе
+новой миграцией не считается: `status.sh --target` пишет `info: migrations:` только когда
+`pending_migrations` не пуст. Запускать его лучше
 отдельно от SSH-сессии, через `systemd-run` — [README.md, раздел 9](README.md).
 
 ### Откат обновления

@@ -160,6 +160,15 @@ run_step() {
   return "$rc"
 }
 
+# last_output <log>: the last line a command wrote to the log (its error, as a rule): no step
+# header, "[mailexpert] " dropped, cut to 160 characters; "no output" when there is none.
+last_output() {
+  local line
+  line=$(grep -v -e '^== ' -e '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1) || line=''
+  line=${line#\[mailexpert\] }
+  printf '%s' "${line:-no output}" | cut -c1-160
+}
+
 # shellcheck disable=SC2317,SC2329 # invoked through run_step
 # run_setup [<seconds>]: setup.sh of the checkout as it is now, without options, bounded
 # (SETUP_TIMEOUT by default).
@@ -172,14 +181,45 @@ checkout() {
   git -C "$SRC" checkout --quiet --detach "$1"
 }
 
+# bad_containers: reads mailcow_containers lines on stdin and prints, on one line, the containers
+# that do not run or are unhealthy or still starting ("<service>: <state>, ..."), nothing when none.
+bad_containers() {
+  awk -F'\t' 'NF && ($2 != "running" || $3 == "unhealthy" || $3 == "starting") {
+    printf "%s%s: %s", (n++ ? ", " : ""), $1, ($2 != "running" ? $2 : $3) }'
+}
+
+LAST_ERROR=''
+# with_error <command...>: the command (a function too) with its error output still in the log;
+# the last line of that output is kept in LAST_ERROR (cut to 200 characters), for the warning that
+# names the cause.
+with_error() {
+  local file rc=0
+  file=$(mktemp)
+  "$@" 2>"$file" || rc=$?
+  cat "$file" >&2
+  LAST_ERROR=$(sed '/^[[:space:]]*$/d' "$file" | tail -n 1 | cut -c1-200)
+  rm -f "$file"
+  return "$rc"
+}
+
+# compose_error: reads the output of docker compose on stdin and prints its last line that names
+# an error (error, failed, unhealthy), or its last line when none does; cut to 200 characters.
+compose_error() {
+  local out line
+  out=$(sed '/^[[:space:]]*$/d')
+  line=$(grep -iE 'error|fail|unhealthy' <<<"$out" | tail -n 1) || line=''
+  if [ -z "$line" ]; then line=$(tail -n 1 <<<"$out"); fi
+  line=${line#"${line%%[![:space:]]*}"}
+  printf '%s\n' "${line:0:200}"
+}
+
 # mailcow_wait_healthy <seconds>: every container of mailcow runs and none is unhealthy or still
 # starting, within the seconds. Prints what is not, and fails, past them.
 mailcow_wait_healthy() {
   local limit=$1 waited=0 lines bad
   while :; do
     lines=$(mailcow_containers) || lines=''
-    bad=$(printf '%s\n' "$lines" | awk -F'\t' 'NF && ($2 != "running" || $3 == "unhealthy" || $3 == "starting") {
-      printf "%s%s: %s", (n++ ? ", " : ""), $1, ($2 != "running" ? $2 : $3) }')
+    bad=$(bad_containers <<<"$lines")
     if [ -n "$lines" ] && [ -z "$bad" ]; then return 0; fi
     if [ "$waited" -ge "$limit" ]; then
       echo "${bad:-no containers}"
@@ -250,7 +290,7 @@ same_repository() {
 # mailcow_past_pin); mailcow may be stopped then, and the caller starts it again.
 # Run by hand: SRC=<checkout> and node-update.sh sourced (docs/operations/mail-node.md, 7a).
 mailcow_update_if_pinned() {
-  local src dir tag pin base relation branch hostname origin started stopped problem changed limit
+  local src dir tag pin base relation branch hostname origin started stopped problem changed limit output rc bad
   MAILCOW_DEADLINE=$(($(date +%s) + MAILCOW_TIMEOUT - MAILCOW_RESERVE))
   SRC=${SRC:-$(scripts_src)}
   src=$SRC
@@ -277,13 +317,23 @@ mailcow_update_if_pinned() {
   if ! same_repository "$origin" "$MAILCOW_UPSTREAM"; then
     log "mailcow: origin set to the official repository $MAILCOW_UPSTREAM (update.sh --force does the same)"
     if [ -n "$origin" ]; then
-      git -C "$dir" remote set-url origin "$MAILCOW_UPSTREAM"
+      with_error git -C "$dir" remote set-url origin "$MAILCOW_UPSTREAM"
     else
-      git -C "$dir" remote add origin "$MAILCOW_UPSTREAM"
-    fi || { warn "mailcow: could not set origin in $dir"; return 1; }
+      with_error git -C "$dir" remote add origin "$MAILCOW_UPSTREAM"
+    fi || { warn "mailcow: could not set origin in $dir${LAST_ERROR:+: $LAST_ERROR}"; return 1; }
   fi
-  git -C "$dir" fetch --quiet origin +refs/heads/master:refs/remotes/origin/master || {
-    warn "mailcow: git fetch of master from $MAILCOW_UPSTREAM failed"
+  # A clone of one tag (git clone --branch <tag> --single-branch) fetches only that tag: origin's
+  # branches never reach refs/remotes/origin/, and master cannot track origin/master.
+  if ! git -C "$dir" config --get-all remote.origin.fetch 2>/dev/null |
+    grep -qE '^\+?refs/heads/(\*|master):refs/remotes/origin/(\*|master)$'; then
+    log "mailcow: origin fetched no branches (a clone of one tag); its fetch now maps them too: +refs/heads/*:refs/remotes/origin/*"
+    with_error git -C "$dir" config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' || {
+      warn "mailcow: could not add the branches to origin's fetch in $dir${LAST_ERROR:+: $LAST_ERROR}"
+      return 1
+    }
+  fi
+  with_error git -C "$dir" fetch --quiet origin +refs/heads/master:refs/remotes/origin/master || {
+    warn "mailcow: git fetch of master from $MAILCOW_UPSTREAM failed${LAST_ERROR:+: $LAST_ERROR}"
     return 1
   }
   base=$(mailcow_base "$dir") || base=''
@@ -331,15 +381,18 @@ mailcow_update_if_pinned() {
         return 1
       fi
       log "mailcow: $dir is detached at ${base:0:12}; the branch master now points there (no file changes)"
-      git -C "$dir" checkout --quiet -B master || { warn "mailcow: git checkout -B master failed"; return 1; }
+      with_error git -C "$dir" checkout --quiet -B master || {
+        warn "mailcow: git checkout -B master failed${LAST_ERROR:+: $LAST_ERROR}"
+        return 1
+      }
       ;;
     *)
       warn "mailcow: $dir is on the branch $branch, not master: update mailcow by hand"
       return 1
       ;;
   esac
-  git -C "$dir" branch --quiet --set-upstream-to=origin/master master || {
-    warn "mailcow: could not make master track origin/master"
+  with_error git -C "$dir" branch --quiet --set-upstream-to=origin/master master || {
+    warn "mailcow: could not make master track origin/master${LAST_ERROR:+: $LAST_ERROR}"
     return 1
   }
 
@@ -350,19 +403,35 @@ mailcow_update_if_pinned() {
   started=$(date -u +%H:%M:%S)
   log "mailcow: update.sh to $tag; mail is not accepted from its stop until the start below (EOP queues it and retries)"
   mailcow_update_sh "$dir" || {
-    warn "mailcow: update.sh failed (exit $?)"
+    warn "mailcow: update.sh failed (exit $?); its output is above in this log"
     return 1
   }
   log "mailcow: setup.sh again (mailcow.conf: our settings back)"
-  run_setup "$(mailcow_budget "$SETUP_TIMEOUT")" || { warn "mailcow: setup.sh after update.sh failed"; return 1; }
-  (cd "$dir" && run_group "$(mailcow_budget "$CHECK_TIMEOUT")" docker compose up -d --remove-orphans) || {
-    warn "mailcow: docker compose up -d failed"
+  run_setup "$(mailcow_budget "$SETUP_TIMEOUT")" || {
+    warn "mailcow: setup.sh after update.sh failed (exit $?); its output is above in this log"
     return 1
   }
+  # The output of `up` goes to the log as it is; on a failure the warning names its last error
+  # line and the containers that do not run or are unhealthy.
+  output=$(mktemp)
+  rc=0
+  (cd "$dir" && run_group "$(mailcow_budget "$CHECK_TIMEOUT")" docker compose up -d --remove-orphans) >"$output" 2>&1 || rc=$?
+  cat "$output"
+  if [ "$rc" != 0 ]; then
+    problem=$(compose_error <"$output")
+    rm -f "$output"
+    bad=$(mailcow_containers | bad_containers) || bad=''
+    warn "mailcow: docker compose up -d failed (exit $rc): ${problem:-no output}${bad:+; not running or unhealthy: $bad}; next: docker compose logs --tail 50 <service> in $dir"
+    return 1
+  fi
+  rm -f "$output"
   stopped=$(date -u +%H:%M:%S)
   log "mailcow: stopped and started again within $started-$stopped UTC (update.sh stops it after fetching the images)"
   limit=$(mailcow_budget "$MAILCOW_HEALTH_WAIT")
-  problem=$(mailcow_wait_healthy "$limit") || { warn "mailcow: containers not healthy after ${limit}s: $problem"; return 1; }
+  problem=$(mailcow_wait_healthy "$limit") || {
+    warn "mailcow: containers not healthy after ${limit}s: $problem; next: docker compose ps and docker compose logs --tail 50 <service> in $dir"
+    return 1
+  }
   base=$(mailcow_base "$dir") || base=''
   relation=$(mailcow_relation "$dir" "$base" "$pin")
   if [ "$relation" = newer ]; then
@@ -458,7 +527,7 @@ update_main() {
   [ -z "$(git -C "$SRC" status --porcelain --untracked-files=no 2>/dev/null || echo error)" ] ||
     finish failed "$SRC has local changes (git status): commit, stash or drop them first; the node is unchanged" local_changes
   run_step --timeout "$FETCH_TIMEOUT" "git fetch origin" git -C "$SRC" fetch --quiet origin ||
-    finish failed "git fetch in $SRC failed" fetch_failed
+    finish failed "git fetch in $SRC failed: $(last_output "$UPDATE_LOG"); the node is unchanged" fetch_failed
   git -C "$SRC" merge-base --is-ancestor "$sha" origin/main >>"$UPDATE_LOG" 2>&1 ||
     finish failed "${sha:0:12} is not in the history of origin/main: refused" not_in_main
   PREVIOUS=$(git -C "$SRC" rev-parse HEAD 2>/dev/null) || PREVIOUS=''
@@ -476,7 +545,7 @@ update_main() {
     finish failed "the pre-update backup failed: $(last_step "$UPDATE_LOG"); the node is unchanged" backup_failed
 
   checkout "$sha" >>"$UPDATE_LOG" 2>&1 ||
-    finish failed "git checkout ${sha:0:12} failed; the node is unchanged" checkout_failed
+    finish failed "git checkout ${sha:0:12} failed: $(last_output "$UPDATE_LOG"); the node is unchanged" checkout_failed
   if ! run_step "setup.sh at ${sha:0:12}" run_setup; then
     problem=$(last_step "$UPDATE_LOG")
     if checkout "$PREVIOUS" >>"$UPDATE_LOG" 2>&1 && run_step "rollback: setup.sh at ${PREVIOUS:0:12}" run_setup; then
