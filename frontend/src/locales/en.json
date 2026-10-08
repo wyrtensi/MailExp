@@ -27,7 +27,16 @@
     "mailboxBusy": "The mailbox is busy, try again in a few seconds",
     "mailboxAuthRejected": "The mail server does not accept the sign-in to this mailbox. Ask an administrator to check the mailbox.",
     "movePending": "The letter is still being moved, try again in a few seconds",
-    "close": "Close"
+    "close": "Close",
+    "actionFailed": {
+      "body": "The request to the server failed. Check the connection and try again.",
+      "star": "Star not changed",
+      "read": "Read status not changed",
+      "category": "Category not changed",
+      "sync": "Sync did not start",
+      "folders": "Could not load folders",
+      "openDraft": "Could not open the draft for editing"
+    }
   },
   "login": {
     "google": {
@@ -543,7 +552,8 @@
           "other": "Another status"
         }
       }
-    }
+    },
+    "downloadAttachmentFailed": "Could not download the attachment"
   },
   "messageList": {
     "search": "Search…",
@@ -820,7 +830,8 @@
       "copyRaw": "Copy raw",
       "copied": "Copied",
       "loading": "Loading headers…",
-      "noHeaders": "No headers available"
+      "noHeaders": "No headers available",
+      "loadFailed": "Could not load the headers: {{message}}"
     },
     "folders": {
       "back": "Move to folder",
