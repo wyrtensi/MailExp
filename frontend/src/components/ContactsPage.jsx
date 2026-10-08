@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api } from '../utils/api.js';
+import { apiErrorText } from '../utils/apiErrors.js';
 import { useStore } from '../store/index.js';
 import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
@@ -203,7 +204,7 @@ export default function ContactsPage() {
       setError(null);
       if (isMobile) setMobilePanel('detail');
     } catch (err) {
-      if (!stale()) setError(err.message);
+      if (!stale()) setError(apiErrorText(err, t));
     }
   };
 
@@ -286,7 +287,8 @@ export default function ContactsPage() {
       setEditing(false);
       setSelected(updated);
     } catch (err) {
-      setError(err.message);
+      // contact_exists, contact_name_required, invalid_contact_url...: said in the UI language.
+      setError(apiErrorText(err, t));
     } finally {
       setSaving(false);
     }
@@ -302,7 +304,7 @@ export default function ContactsPage() {
       if (isMobile) setMobilePanel('list');
       await load(search);
     } catch (err) {
-      setError(err.message);
+      setError(apiErrorText(err, t));
     } finally {
       setSaving(false);
     }

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { apiErrorText } from '../utils/apiErrors.js';
 import { messageDeepLink } from '../utils/deepLink.js';
 
 export default function TodoistTaskModal({ message, onClose }) {
@@ -16,7 +17,8 @@ export default function TodoistTaskModal({ message, onClose }) {
   const [dueDate, setDueDate] = useState('');
   const [projects, setProjects] = useState([]);
   const [labels, setLabels] = useState([]);
-  const [loadError, setLoadError] = useState('');
+  // The failed load (an Error with the server's code), explained at render.
+  const [loadError, setLoadError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
@@ -31,7 +33,7 @@ export default function TodoistTaskModal({ message, onClose }) {
         setProjects(projs);
         setLabels(lbls);
       } catch (err) {
-        setLoadError(err.message);
+        setLoadError(err);
       } finally {
         setLoading(false);
       }
@@ -71,7 +73,7 @@ export default function TodoistTaskModal({ message, onClose }) {
       });
       onClose();
     } catch (err) {
-      setError(err.message);
+      setError(apiErrorText(err, t));
       setCreating(false);
     }
   }
@@ -164,7 +166,7 @@ export default function TodoistTaskModal({ message, onClose }) {
             </div>
           ) : loadError ? (
             <div style={{ fontSize: 13, color: 'var(--red, #f87171)', padding: '8px 10px', borderRadius: 6, background: 'rgba(248,113,113,0.08)' }}>
-              {loadError}
+              {apiErrorText(loadError, t)}
             </div>
           ) : (
             <>

@@ -6,6 +6,7 @@ import { PluginSlot } from '../plugins/PluginSlot.jsx';
 import { newAiAction, AI_ACTION_LIMITS } from '../aiActions.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
+import { apiErrorKey, apiErrorText } from '../utils/apiErrors.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { isValidFromValue } from '../utils/defaultSender.js';
 import {
@@ -115,6 +116,9 @@ function isMicrosoftImapHost(host) {
   return h.includes('.outlook.com') || h.includes('office365.com') || h.includes('.hotmail.com') || h.includes('.live.com');
 }
 
+// A rule screen's own meaning of a shared code (not_found is also a panel update refusal).
+const RULE_ERROR_KEYS = { not_found: 'admin.rules.errorNotFound' };
+
 function AccountForm({ initial, onSave, onCancel }) {
   const { t } = useTranslation();
   const { categorizationEnabled, user } = useStore();
@@ -169,7 +173,8 @@ function AccountForm({ initial, onSave, onCancel }) {
     try {
       await onSave(form);
     } catch (err) {
-      setError(err.message);
+      // connection_admin_only, a disabled mailbox, a bad id: explained; anything else keeps its text.
+      setError(apiErrorText(err, t));
       setSaving(false);
     }
   };
@@ -2863,7 +2868,7 @@ function IntegrationsTab() {
       setTodoistConnected(true);
       setTdToken('');
     } catch (err) {
-      setTdError(err.message);
+      setTdError(apiErrorText(err, t));
     } finally {
       setTdConnecting(false);
     }
@@ -2877,7 +2882,7 @@ function IntegrationsTab() {
       setTdConnected(false);
       setTodoistConnected(false);
     } catch (err) {
-      setTdError(err.message);
+      setTdError(apiErrorText(err, t));
     } finally {
       setTdDisconnecting(false);
     }
@@ -5222,7 +5227,7 @@ function UsersAndInvitesPanel() {
         <div role="alert" style={{
           padding: '10px 14px', borderRadius: 8, marginBottom: 12, fontSize: 13,
           background: 'rgba(248,113,113,0.1)', border: '1px solid rgba(248,113,113,0.3)', color: 'var(--red)',
-        }}>{usersLoadError ? t('admin.users.loadFailed', { message: adminUserErrorText(usersLoadError, t) }) : actionError}</div>
+        }}>{usersLoadError ? t('admin.users.loadFailed', { message: usersLoadError.message || t('common.actionFailed.body') }) : actionError}</div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 28 }}>
@@ -6117,7 +6122,7 @@ function RulesTab() {
       // via the mailexpert:rules-run-complete window event below.
       await api.runRules();
     } catch (err) {
-      setRunError(err.message || t('admin.rules.runError'));
+      setRunError(apiErrorText(err, t, { keys: RULE_ERROR_KEYS, fallback: t('admin.rules.runError') }));
       setRunningRules(false);
     }
   }
@@ -6226,7 +6231,7 @@ function RulesTab() {
       setRules(prev => prev.map(r => r.id === rule.id ? saved : r));
       setRuleActionError('');
     } catch (err) {
-      setRuleActionError(t('admin.rules.errorToggle', { message: err.message || t('common.actionFailed.body') }));
+      setRuleActionError(t('admin.rules.errorToggle', { message: apiErrorText(err, t, { keys: RULE_ERROR_KEYS }) }));
     }
   }
 
@@ -6236,7 +6241,7 @@ function RulesTab() {
       setRules(prev => prev.filter(r => r.id !== id));
       setRuleActionError('');
     } catch (err) {
-      setRuleActionError(t('admin.rules.errorDelete', { message: err.message || t('common.actionFailed.body') }));
+      setRuleActionError(t('admin.rules.errorDelete', { message: apiErrorText(err, t, { keys: RULE_ERROR_KEYS }) }));
     }
     setConfirmDelete(null);
   }
@@ -6284,7 +6289,9 @@ function RulesTab() {
     } catch (err) {
       // The server says what is wrong with the rule (a folder that does not exist, an empty
       // condition): keep that rather than a bare "failed".
-      setFormError(err?.message ? t('admin.rules.errorSaveReason', { message: err.message }) : t('admin.rules.errorSave'));
+      const key = apiErrorKey(err?.code, RULE_ERROR_KEYS);
+      if (key) setFormError(t(key));
+      else setFormError(err?.message ? t('admin.rules.errorSaveReason', { message: err.message }) : t('admin.rules.errorSave'));
     } finally {
       setFormSaving(false);
     }
@@ -6300,7 +6307,7 @@ function RulesTab() {
 
     api.reorderRules(reordered.map(r => r.id)).catch((err) => {
       setRules(copy);
-      setRuleActionError(t('admin.rules.errorReorder', { message: err.message || t('common.actionFailed.body') }));
+      setRuleActionError(t('admin.rules.errorReorder', { message: apiErrorText(err, t, { keys: RULE_ERROR_KEYS }) }));
     });
   }
 
@@ -6679,7 +6686,7 @@ function RulesTab() {
       )}
       {(ruleActionError || rulesLoadError) && (
         <div role="alert" style={{ fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>
-          {ruleActionError || t('admin.rules.errorLoad', { message: rulesLoadError.message || t('common.actionFailed.body') })}
+          {ruleActionError || t('admin.rules.errorLoad', { message: apiErrorText(rulesLoadError, t) })}
         </div>
       )}
 
@@ -6824,8 +6831,9 @@ function BlockListTab() {
       const entry = await api.addToBlockList(selectedAccountId, email);
       setEntries(prev => [entry, ...prev]);
       setNewEmail('');
-    } catch {
-      setError(t('admin.blockList.errorAdd'));
+    } catch (err) {
+      // A mailbox that is gone or not valid is named; anything else stays the general failure.
+      setError(apiErrorKey(err?.code) ? apiErrorText(err, t) : t('admin.blockList.errorAdd'));
     } finally {
       setAdding(false);
     }
@@ -6836,8 +6844,8 @@ function BlockListTab() {
     try {
       await api.removeFromBlockList(id);
       setEntries(prev => prev.filter(e => e.id !== id));
-    } catch {
-      setError(t('admin.blockList.errorRemove'));
+    } catch (err) {
+      setError(apiErrorKey(err?.code) ? apiErrorText(err, t) : t('admin.blockList.errorRemove'));
     }
   }
 

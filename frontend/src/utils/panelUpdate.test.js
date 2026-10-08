@@ -118,6 +118,18 @@ describe('rolled back latest', () => {
     assert.equal(requestErrorKey(new Error('rolled_back')), 'admin.panelUpdate.errorRolledBack');
     assert.equal(requestErrorKey(new Error('spool_not_writable')), 'admin.panelUpdate.errorSpoolNotWritable');
   });
+
+  it('reads the code first and knows every refusal of the update routes', () => {
+    const coded = (code) => Object.assign(new Error('Request failed'), { code });
+    assert.equal(requestErrorKey(coded('invalid_target')), 'admin.panelUpdate.errorInvalidTarget');
+    assert.equal(requestErrorKey(coded('confirm_mismatch')), 'admin.panelUpdate.errorConfirmMismatch');
+    assert.equal(requestErrorKey(coded('not_found')), 'admin.panelUpdate.errorNotFound');
+    assert.equal(requestErrorKey(coded('busy')), 'admin.panelUpdate.errorBusy');
+    // An older backend put the token in `error` only.
+    assert.equal(requestErrorKey(new Error('invalid_target')), 'admin.panelUpdate.errorInvalidTarget');
+    assert.equal(requestErrorKey(coded('toString')), null);
+    assert.equal(requestErrorKey(new Error('toString')), null);
+  });
 });
 
 describe('migrations and rollback', () => {

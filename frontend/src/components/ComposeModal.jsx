@@ -7,6 +7,7 @@ import DOMPurify from 'dompurify';
 import { useStore } from '../store/index.js';
 import { isForeignNodeAlias } from '../utils/mailNode.js';
 import { api } from '../utils/api.js';
+import { apiErrorText } from '../utils/apiErrors.js';
 import { isMailboxBusy, mailboxBusyText } from '../utils/mailboxBusy.js';
 import { useMobile } from '../hooks/useMobile.js';
 import { useUiScale, descale } from '../hooks/useUiScale.js';
@@ -884,7 +885,12 @@ export default function ComposeModal() {
     closeCompose();
     Promise.resolve(pendingDraftSave).then(stored => {
       const draft = stored || knownDraft;
-      if (draft) api.deleteDraft(draft.accountId, draft.uid, draft.folder).catch(() => {});
+      // Discarded by the writer: a copy left in Drafts is worth a word.
+      if (draft) {
+        api.deleteDraft(draft.accountId, draft.uid, draft.folder).catch((err) => {
+          addNotification({ type: 'error', title: t('compose.draftDeleteFailed'), body: apiErrorText(err, t) });
+        });
+      }
     });
   };
 
@@ -1127,7 +1133,7 @@ export default function ComposeModal() {
       // autosave stays quiet and retries on its next interval.
       if (!silent && !closedRef.current) {
         if (isMailboxBusy(err)) addNotification({ title: mailboxBusyText(err, t) });
-        else addNotification({ type: 'error', title: t('compose.draftSaveFailed'), body: err.message || t('compose.draftSaveFailedBody') });
+        else addNotification({ type: 'error', title: t('compose.draftSaveFailed'), body: apiErrorText(err, t, { fallback: t('compose.draftSaveFailedBody') }) });
       }
     } finally {
       reportStored(null); // no-op once the answer was reported

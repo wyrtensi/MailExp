@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useLayoutEffect, useState, useRef
 import { useTranslation } from 'react-i18next';
 import { useStore, selectAccountFolders } from '../store/index.js';
 import { api } from '../utils/api.js';
+import { apiErrorText } from '../utils/apiErrors.js';
 import { deleteView, deleteViewFolder } from '../utils/deleteIntent.js';
 import { shortcutBus } from '../utils/shortcutBus.js';
 import { getEffectiveShortcuts, parseModKey, modCompactLabel } from '../utils/defaultShortcuts.js';
@@ -596,8 +597,9 @@ export default function MessagePane({ windowMessageId = null, onWindowClose = nu
       })
       .catch(err => {
         if (cancelled) return;
-        // The code, not translated text: translated at render, so the effect need not depend on t.
-        setBodyError(isMailboxBusy(err) ? err.code : err.message);
+        // The code and text, not translated text: translated at render, so the effect need not
+        // depend on t.
+        setBodyError({ code: err.code, message: err.message });
       })
       .finally(() => {
         if (!cancelled) setLoadingBody(false);
@@ -3015,7 +3017,7 @@ ${bodyContent}
                 {t('message.loadingError')}
               </div>
               <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                {mailboxBusyOr({ code: bodyError }, t, bodyError)}
+                {apiErrorText(bodyError, t)}
               </div>
             </div>
             <button

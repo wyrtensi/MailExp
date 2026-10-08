@@ -47,6 +47,16 @@
       "title": "Setting not saved",
       "body": "The change works on this device for now, but the server did not save it, so it may be undone after a reload. Check the connection and change it again.",
       "pinBody": "The server did not save the pin, so the mailbox order may change after a reload. Try again."
+    },
+    "apiError": {
+      "invalidId": "The link or item is not valid. Reload the page and try again.",
+      "invalidJson": "The request was damaged on the way. Reload the page and try again.",
+      "requestTooLarge": "Too large to send: attachments may be 25 MiB in total at most.",
+      "internalError": "Something went wrong on the server. Try again; if it repeats, tell the administrator.",
+      "invalidAccount": "The mailbox is not valid. Reload the page and pick it again.",
+      "accountNotFound": "This mailbox no longer exists. Reload the page to see the current list.",
+      "accountRequired": "Choose a mailbox first.",
+      "draftDeleteFailed": "The draft could not be deleted on the mail server. Try again."
     }
   },
   "login": {
@@ -242,7 +252,8 @@
     "disabledOption": "disabled",
     "draftSaveFailed": "Draft not saved",
     "draftSaveFailedBody": "Check the connection and try saving again.",
-    "attachReadFailed": "Could not read the file, it was not attached"
+    "attachReadFailed": "Could not read the file, it was not attached",
+    "draftDeleteFailed": "Discarded draft is still in Drafts"
   },
   "message": {
     "find": {
@@ -577,7 +588,8 @@
         }
       }
     },
-    "downloadAttachmentFailed": "Could not download the attachment"
+    "downloadAttachmentFailed": "Could not download the attachment",
+    "bodyFetchFailed": "Could not load the message text from the mail server. Try again."
   },
   "messageList": {
     "search": "Search…",
@@ -1153,7 +1165,13 @@
       "errorToggle": "Could not switch the rule: {{message}}",
       "errorDelete": "Could not delete the rule: {{message}}",
       "errorReorder": "Rule order not saved: {{message}}",
-      "errorLoad": "Could not load rules: {{message}}"
+      "errorLoad": "Could not load rules: {{message}}",
+      "errorInvalid": "The rule could not be read. Reload the page and set it up again.",
+      "errorInvalidCondition": "One of the conditions is incomplete: fill in its value (and the header name for a header condition).",
+      "errorInvalidAction": "One of the actions is incomplete: check its folder, address or category.",
+      "errorMoveFolderNotFound": "The destination folder does not exist in this mailbox. Choose another folder.",
+      "errorAlreadyRunning": "Rules are already running. Wait for that run to finish.",
+      "errorNotFound": "This rule no longer exists. Reload the page to see the current rules."
     },
     "blockList": {
       "description": "Emails from blocked senders are automatically moved to trash.",
@@ -1364,7 +1382,9 @@
         "errorAlready": "This mailbox is deactivated already.",
         "errorNot": "This mailbox is not deactivated.",
         "errorDeletionPending": "This mailbox is pending deletion: cancel the deletion first."
-      }
+      },
+      "errorConnectionAdminOnly": "Only an administrator can change the server settings of a mailbox. Ask an administrator.",
+      "errorOAuthMailboxNotFound": "This mailbox does not sign in with Google or Microsoft, so there is nothing to reset."
     },
     "folderMappings": {
       "title": "Folder mappings",
@@ -2247,7 +2267,10 @@
       "nodeHint": "The node part runs through the node agent (Settings, Mail node, Node agent): a pre-update backup, setup.sh at the panel commit, a rollback when it fails, then mailcow to the version the release confirms. \"Update node now\" there tries again.",
       "nodeNewer": "Node scripts newer than the panel",
       "nodeMailcow": "mailcow: {{node}} on the node, {{pinned}} confirmed by this release",
-      "nodeMailcowUnknown": "unknown"
+      "nodeMailcowUnknown": "unknown",
+      "errorInvalidTarget": "The version to install is not valid. Check for updates again.",
+      "errorConfirmMismatch": "The confirmation did not match the version. Check for updates again and confirm.",
+      "errorNotFound": "The server no longer knows this update request. Reload the page to see the panel's state."
     },
     "audit": {
       "description": "What users did with mailboxes, messages and users, newest first.",
@@ -3540,7 +3563,12 @@
       "show": "Show letters",
       "hide": "Hide letters",
       "showMore": "Show more"
-    }
+    },
+    "errorNotFound": "This contact no longer exists. Reload the list.",
+    "errorExists": "A contact with this email already exists.",
+    "errorNameRequired": "Enter a name or an email address.",
+    "errorInvalidUrl": "One of the links is not a valid web address.",
+    "errorInvalidField": "One of the fields is too long or not valid. Check the contact and save again."
   },
   "todoist": {
     "title": "Create Todoist Task",
@@ -3560,7 +3588,13 @@
     "create": "Create task",
     "creating": "Creating...",
     "taskCreated": "Task created in Todoist",
-    "openTask": "Open in Todoist"
+    "openTask": "Open in Todoist",
+    "errorNotConnected": "Todoist is not connected. Connect it in Settings, Integrations.",
+    "errorTokenRequired": "Enter the Todoist API token.",
+    "errorTokenInvalid": "Todoist did not accept the API token. Copy a new one from Todoist and connect again.",
+    "errorUnavailable": "Todoist is not answering right now. Try again later.",
+    "errorTitleRequired": "Enter a task title.",
+    "errorFailed": "The Todoist request failed. Try again."
   },
   "rightSidebar": {
     "hide": "Hide right sidebar",
