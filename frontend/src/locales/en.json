@@ -35,8 +35,12 @@
       "category": "Category not changed",
       "sync": "Sync did not start",
       "folders": "Could not load folders",
-      "openDraft": "Could not open the draft for editing"
-    }
+      "openDraft": "Could not open the draft for editing",
+      "markAllRead": "Could not mark all as read",
+      "syncFolders": "Folder list not refreshed",
+      "reconnect": "Could not reconnect the mailbox"
+    },
+    "mailboxDisabled": "This mailbox is turned off. Turn it on in its settings to connect."
   },
   "login": {
     "google": {

@@ -711,8 +711,16 @@ export function AccountsTab() {
   };
 
   const handleReconnect = async (id) => {
-    await api.reconnectAccount(id);
-    updateAccount(id, { sync_error: null });
+    try {
+      await api.reconnectAccount(id);
+      updateAccount(id, { sync_error: null });
+    } catch (err) {
+      addNotification({
+        type: 'error',
+        title: t('common.actionFailed.reconnect'),
+        body: err?.code === 'mailbox_disabled' ? t('common.mailboxDisabled') : err.message,
+      });
+    }
   };
 
   const handleReindex = async (id) => {
@@ -813,7 +821,7 @@ export function AccountsTab() {
       const folders = await api.getFolders(account.id);
       setAvailableFolders(folders);
     } catch (err) {
-      addNotification({ type: 'error', title: 'Could not load folders', body: err.message });
+      addNotification({ type: 'error', title: t('common.actionFailed.folders'), body: err.message });
     } finally {
       setFoldersLoading(false);
     }
