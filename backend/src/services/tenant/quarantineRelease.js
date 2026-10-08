@@ -76,6 +76,9 @@ export const RELEASE_DOMAIN_STATES = Object.freeze(['connector_ready', 'ready', 
 export const RECHECK_EXHAUSTED_MS = 6 * 60 * 60 * 1000;
 export const RELEASE_CHECK_MS = 5 * 1000;
 export const RELEASE_JOB_MAX_ATTEMPTS = 4;
+// Failed release jobs kept, the newest first: a run every 10 minutes through a long tenant outage
+// would otherwise keep one failed job per run for the failed jobs' retention (jobQueue.js).
+export const KEPT_FAILED_RELEASE_JOBS = 5;
 const FOLLOW_UP_MS = 30 * 1000;
 // A claim older than this is a run that died; a younger one belongs to a run still going.
 export const CLAIM_STALE_MINUTES = 10;
@@ -563,6 +566,17 @@ const unlockRun = (jobId) => query(
   [RUN_LOCK_PROVIDER, String(jobId)],
 ).catch((err) => console.error(`Phish release lock not freed: ${err?.code || err?.message}`));
 
+// Before this job ends failed: the older failed release jobs beyond the newest few go, so this one
+// and the KEPT_FAILED_RELEASE_JOBS - 1 before it stay. Best effort: the cleanup of finished jobs
+// removes them later anyway.
+async function pruneFailedReleaseJobs(jobId) {
+  await query(`
+    DELETE FROM jobs WHERE kind = $1 AND status = 'failed' AND id::text <> $2
+       AND id NOT IN (SELECT id FROM jobs WHERE kind = $1 AND status = 'failed' ORDER BY id DESC LIMIT $3)
+  `, [QUARANTINE_RELEASE_KIND, String(jobId), KEPT_FAILED_RELEASE_JOBS - 1])
+    .catch((err) => console.error(`Phish release: pruning old failed jobs (job ${jobId}) failed: ${err?.code || err?.message}`));
+}
+
 export async function handleReleaseJob(job, ctx, { now = Date.now() } = {}) {
   const context = await tenantContext();
   const jobId = job?.id ?? `run-${now}`;
@@ -584,6 +598,7 @@ export async function handleReleaseJob(job, ctx, { now = Date.now() } = {}) {
       console.error(`Phish release run failed (job ${jobId}): ${err?.code || err?.name || 'error'}: ${String(err?.message ?? '').slice(0, TEXT_MAX)}`);
     }
     await saveTenantState({ phishRelease: { at, ok: false, error: failure } });
+    await pruneFailedReleaseJobs(jobId);
     // The job ends failed with the reason (jobs show, the panel's job card); the next slot runs again.
     throw new JobError(failure.message || failure.code, { outcome: 'fail', code: failure.code });
   } finally {

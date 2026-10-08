@@ -40,7 +40,7 @@ const { TENANT_FIXTURES } = await import('./fakes.js');
 const { getTenantState, registerTenantJobKinds } = await import('./tenantJobs.js');
 const {
   MAX_MESSAGES_PER_RUN, MAX_RELEASE_ATTEMPTS, QUARANTINE_RELEASE_KIND, RUN_LOCK_PROVIDER, enqueueReleaseSlot, getReleaseSettings,
-  handleReleaseJob, heldSummary, markReleased, runRelease, setReleaseEnabled,
+  KEPT_FAILED_RELEASE_JOBS, handleReleaseJob, heldSummary, markReleased, runRelease, setReleaseEnabled,
 } = await import('./quarantineRelease.js');
 const { tenantContext } = await import('./tenantJobs.js');
 const { enqueueJob } = await import('../jobQueue.js');
@@ -495,6 +495,21 @@ describe('a failed release run', () => {
     const job = await runJobNow();
     expect(job).toMatchObject({ status: 'failed', error_code: 'tenant_unreachable', last_error: 'The tenant did not answer' });
     expect((await getTenantState()).phishRelease).toMatchObject({ ok: false, error: { code: 'tenant_unreachable' } });
+  });
+
+  // A run every 10 minutes through a day-long outage would keep ~144 failed jobs for the failed
+  // jobs' retention: only the newest few stay, the latest one always among them.
+  it('keeps only the newest failed release jobs', async () => {
+    expect(KEPT_FAILED_RELEASE_JOBS).toBe(5);
+    spamRule.throws = new TenantError('tenant_unreachable', 'The tenant did not answer');
+    const ids = [];
+    for (let i = 0; i < KEPT_FAILED_RELEASE_JOBS + 3; i += 1) {
+      quarantine(70 + i);
+      ids.push((await runJobNow()).id);
+    }
+    const { rows } = await db.query("SELECT id, status FROM jobs WHERE kind = $1 ORDER BY id", [QUARANTINE_RELEASE_KIND]);
+    expect(rows.map((r) => r.id)).toEqual(ids.slice(-KEPT_FAILED_RELEASE_JOBS));
+    expect(rows.every((r) => r.status === 'failed')).toBe(true);
   });
 
   it('any other error: the job fails as tenant_failed, the detail stays in the log', async () => {
