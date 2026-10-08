@@ -32,6 +32,8 @@ import {
 import { removeThreadCacheEntry } from '../utils/threadedArchive.js';
 import i18n from '../i18n.js';
 import { createPrefSaveQueue } from '../utils/prefSaveQueue.js';
+import { apiErrorText } from '../utils/apiErrors.js';
+import { SETTINGS_ERROR_KEYS } from '../utils/adminErrors.js';
 
 // Accumulate rapid preference changes and flush at most once per second. The queue itself
 // lives in prefSaveQueue.js so its behaviour is testable without a network or a DOM.
@@ -929,7 +931,9 @@ export const useStore = create((set, get) => ({
     api.admin.updateSettings({ categorization_enabled: val })
       .catch((err) => {
         set({ categorizationEnabled: previous });
-        get().addNotification({ type: 'error', title: i18n.t('common.prefSaveFailed.title'), body: err?.message || i18n.t('common.actionFailed.body') });
+        get().addNotification({
+          type: 'error', title: i18n.t('common.prefSaveFailed.title'), body: apiErrorText(err, i18n.t.bind(i18n), { keys: SETTINGS_ERROR_KEYS }),
+        });
       });
   },
 

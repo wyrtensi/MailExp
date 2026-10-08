@@ -8,6 +8,7 @@ import { useMobile } from '../hooks/useMobile.js';
 import { api } from '../utils/api.js';
 import { apiErrorKey, apiErrorText } from '../utils/apiErrors.js';
 import { saveConfirmedSwitch } from '../utils/confirmedSwitch.js';
+import { INVITE_ERROR_KEYS, OIDC_ERROR_KEYS, SETTINGS_ERROR_KEYS, SYSTEM_EMAIL_ERROR_KEYS } from '../utils/adminErrors.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { isValidFromValue } from '../utils/defaultSender.js';
 import {
@@ -1579,7 +1580,7 @@ export function ThemesTab() {
       setCssSaved(true);
       setTimeout(() => setCssSaved(false), 2000);
     } catch (err) {
-      setCssError(err.message || 'Failed to save');
+      setCssError(apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS }));
     } finally {
       setCssSaving(false);
     }
@@ -3562,7 +3563,8 @@ function SSOTab() {
             await api.admin.updateSettings({ internal_auth_disabled: true });
             setInternalAuthDisabled(true);
           } catch (err) {
-            setInternalAuthError(err.message);
+            // No enabled SSO provider, or the admin has no SSO identity to sign in with.
+            setInternalAuthError(apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS }));
           } finally {
             setInternalAuthSaving(false);
           }
@@ -3572,7 +3574,7 @@ function SSOTab() {
       setInternalAuthSaving(true);
       api.admin.updateSettings({ internal_auth_disabled: false })
         .then(() => setInternalAuthDisabled(false))
-        .catch(err => setInternalAuthError(err.message))
+        .catch(err => setInternalAuthError(apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS })))
         .finally(() => setInternalAuthSaving(false));
     }
   };
@@ -3630,7 +3632,7 @@ function SSOTab() {
       }
       closeForm();
     } catch (err) {
-      setError(err.message);
+      setError(apiErrorText(err, t, { keys: OIDC_ERROR_KEYS }));
     } finally {
       setSaving(false);
     }
@@ -3642,7 +3644,9 @@ function SSOTab() {
       message: t('admin.sso.deleteConfirmBody'),
       confirmLabel: t('admin.sso.deleteConfirmLabel'),
       onConfirm: async () => {
-        await api.admin.oidc.deleteProvider(p.id);
+        await api.admin.oidc.deleteProvider(p.id).catch((err) => {
+          throw new Error(apiErrorText(err, t, { keys: OIDC_ERROR_KEYS }), { cause: err });
+        });
         setProviders(ps => ps.filter(x => x.id !== p.id));
       },
     });
@@ -4936,7 +4940,7 @@ function SystemEmailSection() {
       setConfig({ ...form });
       setMsg({ type: 'ok', text: t('admin.systemEmail.saved') });
     } catch (err) {
-      setMsg({ type: 'error', text: err.message });
+      setMsg({ type: 'error', text: apiErrorText(err, t, { keys: SYSTEM_EMAIL_ERROR_KEYS }) });
     } finally { setSaving(false); }
   };
 
@@ -4946,12 +4950,18 @@ function SystemEmailSection() {
       await api.admin.testSystemEmail();
       setMsg({ type: 'ok', text: t('admin.systemEmail.testOk') });
     } catch (err) {
-      setMsg({ type: 'error', text: `${t('admin.systemEmail.testFail')}: ${err.message}` });
+      setMsg({ type: 'error', text: `${t('admin.systemEmail.testFail')}: ${apiErrorText(err, t, { keys: SYSTEM_EMAIL_ERROR_KEYS })}` });
     } finally { setTesting(false); }
   };
 
   const handleRemove = async () => {
-    await api.admin.deleteSystemEmail();
+    setMsg(null);
+    try {
+      await api.admin.deleteSystemEmail();
+    } catch (err) {
+      setMsg({ type: 'error', text: apiErrorText(err, t, { keys: SYSTEM_EMAIL_ERROR_KEYS }) });
+      return;
+    }
     setConfig(null);
     setForm({ host: '', port: '587', tls: 'STARTTLS', user: '', pass: '', fromName: 'MailExpert', fromEmail: '' });
     setMsg({ type: 'ok', text: t('admin.systemEmail.removed') });
@@ -5122,12 +5132,13 @@ function UsersAndInvitesPanel() {
 
   // Runs a user, registration or invite action; a refusal (the last admin, a bootstrap admin) is
   // shown instead of the click silently doing nothing.
-  const runAction = async (action) => {
+  // `keys`: the screen's meaning of the codes (settings, invites); a users action by default.
+  const runAction = async (action, keys = null) => {
     setActionError('');
     try {
       await action();
     } catch (err) {
-      setActionError(adminUserErrorText(err, t));
+      setActionError(keys ? apiErrorText(err, t, { keys }) : adminUserErrorText(err, t));
     }
   };
 
@@ -5168,7 +5179,7 @@ function UsersAndInvitesPanel() {
     const newVal = !regOpen;
     await api.admin.updateSettings({ registration_open: newVal });
     setRegOpen(newVal);
-  });
+  }, SETTINGS_ERROR_KEYS);
 
   const handleSendInvite = async () => {
     if (!inviteEmail.includes('@')) return;
@@ -5188,7 +5199,7 @@ function UsersAndInvitesPanel() {
         setInviteTotal(d.total);
       }).catch(() => {});
     } catch (err) {
-      setInviteMsg({ type: 'error', text: err.message });
+      setInviteMsg({ type: 'error', text: apiErrorText(err, t, { keys: INVITE_ERROR_KEYS }) });
     } finally {
       setInviteLoading(false);
     }
@@ -5197,7 +5208,7 @@ function UsersAndInvitesPanel() {
   const handleRevokeInvite = (id) => runAction(async () => {
     await api.admin.deleteInvite(id);
     setInvites(inv => inv.filter(i => i.id !== id));
-  });
+  }, INVITE_ERROR_KEYS);
 
   const copyInviteUrl = async (url, id) => {
     const { ok } = await copyToClipboard(url);
@@ -7853,7 +7864,7 @@ function SecurityTab() {
       setProtectionSaved(true);
       setTimeout(() => setProtectionSaved(false), 3000);
     } catch (err) {
-      setProtectionError(err.message);
+      setProtectionError(apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS }));
     } finally {
       setProtectionSaving(false);
     }
@@ -7867,7 +7878,7 @@ function SecurityTab() {
         save: () => api.admin.updateSettings({ [key]: newVal }),
       });
     } catch (err) {
-      setMailPolicyError(t('admin.security.mailPolicySaveFailed', { message: err.message || t('common.actionFailed.body') }));
+      setMailPolicyError(t('admin.security.mailPolicySaveFailed', { message: apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS }) }));
     }
   };
 
@@ -7879,7 +7890,7 @@ function SecurityTab() {
       setMfaSaved(true);
       setTimeout(() => setMfaSaved(false), 3000);
     } catch (err) {
-      setMfaError(err.message);
+      setMfaError(apiErrorText(err, t, { keys: SETTINGS_ERROR_KEYS }));
     } finally {
       setMfaSaving(false);
     }
