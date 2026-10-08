@@ -25,9 +25,9 @@ describe('contact websites', () => {
     query.mockReset().mockImplementation(async (sql) => {
       if (sql.includes('COUNT(*)')) return { rows: [{ count: '0' }] };
       if (/SELECT \* FROM contacts/.test(sql)) {
-        return { rows: [{ id: 'c1', uid: 'u1', display_name: 'Dana', emails: [], phones: [], urls: [] }] };
+        return { rows: [{ id: '22222222-2222-4222-8222-222222222222', uid: 'u1', display_name: 'Dana', emails: [], phones: [], urls: [] }] };
       }
-      return { rows: [{ id: 'c1', uid: 'u1', emails: [], phones: [], urls: [] }] };
+      return { rows: [{ id: '22222222-2222-4222-8222-222222222222', uid: 'u1', emails: [], phones: [], urls: [] }] };
     });
   });
 
@@ -48,7 +48,7 @@ describe('contact websites', () => {
   });
 
   it('updates websites on an existing contact', async () => {
-    const res = await send('PATCH', '/c1', { urls: [{ value: 'https://new.example.com', type: 'home' }] });
+    const res = await send('PATCH', '/22222222-2222-4222-8222-222222222222', { urls: [{ value: 'https://new.example.com', type: 'home' }] });
     expect(res.status).toBe(200);
     const [sql, params] = writeCall('UPDATE contacts SET');
     expect(sql).toMatch(/urls = /);

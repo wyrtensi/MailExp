@@ -120,15 +120,27 @@ describe('POST /api/mail/draft — local row persistence', () => {
     expect((await res.json()).code).toBe(code);
   });
 
-  it('keeps other append failures as they were', async () => {
-    imapManager.appendToFolder.mockRejectedValueOnce(new Error('Mailbox does not exist'));
+  it('answers another append failure with a 500 draft_save_failed, not the server text', async () => {
+    imapManager.appendToFolder.mockRejectedValueOnce(new Error('NO [SERVERBUG] internal detail'));
     const res = await fetch(`${base}/api/mail/draft`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ accountId: ACCOUNT_ID, to: ['a@b.com'], subject: 'x', body: 'y' }),
     });
     expect(res.status).toBe(500);
-    expect((await res.json()).code).toBeUndefined();
+    expect(await res.json()).toEqual({ error: 'Failed to save the draft', code: 'draft_save_failed' });
+  });
+
+  it('answers a malformed accountId with a 400 invalid_account before any query', async () => {
+    query.mockReset();
+    const res = await fetch(`${base}/api/mail/draft`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accountId: 'nope', body: 'y' }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_account');
+    expect(query).not.toHaveBeenCalled();
   });
 
   it('does not persist a row when the append returns no uid (no reliable key)', async () => {
@@ -408,6 +420,23 @@ describe('DELETE /api/mail/draft/:uid — Drafts folders only', () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'Folder is not a Drafts folder' });
     expect(imapManager.permanentDeleteMessage).not.toHaveBeenCalled();
+  });
+
+  it('answers a malformed accountId with a 400 invalid_account, not the database cast error', async () => {
+    const res = await fetch(`${base}/api/mail/draft/9?accountId=nope&folder=Drafts`, { method: 'DELETE' });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('invalid_account');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('answers an IMAP failure with a 500 draft_delete_failed, not the server text', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    imapManager.permanentDeleteMessage.mockRejectedValueOnce(new Error('NO [SERVERBUG] internal detail'));
+    const res = await del('folder=Drafts');
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'Failed to delete the draft', code: 'draft_delete_failed' });
+    expect(spy.mock.calls.some(([line]) => String(line).includes(ACCOUNT_ID))).toBe(true);
+    spy.mockRestore();
   });
 
   it('refuses a repeated folder param (array) without touching IMAP', async () => {

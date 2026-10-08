@@ -4300,7 +4300,7 @@ export class ImapManager {
       this._statusAccountTimers.delete(accountId);
       query("SELECT * FROM email_accounts WHERE id=$1 AND enabled AND protocol='imap' AND oauth_reconnect_required = false", [accountId])
         .then(({ rows }) => { if (rows[0]) return this.folderStatusMonitor.refresh(rows[0], { force: true }); })
-        .catch(err => console.warn('Post-mutation count refresh:', err.message));
+        .catch(err => console.warn(`Post-mutation count refresh for account ${accountId}:`, err.message));
     }, 5000));
   }
 
@@ -4989,7 +4989,7 @@ export class ImapManager {
               await rerootThreadChildren(account.id, threadId, msgId);
             }
           } catch (parseErr) {
-            console.error('Message sync parse error:', parseErr.message);
+            console.error(`Message sync parse error for ${logAccount(account)} ${folder} uid=${msg?.uid}:`, parseErr.message);
           }
         };
 
@@ -5190,14 +5190,14 @@ export class ImapManager {
             try {
               newMessages = await applyBlockList(newMessages, account, this);
             } catch (err) {
-              console.error('blockList error:', err.message);
+              console.error(`blockList error for ${logAccount(account)}:`, err.message);
             }
             try {
               const rulesResult = await applyInboxRules(newMessages, account, this);
               newMessages = rulesResult.remaining;
               mutedIds = rulesResult.mutedIds;
             } catch (err) {
-              console.error('inboxRules error:', err.message);
+              console.error(`inboxRules error for ${logAccount(account)}:`, err.message);
             }
             // Any unread candidate no longer in `newMessages` was moved out of / deleted from
             // INBOX by the block-list or a rule. Only genuinely-DELETED ones are excluded from

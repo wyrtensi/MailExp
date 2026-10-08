@@ -35,6 +35,28 @@ const jobColumns = [
   { header: 'ERROR', value: (j) => j.error },
 ];
 
+// The codes the panel sets when it fails an agent job itself (services/mailNode/nodeAgent.js), with
+// the next step; the panel's screen translates the same codes. The update job's own codes come with
+// the node's step text and show as they are.
+export const AGENT_JOB_ERRORS = Object.freeze({
+  not_picked_up: 'the agent did not pick the job up within 30 minutes: check that it runs on the node ("agent status"), then run the job again',
+  timed_out: 'no word from the agent within the time bound of the job: check the node, then run the job again',
+  agent_revoked: 'the token was revoked while the job waited or ran: "mailexpert agent token issue", set it up on the node, run the job again',
+  agent_token_rotated: 'a new token was issued while the job waited or ran: run the job again once the node has the new token',
+  agent_restarted: 'the agent restarted while the job ran: run the job again',
+  agent_stopped: 'the agent was stopped while the job ran: start it on the node, then run the job again',
+  update_silent: 'no word from the node for 5 minutes: the update was lost; check the node before running it again',
+});
+
+// The table of jobs, then one line per known error code in it saying what it means.
+function jobLines(list) {
+  const codes = [...new Set(list.map((j) => j.error).filter((code) => AGENT_JOB_ERRORS[code]))];
+  return [
+    ...table(list, jobColumns, { empty: 'no jobs' }),
+    ...(codes.length ? ['', ...codes.map((code) => `${code}: ${AGENT_JOB_ERRORS[code]}`)] : []),
+  ];
+}
+
 const status = {
   name: 'status',
   summary: 'whether the agent is connected, its last status report and its recent jobs',
@@ -51,7 +73,7 @@ const status = {
         ['pinned mailcow', view.pinnedMailcow],
       ]),
       '',
-      ...table(view.jobs, jobColumns, { empty: 'no jobs' }),
+      ...jobLines(view.jobs),
     ];
     return { data: view, lines };
   },
@@ -66,7 +88,7 @@ const jobs = {
   async run(ctx) {
     const limit = parseCount(ctx.flags.limit, { name: 'limit', min: 1, max: 50, fallback: 20 });
     const list = await agentAction(() => listJobs(limit));
-    return { data: { jobs: list }, lines: table(list, jobColumns, { empty: 'no jobs' }) };
+    return { data: { jobs: list }, lines: jobLines(list) };
   },
 };
 

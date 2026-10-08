@@ -94,36 +94,36 @@ export function createAdminUpdateRouter({
     const spool = getSpool();
     const updater = await spool.readUpdater();
     if (!spool.enabled || !updater.installed) {
-      res.status(503).json({ error: 'updater_not_installed' });
+      res.status(503).json({ error: 'updater_not_installed', code: 'updater_not_installed' });
       return null;
     }
     const target = req.body?.target;
     if (typeof target !== 'string' || !TARGET_RE.test(target)) {
-      res.status(400).json({ error: 'invalid_target' });
+      res.status(400).json({ error: 'invalid_target', code: 'invalid_target' });
       return null;
     }
     if (action === 'update' && req.body?.confirm !== target) {
-      res.status(400).json({ error: 'confirm_mismatch' });
+      res.status(400).json({ error: 'confirm_mismatch', code: 'confirm_mismatch' });
       return null;
     }
     const status = await getStatus();
     if (!status.latest || status.latest.version !== target) {
-      res.status(409).json({ error: 'not_latest' });
+      res.status(409).json({ error: 'not_latest', code: 'not_latest' });
       return null;
     }
     // The host refuses a version somebody rolled back from until a newer build is promoted.
     if (updater.rolledBack && updater.rolledBack === target) {
-      res.status(409).json({ error: 'rolled_back' });
+      res.status(409).json({ error: 'rolled_back', code: 'rolled_back' });
       return null;
     }
     if (action === 'update' && !status.updateAvailable) {
-      res.status(409).json({ error: 'no_update' });
+      res.status(409).json({ error: 'no_update', code: 'no_update' });
       return null;
     }
     const requestedBy = await requesterName(req.session.userId);
     return serialized(async () => {
       if ((await spoolState(spool)).busy) {
-        res.status(409).json({ error: 'busy' });
+        res.status(409).json({ error: 'busy', code: 'busy' });
         return null;
       }
       try {
@@ -131,7 +131,7 @@ export function createAdminUpdateRouter({
         return { id, status };
       } catch (err) {
         if (err instanceof SpoolError && (err.code === 'updater_not_installed' || err.code === 'spool_not_writable')) {
-          res.status(503).json({ error: err.code });
+          res.status(503).json({ error: err.code, code: err.code });
           return null;
         }
         throw err;
@@ -161,7 +161,7 @@ export function createAdminUpdateRouter({
     const result = await spool.readResult(id);
     if (result) return res.json(result);
     if (await spool.hasRequest(id)) return res.json({ id, state: 'queued', terminal: false });
-    return res.status(404).json({ error: 'not_found' });
+    return res.status(404).json({ error: 'not_found', code: 'not_found' });
   });
 
   return router;

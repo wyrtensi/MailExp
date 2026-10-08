@@ -25,11 +25,12 @@ export const RULE_ERRORS = Object.freeze({
   already_running: [409, 'Rules are already running'],
 });
 
-// The API's answer to a refusal: [status, body].
+// The API's answer to a refusal: [status, body]. A catalogued refusal carries its key as the code.
 export function ruleRefusal(result) {
   if (MAILBOX_REF_ERRORS[result.error]) return MAILBOX_REF_ERRORS[result.error];
-  const [status, message] = RULE_ERRORS[result.error] ?? [500, result.error];
-  return [status, { error: result.message ?? message }];
+  if (!RULE_ERRORS[result.error]) return [500, { error: result.message ?? result.error }];
+  const [status, message] = RULE_ERRORS[result.error];
+  return [status, { error: result.message ?? message, code: result.error }];
 }
 
 const DESTINATION_ACTIONS = new Set(['move', 'archive', 'delete']);

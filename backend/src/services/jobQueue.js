@@ -88,6 +88,15 @@ export function jobKind(kind) {
   return kinds.get(kind) || null;
 }
 
+// The reason a failed job shows (last_error): the error's message, or its code or class when it has
+// none, with the cause of a network failure ("fetch failed (ECONNREFUSED)"); a thrown string as is.
+function errorText(err) {
+  if (typeof err === 'string') return err || 'Job failed';
+  const text = err?.message || (typeof err?.code === 'string' ? err.code : '') || err?.name || 'Job failed';
+  const cause = err?.cause?.code;
+  return typeof cause === 'string' && !text.includes(cause) ? `${text} (${cause})` : text;
+}
+
 function clip(text) {
   const value = String(text ?? '');
   return value.length > ERROR_TEXT_MAX ? `${value.slice(0, ERROR_TEXT_MAX - 1)}…` : value;
@@ -232,7 +241,7 @@ function outcomeOf(job, err, effectStarted) {
 async function settleFailure(job, err, effectStarted) {
   const kind = kinds.get(job.kind);
   const outcome = outcomeOf(job, err, effectStarted);
-  const lastError = clip(err?.message || 'Job failed');
+  const lastError = clip(errorText(err));
   const code = typeof err?.code === 'string' ? err.code.slice(0, 64) : null;
   let row;
   if (outcome === 'retry') {
@@ -345,6 +354,9 @@ export async function runJob(job) {
     } else if (err?.code === 'claim_lost') {
       console.warn(`[jobs] ${job.kind} job ${job.id} lost its claim before its effect began`);
     } else {
+      // A JobError is the handler's chosen outcome; anything else is unexpected, and the log keeps it
+      // with its job even when recording the failure does not get through.
+      if (!(err instanceof JobError)) console.error(`[jobs] ${job.kind} job ${job.id} failed: ${errorText(err)}`);
       await settleWithRetry(job, err, effectStarted);
     }
   } finally {

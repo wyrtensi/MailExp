@@ -16,7 +16,7 @@ describe('uuid util', () => {
     const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
     uuidParam('id')(req, res, next, 'bogus');
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ error: 'Invalid id' });
+    expect(res.json).toHaveBeenCalledWith({ error: 'Invalid id', code: 'invalid_id' });
     expect(next).not.toHaveBeenCalled();
   });
 

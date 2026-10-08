@@ -11,6 +11,7 @@ import { imapManager } from '../index.js';
 import { isMailboxBusyError } from '../services/imapManager.js';
 import { sendMailboxBusy } from '../utils/mailboxBusy.js';
 import { resolveAllDraftsPaths } from '../utils/mailUtils.js';
+import { isUuid } from '../utils/uuid.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -180,6 +181,7 @@ async function findReplacedDraft(account, draftsFolder, { existingUid, existingF
 router.post('/draft', async (req, res) => {
   const { accountId, aliasId, to, cc, bcc, subject, body, bodyIsHtml = false, quotedBody, quotedBodyHtml, editedSignature, priority, inReplyTo, references, existingUid, existingFolder, existingAccountId } = req.body;
   if (!accountId) return res.status(400).json({ error: 'accountId required' });
+  if (!isUuid(accountId)) return res.status(400).json({ error: 'Invalid account id', code: 'invalid_account' });
 
   const ownerCheck = await query(
     'SELECT id FROM email_accounts WHERE id = $1',
@@ -243,11 +245,14 @@ router.post('/draft', async (req, res) => {
 
     res.json({ uid, folder: draftsFolder });
   } catch (err) {
-    console.error('Save draft failed:', err.message);
+    console.error(`Save draft failed for account ${accountId}:`, err.message);
     // No pooled session for the APPEND (full pool, or a login held back): nothing was stored, and
     // the client says why (busy, or a rejected password) instead of showing the raw error.
     if (isMailboxBusyError(err)) return sendMailboxBusy(res, err);
-    res.status(err.status || 500).json({ error: err.message || 'Failed to save draft' });
+    // A refusal this file threw on purpose (err.status) keeps its text; the server's own error
+    // stays in the log above.
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to save the draft', code: 'draft_save_failed' });
   }
 });
 
@@ -259,6 +264,7 @@ router.delete('/draft/:uid', async (req, res) => {
 
   const { accountId, folder } = req.query;
   if (!accountId || !folder) return res.status(400).json({ error: 'accountId and folder required' });
+  if (!isUuid(accountId)) return res.status(400).json({ error: 'Invalid account id', code: 'invalid_account' });
 
   const ownerCheck = await query(
     'SELECT * FROM email_accounts WHERE id = $1',
@@ -294,8 +300,8 @@ router.delete('/draft/:uid', async (req, res) => {
     );
     res.json({ ok: true });
   } catch (err) {
-    console.error('Delete draft failed:', err.message);
-    res.status(500).json({ error: err.message || 'Failed to delete draft' });
+    console.error(`Delete draft failed for account ${accountId} uid=${uid} folder ${JSON.stringify(folder)}:`, err.message);
+    res.status(500).json({ error: 'Failed to delete the draft', code: 'draft_delete_failed' });
   }
 });
 

@@ -172,6 +172,28 @@ describe('running', () => {
     expect(await getJob(job.id)).toMatchObject({ status: 'failed', error_code: 'rejected', attempts: 1 });
   });
 
+  // jobs show and the panel's job card read last_error: an error without a message still names
+  // what failed, a network failure names its cause, and the server log has the job and its kind.
+  it('records a readable reason for an error without a message, and logs the job it came from', async () => {
+    registerJobKind('test', { handler: async () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ECONNREFUSED' }) }); }, maxAttempts: 1 });
+    let { job } = await due();
+    await runDueJobs({ wait: true });
+    expect(await getJob(job.id)).toMatchObject({ status: 'failed', last_error: 'fetch failed (ECONNREFUSED)' });
+    expect(console.error.mock.calls.some(([line]) => String(line).includes(`test job ${job.id}`))).toBe(true);
+
+    await db.exec('DELETE FROM jobs');
+    registerJobKind('test', { handler: async () => { throw Object.assign(new Error(''), { code: 'ETIMEDOUT' }); }, maxAttempts: 1 });
+    ({ job } = await due());
+    await runDueJobs({ wait: true });
+    expect(await getJob(job.id)).toMatchObject({ status: 'failed', last_error: 'ETIMEDOUT' });
+
+    await db.exec('DELETE FROM jobs');
+    registerJobKind('test', { handler: async () => { throw 'plain text'; }, maxAttempts: 1 });
+    ({ job } = await due());
+    await runDueJobs({ wait: true });
+    expect(await getJob(job.id)).toMatchObject({ status: 'failed', last_error: 'plain text' });
+  });
+
   it('never runs again an at-most-once job that failed after its effect began', async () => {
     const handler = vi.fn(async (job, ctx) => {
       await ctx.markEffectStarted();

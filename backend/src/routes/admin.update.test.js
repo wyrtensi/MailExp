@@ -194,15 +194,15 @@ describe('/api/admin/update', () => {
 
     it('refuses a check and an update of the rolled back target', async () => {
       await rollBack(TARGET);
-      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 409, body: { error: 'rolled_back' } });
-      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'rolled_back' } });
+      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 409, body: { error: 'rolled_back', code: 'rolled_back' } });
+      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'rolled_back', code: 'rolled_back' } });
       expect(await requests()).toEqual([]);
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
     it('reports not_latest before rolled_back', async () => {
       await rollBack('sha-111111111111');
-      expect((await call('POST', '/check', { target: 'sha-111111111111' })).body).toEqual({ error: 'not_latest' });
+      expect((await call('POST', '/check', { target: 'sha-111111111111' })).body).toEqual({ error: 'not_latest', code: 'not_latest' });
     });
 
     it('lets a different target through', async () => {
@@ -216,7 +216,7 @@ describe('/api/admin/update', () => {
       getSpool.mockImplementation(() => ({
         ...realGetSpool(), writeRequest: async () => { throw new SpoolError('spool_not_writable'); },
       }));
-      expect(await call('POST', path, body)).toEqual({ status: 503, body: { error: 'spool_not_writable' } });
+      expect(await call('POST', path, body)).toEqual({ status: 503, body: { error: 'spool_not_writable', code: 'spool_not_writable' } });
       expect(recordAudit).not.toHaveBeenCalled();
     });
   });
@@ -233,30 +233,30 @@ describe('/api/admin/update', () => {
 
     it('refuses without a spool directory', async () => {
       vi.stubEnv('UPDATE_SPOOL_DIR', '');
-      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 503, body: { error: 'updater_not_installed' } });
+      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 503, body: { error: 'updater_not_installed', code: 'updater_not_installed' } });
     });
 
     it('refuses when the host updater is not installed', async () => {
       await rm(join(dir, 'result', 'updater.json'));
-      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 503, body: { error: 'updater_not_installed' } });
+      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 503, body: { error: 'updater_not_installed', code: 'updater_not_installed' } });
       expect(await requests()).toEqual([]);
     });
 
     it.each([undefined, 'latest', 'sha-0123456789AB', 'sha-0123', 42])('refuses the target %j', async (target) => {
-      expect(await call('POST', '/check', { target })).toEqual({ status: 400, body: { error: 'invalid_target' } });
+      expect(await call('POST', '/check', { target })).toEqual({ status: 400, body: { error: 'invalid_target', code: 'invalid_target' } });
       expect(await requests()).toEqual([]);
     });
 
     it('refuses a target that is not the latest', async () => {
-      expect(await call('POST', '/check', { target: 'sha-111111111111' })).toEqual({ status: 409, body: { error: 'not_latest' } });
+      expect(await call('POST', '/check', { target: 'sha-111111111111' })).toEqual({ status: 409, body: { error: 'not_latest', code: 'not_latest' } });
       getLatestStatus.mockResolvedValue(status({ latest: null }));
-      expect((await call('POST', '/check', { target: TARGET })).body).toEqual({ error: 'not_latest' });
+      expect((await call('POST', '/check', { target: TARGET })).body).toEqual({ error: 'not_latest', code: 'not_latest' });
       expect(await requests()).toEqual([]);
     });
 
     it('refuses while a request is pending', async () => {
       await writeFile(join(dir, 'request', `${RID}.json`), '{}');
-      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 409, body: { error: 'busy' } });
+      expect(await call('POST', '/check', { target: TARGET })).toEqual({ status: 409, body: { error: 'busy', code: 'busy' } });
     });
 
     it('lets one of two simultaneous requests through', async () => {
@@ -279,28 +279,28 @@ describe('/api/admin/update', () => {
     });
 
     it('refuses a confirmation that does not repeat the target', async () => {
-      expect(await call('POST', '', { target: TARGET, confirm: 'sha-111111111111' })).toEqual({ status: 400, body: { error: 'confirm_mismatch' } });
-      expect(await call('POST', '', { target: TARGET })).toEqual({ status: 400, body: { error: 'confirm_mismatch' } });
+      expect(await call('POST', '', { target: TARGET, confirm: 'sha-111111111111' })).toEqual({ status: 400, body: { error: 'confirm_mismatch', code: 'confirm_mismatch' } });
+      expect(await call('POST', '', { target: TARGET })).toEqual({ status: 400, body: { error: 'confirm_mismatch', code: 'confirm_mismatch' } });
       expect(await requests()).toEqual([]);
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
     it('refuses when there is nothing newer', async () => {
       getLatestStatus.mockResolvedValue(status({ updateAvailable: false, compare: { status: 'identical', aheadBy: 0, url: null } }));
-      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'no_update' } });
+      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'no_update', code: 'no_update' } });
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
     it('refuses a target that is not the latest', async () => {
       const other = 'sha-111111111111';
-      expect(await call('POST', '', { target: other, confirm: other })).toEqual({ status: 409, body: { error: 'not_latest' } });
+      expect(await call('POST', '', { target: other, confirm: other })).toEqual({ status: 409, body: { error: 'not_latest', code: 'not_latest' } });
     });
 
     it('refuses while an update runs', async () => {
       await writeFile(join(dir, 'result', `${RID}.json`), JSON.stringify(result({
         state: 'updating', terminal: false, updatedAt: new Date().toISOString(), finishedAt: null, exitCode: null,
       })));
-      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'busy' } });
+      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 409, body: { error: 'busy', code: 'busy' } });
       expect(recordAudit).not.toHaveBeenCalled();
     });
 
@@ -313,7 +313,7 @@ describe('/api/admin/update', () => {
 
     it('refuses without a spool directory', async () => {
       vi.stubEnv('UPDATE_SPOOL_DIR', '');
-      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 503, body: { error: 'updater_not_installed' } });
+      expect(await call('POST', '', { target: TARGET, confirm: TARGET })).toEqual({ status: 503, body: { error: 'updater_not_installed', code: 'updater_not_installed' } });
     });
   });
 

@@ -19,7 +19,10 @@ vi.mock('../auditLog.js', () => ({
 const spamRule = vi.hoisted(() => ({ state: 'ok' }));
 vi.mock('../mailNode/nodeApply.js', async (importActual) => ({
   ...(await importActual()),
-  checkSpamRule: vi.fn(async () => ({ at: new Date().toISOString(), state: spamRule.state })),
+  checkSpamRule: vi.fn(async () => {
+    if (spamRule.throws) throw spamRule.throws;
+    return { at: new Date().toISOString(), state: spamRule.state };
+  }),
 }));
 vi.mock('../../middleware/auth.js', () => ({
   requireAuth: (req, _res, next) => { req.session = { userId: '60000000-0000-4000-8000-000000000001' }; next(); },
@@ -37,7 +40,7 @@ const { TENANT_FIXTURES } = await import('./fakes.js');
 const { getTenantState, registerTenantJobKinds } = await import('./tenantJobs.js');
 const {
   MAX_MESSAGES_PER_RUN, MAX_RELEASE_ATTEMPTS, QUARANTINE_RELEASE_KIND, RUN_LOCK_PROVIDER, enqueueReleaseSlot, getReleaseSettings,
-  handleReleaseJob, heldSummary, markReleased, runRelease, setReleaseEnabled,
+  KEPT_FAILED_RELEASE_JOBS, handleReleaseJob, heldSummary, markReleased, runRelease, setReleaseEnabled,
 } = await import('./quarantineRelease.js');
 const { tenantContext } = await import('./tenantJobs.js');
 const { enqueueJob } = await import('../jobQueue.js');
@@ -101,6 +104,7 @@ beforeEach(async () => {
   // On by default (section 5.14): no switch row at the start of a test.
   journal.entries = [];
   spamRule.state = 'ok';
+  spamRule.throws = null;
   await db.query("DELETE FROM integration_config WHERE provider = 'mail_node_phish_release_cursor'");
 });
 
@@ -473,6 +477,50 @@ describe('the review round (R-42)', () => {
     await runNow();
     expect(await rowOf(qid(58))).toMatchObject({ state: 'skipped', reason: 'worker_refused' });
     expect(releases()).toEqual([]);
+  });
+});
+
+// A run that fails ends its job failed with the reason, so `jobs show` and the panel's job card say
+// so, instead of a done job next to a failed run in the tenant state.
+describe('a failed release run', () => {
+  const runJobNow = async () => {
+    const { job } = await enqueueJob({ kind: QUARANTINE_RELEASE_KIND });
+    await runDue();
+    return getJob(job.id);
+  };
+
+  it('a tenant refusal: the job fails with its code and text', async () => {
+    quarantine(60);
+    spamRule.throws = new TenantError('tenant_unreachable', 'The tenant did not answer');
+    const job = await runJobNow();
+    expect(job).toMatchObject({ status: 'failed', error_code: 'tenant_unreachable', last_error: 'The tenant did not answer' });
+    expect((await getTenantState()).phishRelease).toMatchObject({ ok: false, error: { code: 'tenant_unreachable' } });
+  });
+
+  // A run every 10 minutes through a day-long outage would keep ~144 failed jobs for the failed
+  // jobs' retention: only the newest few stay, the latest one always among them.
+  it('keeps only the newest failed release jobs', async () => {
+    expect(KEPT_FAILED_RELEASE_JOBS).toBe(5);
+    spamRule.throws = new TenantError('tenant_unreachable', 'The tenant did not answer');
+    const ids = [];
+    for (let i = 0; i < KEPT_FAILED_RELEASE_JOBS + 3; i += 1) {
+      quarantine(70 + i);
+      ids.push((await runJobNow()).id);
+    }
+    const { rows } = await db.query("SELECT id, status FROM jobs WHERE kind = $1 ORDER BY id", [QUARANTINE_RELEASE_KIND]);
+    expect(rows.map((r) => r.id)).toEqual(ids.slice(-KEPT_FAILED_RELEASE_JOBS));
+    expect(rows.every((r) => r.status === 'failed')).toBe(true);
+  });
+
+  it('any other error: the job fails as tenant_failed, the detail stays in the log', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    quarantine(61);
+    spamRule.throws = new Error('relation "x" does not exist');
+    const job = await runJobNow();
+    expect(job).toMatchObject({ status: 'failed', error_code: 'tenant_failed' });
+    expect(job.last_error).not.toContain('relation');
+    expect(spy.mock.calls.some(([line]) => String(line).includes(`job ${job.id}`) && String(line).includes('relation'))).toBe(true);
+    spy.mockRestore();
   });
 });
 

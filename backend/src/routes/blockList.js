@@ -2,8 +2,10 @@ import { Router } from 'express';
 import { query } from '../services/db.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireMailbox } from '../utils/requireMailbox.js';
+import { uuidParam } from '../utils/uuid.js';
 
 const router = Router();
+router.param('id', uuidParam('id'));
 router.use(requireAuth);
 
 // The block list of every mailbox; each entry names the mailbox it applies to.

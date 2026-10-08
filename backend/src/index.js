@@ -10,6 +10,7 @@ import { redisClient } from './services/redis.js';
 import { buildSessionOptions } from './utils/sessionConfig.js';
 import { parseTrustProxy } from './utils/trustProxy.js';
 import { composeJson } from './middleware/composeBody.js';
+import { bodyErrorHandler, finalErrorHandler } from './middleware/errorHandlers.js';
 
 import sendRoutes from './routes/send.js';
 import draftRoutes from './routes/draft.js';
@@ -163,13 +164,8 @@ app.use('/api/gtd/pet/import', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 // Express 5 leaves req.body undefined when no parser ran; handlers destructure it directly.
 app.use(defaultEmptyBody);
-// Return a clean JSON error when the body parser rejects an oversized payload.
-app.use((err, req, res, next) => {
-  if (err.type === 'entity.too.large') {
-    return res.status(413).json({ error: 'Request too large. Total attachment size must not exceed 25 MiB.' });
-  }
-  next(err);
-});
+// A clean JSON error (413 request_too_large, 400 invalid_json) when a body parser refuses the body.
+app.use(bodyErrorHandler);
 // The mail node's agent (routes/mailNodeAgent.js) authenticates with its bearer token only: it is
 // mounted before the session, the identity gate, the CSRF check and the screen lock, which are
 // about signed-in users. Its router answers every path under the prefix itself.
@@ -265,12 +261,7 @@ app.get('/api/update', async (_req, res) => {
 
 // Catch unhandled errors thrown (or rejected) inside async route handlers.
 // Express 5 forwards a rejected async handler here natively.
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, _next) => {
-  console.error('Unhandled route error:', err);
-  if (res.headersSent) return;
-  res.status(500).json({ error: 'Internal server error' });
-});
+app.use(finalErrorHandler);
 
 // WebSocket
 setupWebSocket(wss, sessionMiddleware);

@@ -35,8 +35,8 @@ describe('rules belong to one mailbox', () => {
       if (sql === 'SELECT id FROM email_accounts WHERE id = $1') return { rows: [{ id: MAILBOX }] };
       if (sql.includes('FROM folders')) return { rows: [{ total: '2', match: '1' }] };
       if (sql.includes('COUNT(*) AS cnt FROM inbox_rules')) return { rows: [{ cnt: '3' }] };
-      if (sql.includes('INSERT INTO inbox_rules') || sql.includes('UPDATE inbox_rules')) return { rows: [{ id: 'rule-1' }] };
-      if (sql.startsWith('SELECT id, account_id, name, actions FROM inbox_rules')) return { rows: [{ id: 'rule-1', account_id: MAILBOX, name: 'x', actions: [] }] };
+      if (sql.includes('INSERT INTO inbox_rules') || sql.includes('UPDATE inbox_rules')) return { rows: [{ id: '11111111-1111-4111-8111-111111111111' }] };
+      if (sql.startsWith('SELECT id, account_id, name, actions FROM inbox_rules')) return { rows: [{ id: '11111111-1111-4111-8111-111111111111', account_id: MAILBOX, name: 'x', actions: [] }] };
       return { rows: [] };
     });
   });
@@ -56,13 +56,22 @@ describe('rules belong to one mailbox', () => {
 
   it('requires a mailbox to create or change a rule', async () => {
     expect(await send('POST', '/', RULE)).toMatchObject({ status: 400, body: { code: 'account_required' } });
-    expect(await send('PUT', '/rule-1', RULE)).toMatchObject({ status: 400, body: { code: 'account_required' } });
+    expect(await send('PUT', '/11111111-1111-4111-8111-111111111111', RULE)).toMatchObject({ status: 400, body: { code: 'account_required' } });
     expect(query.mock.calls.some(([sql]) => /INSERT|UPDATE/.test(sql))).toBe(false);
   });
 
   it('answers 404 for a mailbox that does not exist', async () => {
     query.mockImplementation(async () => ({ rows: [] }));
-    expect((await send('POST', '/', { ...RULE, accountId: MAILBOX })).status).toBe(404);
+    expect(await send('POST', '/', { ...RULE, accountId: MAILBOX })).toMatchObject({ status: 404, body: { code: 'account_not_found' } });
+  });
+
+  // Every refusal carries its code next to the text, so the screens can translate it.
+  it('answers each refusal with its code', async () => {
+    expect(await send('POST', '/', { ...RULE, accountId: 'nope' })).toMatchObject({ status: 400, body: { code: 'invalid_account' } });
+    expect(await send('POST', '/', { ...RULE, accountId: MAILBOX, conditions: 'x' })).toMatchObject({ status: 400, body: { code: 'not_arrays' } });
+    expect(await send('POST', '/', { ...RULE, accountId: MAILBOX, actions: [{ type: 'forward', value: 'not an address' }] })).toMatchObject({ status: 400, body: { code: 'invalid_action' } });
+    query.mockImplementation(async (sql) => (sql.startsWith('DELETE FROM inbox_rules') ? { rows: [] } : { rows: [{ id: MAILBOX }] }));
+    expect(await send('DELETE', '/11111111-1111-4111-8111-111111111111')).toMatchObject({ status: 404, body: { code: 'not_found', error: 'Rule not found' } });
   });
 
   it('stores the mailbox, the author and the move action', async () => {
@@ -74,12 +83,12 @@ describe('rules belong to one mailbox', () => {
   });
 
   it('changes and deletes a rule whoever created it', async () => {
-    expect((await send('PUT', '/rule-1', { ...RULE, accountId: MAILBOX })).status).toBe(200);
+    expect((await send('PUT', '/11111111-1111-4111-8111-111111111111', { ...RULE, accountId: MAILBOX })).status).toBe(200);
     const [updateSql, updateParams] = query.mock.calls.find(([s]) => s.includes('UPDATE inbox_rules'));
     expect(updateSql).toMatch(/WHERE id = \$8\s+RETURNING \*/);
     expect(updateParams).toHaveLength(8);
-    query.mockResolvedValueOnce({ rows: [{ id: 'rule-1' }] });
-    expect((await send('DELETE', '/rule-1')).status).toBe(200);
-    expect(query).toHaveBeenLastCalledWith('DELETE FROM inbox_rules WHERE id = $1 RETURNING id, account_id, name, actions', ['rule-1']);
+    query.mockResolvedValueOnce({ rows: [{ id: '11111111-1111-4111-8111-111111111111' }] });
+    expect((await send('DELETE', '/11111111-1111-4111-8111-111111111111')).status).toBe(200);
+    expect(query).toHaveBeenLastCalledWith('DELETE FROM inbox_rules WHERE id = $1 RETURNING id, account_id, name, actions', ['11111111-1111-4111-8111-111111111111']);
   });
 });

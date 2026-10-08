@@ -306,6 +306,11 @@ describe('mailexpert agent', () => {
     expect(revoked.json()).toEqual({ revoked: true });
     expect(await storedHash()).toBeNull();
     expect(await entry('mail_node.agent_token_revoked', 4)).toMatchObject({ actor_email: 'cli', details: { via: 'cli' } });
+    // The job the revocation failed: its code is explained under the table, with the next step.
+    const failed = await cli(['agent', 'jobs']);
+    expect(failed.out).toMatch(/backup\s+failed/);
+    expect(failed.out).toMatch(/agent_revoked: .*revoked.*mailexpert agent token issue/);
+    expect((await cli(['agent', 'jobs', '--json'])).json().jobs[0]).toMatchObject({ state: 'failed', error: 'agent_revoked' });
   });
 });
 

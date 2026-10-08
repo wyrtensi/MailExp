@@ -621,7 +621,7 @@ router.get('/messages/:id/body', async (req, res) => {
     res.json({ html: responseHtml, text: safeText, attachments: attachments || [], hasBlockedRemoteImages, senderEmail: message.sender_email, senderName: message.sender_name, eopCategory: message.eop_category ?? null, inReplyTo: message.in_reply_to ?? null, references: message.thread_references ?? null });
   } catch (err) {
     const msg = err.message || 'Unknown error';
-    console.error('Body fetch error:', msg);
+    console.error(`Body fetch error for message ${id} (account ${message.account_id}):`, msg);
     // Detect Gmail/IMAP throttling and surface a helpful message
     const isThrottle = /THROTTL/i.test(msg);
     if (isThrottle) {
@@ -640,7 +640,8 @@ router.get('/messages/:id/body', async (req, res) => {
     // or a server refusing one outright: none is a broken message, and each is worth retrying
     // shortly, so the same 503 busy answer the UI already explains instead of a raw 500.
     if (isMailboxBusyError(err) || isConnectionRefusal(msg)) return sendMailboxBusy(res, err);
-    res.status(500).json({ error: msg });
+    // The server's own text stays in the log above; the screen gets a code to translate.
+    res.status(500).json({ error: 'Failed to load the message body', code: 'body_fetch_failed' });
   }
 });
 

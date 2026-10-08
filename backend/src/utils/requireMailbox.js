@@ -2,11 +2,11 @@ import { query } from '../services/db.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// code -> [HTTP status, the API's answer]. Only a missing mailbox has always answered its code.
+// code -> [HTTP status, the API's answer]; each answer carries its code for the screens.
 export const MAILBOX_REF_ERRORS = Object.freeze({
   account_required: [400, { error: 'accountId is required', code: 'account_required' }],
-  invalid_account: [400, { error: 'Invalid account id' }],
-  account_not_found: [404, { error: 'Account not found' }],
+  invalid_account: [400, { error: 'Invalid account id', code: 'invalid_account' }],
+  account_not_found: [404, { error: 'Account not found', code: 'account_not_found' }],
 });
 
 // Rules and block list entries each belong to one mailbox: { id } of the mailbox the request
