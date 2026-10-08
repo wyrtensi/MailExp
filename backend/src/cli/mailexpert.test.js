@@ -206,6 +206,24 @@ describe('errors and exit codes', () => {
     expect(result.err).toContain('(internal_error)');
   });
 
+  // The cause's code reaches a script too (--json), not only the line on stderr.
+  it('names the cause of an unexpected failure in --json', async () => {
+    actions.adminDomainList.mockRejectedValue(Object.assign(new Error('boom'), { code: 'XX000' }));
+    const result = await cli(['domain', 'list', '--json']);
+    expect(result.code).toBe(3);
+    expect(JSON.parse(result.out)).toMatchObject({ code: 'internal_error', cause: 'XX000' });
+  });
+
+  it.each([
+    ['ECONNREFUSED'], ['ENOTFOUND'], ['ETIMEDOUT'], ['EAI_AGAIN'], ['28P01'], ['3D000'], ['57P03'],
+  ])('a database it cannot reach (%s) is database_unavailable with the next step', async (code) => {
+    actions.resolveCliActor.mockRejectedValueOnce(Object.assign(new Error('connect failed'), { code }));
+    const result = await cli(['domain', 'list']);
+    expect(result.code).toBe(3);
+    expect(result.err).toContain('(database_unavailable)');
+    expect(result.err).toMatch(/DATABASE_URL/);
+  });
+
   it('refuses --as for anyone but an enabled administrator before acting', async () => {
     actions.resolveCliActor.mockResolvedValue({ error: 'admin_not_found' });
     const result = await cli(['domain', 'restart', 'example.com', '--yes', '--as', 'someone@example.com']);

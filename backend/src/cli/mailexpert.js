@@ -226,10 +226,19 @@ export async function run(argv, overrides = {}) {
     }
     if (err instanceof CliError) return fail(err.code, err.message, err.exit, err.details ?? {});
     // Anything else is the panel's own failure: its name and code only, never a value it carried.
-    console.error(`mailexpert ${group.name} ${command.name} failed:`, err?.code || err?.name || 'Error', err?.message ?? '');
-    return fail('internal_error', 'The command failed; the line above says why', EXIT.failed);
+    const cause = err?.code || err?.name || 'Error';
+    console.error(`mailexpert ${group.name} ${command.name} failed:`, cause, err?.message ?? '');
+    if (DATABASE_DOWN_CODES.has(err?.code)) {
+      return fail('database_unavailable', `The database is not reachable (${err.code}): check that the stack is running and that DATABASE_URL names it`, EXIT.failed);
+    }
+    return fail('internal_error', 'The command failed; the line above says why', EXIT.failed, { cause: String(cause) });
   }
 }
+
+// The codes of a database the CLI cannot reach or sign in to (the connection's, then Postgres's
+// invalid_password, invalid_catalog_name, cannot_connect_now): the next step is the stack or
+// DATABASE_URL, not the command.
+const DATABASE_DOWN_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNRESET', '28P01', '3D000', '57P03']);
 
 // Before the process ends: the journal writes still running (recordAudit is not awaited by the
 // actions) end first, then the pool closes. Every job the actions queued is written by then (they
