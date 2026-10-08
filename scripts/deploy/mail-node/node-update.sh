@@ -160,12 +160,13 @@ run_step() {
   return "$rc"
 }
 
-# last_output <log>: the last line a command wrote to the log (its error, as a rule): no step
-# header, "[mailexpert] " dropped, URLs without user information (error_tail), cut to 160
-# characters; "no output" when there is none.
+# last_output <log>: the last line the step run_step started last wrote to the log (its error, as
+# a rule), never a line of an earlier step: only what follows the last "== " header,
+# "[mailexpert] " dropped, URLs without user information (error_tail), cut to 160 characters;
+# "no output" when the step wrote nothing.
 last_output() {
   local line
-  line=$(grep -v -e '^== ' -e '^[[:space:]]*$' "$1" 2>/dev/null | error_tail) || line=''
+  line=$(awk '/^== / {out = ""; next} {out = out $0 "\n"} END {printf "%s", out}' "$1" 2>/dev/null | error_tail) || line=''
   line=${line#\[mailexpert\] }
   printf '%s' "${line:-no output}" | cut -c1-160
 }
@@ -211,6 +212,7 @@ compose_error() {
   line=$(grep -iE 'error|fail|unhealthy' <<<"$out" | tail -n 1) || line=''
   if [ -z "$line" ]; then line=$(tail -n 1 <<<"$out"); fi
   line=${line#"${line%%[![:space:]]*}"}
+  line=${line#\[mailexpert\] }
   printf '%s\n' "${line:0:200}"
 }
 
@@ -412,20 +414,17 @@ mailcow_update_if_pinned() {
     warn "mailcow: setup.sh after update.sh failed (exit $?); its output is above in this log"
     return 1
   }
-  # The output of `up` goes to the log as it is; on a failure the warning names its last error
-  # line and the containers that do not run or are unhealthy.
-  output=$(mktemp)
+  # The output of `up` reaches the log line by line as it runs (on stderr) and is kept for the
+  # warning, which names its last error line and the containers that do not run or are unhealthy.
   rc=0
-  (cd "$dir" && run_group "$(mailcow_budget "$CHECK_TIMEOUT")" docker compose up -d --remove-orphans) >"$output" 2>&1 || rc=$?
-  cat "$output"
+  output=$( (cd "$dir" && run_group "$(mailcow_budget "$CHECK_TIMEOUT")" docker compose up -d --remove-orphans) 2>&1 |
+    while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line" >&2 && printf '%s\n' "$line"; done) || rc=$?
   if [ "$rc" != 0 ]; then
-    problem=$(compose_error <"$output")
-    rm -f "$output"
+    problem=$(compose_error <<<"$output")
     bad=$(mailcow_containers | bad_containers) || bad=''
     warn "mailcow: docker compose up -d failed (exit $rc): ${problem:-no output}${bad:+; not running or unhealthy: $bad}; next: docker compose logs --tail 50 <service> in $dir"
     return 1
   fi
-  rm -f "$output"
   stopped=$(date -u +%H:%M:%S)
   log "mailcow: stopped and started again within $started-$stopped UTC (update.sh stops it after fetching the images)"
   limit=$(mailcow_budget "$MAILCOW_HEALTH_WAIT")
@@ -502,7 +501,7 @@ trusted_origin() {
 }
 
 update_main() {
-  local sha=${2:-} problem checks_problem='' rc error
+  local sha=${2:-} problem checks_problem='' rc error output
   UPDATE_ID=${1:-}
   is_job_id "$UPDATE_ID" || die "usage: node-update.sh <job id> <sha>" 2
   is_sha "$sha" || die "the commit must be 40 hex digits" 2
@@ -545,8 +544,14 @@ update_main() {
     "$NODE_DIR/node-backup.sh" --tag pre-update ||
     finish failed "the pre-update backup failed: $(last_step "$UPDATE_LOG"); the node is unchanged" backup_failed
 
-  checkout "$sha" >>"$UPDATE_LOG" 2>&1 ||
-    finish failed "git checkout ${sha:0:12} failed: $(last_output "$UPDATE_LOG"); the node is unchanged" checkout_failed
+  # Its own output, in the log and in the cause: never a line an earlier step left there.
+  rc=0
+  output=$(checkout "$sha" 2>&1) || rc=$?
+  if [ -n "$output" ]; then printf '%s\n' "$output" >>"$UPDATE_LOG"; fi
+  if [ "$rc" != 0 ]; then
+    problem=$(error_tail <<<"$output")
+    finish failed "git checkout ${sha:0:12} failed: ${problem:-no output}; the node is unchanged" checkout_failed
+  fi
   if ! run_step "setup.sh at ${sha:0:12}" run_setup; then
     problem=$(last_step "$UPDATE_LOG")
     if checkout "$PREVIOUS" >>"$UPDATE_LOG" 2>&1 && run_step "rollback: setup.sh at ${PREVIOUS:0:12}" run_setup; then

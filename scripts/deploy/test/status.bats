@@ -112,6 +112,13 @@ setup() {
   [[ $output == "info migrations: the applied ones cannot be compared (? before, 98 now): treat them as applied;"* ]]
 }
 
+@test "applied_note: a replaced Caddy image is put back before the code-only way back" {
+  run applied_note 96 96 sha-aaaaaaaaaaaa /opt/me /d.dump /opt/me/edge/.env ghcr.io/x/mailexpert-edge@sha256:abc
+  [ "$output" = "info migrations: none was applied (96 before and after); going back to sha-aaaaaaaaaaaa needs no dump: set EDGE_IMAGE in /opt/me/edge/.env back to ghcr.io/x/mailexpert-edge@sha256:abc, then install.sh --prefix /opt/me --version sha-aaaaaaaaaaaa" ]
+  run applied_note 96 96 sha-aaaaaaaaaaaa /opt/me /d.dump /opt/me/edge/.env ""
+  [[ $output == *"set EDGE_IMAGE in /opt/me/edge/.env back to empty (it was unpinned), then install.sh"* ]]
+}
+
 @test "update_notes: no Caddy lines without Caddy, no edge lines without an edge" {
   run update_notes 0 cloudflared <<<$'deploy/edge/Dockerfile\ndeploy/edge/Caddyfile.tmpl\ndeploy/edge/compose.yml'
   [ "$output" = "info edge: its compose file changed; install.sh (run by update.sh) copies it and recreates what changed" ]

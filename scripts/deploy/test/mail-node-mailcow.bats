@@ -195,8 +195,9 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   run_hook
   [ "$status" -eq 1 ]
   [[ $output == *"mailcow: docker compose up -d failed (exit 1): dependency failed to start: container mailcowdockerized-unbound-mailcow-1 is unhealthy; not running or unhealthy: unbound-mailcow: unhealthy, nginx-mailcow: created; next: docker compose logs"* ]]
-  # compose's own output stays in the log.
+  # compose's own output stays in the log, before the warning (it is passed on as it comes).
   [[ $output == *"unbound-mailcow-1  Waiting"* ]]
+  [ "$(grep -n 'unbound-mailcow-1  Waiting' <<<"$output" | cut -d: -f1)" -lt "$(grep -n 'docker compose up -d failed' <<<"$output" | cut -d: -f1)" ]
 }
 
 @test "compose_error: the last error line, else the last line" {
@@ -204,13 +205,16 @@ base() { git -C "$MC" merge-base HEAD origin/master; }
   [ "$output" = "Error response from daemon: port is already allocated" ]
   run bash -c '. "$1"; compose_error <<<"$2"' _ "$NODE_SCRIPTS/node-update.sh" $' Container a  Started\n Container b  Created\n'
   [ "$output" = "Container b  Created" ]
+  run bash -c '. "$1"; compose_error <<<"$2"' _ "$NODE_SCRIPTS/node-update.sh" $' Container a  Waiting\n[mailexpert] error: docker ran past 5s; stopped\n'
+  [ "$output" = "error: docker ran past 5s; stopped" ]
 }
 
 @test "last_output: the last line a command wrote, without a URL's user information" {
   printf "== git fetch origin\nfatal: unable to access 'https://user:secret-token@example.com/x.git/': timeout\n\n" >"$BATS_TEST_TMPDIR/step.log"
   run bash -c '. "$1"; last_output "$2"' _ "$NODE_SCRIPTS/node-update.sh" "$BATS_TEST_TMPDIR/step.log"
   [ "$output" = "fatal: unable to access 'https://example.com/x.git/': timeout" ]
-  printf '== git fetch origin\n' >"$BATS_TEST_TMPDIR/step.log"
+  # A step that wrote nothing: never the line an earlier step left.
+  printf '== node-backup.sh --tag pre-update\nerror: an earlier step\n\n== git fetch origin\n' >"$BATS_TEST_TMPDIR/step.log"
   run bash -c '. "$1"; last_output "$2"' _ "$NODE_SCRIPTS/node-update.sh" "$BATS_TEST_TMPDIR/step.log"
   [ "$output" = "no output" ]
 }

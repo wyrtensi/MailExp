@@ -112,13 +112,15 @@ check_index_warning() {
   if [ -n "$line" ]; then warn "$line"; fi
 }
 
-# print_update_notes <old commit> <new commit> <applied migrations before> <old version> <dump>:
-# "next:" for the steps a person takes outside update.sh, "info:" for context. Whether migrations
+# print_update_notes <old commit> <new commit> <applied migrations before> <old version> <dump>
+# [<previous EDGE_IMAGE>]: "next:" for the steps a person takes outside update.sh, "info:" for context. Whether migrations
 # ran comes from the count of applied ones before and now, not from the files that changed (an
-# edit of an applied migration runs nothing).
+# edit of an applied migration runs nothing). With a sixth argument (empty or not) the Caddy image
+# was replaced too.
 print_update_notes() {
-  local changed tenant=0 profiles line
-  line=$(applied_note "$3" "$(applied_migrations)" "$4" "$OPT_PREFIX" "$5")
+  local changed tenant=0 profiles line edge_env=''
+  if [ $# -ge 6 ]; then edge_env=$EDGE_ENV; fi
+  line=$(applied_note "$3" "$(applied_migrations)" "$4" "$OPT_PREFIX" "$5" "$edge_env" "${6:-}")
   log "info: ${line#info }"
   changed=$(git -C "$APP_DIR" diff --name-only "$1" "$2" 2>/dev/null) || return 0
   profiles=$(env_get "$ENV_FILE" COMPOSE_PROFILES) || profiles=''
@@ -250,8 +252,8 @@ main() {
     send_ping "$url" fail "the update to $target did not become ready"
     warn "$target did not become ready; nothing was rolled back"
     log "the backend log: docker compose -p $CFG_PROJECT logs backend"
-    if [ -n "$edge_previous" ]; then
-      log "the Caddy image was replaced as well; going back restores $edge_previous (rollback.sh does it, or set EDGE_IMAGE in $EDGE_ENV)"
+    if [ -n "$edge_image" ]; then
+      log "the Caddy image was replaced as well; going back restores ${edge_previous:-an empty EDGE_IMAGE (it was unpinned)} (rollback.sh does it, or set EDGE_IMAGE in $EDGE_ENV)"
     fi
     after=$(applied_migrations)
     if [ -n "$before" ] && [ "$before" = "$after" ]; then
@@ -264,7 +266,11 @@ main() {
   check_index_warning "$since"
   send_ping "$url" success "updated to $target"
   log "updated to $target; the pre-update dump is $dump"
-  print_update_notes "$old_head" "${target#sha-}" "$before" "$old" "$dump"
+  if [ -n "$edge_image" ]; then
+    print_update_notes "$old_head" "${target#sha-}" "$before" "$old" "$dump" "$edge_previous"
+  else
+    print_update_notes "$old_head" "${target#sha-}" "$before" "$old" "$dump"
+  fi
 }
 
 # One line: install.sh checks out another commit, which rewrites this file while it runs.

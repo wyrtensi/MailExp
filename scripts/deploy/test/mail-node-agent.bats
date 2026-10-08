@@ -671,6 +671,18 @@ run_update_with() {
   run bash -c '. "$1"; eval "$2"; update_main 42 "$3"' _ "$MAILEXPERT_NODE_DIR/node-update.sh" "$1" "$NEW_SHA"
 }
 
+@test "update: a failed checkout names its own error, never a line of an earlier step" {
+  update_setup
+  write_backup_keys
+  run_update_with 'checkout() { echo "error: Your local changes would be overwritten by checkout" >&2; return 1; }'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .error <<<"$(last_report)")" = checkout_failed ]
+  [ "$(jq -r .step <<<"$(last_report)")" = "git checkout ${NEW_SHA:0:12} failed: error: Your local changes would be overwritten by checkout; the node is unchanged" ]
+  grep -q 'Your local changes would be overwritten' "$MAILEXPERT_NODE_STATE/update-42.log"
+  run_update_with 'checkout() { return 1; }'
+  [ "$(jq -r .step <<<"$(last_report)")" = "git checkout ${NEW_SHA:0:12} failed: no output; the node is unchanged" ]
+}
+
 @test "update: a failed mailcow update starts mailcow again, still runs the checks and reports" {
   update_setup
   write_backup_keys

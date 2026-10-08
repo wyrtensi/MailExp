@@ -115,11 +115,16 @@ pending_note() {
 
 # applied_note <applied before> <applied after> <old version> <prefix> <pre-update dump>: what an
 # update that became ready did to the schema, from the counts of applied migrations (empty: the
-# database did not answer), as "info <text>".
+# database did not answer), as "info <text>". [<edge env file> <previous EDGE_IMAGE>]: the update
+# replaced the Caddy image too (the file is empty otherwise); install.sh --version <old> does not put
+# the previous one back (rollback.sh does), so the code-only way back names that step first.
 applied_note() {
-  local before=$1 after=$2 old=$3 prefix=$4 dump=$5
+  local before=$1 after=$2 old=$3 prefix=$4 dump=$5 edge_env=${6:-} edge_previous=${7:-} edge_step=''
+  if [ -n "$edge_env" ]; then
+    edge_step="set EDGE_IMAGE in $edge_env back to ${edge_previous:-empty (it was unpinned)}, then "
+  fi
   if [[ $before =~ ^[0-9]+$ && $after =~ ^[0-9]+$ ]] && [ "$before" = "$after" ]; then
-    echo "info migrations: none was applied ($after before and after); going back to $old needs no dump: install.sh --prefix $prefix --version $old"
+    echo "info migrations: none was applied ($after before and after); going back to $old needs no dump: ${edge_step}install.sh --prefix $prefix --version $old"
   elif [[ $before =~ ^[0-9]+$ && $after =~ ^[0-9]+$ ]] && [ "$after" -gt "$before" ]; then
     echo "info migrations: $((after - before)) applied ($before before, $after now); going back to $old means restoring the pre-update dump $dump (rollback.sh --to $old, runbook: \"Откат обновления\")"
   else
