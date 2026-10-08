@@ -35,6 +35,7 @@ import deliveryRoutes from './routes/delivery.js';
 import { startMailNodeDiskWatch } from './services/mailNode/diskWatch.js';
 import { startDnsCheckJob } from './services/mailNode/dnsCheckJob.js';
 import { startNodeAlertJob } from './services/mailNode/nodeAlerts.js';
+import { registerNodeCheckJobKind } from './services/mailNode/nodeChecks.js';
 import { BEFORE_NODE_DELETE, startMailboxDeletionJob } from './services/mailNode/mailboxDeletion.js';
 import { adoptDomainsWithMailboxes } from './services/mailNode/domains.js';
 import mailRoutes from './routes/mail.js';
@@ -312,6 +313,9 @@ registerAccessSyncJobKind();
 // plugins' clean-up of a deleted user, the Access sync and the settings kept in memory
 // (services/admin/adminEffects.js); the admin routes apply the same hooks at once.
 registerAdminEffectsJob();
+// The node's checks the panel CLI asked for (DNS, alerts, the outage trace): run here, where each
+// joins the run going and the trace keeps its request budget (services/mailNode/nodeChecks.js).
+registerNodeCheckJobKind();
 startJobWorker();
 
 // A failed concurrent build (migration 0061) leaves an unusable index that no later migration repairs.

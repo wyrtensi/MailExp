@@ -1,7 +1,9 @@
 import { WAIT_FLAGS, WAIT_HELP, jobLine, maybeWait, unwrap } from '../common.js';
 import { fmtDate, keyValues } from '../output.js';
 import { TENANT_JOB_KINDS } from '../../services/tenant/tenantJobs.js';
-import { TENANT_ERRORS, enqueueTenantAction, tenantStatus } from '../../services/tenant/tenantActions.js';
+import {
+  TENANT_ERRORS, enqueueTenantAction, takeConnectorReferenceAction, tenantStatus,
+} from '../../services/tenant/tenantActions.js';
 
 // mailexpert tenant ...: the Microsoft tenant (services/tenant/tenantActions.js). Nothing here
 // calls the tenant or its worker: status reads what the tenant jobs stored, the other commands
@@ -89,9 +91,22 @@ function enqueueCommand(name, kind, summary, journal, usageExtra = []) {
   };
 }
 
+const connectorsReference = {
+  name: 'connectors-reference',
+  journal: 'tenant.connector_reference_taken with the names of the connectors',
+  summary: 'take the last read of the connectors as the reference the status compares with (R-25)',
+  usage: 'tenant connectors-reference',
+  help: ['Refused until a poll has read the connectors ("tenant poll --wait" first).'],
+  async run(ctx) {
+    const result = unwrap(await takeConnectorReferenceAction(ctx.actor), TENANT_ERRORS);
+    const { reference } = result;
+    return { data: result, lines: [`reference taken: ${reference.inbound.length} inbound, ${reference.outbound.length} outbound (read at ${fmtDate(reference.readAt)})`] };
+  },
+};
+
 export default {
   name: 'tenant',
-  summary: 'the Microsoft tenant: status, connection test, anti-spam policy',
+  summary: 'the Microsoft tenant: status, connection test, poll, anti-spam policy, connector reference',
   commands: [
     status,
     enqueueCommand('test', TENANT_JOB_KINDS.test, 'test the connection to the tenant through the worker (the "Test connection" button)',
@@ -101,5 +116,8 @@ export default {
       'Sets the spam, high confidence spam, phishing and bulk actions of the Default policy to',
       'MoveToJmf where they differ (section 5.14); what changed is journaled.',
     ]),
+    enqueueCommand('poll', TENANT_JOB_KINDS.poll, 'read the blocked connectors, the connectors and the certificate now (the "Check now" button)',
+      'none for queuing; what the poll finds is journaled by the job'),
+    connectorsReference,
   ],
 };

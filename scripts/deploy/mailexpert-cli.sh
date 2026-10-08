@@ -45,8 +45,9 @@ usage() {
 Usage: mailexpert-cli.sh [--prefix /opt/mailexpert] [--] <group> <command> [options]
 
 Runs the panel CLI in the installed panel's backend container. Groups: mailbox, domain,
-tenant, quarantine, jobs, access, user, settings, sso, integration, node, eop, seats, agent,
-invite, system-email, audit, account, rule.
+tenant, quarantine, jobs, access, user, settings, sso, integration, node, eop, seats, agent.
+Mail node operations: queue, alerts, outage, spam-quarantine.
+Panel operations: invite, system-email, audit, account, rule.
 stdin reaches the CLI (access token, sso add, sso set --secret, integration microsoft set
 --secret, node config set --api-key-stdin, system-email set --password-stdin, account create
 and account set-connection --password-stdin/--smtp-password-stdin read their secret from it;

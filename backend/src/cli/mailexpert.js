@@ -40,6 +40,10 @@ import node from './commands/node.js';
 import eop from './commands/eop.js';
 import seats from './commands/seats.js';
 import agent from './commands/agent.js';
+import queue from './commands/queue.js';
+import alerts from './commands/alerts.js';
+import outage from './commands/outage.js';
+import spamQuarantine from './commands/spamQuarantine.js';
 import invite from './commands/invite.js';
 import systemEmail from './commands/systemEmail.js';
 import audit from './commands/audit.js';
@@ -50,6 +54,7 @@ export const GROUPS = Object.freeze([
   mailbox, domain, tenant, quarantine, jobs, access,
   user, settings, sso, integration,
   node, eop, seats, agent,
+  queue, alerts, outage, spamQuarantine,
   invite, systemEmail, audit, account, rule,
 ]);
 

@@ -1,5 +1,6 @@
 import { query } from '../db.js';
 import { recordAudit } from '../auditLog.js';
+import { auditOf } from '../actor.js';
 import { MailNodeError, getDkim, getMailNodeConfig } from './mailcow.js';
 import { getEopSettings } from './eopSettings.js';
 import { SYSTEM_ACTOR } from './domains.js';
@@ -149,30 +150,33 @@ async function saveNodeOutcome(run) {
 
 const namesWith = (checks, status) => checks.filter((c) => c.status === status).map((c) => c.check);
 const actor = (userId) => (userId ? { actorUserId: userId } : { actorEmail: SYSTEM_ACTOR });
+// A journal entry of a check. by: who asked, as services/actor.js names them, when the panel CLI
+// asked (the entry then carries details.via); without it the user or the system.
+const entryOf = (userId, by, entry) => (by ? auditOf(by, entry) : { ...actor(userId), ...entry });
 
 // The journal entry of one check: always for an administrator's check (a lookup failure says so),
 // otherwise only for a result whose overall status changed from a previous one.
-function journal({ userId, trigger, scope, domain, saved }) {
+function journal({ userId, by = null, trigger, scope, domain, saved }) {
   const manual = trigger === 'manual';
   if (saved.failed) {
     if (!manual) return;
-    recordAudit({
-      ...actor(userId), action: 'mail_node.dns_checked',
+    recordAudit(entryOf(userId, by, {
+      action: 'mail_node.dns_checked',
       details: {
         scope, ...(domain ? { domain } : {}), trigger, lookupFailed: true,
         code: saved.kept.lookupFailed.code, detail: saved.kept.lookupFailed.detail,
       },
-    });
+    }));
     return;
   }
   if (!manual && (saved.before === null || saved.before === saved.kept.overall)) return;
-  recordAudit({
-    ...actor(userId), action: 'mail_node.dns_checked',
+  recordAudit(entryOf(userId, by, {
+    action: 'mail_node.dns_checked',
     details: {
       scope, ...(domain ? { domain } : {}), trigger, overall: saved.kept.overall, from: saved.before,
       errors: namesWith(saved.kept.checks, 'error'), warnings: namesWith(saved.kept.checks, 'warning'),
     },
-  });
+  }));
 }
 
 const notConfigured = () => new MailNodeError('mail_node_not_configured', 'The mail node is not set up', 409);
@@ -200,8 +204,8 @@ async function runDomain(cfg, eop, row, resolver, failure) {
 const answerOf = (domain, saved) => ({ domain, ...saved.kept });
 
 // One domain the panel knows, at once and on its own: { domain, at, overall, trigger, checks,
-// lookupFailed? }. trigger: 'manual' or 'expected_changed'.
-export async function checkDomainNow({ domain, userId = null, trigger = 'manual' }) {
+// lookupFailed? }. trigger: 'manual' or 'expected_changed'. by: the panel CLI's actor (journal).
+export async function checkDomainNow({ domain, userId = null, by = null, trigger = 'manual' }) {
   const cfg = await getMailNodeConfig();
   if (!cfg) throw notConfigured();
   const [row] = await domainRows(domain);
@@ -211,7 +215,7 @@ export async function checkDomainNow({ domain, userId = null, trigger = 'manual'
   const at = new Date().toISOString();
   const result = await runDomain(cfg, eop, row, resolver, failure);
   const saved = await saveDomainOutcome(row.domain, { at, trigger, ...result });
-  journal({ userId, trigger, scope: 'domain', domain: row.domain, saved });
+  journal({ userId, by, trigger, scope: 'domain', domain: row.domain, saved });
   return answerOf(row.domain, saved);
 }
 
@@ -228,7 +232,7 @@ async function eachLimited(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
-async function runAll({ userId, trigger, deadlineMs = RUN_DEADLINE_MS }) {
+async function runAll({ userId, by = null, trigger, deadlineMs = RUN_DEADLINE_MS }) {
   const cfg = await getMailNodeConfig();
   if (!cfg) throw notConfigured();
   const eop = await getEopSettings();
@@ -266,15 +270,15 @@ async function runAll({ userId, trigger, deadlineMs = RUN_DEADLINE_MS }) {
   if (trigger === 'manual') {
     const counts = { ok: 0, warning: 0, error: 0, lookupFailed: 0 };
     for (const d of domains) counts[d.saved.failed ? 'lookupFailed' : d.saved.kept.overall] += 1;
-    recordAudit({
-      ...actor(userId), action: 'mail_node.dns_checked',
+    recordAudit(entryOf(userId, by, {
+      action: 'mail_node.dns_checked',
       details: {
         scope: 'all', trigger, overall: nodeSaved.failed ? null : nodeSaved.kept.overall, from: nodeSaved.before,
         ...(nodeSaved.failed ? { lookupFailed: true, code: nodeSaved.kept.lookupFailed.code } : {}),
         counts, errorDomains: domains.filter((d) => !d.saved.failed && d.saved.kept.overall === 'error').map((d) => d.domain),
         ...(skipped.length ? { skipped: skipped.length } : {}),
       },
-    });
+    }));
   } else {
     journal({ trigger, scope: 'node', saved: nodeSaved });
     for (const d of domains) journal({ trigger, scope: 'domain', domain: d.domain, saved: d.saved });
@@ -283,10 +287,11 @@ async function runAll({ userId, trigger, deadlineMs = RUN_DEADLINE_MS }) {
 }
 
 // Starts a check of the node and every domain, or joins the one running: { started, promise }.
-// The promise never rejects (a failure is logged): the caller answers before the run ends.
-export function startCheckAll({ userId = null, trigger = 'manual', deadlineMs } = {}) {
+// The promise never rejects (a failure is logged): the caller answers before the run ends. by: the
+// panel CLI's actor, whose check the backend runs (services/mailNode/nodeChecks.js).
+export function startCheckAll({ userId = null, by = null, trigger = 'manual', deadlineMs } = {}) {
   if (running) return { started: false, promise: running };
-  running = runAll({ userId, trigger, deadlineMs })
+  running = runAll({ userId, by, trigger, deadlineMs })
     .catch((err) => {
       console.error('Mail node DNS check failed:', err?.code || err?.message || 'error');
       return null;
