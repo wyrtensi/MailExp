@@ -172,8 +172,9 @@ $D/backup.sh --show-recovery-key
    `systemctl is-active mailexpert-updater.path` — `active`;
    `cat /opt/mailexpert/state/update-spool/result/updater.json` — `"installed":true`.
    С `--no-system` исполнителя нет: обновления только по SSH.
-2. GitHub (владелец репозитория): ruleset на тег `latest` — создавать, двигать и удалять его могут
-   только workflow `promote.yml` и владелец.
+2. GitHub: ничего настраивать не нужно. Ruleset на тег `latest` не используется (личный репозиторий,
+   см. [deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)): тег двигает
+   только владелец через `promote.yml`.
 3. Продвижение сборки: `promote.yml` с `main`, сначала `dry_run`, затем настоящий запуск. Кнопка
    ставит только продвинутую `latest`, только вперёд и только с `main`.
 4. Бэкапы restic (шаг 4) — рекомендуются: без них перед обновлением делается только локальный дамп

@@ -174,8 +174,9 @@ verification). Подробно — [operations/google-oauth.md](operations/goog
 Cloudflare ([deployment.md](operations/deployment.md)) и, если подключаются ящики Microsoft 365,
 реальные поля токена Microsoft при подключении.
 
-Не настроено: правило в GitHub, которое запрещает двигать тег `latest` кому-то кроме CI и
-владельца (Settings → Rules → Rulesets, [operations/README.md, раздел 9](operations/README.md)).
+Ruleset на тег `latest` не нужен и невозможен: репозиторий личный, GitHub Actions в обход не
+добавить. Тег двигает только владелец через `promote.yml`
+([deployment.md, раздел 5.1](operations/deployment.md#51-включить-обновления-на-боевом-сервере)).
 
 ### Свои домены через Microsoft EOP — код написан, не проверен с настоящим Microsoft
 

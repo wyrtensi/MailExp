@@ -399,7 +399,7 @@ Caddy) и `info:` (справка: что `install.sh` сделал сам и `i
 ### 5.1. Включить обновления на боевом сервере
 
 Чтобы кнопка «Обновить» в панели и `update.sh latest` работали, нужно один раз: исполнитель на
-хосте, ruleset на тег `latest` в GitHub, продвинутая сборка. Бэкапы и служба почтового узла —
+хосте и продвинутая сборка. Бэкапы и служба почтового узла —
 рекомендуемые части того же пути.
 
 **1. Хост панели — делает `install.sh` сам.** Отдельной команды включения нет: всё ставит
@@ -427,25 +427,15 @@ Caddy) и `info:` (справка: что `install.sh` сделал сам и `i
 (сверка digest и скачивание образов); контейнеру backend — к `api.github.com`: оттуда карточка узнаёт,
 куда указывает `latest` и сколько коммитов до него. Без этого карточка не видит новую сборку.
 
-**2. GitHub — делает владелец репозитория, один раз.** Ruleset на тег `latest`, иначе любой с правом
-push тегов мог бы направить панели на другой коммит (хосты всё равно не ставят `latest` вне `main`
-или старее текущей версии и сверяют digest образов, но решение «что идёт в прод» должно оставаться
-за владельцем). Settings → Rules → Rulesets → New ruleset → **New tag ruleset**:
-
-| Поле | Значение |
-|---|---|
-| Ruleset name | например, `latest channel` |
-| Enforcement status | **Active** |
-| Bypass list → Add bypass | роль **Repository admin** (владелец) и приложение **GitHub Actions** (под ним `promote.yml` двигает тег токеном `GITHUB_TOKEN`), режим **Always allow** |
-| Target tags → Add a target → Include by pattern | `latest` |
-| Tag protections (rules) | **Restrict creations**, **Restrict updates**, **Restrict deletions** |
-
-Проверка: `gh api repos/wyrtensi/MailExpert/rulesets` — в списке есть этот ruleset. `dry_run` тег не
-двигает, поэтому, попал ли workflow в список обхода, покажет только первый **настоящий** запуск
-`promote.yml` после включения ruleset: отказ push тега (`GH013: Repository rule violations`) значит,
-что GitHub Actions в обходе нет. Если GitHub не даёт добавить приложение GitHub Actions в список
-обхода, другого пути в коде нет (workflow двигает тег только токеном `GITHUB_TOKEN`): это решение
-владельца — вопрос к проекту, а не обход ruleset.
+**2. GitHub — ничего настраивать не нужно.** Ruleset на тег `latest` не создаётся: `wyrtensi/MailExpert`
+— личный репозиторий, и GitHub не принимает в обход ruleset приложение GitHub Actions (ошибка 422
+`Actor GitHub Actions integration must be part of the ruleset source or owner organization`), а ruleset
+без этого обхода заблокировал бы `promote.yml`, который двигает тег токеном `GITHUB_TOKEN`. Решение
+владельца: тег `latest` двигает только он, запуская `promote.yml` с `main` (сначала `dry_run`).
+Канал защищают проверки хостов (`latest` вне `main` или старее текущей версии отклоняется, digest
+образов сверяется) и то, что пушить теги и запускать workflow могут только люди с правом записи в
+репозиторий. Если репозиторий перейдёт в организацию, ruleset с обходом для GitHub Actions станет
+возможен.
 
 **3. Продвинуть сборку в `latest`** (владелец; workflow запускается только с `main`):
 
