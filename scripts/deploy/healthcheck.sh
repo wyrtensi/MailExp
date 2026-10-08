@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks the panel every 5 minutes (mailexpert-health.timer): readiness, containers, free disk,
-# the age of the last backup and, with Caddy and a public certificate, its expiry. On success it
+# the age of the last backup, the host updater (a problem when mailexpert-updater.path is installed
+# but not active) and, with Caddy and a public certificate, its expiry. On success it
 # pings HEALTHCHECK_PING_URL, otherwise <url>/fail with the list of problems. The monitoring
 # service alerts the owner (in Telegram, through its own integration) on a failure and when the
 # pings stop, so a server that is down, or cannot run this script, is noticed too.
@@ -34,7 +35,8 @@ usage() {
 Usage: healthcheck.sh [--prefix /opt/mailexpert]
 
 Checks readiness, containers, free disk (MAILEXPERT_MIN_FREE_PCT, default 15), the age of the
-last backup and the certificate of <DIRECT_HOST>; pings HEALTHCHECK_PING_URL (or <url>/fail).
+last backup, the host updater (mailexpert-updater.path installed but not active) and the
+certificate of <DIRECT_HOST>; pings HEALTHCHECK_PING_URL (or <url>/fail).
 Exit codes: 0 healthy or skipped, 1 problems found, 2 invalid input.
 EOF
 }
@@ -84,6 +86,7 @@ collect_problems() {
   else
     echo "backup: not configured (add the restic keys with configure.sh, then run install.sh)"
   fi
+  updater_problem "$(updater_state "$CFG_SYSTEM")"
   if grep -qx caddy <<<"$services" && [ "$CFG_EDGE_TLS" = acme ]; then
     expiry=$(cert_expiry_epoch) || expiry=''
     cert_problem "$CFG_DIRECT_HOST" "$now" "$expiry"

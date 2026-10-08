@@ -350,4 +350,31 @@ describe('googleApp.js usage', () => {
     expect(await run(['bogus'])).toBe(2);
     expect(await run(['--help'])).toBe(0);
   });
+
+  it('<command> --help (or -h) prints that command usage, exits 0 and touches nothing', async () => {
+    const commands = ['add', 'list', 'show', 'enable', 'close', 'disable', 'delete', 'set-limit', 'set-label', 'replace-secret'];
+    for (const command of commands) {
+      for (const flag of ['--help', '-h']) {
+        console.log.mockClear();
+        expect(await run([command, flag], stdinOf(''))).toBe(0);
+        expect(out()).toContain(`googleApp.js ${command} `);
+        expect(out()).toContain('Exit codes:');
+      }
+    }
+    // Only the command's own line, not the whole list.
+    console.log.mockClear();
+    await run(['show', '--help']);
+    expect(out()).not.toContain('googleApp.js enable');
+    // Help answers whatever else the line says, and no service function runs.
+    expect(await run(['delete', APP_ID, '--help'])).toBe(0);
+    expect(await run(['add', '--user-limit', 'abc', '--help'], stdinOf(WEB_CLIENT_JSON))).toBe(0);
+    for (const fn of Object.values(registry)) {
+      if (fn !== registry.getEffectiveGoogleRedirectUri) expect(fn).not.toHaveBeenCalled();
+    }
+  });
+
+  it('after -- a literal --help is an argument, not a request for help', async () => {
+    expect(await run(['set-label', APP_ID, '--', '--help'])).toBe(0);
+    expect(registry.updateGoogleApp).toHaveBeenCalledWith(APP_ID, { label: '--help' });
+  });
 });

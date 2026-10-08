@@ -166,7 +166,8 @@ MailExpert подключает Gmail-ящики пользователей, н�
   хранилище и проверки им не мешают. Весь прогон юнита ограничен 6 часами.
 - **Проверка здоровья** — таймер `mailexpert-health.timer`, каждые 5 минут
   (`healthcheck.sh`): готовность `/api/health/ready`, состояние контейнеров, свободное место,
-  возраст последнего бэкапа, срок сертификата `<DIRECT_HOST>`.
+  возраст последнего бэкапа, срок сертификата `<DIRECT_HOST>`, исполнитель обновлений из панели
+  (проблема, если `mailexpert-updater.path` установлен, но не активен).
 - **Ручной бэкап:**
 
   ```bash
@@ -458,10 +459,17 @@ gh api repos/wyrtensi/MailExpert/git/ref/tags/latest --jq '.object.sha[0:12]'   
 GHCR, то есть CI на `main` для него зелёный; иначе workflow останавливается, ничего не меняя.
 Workflow ставит образам тег `latest` на тот же digest, проверяет его и последним двигает git-тег.
 
-**4. Проверить исполнитель на хосте.** `status.sh` и `healthcheck.sh` исполнитель не проверяют —
+**4. Проверить исполнитель на хосте.** Его проверяют оба скрипта. `status.sh` показывает поле
+`updater` (`{"state": "active|inactive|not_installed|no_system|no_systemd", "expected": true|false}`)
+и предупреждение `warning: updater: ...`, если юнитов нет или `.path` не активен там, где они должны
+быть (с systemd и `updater.sh` в checkout); установка с `--no-system` и хост без `systemctl` получают
+строку `info:`, не ошибку. `healthcheck.sh` (таймер каждые 5 минут) считает проблемой установленный,
+но не активный `mailexpert-updater.path`: кнопка в панели тогда молчит. Лечение —
+`systemctl enable --now mailexpert-updater.path` или `install.sh --prefix <PREFIX>`. Остальное
 смотрите сами:
 
 ```bash
+sudo <PREFIX>/app/scripts/deploy/status.sh --json | jq .updater   # {"state":"active","expected":true}
 systemctl is-active mailexpert-updater.path                    # active
 cat <PREFIX>/state/update-spool/result/updater.json            # "installed":true, version = текущая
 sudo <PREFIX>/app/scripts/deploy/update.sh --check latest      # та же предпроверка, что у кнопки

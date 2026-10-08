@@ -18,6 +18,15 @@ setup() {
   [[ $output == *"Usage: google-app.sh add"* ]]
 }
 
+@test "not root is a wrapper error: exit 2, like mailexpert-cli.sh" {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/usr/bin/env bash\n[ "$1" = -u ] && echo 1000 || command -p id "$@"\n' >"$BATS_TEST_TMPDIR/bin/id"
+  chmod +x "$BATS_TEST_TMPDIR/bin/id"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash "$SCRIPT" list
+  [ "$status" -eq 2 ]
+  [[ $output == *"run google-app.sh as root"* ]]
+}
+
 @test "no command is an error" {
   run bash "$SCRIPT"
   [ "$status" -eq 2 ]
