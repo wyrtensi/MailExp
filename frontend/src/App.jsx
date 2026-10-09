@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Routes, Route, Navigate } from 'react-router';
 import { useStore } from './store/index.js';
 import { api } from './utils/api.js';
@@ -8,7 +8,8 @@ import { applyLayout } from './layouts.js';
 import LoginPage from './components/LoginPage.jsx';
 import GoogleLoginPage from './components/GoogleLoginPage.jsx';
 import AccessDeniedPage from './components/AccessDeniedPage.jsx';
-import { isGoogleAuthMode } from './utils/authMode.js';
+import { accessRefusalCode, isCloudflareOnlyMode, isGoogleAuthMode } from './utils/authMode.js';
+import { signOut } from './utils/signOut.js';
 import { isDemoMode } from './demo/mode.js';
 import { demoRole } from './utils/demoRole.js';
 import { needsLanguageChoice } from './utils/language.js';
@@ -36,6 +37,41 @@ export default function App() {
   const [checking, setChecking] = useState(true);
   const [authConfig, setAuthConfig] = useState(null);
   const [accessDenied, setAccessDenied] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryFailed, setRetryFailed] = useState(false);
+
+  // A signed-in user means the refusal no longer applies (access restored, another account
+  // signed in): drop the no-access screen so it cannot outlive the state it describes.
+  useEffect(() => { if (user) setAccessDenied(null); }, [user]);
+
+  // "Try again" on the no-access screen: ask the server who this session is now. Allowed ->
+  // the app; refused again -> the screen stays (with the fresh code); no session at all -> the
+  // sign-in form.
+  const retryAccess = useCallback(async () => {
+    setRetrying(true);
+    setRetryFailed(false);
+    try {
+      const data = await api.me();
+      setUser(data.user);
+      setAccessDenied(null);
+      if (data.user?.locked) setLocked(true);
+      else {
+        setLocked(false);
+        await loadPreferences();
+      }
+    } catch (err) {
+      const refusal = accessRefusalCode(err);
+      if (refusal) setAccessDenied(refusal);
+      else if (err?.status === 401 && !isCloudflareOnlyMode(authConfig)) setAccessDenied(null);
+      else setRetryFailed(true); // network error, 5xx, another 403: the check did not happen
+    } finally {
+      setRetrying(false);
+    }
+  }, [authConfig, loadPreferences, setUser, setLocked]);
+
+  // "Use another account": the regular sign-out, which also ends a Cloudflare Access / SSO
+  // session when the server returns an end-session URL, then lands on the sign-in screen.
+  const switchAccount = useCallback(() => signOut({ setUser }), [setUser]);
 
   // Register service worker on first mount — independent of auth state.
   // The SW itself does nothing until the user explicitly grants push permission.
@@ -171,7 +207,9 @@ export default function App() {
     );
   }
 
-  if (accessDenied) return <AccessDeniedPage code={accessDenied} />;
+  if (accessDenied && !user) {
+    return <AccessDeniedPage code={accessDenied} retrying={retrying} retryFailed={retryFailed} onRetry={retryAccess} onSwitchAccount={switchAccount} />;
+  }
 
   const loginPage = isGoogleAuthMode(authConfig) ? <GoogleLoginPage config={authConfig} /> : <LoginPage />;
 

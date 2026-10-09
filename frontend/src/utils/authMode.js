@@ -5,6 +5,12 @@ export function isGoogleAuthMode(value) {
   return value?.authMode === 'google' || value?.mode === 'google';
 }
 
+// Cloudflare Access is the only way in (no Google button): the sign-in form is not a path
+// to another account there, so a missing session cannot be answered with it.
+export function isCloudflareOnlyMode(value) {
+  return isGoogleAuthMode(value) && !value?.googleSignIn;
+}
+
 const ERROR_KEYS = {
   not_allowed: 'login.google.errorNotAllowed',
   user_disabled: 'login.google.errorDisabled',
