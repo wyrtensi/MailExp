@@ -180,6 +180,8 @@ main() {
   backup_configured "$ENV_FILE" ||
     die "the restic keys are missing in $ENV_FILE: add RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY with configure.sh first" 2
   take_lock "$STATE_DIR/update.lock" 60 "update.sh or restore.sh"
+  # Before the checks below, whose way out (down -v) must never reach another project's data.
+  guard_existing_projects
   if db_volume_exists; then
     die "volume ${CFG_PROJECT}_postgres_data exists: restore.sh runs only on a server without a database. If it holds nothing you need (for example after a rehearsal), remove it with: docker compose -p $CFG_PROJECT down -v; then run restore.sh again" 2
   fi

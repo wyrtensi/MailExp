@@ -405,6 +405,15 @@ EOF
   calls | grep -q '^docker rm -f deadbeef0001 '
 }
 
+@test "a mailcow-backup container that writes elsewhere is not this backup's: left alone" {
+  configured
+  export MOCK_MAILCOW_BACKUP_LEFTOVER=foreign
+  run bash "$BACKUP" --cleanup
+  [ "$status" -eq 0 ]
+  calls | lacks '^docker rm -f mailcow-backup'
+  [[ $output == *"a container mailcow-backup runs that writes outside $MAILEXPERT_NODE_BACKUP_DIR"*"left alone"* ]]
+}
+
 @test "--tag move: services down and kept down, a complete snapshot, then standby" {
   configured
   export MOCK_RUNNING='postfix-mailcow dovecot-mailcow'

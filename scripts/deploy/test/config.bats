@@ -23,7 +23,7 @@ keys_of() { awk '{print $2}' | sort | paste -sd' ' -; }
   [ "$CFG_SIGNIN" = direct ]
   [ "$CFG_DIRECT_HOST" = panel.example.com ]
   [ "$CFG_ADMIN_EMAILS" = admin@example.com,b@example.com ]
-  [ "$CFG_PROJECT" = mailexpert ] && [ "$CFG_EDGE_PROJECT" = edge ] && [ "$CFG_HTTP_PORT" = 8080 ]
+  [ "$CFG_PROJECT" = mailexpert ] && [ "$CFG_EDGE_PROJECT" = mailexpert-edge ] && [ "$CFG_HTTP_PORT" = 8080 ]
   [ "$CFG_EDGE" = 1 ] && [ "$CFG_EDGE_TLS" = acme ] && [ "$CFG_SYSTEM" = 1 ] && [ "$CFG_LOCAL_AUTH" = 0 ]
   [ "$CFG_IMAGE_PREFIX" = ghcr.io/wyrtensi ]
   [ "$OPT_PREFIX" = /opt/mailexpert ] && [ "$OPT_START" = 1 ]
@@ -90,7 +90,7 @@ expect_invalid() {
   expect_invalid "not an email" --version sha-0123456789ab --signin direct --direct-host panel.example.com --admin-email nobody
   expect_invalid "--http-port" --version sha-0123456789ab "${ok[@]}" --http-port 80
   expect_invalid "--project" --version sha-0123456789ab "${ok[@]}" --project MailExpert
-  expect_invalid "must differ" --version sha-0123456789ab "${ok[@]}" --project edge
+  expect_invalid "must differ" --version sha-0123456789ab "${ok[@]}" --project mailexpert-edge
   expect_invalid "--edge-tls" --version sha-0123456789ab "${ok[@]}" --edge-tls letsencrypt
   expect_invalid "--prefix" --version sha-0123456789ab "${ok[@]}" --prefix relative/dir
 }
@@ -213,15 +213,74 @@ ufw limit 4022/tcp"
   [ "$status" -eq 1 ]
 }
 
-@test "port_conflicts ignores the edge's own caddy" {
+@test "port_conflicts ignores a caddy only while the edge's own caddy runs" {
   ss_out='LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=10,fd=6))
 LISTEN 0 4096 [::]:443 [::]:* users:(("caddy",pid=11,fd=7))
 LISTEN 0 100 0.0.0.0:25 0.0.0.0:* users:(("docker-proxy",pid=12,fd=4))
 LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*'
-  [ "$(port_conflicts 80 443 <<<"$ss_out")" = "80 nginx" ]
-  [ "$(port_conflicts 25 <<<"$ss_out")" = "25 docker-proxy" ]
-  [ "$(port_conflicts 8080 <<<"$ss_out")" = "8080 unknown" ]
-  [ -z "$(port_conflicts 443 993 <<<"$ss_out")" ]
+  [ "$(port_conflicts 1 80 443 <<<"$ss_out")" = "80 nginx" ]
+  [ "$(port_conflicts 1 25 <<<"$ss_out")" = "25 docker-proxy" ]
+  [ "$(port_conflicts 1 8080 <<<"$ss_out")" = "8080 unknown" ]
+  [ -z "$(port_conflicts 1 443 993 <<<"$ss_out")" ]
+  # No caddy of this install's edge runs: a caddy on 443 is someone else's.
+  [ "$(port_conflicts 0 443 <<<"$ss_out")" = "443 caddy" ]
+  [ "$(port_conflicts 0 80 443 <<<"$ss_out" | paste -sd';' -)" = "80 nginx;443 caddy" ]
+}
+
+@test "loopback_port_holders: listeners a bind of 127.0.0.1:<port> collides with" {
+  ss_out='LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* users:(("docker-proxy",pid=10,fd=6))
+LISTEN 0 4096 0.0.0.0:8081 0.0.0.0:* users:(("nginx",pid=11,fd=7))
+LISTEN 0 4096 *:8082 *:* users:(("node",pid=12,fd=4))
+LISTEN 0 4096 [::]:8083 [::]:*
+LISTEN 0 4096 10.0.0.5:8084 0.0.0.0:* users:(("nginx",pid=13,fd=4))
+LISTEN 0 4096 [::1]:8085 [::]:* users:(("nginx",pid=14,fd=4))
+LISTEN 0 4096 127.0.0.1:18080 0.0.0.0:* users:(("other",pid=15,fd=4))'
+  [ "$(loopback_port_holders 8080 <<<"$ss_out")" = "8080 docker-proxy" ]
+  [ "$(loopback_port_holders 8081 <<<"$ss_out")" = "8081 nginx" ]
+  [ "$(loopback_port_holders 8082 <<<"$ss_out")" = "8082 node" ]
+  [ "$(loopback_port_holders 8083 <<<"$ss_out")" = "8083 unknown" ]
+  [ -z "$(loopback_port_holders 8084 <<<"$ss_out")" ]
+  [ -z "$(loopback_port_holders 8085 <<<"$ss_out")" ]
+  [ -z "$(loopback_port_holders 8086 <<<"$ss_out")" ]
+}
+
+@test "a new install's edge project is mailexpert-edge; an install.conf with edge keeps it" {
+  configure --version sha-0123456789ab --signin direct --direct-host panel.example.com --local-auth
+  [ "$CFG_EDGE_PROJECT" = mailexpert-edge ]
+  write_install_conf "$C"
+  [ "$(env_get "$C" EDGE_PROJECT)" = mailexpert-edge ]
+  # An existing install: install.conf names edge, a rerun without flags keeps it.
+  printf 'VERSION=sha-0123456789ab\nSIGNIN=direct\nDIRECT_HOST=panel.example.com\nEDGE_PROJECT=edge\n' >"$C"
+  configure
+  [ "$CFG_EDGE_PROJECT" = edge ]
+  write_install_conf "$C"
+  [ "$(env_get "$C" EDGE_PROJECT)" = edge ]
+  # An install.conf without the key predates the new default: its edge runs as edge.
+  printf 'VERSION=sha-0123456789ab\nSIGNIN=direct\nDIRECT_HOST=panel.example.com\n' >"$C"
+  configure
+  [ "$CFG_EDGE_PROJECT" = edge ]
+  # The flag always wins (the move to the new name).
+  configure --edge-project mailexpert-edge
+  [ "$CFG_EDGE_PROJECT" = mailexpert-edge ]
+}
+
+@test "generic_name_notes: one info line per project name without the mailexpert prefix" {
+  OPT_PREFIX=/opt/me
+  [ -z "$(generic_name_notes)" ]
+  CFG_PROJECT=mailexpert-two CFG_EDGE_PROJECT=mailexpert_edge2
+  [ -z "$(generic_name_notes)" ]
+  CFG_PROJECT=mailexpert CFG_EDGE_PROJECT=edge
+  run generic_name_notes
+  [ "${#lines[@]}" -eq 1 ]
+  [[ $output == *"the edge's compose project 'edge' has no mailexpert prefix"* ]]
+  [[ $output == *"docker compose -p edge --project-directory /opt/me/edge down, then install.sh --prefix /opt/me --edge-project mailexpert-edge"* ]]
+  # Without an edge there is no edge project to name.
+  CFG_EDGE=0
+  [ -z "$(generic_name_notes)" ]
+  CFG_PROJECT=panel
+  run generic_name_notes
+  [ "${#lines[@]}" -eq 1 ]
+  [[ $output == *"the panel's compose project 'panel' has no mailexpert prefix"*"volume panel_postgres_data"* ]]
 }
 
 @test "resource_shortfalls" {

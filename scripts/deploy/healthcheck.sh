@@ -62,6 +62,8 @@ collect_problems() {
   else
     echo "containers: docker compose ps failed for $CFG_PROJECT"
   fi
+  panel_foreign_objects | sed "s/^/ownership: compose project $CFG_PROJECT holds another owner's /"
+  edge_foreign_objects | sed "s/^/ownership: compose project $CFG_EDGE_PROJECT holds another owner's /"
   services=$(edge_services)
   if [ -n "$services" ]; then
     if ps=$(edge_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then
@@ -118,6 +120,7 @@ main() {
     return 0
   fi
   url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=
+  while IFS= read -r line; do log "info: $line"; done < <(generic_name_notes)
   problems=$(collect_problems)
   if [ -z "$problems" ]; then
     send_ping "$url" success healthy

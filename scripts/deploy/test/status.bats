@@ -200,6 +200,9 @@ stub_install() {
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DOCKER_LOG"
 case " $* " in
+  *" ps -a --filter label=com.docker.compose.project=me-test --format "*)
+    # STUB_FOREIGN: a container of the panel's project that another directory's compose made.
+    if [ -n "${STUB_FOREIGN:-}" ]; then printf '%s\t%s\n' "$STUB_FOREIGN" /srv/neighbour; fi ;;
   *" ps "*"{{.Service}} {{.State}} {{.Health}}"*)
     printf '%s\n' "frontend running healthy" "backend running healthy" "postgres running healthy" "redis running healthy" "cloudflared running " ;;
   *" ps "*"{{.Service}} {{.Image}}"*)
@@ -267,6 +270,13 @@ STUB_EOF
   [[ $output != *"do-not-print-me"* ]]
 }
 
+@test "a container of another owner in the panel's project is a problem" {
+  stub_install
+  STUB_FOREIGN=neighbour-web run bash "$SCRIPT" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $output == *"problem: ownership: compose project me-test: container neighbour-web (/srv/neighbour) is not this install's; install.sh and update.sh refuse to run until it is gone"* ]]
+}
+
 # cf_install: the panel of stub_install behind the tunnel on cf.example.com.
 cf_install() {
   stub_install
@@ -274,6 +284,21 @@ cf_install() {
     PROJECT=me-test HTTP_PORT=18090 SYSTEM=0 "REPO_URL=$P/app" >"$P/install.conf"
   printf '%s\n' COMPOSE_PROFILES= SESSION_SECRET=do-not-print-me CF_ACCESS_ISSUER=https://team-x.cloudflareaccess.com \
     "CF_ACCESS_AUDIENCE=$(printf 'f%.0s' {1..64})" >"$P/.env"
+}
+
+@test "an install that keeps the edge project edge: an info line on how to move, nothing else" {
+  cf_install
+  printf 'EDGE_PROJECT=edge\n' >>"$P/install.conf"
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.info | map(select(startswith("names: the edge'"'"'s compose project '"'"'edge'"'"' has no mailexpert prefix"))) | length' <<<"$output")" = 1 ]
+  [[ $output == *"install.sh --prefix $P --edge-project mailexpert-edge"* ]]
+  [ "$(jq -r '.problems | length' <<<"$output")" = 0 ]
+  # install.conf still says edge: status.sh changes nothing.
+  [ "$(env_get "$P/install.conf" EDGE_PROJECT)" = edge ]
+  sed -i 's/^EDGE_PROJECT=edge$/EDGE_PROJECT=mailexpert-edge/' "$P/install.conf"
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$(jq -r '.info | map(select(startswith("names: the edge"))) | length' <<<"$output")" = 0 ]
 }
 
 @test "the tunnel: Cloudflare Access of the issuer's team in front of <CF_HOST> is reported, no warning" {

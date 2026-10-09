@@ -151,6 +151,20 @@ collect_containers() {
   fi
 }
 
+# collect_names: Docker objects of another owner in this install's compose projects (install.sh,
+# update.sh, rollback.sh and restore.sh refuse to run then: lib/app.sh guard_compose_projects), and
+# a note for each project name without the mailexpert prefix.
+collect_names() {
+  local line
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then problem "ownership: compose project $CFG_PROJECT: $line is not this install's; install.sh and update.sh refuse to run until it is gone"; fi
+  done < <(panel_foreign_objects)
+  while IFS= read -r line; do
+    if [ -n "$line" ]; then problem "ownership: compose project $CFG_EDGE_PROJECT: $line is not this install's; install.sh and update.sh refuse to run until it is gone"; fi
+  done < <(edge_foreign_objects)
+  lines_into INFO < <(generic_name_notes)
+}
+
 # collect_cf_access: with the tunnel, whether https://<CF_HOST> is behind Cloudflare Access of the
 # team in CF_ACCESS_ISSUER. Skipped on a standby server (its tunnel is not running).
 collect_cf_access() {
@@ -447,6 +461,7 @@ main() {
   if lock_held "$STATE_DIR/update.lock"; then info "an update, rollback or restore is running now: results may be in flux"; fi
   collect_versions
   collect_containers
+  collect_names
   collect_cf_access
   collect_updater
   collect_disk_and_backups

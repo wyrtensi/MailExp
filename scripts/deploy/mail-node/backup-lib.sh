@@ -388,16 +388,22 @@ mailcow_mailboxes() {
 # say) and mailcow's backup container it left; the caller holds the backup lock, so none of them
 # belongs to a run still going.
 remove_leftovers() {
-  local ids
+  local ids mounts
   ids=$(docker ps -aq --filter "label=$NODE_BACKUP_LABEL" 2>/dev/null) || ids=''
   if [ -n "$ids" ]; then
     # shellcheck disable=SC2086 # one id per word
     docker rm -f $ids >/dev/null 2>&1 || true
     warn "removed restic containers an earlier run left behind (it was stopped from outside)"
   fi
-  if docker container inspect "$MAILCOW_BACKUP_CONTAINER" >/dev/null 2>&1; then
-    docker rm -f "$MAILCOW_BACKUP_CONTAINER" >/dev/null 2>&1 || true
-    warn "removed the container $MAILCOW_BACKUP_CONTAINER an earlier mailcow dump left behind"
+  # mailcow's script names its container the same for every caller: only one that writes under
+  # NODE_BACKUP_DIR is this backup's; a dump someone runs by hand into another place is left alone.
+  if mounts=$(docker container inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$MAILCOW_BACKUP_CONTAINER" 2>/dev/null); then
+    if [[ $'\n'$mounts == *$'\n'"$NODE_BACKUP_DIR"/* ]]; then
+      docker rm -f "$MAILCOW_BACKUP_CONTAINER" >/dev/null 2>&1 || true
+      warn "removed the container $MAILCOW_BACKUP_CONTAINER an earlier mailcow dump left behind"
+    else
+      warn "a container $MAILCOW_BACKUP_CONTAINER runs that writes outside $NODE_BACKUP_DIR (a mailcow dump started by hand?): left alone; mailcow's backup cannot start until it is gone"
+    fi
   fi
 }
 

@@ -2,8 +2,9 @@
 # Cloudflare tunnel for <CF_HOST>. Both use the host network and reach the panel on
 # 127.0.0.1:<APP_HTTP_PORT>.
 #
-# A compose project of its own (default name "edge"): it outlives panel updates and, on a
-# single server, will also front the mail node. install.sh copies this file to <prefix>/edge/
+# A compose project of its own (default name "mailexpert-edge"; an install made before keeps
+# "edge", as its install.conf records): it outlives panel updates and fronts the panel only, the
+# mail node always runs on a server of its own. install.sh copies this file to <prefix>/edge/
 # and writes <prefix>/edge/.env: COMPOSE_PROJECT_NAME, COMPOSE_PROFILES (caddy, tunnel),
 # EDGE_IMAGE (pinned by digest), and the secrets from configure.sh (DNS_API_TOKEN,
 # TUNNEL_TOKEN). The public hostname of the tunnel (<CF_HOST> -> http://127.0.0.1:<port>) is

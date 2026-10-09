@@ -40,7 +40,7 @@ if [ -z "$VERSION" ] || [ -z "$IMAGE_PREFIX" ] || [ -z "$REPO_URL" ]; then
 fi
 
 for p in "$PROJECT" "$EDGE_PROJECT"; do
-  case $p in mailexpert | edge) fail "refusing to run as project $p" ;; esac
+  case $p in mailexpert | mailexpert-edge | edge) fail "refusing to run as project $p" ;; esac
   [ -z "$(labelled ps "$p")$(labelled volume "$p")" ] || fail "project $p already has containers or volumes"
 done
 [ ! -e "$PREFIX" ] || fail "$PREFIX already exists"
