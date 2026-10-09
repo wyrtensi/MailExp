@@ -125,7 +125,7 @@ validate_install_config() {
   is_port "$CFG_HTTP_PORT" || errors+=("--http-port must be a port from 1024 to 65535")
   [[ $CFG_IMAGE_PREFIX =~ ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$ ]] || errors+=("--image-prefix is not an image repository prefix")
   if [ -z "$CFG_REPO_URL" ] || ! env_value_ok "$CFG_REPO_URL"; then errors+=("--repo-url is empty or has spaces"); fi
-  [[ $OPT_PREFIX =~ ^/[A-Za-z0-9._/-]+$ ]] || errors+=("--prefix must be an absolute path without spaces")
+  is_prefix "$OPT_PREFIX" || errors+=("--prefix must be an absolute path without spaces or .. segments")
   if [ "${#errors[@]}" -gt 0 ]; then
     printf '[mailexpert] error: %s\n' "${errors[@]}" >&2
     return 2
@@ -316,9 +316,17 @@ generic_name_notes() {
     echo "names: the panel's compose project '$CFG_PROJECT' has no mailexpert prefix; it holds the database (volume ${CFG_PROJECT}_postgres_data), so it stays; a move is a backup restored into an install with another --project ($doc)"
   fi
   if [ "$CFG_EDGE" = 1 ] && ! is_prefixed_name "$CFG_EDGE_PROJECT"; then
-    echo "names: the edge's compose project '$CFG_EDGE_PROJECT' has no mailexpert prefix (new installs use mailexpert-edge); to move: docker compose -p $CFG_EDGE_PROJECT --project-directory $OPT_PREFIX/edge down, then install.sh --prefix $OPT_PREFIX --edge-project mailexpert-edge; Caddy gets its certificates again ($doc)"
+    echo "names: the edge's compose project '$CFG_EDGE_PROJECT' has no mailexpert prefix (new installs use mailexpert-edge); to move: $(edge_move_steps)"
   fi
   return 0
+}
+
+# edge_move_steps: how this install's edge moves to the project mailexpert-edge. Only this install's
+# containers go, selected by project and working directory: `docker compose -p <name> down` would
+# also remove a neighbour's containers of the same project name. The volumes stay until removed by
+# hand once the new Caddy has its certificates.
+edge_move_steps() {
+  printf '%s\n' "docker ps -aq --filter label=com.docker.compose.project=$CFG_EDGE_PROJECT --filter label=com.docker.compose.project.working_dir=$(clean_path "$OPT_PREFIX/edge") | xargs -r docker rm -f, then install.sh --prefix $OPT_PREFIX --edge-project mailexpert-edge; Caddy gets its certificates again (docs/operations/deployment.md, \"Имена на общем сервере\")"
 }
 
 # resource_shortfalls <cpus> <MemTotal kB> <free disk kB>: one line per shortfall. A "4 GB"

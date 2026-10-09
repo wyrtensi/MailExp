@@ -157,7 +157,7 @@ main() {
   marker=$STATE_DIR/rollback-in-progress
   if is_standby; then die "standby server: the panel does not run here" 2; fi
   # Before `stop backend frontend` and install.sh: both act on these projects' containers.
-  guard_existing_projects
+  guard_existing_projects 3
   # install.sh records the version before it switches, so an interrupted rollback reads as done.
   [ "$to" != "$from" ] ||
     die "install.conf says $to already: if a rollback to it was interrupted, finish it with install.sh --prefix $OPT_PREFIX (the database already holds the dump)" 2

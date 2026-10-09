@@ -165,7 +165,7 @@ collect_names() {
     while IFS= read -r line; do
       if [ -z "$line" ]; then continue; fi
       if [ "$project" = panel ]; then line="$CFG_PROJECT: $line"; else line="$CFG_EDGE_PROJECT: $line"; fi
-      problem "ownership: compose project $line is not this install's; install.sh and update.sh refuse to run until it is gone"
+      problem "ownership: compose project $line is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone"
     done <<<"$foreign"
   done
   lines_into INFO < <(generic_name_notes)

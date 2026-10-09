@@ -273,7 +273,9 @@ LISTEN 0 4096 127.0.0.1:18080 0.0.0.0:* users:(("other",pid=15,fd=4))'
   run generic_name_notes
   [ "${#lines[@]}" -eq 1 ]
   [[ $output == *"the edge's compose project 'edge' has no mailexpert prefix"* ]]
-  [[ $output == *"docker compose -p edge --project-directory /opt/me/edge down, then install.sh --prefix /opt/me --edge-project mailexpert-edge"* ]]
+  # Only this install's containers, by project and working directory: never `compose -p edge down`.
+  [[ $output == *"docker ps -aq --filter label=com.docker.compose.project=edge --filter label=com.docker.compose.project.working_dir=/opt/me/edge | xargs -r docker rm -f, then install.sh --prefix /opt/me --edge-project mailexpert-edge"* ]]
+  [[ $output != *"compose -p"* ]]
   # Without an edge there is no edge project to name.
   CFG_EDGE=0
   [ -z "$(generic_name_notes)" ]

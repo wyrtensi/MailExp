@@ -261,3 +261,19 @@ snapshot_tenant_files() {
   [ "$status" -eq 0 ]
   [ ! -e "$P/tenant-cert" ] && [ ! -e "$P/tenant-secrets" ]
 }
+
+@test "the panel's port taken by something else: exit 2 before anything changes; a warning with --no-start" {
+  stub_restore
+  printf '#!/bin/sh\necho %s\n' "'LISTEN 0 4096 127.0.0.1:18090 0.0.0.0:* users:((\"node\",pid=7,fd=3))'" >"$STUB/ss"
+  chmod +x "$STUB/ss"
+  run bash "$SCRIPT" latest --prefix "$P"
+  [ "$status" -eq 2 ]
+  [[ $output == *"the panel's port 127.0.0.1:18090 is taken: 18090 node"*"nothing was changed"* ]]
+  [ ! -e "$P/state/standby" ]
+  run ! grep -q -- '--target /restore' "$DOCKER_LOG"
+  # A snapshot without the tenant worker, so that the rehearsal goes through.
+  sed -i '/^COMPOSE_PROFILES=/d' "$SNAPSHOT/env"
+  run bash "$SCRIPT" latest --prefix "$P" --no-start
+  [ "$status" -eq 0 ]
+  [[ $output == *"warning: the panel's port 127.0.0.1:18090 is taken"* ]]
+}

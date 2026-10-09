@@ -128,7 +128,6 @@ main() {
     return 0
   fi
   url=$(env_get "$ENV_FILE" HEALTHCHECK_PING_URL) || url=
-  while IFS= read -r line; do log "info: $line"; done < <(generic_name_notes)
   problems=$(collect_problems)
   if [ -z "$problems" ]; then
     send_ping "$url" success healthy

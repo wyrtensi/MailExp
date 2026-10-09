@@ -58,8 +58,32 @@ compose_calls() { grep -c '^compose' "$FAKE_DOCKER/calls" || true; }
 
 # --- the guard -----------------------------------------------------------------------------------
 
+@test "a prefix with a .. segment is refused everywhere it is read" {
+  is_prefix /opt/mailexpert
+  is_prefix /opt/mail..expert/x
+  run is_prefix /opt/../srv/me
+  [ "$status" -eq 1 ]
+  run is_prefix /opt/me/..
+  [ "$status" -eq 1 ]
+  run is_prefix relative/path
+  [ "$status" -eq 1 ]
+  run load_install /opt/../srv/me
+  [ "$status" -eq 2 ]
+  [[ $output == *"--prefix must be an absolute path without spaces or .. segments"* ]]
+  install_defaults
+  CFG_VERSION=sha-0123456789ab CFG_SIGNIN=direct CFG_DIRECT_HOST=panel.example.com CFG_LOCAL_AUTH=1 OPT_PREFIX=/srv/x/../me
+  run validate_install_config
+  [ "$status" -eq 2 ]
+  [[ $output == *"--prefix must be an absolute path without spaces or .. segments"* ]]
+  local script
+  for script in configure.sh google-app.sh mailexpert-cli.sh updater.sh; do
+    grep -q 'is_prefix "$prefix" || die' "$DEPLOY_DIR/$script"
+  done
+}
+
 @test "clean_path and foreign_containers" {
   [ "$(clean_path /opt//mailexpert/./app/)" = /opt/mailexpert/app ]
+  [ "$(clean_path /opt/me/edge/.)" = /opt/me/edge ]
   [ "$(clean_path /)" = / ]
   out=$(printf 'a\t/opt/me/app\nb\t/opt/me//app/\nc\t/srv/other\nd\t\n' | foreign_containers /opt/me/app)
   [ "$out" = $'c (/srv/other)\nd (no compose working directory)' ]
@@ -131,14 +155,37 @@ compose_calls() { grep -c '^compose' "$FAKE_DOCKER/calls" || true; }
   [[ $output == *"volume me-test_extra (used by neighbour-db (/srv/neighbour))"* ]]
 }
 
-@test "guard: a Docker that does not answer stops the script, nothing is run" {
+@test "guard: a Docker that does not answer stops the script with the caller's nothing-changed code" {
   : >"$FAKE_DOCKER/down"
   run guard_projects
   [ "$status" -eq 1 ]
-  [[ $output == *"cannot list Docker's containers, volumes and networks to check compose project me-test"* ]]
+  [[ $output == *"cannot list Docker's containers, volumes and networks to check compose project me-test"*"nothing was changed"* ]]
   [ "$(compose_calls)" = 0 ]
+  # update.sh and rollback.sh: 3, failure before anything changed (the updater does not roll back).
+  run guard_existing_projects 3
+  [ "$status" -eq 3 ]
   run compose_foreign_objects me-test "$P/app"
   [ "$status" -eq 1 ]
+  grep -q '^  guard_existing_projects 3$' "$DEPLOY_DIR/update.sh"
+  grep -q '^  guard_existing_projects 3$' "$DEPLOY_DIR/rollback.sh"
+  grep -q '^  guard_existing_projects 1$' "$DEPLOY_DIR/restore.sh"
+}
+
+@test "guard: an edge still named edge that collides with a neighbour's points to the move, never to compose down" {
+  CFG_EDGE_PROJECT=edge EDGE_DIR=$P/edge
+  fake ps-edge '%s\t%s' edge-caddy-1 "$P/edge" neighbour-proxy /srv/neighbour
+  run guard_existing_projects 3
+  [ "$status" -eq 2 ]
+  [[ $output == *"container neighbour-proxy (/srv/neighbour)"* ]]
+  [[ $output == *"or move this install's edge off the shared name: docker ps -aq --filter label=com.docker.compose.project=edge --filter label=com.docker.compose.project.working_dir=$P/edge | xargs -r docker rm -f, then install.sh --prefix $P --edge-project mailexpert-edge"* ]]
+  [[ $output != *"compose -p"* ]]
+  # A prefixed edge name gets no move.
+  : >"$FAKE_DOCKER/ps-edge"
+  fake ps-mailexpert-edge2 '%s\t%s' neighbour-proxy /srv/neighbour
+  CFG_EDGE_PROJECT=mailexpert-edge2
+  run guard_projects
+  [ "$status" -eq 2 ]
+  [[ $output != *"move this install's edge"* ]]
 }
 
 @test "guard: without an edge the edge project is not checked" {

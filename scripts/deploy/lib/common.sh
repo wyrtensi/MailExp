@@ -135,6 +135,23 @@ is_port() {
   [[ $1 =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
 }
 
+# is_prefix <path>: an install prefix: absolute, letters, digits and . _ / - only, no ".." segment
+# (compose records the resolved directory, which the ownership check compares with).
+is_prefix() {
+  [[ $1 =~ ^/[A-Za-z0-9._/-]+$ ]] && ! [[ $1 =~ (^|/)\.\.(/|$) ]]
+}
+
+# clean_path <path>: the path without repeated slashes, "/./" and a trailing slash, as compose
+# records it.
+clean_path() {
+  local path=$1
+  while [[ $path == *//* ]]; do path=${path//\/\//\/}; done
+  while [[ $path == */./* ]]; do path=${path//\/.\//\/}; done
+  if [[ $path == ?*/. ]]; then path=${path%/.}; fi
+  if [ "$path" != / ]; then path=${path%/}; fi
+  printf '%s\n' "$path"
+}
+
 # is_name <compose project name>
 is_name() {
   [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]

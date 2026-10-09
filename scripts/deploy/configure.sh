@@ -100,7 +100,7 @@ main() {
       *) die "unexpected argument (not shown): secrets are read from stdin as KEY=VALUE lines, never from arguments" 2 ;;
     esac
   done
-  [[ $prefix =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--prefix must be an absolute path without spaces" 2
+  is_prefix "$prefix" || die "--prefix must be an absolute path without spaces or .. segments" 2
   if [ -t 0 ]; then log "paste KEY=VALUE lines, then press Ctrl-D"; fi
 
   while IFS= read -r line || [ -n "$line" ]; do

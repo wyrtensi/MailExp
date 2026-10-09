@@ -112,7 +112,7 @@ check_docker() {
 # networks (lib/app.sh guard_compose_projects); runs before any compose command of this run.
 guard_projects() {
   guard_compose_projects "choose another name for the panel with --project <name>" \
-    "choose another name for the edge with --edge-project <name>"
+    "choose another name for the edge with --edge-project <name>" 1
 }
 
 # own_caddy_running: 1 when the edge project's caddy container runs (guard_projects has checked

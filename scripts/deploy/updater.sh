@@ -445,7 +445,7 @@ main() {
       *) die "unknown argument: $1 (see --help)" 2 ;;
     esac
   done
-  [[ $prefix =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--prefix must be an absolute path without spaces" 2
+  is_prefix "$prefix" || die "--prefix must be an absolute path without spaces or .. segments" 2
   [[ $PROGRESS_INTERVAL =~ ^[1-9][0-9]*$ ]] || die "MAILEXPERT_UPDATER_INTERVAL must be a number of seconds" 2
   [[ $LOCK_WAIT =~ ^[0-9]+$ ]] || die "MAILEXPERT_UPDATER_LOCK_WAIT must be a number of seconds" 2
   [ "$(id -u)" = 0 ] || die "run updater.sh as root" 2

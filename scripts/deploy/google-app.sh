@@ -131,7 +131,7 @@ main() {
   done
 
   [ -n "$command" ] || die "a command is required (see --help)" 2
-  [[ $prefix =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--prefix must be an absolute path without spaces" 2
+  is_prefix "$prefix" || die "--prefix must be an absolute path without spaces or .. segments" 2
   [[ -z $user_limit || $user_limit =~ ^[1-9][0-9]*$ ]] || die "--user-limit must be a positive whole number" 2
   if [ -n "$label$user_limit" ] && [ "$command" != add ]; then
     die "--label and --user-limit apply to add only (see set-label, set-limit)" 2

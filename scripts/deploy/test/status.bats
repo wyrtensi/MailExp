@@ -276,7 +276,7 @@ STUB_EOF
   stub_install
   STUB_FOREIGN=neighbour-web run bash "$SCRIPT" --prefix "$P"
   [ "$status" -eq 1 ]
-  [[ $output == *"problem: ownership: compose project me-test: container neighbour-web (/srv/neighbour) is not this install's; install.sh and update.sh refuse to run until it is gone"* ]]
+  [[ $output == *"problem: ownership: compose project me-test: container neighbour-web (/srv/neighbour) is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone"* ]]
 }
 
 # cf_install: the panel of stub_install behind the tunnel on cf.example.com.
@@ -630,10 +630,11 @@ STUB_EOF
   [[ $stderr != *"a command failed"* ]]
 }
 
-@test "healthcheck.sh: another owner's container in the panel's project is a problem; a generic edge name is info" {
+@test "healthcheck.sh: another owner's container in the panel's project is a problem; names are status.sh's only" {
   updater_install active
   STUB_FOREIGN=neighbour-web run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
   [ "$status" -eq 1 ]
   [[ $stderr == *"problem: ownership: compose project me-test holds another owner's container neighbour-web (/srv/neighbour)"* ]]
-  [[ $stderr == *"info: names: the panel's compose project 'me-test' has no mailexpert prefix"* ]]
+  # Every 5 minutes into the journal would be noise: the generic-name note is status.sh's.
+  [[ $stderr != *"names:"* ]]
 }
