@@ -243,7 +243,7 @@ function draftQueryStub({
     if (sql.includes('SELECT id FROM email_accounts')) return { rows: [{ id: ACCOUNT_ID }] };
     if (sql.includes('SELECT * FROM email_accounts')) return { rows: [account] };
     if (sql.includes('no_select = false')) return { rows: mappedUsable ? [{ '?column?': 1 }] : [] };
-    if (sql.includes("lower(name) LIKE '%draft%'")) return { rows: allDraftsPaths.map(path => ({ path })) };
+    if (sql.includes("lower(name) IN ('drafts', 'draft')")) return { rows: allDraftsPaths.map(path => ({ path })) };
     if (sql.includes('SELECT 1 FROM folders')) return { rows: specialUseMatch ? [{ '?column?': 1 }] : [] };
     if (sql.includes('SELECT path FROM folders')) return { rows: draftsFolderPath ? [{ path: draftsFolderPath }] : [] };
     if (sql.includes('SELECT message_id FROM messages')) return { rows: oldMessageId ? [{ message_id: oldMessageId }] : [] };
