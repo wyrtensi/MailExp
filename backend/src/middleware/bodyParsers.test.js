@@ -35,11 +35,15 @@ const CSRF = { 'X-Requested-With': 'MailExpert' };
 // change that session while the body is still arriving, and `failStoreReads` makes the session
 // store fail as Redis does while it restarts. `heldWrites`, while set, holds back every write of
 // one session's unlocked copy until released, so a test decides when such a write lands.
+// `handling` fires once a large-body route's handler has started, and `heldHandler`, while set,
+// keeps that handler from answering until released, as POST /api/mail/send waits on SMTP.
 const parsed = [];
 const answered = [];
 const sessionReads = new EventEmitter();
+const handling = new EventEmitter();
 let failStoreReads = false;
 let heldWrites = null;
+let heldHandler = null;
 function buildApp({ identityGate }) {
   const app = express();
   const store = new session.MemoryStore();
@@ -81,6 +85,8 @@ function buildApp({ identityGate }) {
   app.get('/login-part-way', (req, res) => { req.session.pendingUserId = 'u1'; res.json({ ok: true }); });
   app.get('/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
   app.get('/lock', (req, res) => { req.session.locked = true; res.json({ ok: true }); });
+  // Any other change to the session, as an OAuth connect started in another tab makes.
+  app.get('/note', (req, res) => { req.session.note = 'other tab'; res.json({ ok: true }); });
   app.use('/api', identityGate);
   app.use('/api', requireCsrfHeader);
   // Stands in for index.js's screen-lock check.
@@ -89,7 +95,11 @@ function buildApp({ identityGate }) {
   app.post('/api/auth/login', (req, res) => res.json({ received: req.body }));
   const routes = express.Router();
   routes.use(requireAuth);
-  routes.post([...LARGE_BODY_PATHS, '/api/rules'], (req, res) => res.json({ received: req.body.text.length }));
+  routes.post([...LARGE_BODY_PATHS, '/api/rules'], async (req, res) => {
+    handling.emit('handling');
+    await heldHandler;
+    res.json({ received: req.body.text.length });
+  });
   app.use(routes);
   // Stands in for index.js's last error handler, which answers at once. Express's default one
   // would read off the body first and hide an error answered early.
@@ -295,6 +305,36 @@ describe('JSON body limits and sign-in', () => {
     // every later one with the same cookie went through.
     expect(await endSessionDuringUpload(path, 'logout')).toEqual({ status: 401, next: 401, held: [] });
     expect(await endSessionDuringUpload(path, 'lock')).toEqual({ status: 423, next: 423, held: [] });
+  });
+
+  // Changes the session during the upload, so the copy read again after it differs from the one
+  // read before it, then signs out or locks the session while the handler is still working.
+  // Resolves to the status of the request and of the next one with the same cookie.
+  async function endSessionDuringHandler(path, end) {
+    const sessionCookie = await signIn('u1');
+    let release;
+    heldHandler = new Promise((resolve) => { release = resolve; });
+    try {
+      const started = once(handling, 'handling');
+      const request = postWhile(path, sessionCookie, (c) => fetchFully('/note', { headers: { cookie: c } }));
+      await started;
+      await fetchFully(`/${end}`, { headers: { cookie: sessionCookie } });
+      release();
+      const status = await request;
+      const next = await post(path, OVER_1MB, { cookie: sessionCookie });
+      return { status, next: next.status };
+    } finally {
+      release();
+      heldHandler = null;
+    }
+  }
+
+  it.each(LARGE_BODY_PATHS)('keeps a sign-out or lock that lands while %s is being handled', async (path) => {
+    // The bug: express-session compared the copy read again after the body with the hash of the
+    // one read before it, found it changed and saved it when the response ended, putting back a
+    // session that signed out or locked while the handler waited (on SMTP, say).
+    expect(await endSessionDuringHandler(path, 'logout')).toEqual({ status: 200, next: 401 });
+    expect(await endSessionDuringHandler(path, 'lock')).toEqual({ status: 200, next: 423 });
   });
 
   it('never writes back the session read before the body of a request refused before its body', async () => {

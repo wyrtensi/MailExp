@@ -1,3 +1,5 @@
+import { guardedSessionStore } from './sessionStore.js';
+
 // How long a session survives with no activity. This is an IDLE window, not a fixed lifetime
 // from login: see `rolling` below.
 export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -5,7 +7,9 @@ export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 // Session options, shared by the server and its tests so the two cannot drift.
 export function buildSessionOptions(store, secret) {
   return {
-    store,
+    // Writes back only what a request changed, so a request that ran across a lock or a
+    // sign-out cannot undo it (utils/sessionStore.js).
+    store: guardedSessionStore(store),
     secret,
     resave: false,
     saveUninitialized: false,
