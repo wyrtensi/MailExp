@@ -49,7 +49,7 @@ Usage: install.sh --version sha-<commit> --signin cf|direct|both
                   [--cf-host <CF_HOST>] [--direct-host <DIRECT_HOST>]
                   [--admin-email <email>[,<email>]] [--local-auth]
                   [--no-edge] [--edge-tls acme|internal] [--acme-email <email>]
-                  [--prefix /opt/mailexpert] [--project mailexpert] [--edge-project edge]
+                  [--prefix /opt/mailexpert] [--project mailexpert] [--edge-project mailexpert-edge]
                   [--http-port 8080] [--image-prefix ghcr.io/wyrtensi] [--repo-url <git url>]
                   [--no-system] [--no-start]
 
@@ -95,7 +95,7 @@ lock_install() {
 
 check_tools() {
   local tool
-  for tool in git curl jq ss sha256sum timeout; do
+  for tool in git curl jq ss sha256sum timeout flock; do
     command -v "$tool" >/dev/null || die "$tool is required"
   done
 }
@@ -108,14 +108,56 @@ check_docker() {
   version_ge "$version" 2.24.4 || die "docker compose $version is too old, 2.24.4 or newer is needed"
 }
 
+# ensure_install_id: an install without INSTALL_ID (a new one, or one made before the IDs) gets one
+# now, before any container starts; write_install_conf keeps it from then on, through updates and
+# rollbacks. A restore keeps this server's install.conf: a moved install has the new server's ID.
+ensure_install_id() {
+  [ -z "$CFG_INSTALL_ID" ] || return 0
+  CFG_INSTALL_ID=$(gen_hex 8)
+  log "install ID $CFG_INSTALL_ID (install.conf INSTALL_ID; the label io.mailexpert.install on this install's containers)"
+}
+
+# guard_projects: neither compose project may hold another project's containers, volumes or
+# networks (lib/app.sh guard_compose_projects); runs before any compose command of this run.
+guard_projects() {
+  guard_compose_projects "choose another name for the panel with --project <name>" \
+    "choose another name for the edge with --edge-project <name>" 1
+}
+
+# own_caddy_running: 1 when the edge project's caddy container runs (guard_projects has checked
+# that the project's containers are this install's), 0 otherwise.
+own_caddy_running() {
+  if [ -n "$(docker ps -q --filter "label=com.docker.compose.project=$CFG_EDGE_PROJECT" --filter label=com.docker.compose.service=caddy)" ]; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+# panel_holds_port <port>: status 0 when a running container of the panel's project publishes it.
+panel_holds_port() {
+  local ports
+  ports=$(docker ps --filter "label=com.docker.compose.project=$CFG_PROJECT" --format '{{.Ports}}')
+  grep -q ":$1->" <<<"$ports"
+}
+
 check_ports() {
-  local listening conflicts
+  local listening conflicts holders note=''
   listening=$(ss -ltnpH)
   if edge_services | grep -qx caddy; then
-    conflicts=$(port_conflicts 80 443 <<<"$listening" | sort -u)
-    [ -z "$conflicts" ] || die "ports for the edge are taken: $(paste -sd';' - <<<"$conflicts")"
+    conflicts=$(port_conflicts "$(own_caddy_running)" 80 443 <<<"$listening" | sort -u)
+    if grep -q ' caddy$' <<<"$conflicts"; then
+      note=" (that caddy is not this install's edge: one on the host, another project's, or this install's edge under an earlier --edge-project, which must be stopped first)"
+    fi
+    [ -z "$conflicts" ] || die "ports for the edge are taken: $(paste -sd';' - <<<"$conflicts")$note"
   fi
-  conflicts=$(port_conflicts 25 465 587 993 <<<"$listening" | awk '$2 != "docker-proxy"' | sort -u)
+  holders=$(loopback_port_holders "$CFG_HTTP_PORT" <<<"$listening" | sort -u)
+  if [ -n "$holders" ] && ! panel_holds_port "$CFG_HTTP_PORT"; then
+    holders="--http-port $CFG_HTTP_PORT is taken on 127.0.0.1 by something other than this panel: $(paste -sd';' - <<<"$holders"); choose another --http-port"
+    if [ "$OPT_START" = 1 ]; then die "$holders"; fi
+    warn "$holders (the panel is not started now, it would fail to start)"
+  fi
+  conflicts=$(port_conflicts 0 25 465 587 993 <<<"$listening" | awk '$2 != "docker-proxy"' | sort -u)
   [ -z "$conflicts" ] || warn "mail ports are taken outside Docker: $(paste -sd';' - <<<"$conflicts"); the mail node needs them"
 }
 
@@ -179,7 +221,9 @@ ensure_app_images() {
 # (1000, `USER node`) stays.
 record_spool_uid() {
   local uid
-  uid=$(docker run --rm --network none --entrypoint id "$BACKEND_IMAGE" -u 2>/dev/null | tr -d '[:space:]') || uid=''
+  local -a labels
+  managed_label_args labels helper "$CFG_INSTALL_ID"
+  uid=$(docker run --rm --network none "${labels[@]}" --entrypoint id "$BACKEND_IMAGE" -u 2>/dev/null | tr -d '[:space:]') || uid=''
   if [[ $uid =~ ^[1-9][0-9]{0,9}$ ]]; then
     printf '%s\n' "$uid" >"$STATE_DIR/spool-uid"
   else
@@ -386,6 +430,7 @@ main() {
   resolve_install_config "${INSTALL_ARGS[PREFIX]:-/opt/mailexpert}/install.conf"
   validate_install_config || exit 2
   [[ $READY_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_READY_TIMEOUT must be a number of seconds" 2
+  ensure_install_id
   set_install_paths
 
   [ "$(id -u)" = 0 ] || die "run install.sh as root"
@@ -396,6 +441,7 @@ main() {
   prepare_host
   check_tools
   check_docker
+  guard_projects
   check_ports
 
   write_install_conf "$OPT_PREFIX/install.conf"

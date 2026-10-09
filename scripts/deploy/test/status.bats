@@ -199,7 +199,12 @@ stub_install() {
   cat >"$STUB/docker" <<'STUB_EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DOCKER_LOG"
+# STUB_DOCKER_DOWN=1: the daemon does not answer.
+if [ "${STUB_DOCKER_DOWN:-0}" = 1 ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi
 case " $* " in
+  *" ps -a --filter label=com.docker.compose.project=me-test --format "*)
+    # STUB_FOREIGN: a container of the panel's project that another directory's compose made.
+    if [ -n "${STUB_FOREIGN:-}" ]; then printf '%s\037%s\037\n' "$STUB_FOREIGN" /srv/neighbour; fi ;;
   *" ps "*"{{.Service}} {{.State}} {{.Health}}"*)
     printf '%s\n' "frontend running healthy" "backend running healthy" "postgres running healthy" "redis running healthy" "cloudflared running " ;;
   *" ps "*"{{.Service}} {{.Image}}"*)
@@ -267,6 +272,13 @@ STUB_EOF
   [[ $output != *"do-not-print-me"* ]]
 }
 
+@test "a container of another owner in the panel's project is a problem" {
+  stub_install
+  STUB_FOREIGN=neighbour-web run bash "$SCRIPT" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $output == *"problem: ownership: compose project me-test: container neighbour-web (/srv/neighbour) is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone"* ]]
+}
+
 # cf_install: the panel of stub_install behind the tunnel on cf.example.com.
 cf_install() {
   stub_install
@@ -274,6 +286,21 @@ cf_install() {
     PROJECT=me-test HTTP_PORT=18090 SYSTEM=0 "REPO_URL=$P/app" >"$P/install.conf"
   printf '%s\n' COMPOSE_PROFILES= SESSION_SECRET=do-not-print-me CF_ACCESS_ISSUER=https://team-x.cloudflareaccess.com \
     "CF_ACCESS_AUDIENCE=$(printf 'f%.0s' {1..64})" >"$P/.env"
+}
+
+@test "an install that keeps the edge project edge: an info line on how to move, nothing else" {
+  cf_install
+  printf 'EDGE_PROJECT=edge\n' >>"$P/install.conf"
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.info | map(select(startswith("names: the edge'"'"'s compose project '"'"'edge'"'"' has no mailexpert prefix"))) | length' <<<"$output")" = 1 ]
+  [[ $output == *"install.sh --prefix $P --edge-project mailexpert-edge"* ]]
+  [ "$(jq -r '.problems | length' <<<"$output")" = 0 ]
+  # install.conf still says edge: status.sh changes nothing.
+  [ "$(env_get "$P/install.conf" EDGE_PROJECT)" = edge ]
+  sed -i 's/^EDGE_PROJECT=edge$/EDGE_PROJECT=mailexpert-edge/' "$P/install.conf"
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$(jq -r '.info | map(select(startswith("names: the edge"))) | length' <<<"$output")" = 0 ]
 }
 
 @test "the tunnel: Cloudflare Access of the issuer's team in front of <CF_HOST> is reported, no warning" {
@@ -587,4 +614,27 @@ STUB_EOF
   updater_install inactive
   MAILEXPERT_SYSTEMD=0 run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
   [[ $stderr != *"updater:"* ]]
+}
+
+@test "healthcheck.sh and status.sh: a Docker that does not answer is reported, the ownership check does not end the run" {
+  updater_install active
+  STUB_DOCKER_DOWN=1 run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"problem: containers: docker compose ps failed for me-test"* ]]
+  [[ $stderr == *"problem: backup:"* ]]
+  [[ $stderr != *"a command failed"* ]]
+  STUB_DOCKER_DOWN=1 run --separate-stderr bash "$SCRIPT" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $output == *"warning: ownership: docker did not answer; the panel's compose project was not checked"* ]]
+  [[ $output == *"result: "* ]]
+  [[ $stderr != *"a command failed"* ]]
+}
+
+@test "healthcheck.sh: another owner's container in the panel's project is a problem; names are status.sh's only" {
+  updater_install active
+  STUB_FOREIGN=neighbour-web run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"problem: ownership: compose project me-test holds another owner's container neighbour-web (/srv/neighbour)"* ]]
+  # Every 5 minutes into the journal would be noise: the generic-name note is status.sh's.
+  [[ $stderr != *"names:"* ]]
 }

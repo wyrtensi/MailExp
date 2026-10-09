@@ -53,7 +53,7 @@ cert_expiry_epoch() {
 
 # collect_problems: one line per problem.
 collect_problems() {
-  local now ps services root path used finished='' since='' expiry
+  local now ps services root path used finished='' since='' expiry foreign kind project line
   local -a paths=(/)
   now=$(date +%s)
   panel_ready || echo "ready: http://127.0.0.1:$CFG_HTTP_PORT/api/health/ready does not answer 200"
@@ -62,6 +62,16 @@ collect_problems() {
   else
     echo "containers: docker compose ps failed for $CFG_PROJECT"
   fi
+  # Inside ||: a Docker that does not answer is reported by the lines above and below, it must not
+  # end this function (the ERR trap) before the /fail ping.
+  for kind in panel edge; do
+    foreign=$("${kind}_foreign_objects" 2>/dev/null) || foreign=''
+    project=$CFG_PROJECT
+    if [ "$kind" = edge ]; then project=$CFG_EDGE_PROJECT; fi
+    while IFS= read -r line; do
+      if [ -n "$line" ]; then echo "ownership: compose project $project holds another owner's $line"; fi
+    done <<<"$foreign"
+  done
   services=$(edge_services)
   if [ -n "$services" ]; then
     if ps=$(edge_compose ps --all --format '{{.Service}} {{.State}} {{.Health}}' 2>/dev/null); then

@@ -8,7 +8,8 @@
 # text: one entry per line) or, for the restore check's loop, exits MOCK_TAR_STATUS (default 0).
 # mailcow's database answers `SELECT COUNT(*) FROM mailbox` with the number in its volume's file
 # `mailboxes`. MOCK_LEFTOVER: ids of labelled restic containers a killed run left;
-# MOCK_MAILCOW_BACKUP_LEFTOVER=1: mailcow's backup container is still there.
+# MOCK_MAILCOW_BACKUP_LEFTOVER=1: mailcow's backup container is still there (writing under the
+# node's backup directory); =foreign: one that writes elsewhere (a dump started by hand).
 printf 'docker %s (in %s)\n' "$*" "$PWD" >>"$MOCK_DIR/calls"
 running() { [[ " ${MOCK_RUNNING:-} $(cat "$MOCK_DIR/running" 2>/dev/null | tr '\n' ' ') " == *" $1 "* ]]; }
 # MOCK_RESTART_FAIL lists the services whose restart fails.
@@ -48,7 +49,11 @@ case $1 in
     [[ " $* " == *" --filter label="* ]] && [ -n "${MOCK_LEFTOVER:-}" ] && echo "$MOCK_LEFTOVER"
     ;;
   container)
-    [ "$2" = inspect ] && [ "${MOCK_MAILCOW_BACKUP_LEFTOVER:-0}" = 1 ] && exit 0
+    [ "$2" = inspect ] || exit 1
+    case ${MOCK_MAILCOW_BACKUP_LEFTOVER:-0} in
+      1) printf '%s\n' "$MAILEXPERT_NODE_BACKUP_DIR/mailcow/mailcow-2026-10-09-03-00-00" && exit 0 ;;
+      foreign) printf '%s\n' /root/manual-dump && exit 0 ;;
+    esac
     exit 1
     ;;
   run)

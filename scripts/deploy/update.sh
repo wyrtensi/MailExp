@@ -199,6 +199,8 @@ main() {
     return 0
   fi
   if is_standby; then die "standby server: the panel does not run here; install.sh --version sets its version" 2; fi
+  # Before the backup and install.sh: both run compose for these projects.
+  guard_existing_projects 3
   # 10 minutes: a backup holds the lock (shared) while it dumps the database. Another update,
   # rollback or restore holds it exclusively, and the updater does not start one then.
   take_lock "$STATE_DIR/update.lock" 600 "another update.sh, rollback.sh or restore.sh, or a backup's database dump," UPDATE_LOCK_FD

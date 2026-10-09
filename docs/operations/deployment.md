@@ -51,8 +51,9 @@ Google-приложений для ящиков Gmail — отдельно, в [
 
 - `mailexpert` (имя меняет `--project`): `frontend`, `backend`, `postgres`, `redis` и, если включён
   профиль `tenant`, `tenant-worker`;
-- `edge` (имя меняет `--edge-project`): Caddy (профиль `caddy`) и/или cloudflared (профиль `tunnel`),
-  в зависимости от режима входа; с `--no-edge` этого проекта нет.
+- `mailexpert-edge` (имя меняет `--edge-project`; установки, сделанные до этого умолчания, остаются
+  на `edge`, см. [«Имена на общем сервере»](#имена-на-общем-сервере)): Caddy (профиль `caddy`) и/или
+  cloudflared (профиль `tunnel`), в зависимости от режима входа; с `--no-edge` этого проекта нет.
 
 Данные лежат в именованных томах Docker, настройки и состояние — в `<PREFIX>` (по умолчанию
 `/opt/mailexpert`). Кроме этого `install.sh` ставит собственные юниты systemd панели (таймеры
@@ -119,7 +120,7 @@ DinD требует привилегированного контейнера, �
 
 ## Сосед на общем сервере: что панель трогает и что нет
 
-Имена ниже — для умолчаний: `--project mailexpert`, `--edge-project edge`, `--http-port 8080`,
+Имена ниже — для умолчаний: `--project mailexpert`, `--edge-project mailexpert-edge`, `--http-port 8080`,
 `--prefix /opt/mailexpert`. Вместо них подставляются ваши значения; так же — во всём документе.
 
 ### Что создаётся и меняется на хосте
@@ -130,11 +131,11 @@ DinD требует привилегированного контейнера, �
 | systemd (если хостом управляет systemd) | в `/etc/systemd/system`: `mailexpert-backup.service` и `.timer`, `mailexpert-health.service` и `.timer`, `mailexpert-updater.path` и `.service`; с `--project <имя>` — `mailexpert-backup-<имя>.timer`, `mailexpert-health-<имя>.timer`, `mailexpert-updater-<имя>.path` и их `.service`. Включаются и запускаются только эти юниты, плюс общий `systemctl daemon-reload` | `systemctl enable --now docker` |
 | Пакеты | нет | `ca-certificates curl git jq ufw iproute2 util-linux unattended-upgrades`; Docker Engine и Compose (`docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin`) из download.docker.com, если Compose нет или он старее 2.24.4. Если стоит `docker.io` из Ubuntu со старым Compose — остановка с просьбой удалить его |
 | Файрвол | нет | `ufw`: входящие закрыты (`default deny incoming`), открыты порты SSH и, если работает Caddy, `80/tcp`, `443/tcp`, `443/udp`; `ufw` включается, только если на одном из этих портов SSH действительно слушает, а уже существующие правила для порта SSH не расширяются |
-| Контейнеры | проект `mailexpert`: `mailexpert-frontend`, `-backend`, `-postgres`, `-redis`, `-tenant-worker` (профиль `tenant`) — имена задаёт `container_name` от имени проекта; проект `edge`: `edge-caddy-1`, `edge-cloudflared-1`; временные: `mailexpert-verify-<id>` (проверка восстановлением, сеть `none`), безымянные `--rm` контейнеры restic и образа backend | — |
-| Сети и тома | сеть `mailexpert_mailexpert` (bridge); тома `mailexpert_postgres_data`, `mailexpert_redis_data` и, с Caddy, `edge_caddy_data`, `edge_caddy_config`. Caddy и cloudflared работают в сети хоста | — |
+| Контейнеры | проект `mailexpert`: `mailexpert-frontend`, `-backend`, `-postgres`, `-redis`, `-tenant-worker` (профиль `tenant`) — имена задаёт `container_name` от имени проекта; проект `mailexpert-edge`: `mailexpert-edge-caddy-1`, `mailexpert-edge-cloudflared-1`; временные: `mailexpert-verify-<id>` (проверка восстановлением, сеть `none`), безымянные `--rm` контейнеры restic и образа backend | — |
+| Сети и тома | сеть `mailexpert_mailexpert` (bridge); тома `mailexpert_postgres_data`, `mailexpert_redis_data` и, с Caddy, `mailexpert-edge_caddy_data`, `mailexpert-edge_caddy_config`. Caddy и cloudflared работают в сети хоста | — |
 | Образы | `ghcr.io/wyrtensi/mailexpert-{backend,frontend,edge,tenant-worker}:sha-<12>`, `postgres:16-alpine`, `redis:7-alpine`, `cloudflare/cloudflared:<версия>`, `restic/restic:0.18.0` | — |
 | Порты | `127.0.0.1:8080` (frontend). Caddy (`direct`, `both`): 80/tcp, 443/tcp и 443/udp на всех адресах хоста. cloudflared (`cf`, `both`) входящих портов не открывает, только слушатель метрик в сети хоста ([ports.md, раздел 1](ports.md)). PostgreSQL, Redis и tenant-worker на хост не публикуются | — |
-| Проверки | `git curl jq ss sha256sum timeout` и `flock`, Docker доступен, Compose 2.24.4+, порты (ниже) | Ubuntu 24.04; ресурсы 2 vCPU / 4 ГБ / 20 ГБ свободно (первая установка с нехваткой останавливается, повторная — предупреждает) |
+| Проверки | `git curl jq ss sha256sum timeout flock`, Docker доступен, Compose 2.24.4+, чужие объекты в своих compose-проектах, порты (ниже) | Ubuntu 24.04; ресурсы 2 vCPU / 4 ГБ / 20 ГБ свободно (первая установка с нехваткой останавливается, повторная — предупреждает) |
 
 Как юниты с суффиксом уживаются с юнитами под именами по умолчанию —
 [раздел 5.1](#51-включить-обновления-на-боевом-сервере); откат на версию без суффиксов —
@@ -149,8 +150,9 @@ DinD требует привилегированного контейнера, �
   группы.
 - Чужие compose-проекты, контейнеры, тома, сети и образы: в скриптах нет `docker system prune`,
   `docker image prune`, `docker volume rm` и `docker rmi`. `--remove-orphans` (`install.sh`) и
-  удаление лишних сервисов края работают только внутри своих проектов (`-p`). Общие образы
-  (`postgres:16-alpine`, `redis:7-alpine`) только скачиваются, если их нет.
+  удаление лишних сервисов края работают только внутри своих проектов (`-p`), а до первой команды
+  compose скрипты проверяют, что в этих проектах нет чужого ([«Имена на общем сервере»](#имена-на-общем-сервере)).
+  Общие образы (`postgres:16-alpine`, `redis:7-alpine`) только скачиваются, если их нет.
 - Чужие юниты systemd (кроме временной подмены при откате установки с `--project` на версию без
   суффиксов, [«Откат обновления»](#откат-обновления)). Файрвол с `--no-system` не трогается
   совсем; без него `ufw` получает политику `deny incoming` и правила для SSH и 80/443, а правила
@@ -187,28 +189,141 @@ DinD требует привилегированного контейнера, �
   `docker`, root), может остановить контейнеры панели и удалить её тома вместе с базой; чистка
   неиспользуемых томов (`docker volume prune -a`) при остановленной панели тоже удалит её базу.
   Защита — ночной бэкап restic во внешнее хранилище и ключ восстановления вне сервера.
-- **Порты.** Перед запуском `install.sh` проверяет, кто слушает: если нужен Caddy, а 80 или 443
-  занимает другой процесс или чужой контейнер (`docker-proxy`), установка останавливается («ports for
-  the edge are taken»). Процесс с именем `caddy` за конфликт не считается — чужой Caddy вне Docker на
-  80/443 эта проверка не заметит, и установка остановится позже, на проверке
-  `https://<DIRECT_HOST>`. Порт `--http-port` заранее не проверяется: если он занят, падает
-  `docker compose up` с ошибкой привязки — задайте другой. Занятые вне Docker почтовые порты
-  25/465/587/993 — только предупреждение (они нужны почтовому узлу, который всё равно живёт на
-  отдельном сервере). Слушатель метрик cloudflared — в
+- **Порты.** Перед запуском `install.sh` проверяет, кто слушает:
+  - если нужен Caddy, а 80 или 443 занимает другой процесс, чужой контейнер (`docker-proxy`) или
+    Caddy, который не является контейнером `caddy` своего проекта края (Caddy на хосте, Caddy соседа,
+    край этой же установки под прежним `--edge-project`), установка останавливается («ports for the
+    edge are taken»);
+  - если `127.0.0.1:<http-port>` (или тот же порт на всех адресах) занят не контейнером своей панели,
+    установка останавливается до запуска (`--http-port ... is taken`): задайте другой `--http-port`.
+    С `--no-start` это только предупреждение. `restore.sh` проверяет тот же порт до восстановления
+    (код 2, ничего не изменено; с `--no-start` — предупреждение);
+  - занятые вне Docker почтовые порты 25/465/587/993 — только предупреждение (они нужны почтовому
+    узлу, который всё равно живёт на отдельном сервере).
+
+  Слушатель метрик cloudflared — в
   [рецепте](#установка-на-общий-сервер-минимальное-влияние-полный-функционал).
-- **Имена.** `install.sh` не проверяет, занято ли имя проекта чужими контейнерами. Чужой
-  compose-проект с тем же именем потеряет контейнеры, которых нет в compose-файлах панели
-  (`--remove-orphans`), а в проекте края с тем же именем сервисы `caddy` и `cloudflared` будут
-  заменены. Имя края по умолчанию (`edge`) слишком общее: на общем сервере задавайте
-  `--edge-project mailexpert-edge`. Имена контейнеров панели фиксированы (`<проект>-backend` и т. д.):
-  контейнер с таким именем у соседа — ошибка `up`. Проверка до установки:
-  `docker ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}'` и `docker volume ls`.
-  Две панели на одном хосте различаются `--prefix`, `--project`, `--edge-project` и `--http-port`;
-  тогда и временные юниты `systemd-run` из инструкций называйте по проекту
-  (`mailexpert-update-<проект>`).
+- **Имена.** Всё, что панель создаёт на хосте, названо с префиксом `mailexpert`, а чужие объекты в
+  своих compose-проектах скрипты не трогают ([«Имена на общем сервере»](#имена-на-общем-сервере)).
+  Имена контейнеров панели фиксированы (`<проект>-backend` и т. д.): контейнер с таким именем у
+  соседа — ошибка `up`. Две панели на одном хосте различаются `--prefix`, `--project`,
+  `--edge-project` и `--http-port`; тогда и временные юниты `systemd-run` из инструкций называйте по
+  проекту (`mailexpert-update-<проект>`).
 - **Спул обновлений.** Каталог запросов `<PREFIX>/state/update-spool/request` принадлежит uid
   процесса backend (обычно 1000). Если на хосте uid 1000 — пользователь соседа, он тоже может класть
   запросы; они проходят те же проверки ([deployment-system.md, раздел 9](../architecture/deployment-system.md)).
+
+### Имена на общем сервере
+
+**Свои имена.** Compose-проекты по умолчанию — `mailexpert` (панель) и `mailexpert-edge` (край).
+Контейнеры, сеть и тома получают имя проекта в начале (`mailexpert-backend`, `mailexpert_postgres_data`,
+`mailexpert-edge-caddy-1`, `mailexpert-edge_caddy_data`). Остальное тоже с префиксом: юниты
+`mailexpert-*`, временный контейнер проверки `mailexpert-verify-<id>` с меткой `mailexpert.verify`,
+restic-хост `mailexpert-<hex>`, всё состояние — под `<PREFIX>`. На почтовом узле — `/etc/mailexpert-node`,
+`/var/lib/mailexpert-node`, `/var/backups/mailexpert-node`, `/var/log/mailexpert-node-*.log`, файлы
+`mailexpert-node*` в `/etc/cron.d` и `/etc/logrotate.d`, юниты `mailexpert-*`, наборы ipset
+`mailexpert-eop4`/`-eop6`, цепочки `MAILEXPERT-NODE`/`-2`, метка `mailexpert.node-backup`. Имена
+mailcow (`mailcowdockerized`, `br-mailcow`, `mailcow-backup`) принадлежат mailcow и не меняются.
+Хостовые пути без `--no-system` (`/swapfile`, `/etc/apt/...docker.*`, `20auto-upgrades`) — общепринятые
+пути Ubuntu и Docker, на общем сервере с `--no-system` их нет.
+
+**ID установки и метки.** `install.sh` один раз создаёт ID установки (16 hex-символов) и хранит его в
+`install.conf` (`INSTALL_ID`); обновления и откаты его сохраняют, установка, сделанная раньше, получает
+ID при следующем `install.sh` или `update.sh`. При переезде ([раздел 6](#6-переезд-панели-на-другой-сервер))
+новый сервер получает свой ID от своего `install.sh --no-start`: `restore.sh` оставляет `install.conf`
+нового сервера. ID можно сменить правкой `INSTALL_ID` в `install.conf`; контейнеры получат новый при
+следующем `install.sh`. `status.sh` показывает ID (`install_id`). Каждый
+контейнер, который запускает установка, несёт три метки:
+
+| Метка | Значение |
+|---|---|
+| `io.mailexpert.managed` | `true` — у всех контейнеров MailExpert на хосте, любой установки |
+| `io.mailexpert.install` | ID установки (`INSTALL_ID`) |
+| `io.mailexpert.component` | `panel` (сервисы панели и `docker compose run`), `edge`, `verify` (проверка восстановлением), `restic`, `helper` (разовые контейнеры `install.sh`); на почтовом узле — `node-restic`, `node-backup-check` |
+
+Это сервисы `deploy/compose.prod.yml` и `deploy/edge/compose.yml` (ID приходит из `<PREFIX>/.env` и
+`<PREFIX>/edge/.env`, их пишет `install.sh`) и каждый `docker run` скриптов. Тома и сети меток
+MailExpert не получают: смену метки тома compose считает изменением конфигурации и предлагает
+пересоздать том вместе с данными. У них остаётся только метка проекта compose. На почтовом узле у
+вспомогательных контейнеров нет ID (узел на хосте один, его контейнеры — контейнеры mailcow): только
+`managed` и `component`. Контейнер, созданный до появления меток, получает их, когда compose его
+пересоздаёт (обычно при ближайшем обновлении).
+
+`io.mailexpert.managed=true` только находит контейнеры MailExpert, владельца он не доказывает. Список
+и удаление своих объектов (`<INSTALL_ID>` — из `install.conf` или `status.sh`, `<проект>` — `PROJECT`
+или `EDGE_PROJECT` оттуда же):
+
+```bash
+docker ps -a --filter label=io.mailexpert.managed=true \
+  --format '{{.Names}} {{.Label "io.mailexpert.install"}} {{.Label "io.mailexpert.component"}}'
+docker ps -aq --filter label=io.mailexpert.install=<INSTALL_ID>                   # контейнеры установки
+docker ps -aq --filter label=io.mailexpert.install=<INSTALL_ID> | xargs -r docker rm -f
+docker volume ls --filter label=com.docker.compose.project=<проект>              # тома проекта
+docker network ls --filter label=com.docker.compose.project=<проект>             # сети проекта
+```
+
+Удаление тома панели удаляет её базу (`<проект>_postgres_data`), тома края — сертификаты Caddy.
+Перед `docker volume rm` убедитесь, что тома не соседские (метка проекта общая, если сосед взял то же
+имя проекта; см. «Проверка владельца») и что ключ восстановления и бэкап restic вне сервера.
+
+**Проверка владельца.** Перед первой командой compose `install.sh`, `update.sh`, `rollback.sh` и
+`restore.sh` смотрят, что лежит в проектах панели и края:
+
+- контейнеры с меткой `com.docker.compose.project=<проект>`: своим считается контейнер с меткой
+  `io.mailexpert.install=<INSTALL_ID>`, а без неё или с другим ID — только если его
+  `com.docker.compose.project.working_dir` — `<PREFIX>/app` (панель) или `<PREFIX>/edge` (край):
+  так остаются своими контейнеры, созданные до меток, и контейнеры после смены `INSTALL_ID` (при
+  пересоздании compose даёт им новый ID). Без обеих примет или из другого каталога с чужим ID — чужой;
+  ни `io.mailexpert.managed`, ни ответ на порту владельца не доказывают;
+- тома и сети, которые compose переиспользует (`<проект>_postgres_data`, `<проект>_redis_data`,
+  `<проект>_mailexpert`, `<край>_caddy_data`, `<край>_caddy_config`), и все тома с меткой проекта:
+  чужие, если их метка проекта другая или её нет, или если том подключён к чужому контейнеру.
+
+Найдя чужое, скрипт останавливается с кодом 2, перечисляет объекты и ни одной команды compose против
+них не выполняет. Выход для новой установки — другое имя: `--project <имя>` или `--edge-project <имя>`.
+Для существующей (`update.sh`, `rollback.sh`, `restore.sh`) — выяснить, чей это объект
+(`docker inspect <имя>`), и убрать его из проекта; для края со старым именем `edge` — переезд ниже.
+Если Docker не отвечает, скрипт тоже останавливается, ничего не меняя: `install.sh` и `restore.sh` с
+кодом 1, `update.sh` и `rollback.sh` с кодом 3 («ничего не изменено», исполнитель обновлений не
+откатывает). `status.sh` и `healthcheck.sh` показывают чужие объекты как проблему (`ownership: ...`).
+Том без контейнеров, созданный соседом с той же меткой проекта, от своего не отличить: проверка его
+пропускает. `--prefix` с сегментом `..` не принимается: каталог проекта сравнивается по пути.
+
+**Установки со старым именем края.** До этого умолчания край назывался `edge`. Установка хранит имя
+в `install.conf` (`EDGE_PROJECT=edge`) и сама его не меняет; `status.sh` пишет строку
+`info: names: ...` с командой переезда. Переезд — убрать свои контейнеры старого проекта и поднять новый;
+у нового Caddy свои пустые тома, сертификат `<DIRECT_HOST>` он получает заново (DNS-01, обычно до
+пары минут; лимит Let's Encrypt — 5 одинаковых сертификатов в неделю). На это время
+`https://<DIRECT_HOST>` недоступен, туннель переподключается за секунды:
+
+```bash
+# 1. посмотреть, что лежит в проекте edge: свои контейнеры — с каталогом <PREFIX>/edge,
+#    остальные (если есть) — соседа с тем же именем проекта:
+docker ps -a --filter label=com.docker.compose.project=edge \
+  --format '{{.Names}} {{.Label "com.docker.compose.project.working_dir"}}'
+# 2. удалить только свои контейнеры старого края (тома остаются). Не `docker compose -p edge down`:
+#    он удалит и контейнеры соседа из проекта с тем же именем. Фильтр по каталогу работает и для
+#    контейнеров, созданных до меток; если у них уже есть метка установки, то же даёт
+#    --filter label=io.mailexpert.install=<INSTALL_ID> вместо фильтра по каталогу.
+docker ps -aq --filter label=com.docker.compose.project=edge \
+  --filter label=com.docker.compose.project.working_dir=<PREFIX>/edge | xargs -r docker rm -f
+# 3. поднять край под новым именем (install.conf запомнит его):
+sudo <PREFIX>/app/scripts/deploy/install.sh --prefix <PREFIX> --edge-project mailexpert-edge
+# 4. когда https://<DIRECT_HOST> отвечает с новым сертификатом — старые тома Caddy больше не нужны
+#    (только если на шаге 1 соседа в проекте edge не было: иначе это могут быть его тома):
+docker volume rm edge_caddy_data edge_caddy_config
+```
+
+Если сосед на этом сервере тоже держит проект `edge`, `install.sh`, `update.sh`, `rollback.sh` и
+`restore.sh` останавливаются на проверке владельца и в сообщении называют эти же шаги.
+
+Без шага 2 `install.sh` остановится: Caddy старого проекта на 80/443 для нового имени уже чужой.
+`install.sh` ждёт ответа `https://<DIRECT_HOST>` 180 секунд; если сертификат выпускается дольше,
+он завершится с ошибкой этой проверки, а Caddy продолжит выпуск — повторите
+`install.sh --prefix <PREFIX>`.
+Проект панели с именем без префикса (`--project`) так не переносится: в его томе база. Переезд —
+бэкап и [раздел 6](#6-переезд-панели-на-другой-сервер) в установку с другим `--project`; `status.sh`
+пишет об этом строку `info: names: ...`.
 
 ### Установка на общий сервер: минимальное влияние, полный функционал
 
@@ -217,8 +332,8 @@ DinD требует привилегированного контейнера, �
 - Linux с systemd — тогда работают кнопка обновления, ночной бэкап и проверка здоровья;
 - Docker Engine, демон запущен (`docker info` отвечает), плагин Compose v2 **2.24.4 или новее**
   (`docker compose version`);
-- утилиты `git curl jq ss sha256sum timeout` (`install.sh` проверяет их до начала работы) и `flock`
-  (пакет util-linux);
+- утилиты `git curl jq ss sha256sum timeout flock` (`flock` — пакет util-linux; `install.sh`
+  проверяет их до начала работы);
 - свободные ресурсы: около 2 vCPU и 4-4,5 ГБ памяти под панель (см. «Память» выше), 20 ГБ на диске
   `<PREFIX>` и Docker;
 - файрвол, swap, обновления ОС — как принято на этом сервере. Панели нужны только исходящие
@@ -259,8 +374,7 @@ DinD требует привилегированного контейнера, �
 
 ```bash
 sudo <PREFIX>/app/scripts/deploy/install.sh --version "$V" --no-system \
-  --signin cf --cf-host <CF_HOST> --admin-email <ADMIN_EMAIL> \
-  --edge-project mailexpert-edge
+  --signin cf --cf-host <CF_HOST> --admin-email <ADMIN_EMAIL>
 # через прокси соседа вместо туннеля:
 #   --signin direct --direct-host <DIRECT_HOST> --no-edge
 # если умолчания заняты (вторая панель, порт 8080 у соседа):
@@ -329,8 +443,8 @@ sudo /opt/mailexpert/app/scripts/deploy/install.sh \
 | `--no-edge` | не запускать ни Caddy, ни cloudflared: снаружи панель публикует ваш прокси ([общий сервер](#установка-на-общий-сервер-минимальное-влияние-полный-функционал)) или никто (стенд) |
 | `--edge-tls acme\|internal` | сертификат Caddy: DNS-01 Cloudflare (по умолчанию) или собственный CA Caddy (стенды); `--acme-email` — адрес для ACME, необязателен |
 | `--prefix` | каталог установки, по умолчанию `/opt/mailexpert` |
-| `--project`, `--edge-project` | имена compose-проектов панели и края, по умолчанию `mailexpert` и `edge`; должны различаться |
-| `--http-port` | порт панели на `127.0.0.1`, по умолчанию `8080` (1024-65535) |
+| `--project`, `--edge-project` | имена compose-проектов панели и края, по умолчанию `mailexpert` и `mailexpert-edge` (установка, сделанная раньше, сохраняет `edge` из `install.conf`); должны различаться. Проект, в котором есть чужие контейнеры или тома, `install.sh` не трогает ([«Имена на общем сервере»](#имена-на-общем-сервере)) |
+| `--http-port` | порт панели на `127.0.0.1`, по умолчанию `8080` (1024-65535); занятый не своей панелью порт останавливает установку до запуска |
 | `--image-prefix`, `--repo-url` | реестр образов и репозиторий кода, по умолчанию `ghcr.io/wyrtensi` и GitHub-репозиторий проекта |
 | `--no-system` | не настраивать хост ([что это меняет](#сосед-на-общем-сервере-что-панель-трогает-и-что-нет)) |
 | `--no-start` | всё подготовить, но не запускать панель и туннель (переезд, [раздел 6](#6-переезд-панели-на-другой-сервер)) |
@@ -506,7 +620,7 @@ services:
   абсолютные.
 - `install.sh` при запуске пишет в лог, что использует этот файл; применяется он при следующем
   `install.sh` или обновлении (или `docker compose ... up -d` с тем же набором `-f`).
-- Проект края (`edge`, Caddy и cloudflared) этот файл не затрагивает.
+- Проект края (`mailexpert-edge`, Caddy и cloudflared) этот файл не затрагивает.
 - `install.sh` запускает панель с `--remove-orphans`: сервис, убранный из файла, при следующем
   запуске останавливается и удаляется. Это касается только контейнеров проекта панели (`-p`):
   проект края и чужие проекты не трогаются.
@@ -948,7 +1062,7 @@ backend и frontend. Если дамп не восстановился или б
    Время восстановления из репетиции (`restore_seconds` в выводе) — оценка простоя.
 3. **В день переезда, на A:** остановить приложение и туннель —
    `docker compose -p mailexpert stop backend frontend`, для режима `cf`/`both` — также
-   `cloudflared` в проекте `edge`.
+   `cloudflared` в проекте края (`mailexpert-edge`; у установок, сделанных раньше, — `edge`, см. `EDGE_PROJECT` в `install.conf`).
 4. **Финальный бэкап на A:**
 
    ```bash

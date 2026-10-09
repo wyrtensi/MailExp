@@ -184,7 +184,8 @@ the node's restic host `mailexpert-node-<hex>`; a repository with the panel's ho
 and the panel's `restore.sh` never picks a node's snapshot.
 
 A run: containers a killed run left removed (restic's carry the label `mailexpert.node-backup=1`;
-mailcow's is `mailcow-backup`) and stale restic locks unlocked; a free space check (the dump and the
+mailcow's is `mailcow-backup`, removed only when it writes under `/var/backups/mailexpert-node`: a
+dump someone started by hand elsewhere is left alone) and stale restic locks unlocked; a free space check (the dump and the
 reserve); mailcow's own `helper-scripts/backup_and_restore.sh backup crypt redis rspamd postfix mysql`
 into `/var/backups/mailexpert-node/mailcow`, every archive checked (the script exits 0 when a step
 failed), the crypt archive listed for `ecprivkey.pem` and `ecpubkey.pem` and the database archive for a

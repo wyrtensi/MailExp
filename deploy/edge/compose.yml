@@ -2,8 +2,9 @@
 # Cloudflare tunnel for <CF_HOST>. Both use the host network and reach the panel on
 # 127.0.0.1:<APP_HTTP_PORT>.
 #
-# A compose project of its own (default name "edge"): it outlives panel updates and, on a
-# single server, will also front the mail node. install.sh copies this file to <prefix>/edge/
+# A compose project of its own (default name "mailexpert-edge"; an install made before keeps
+# "edge", as its install.conf records): it outlives panel updates and fronts the panel only, the
+# mail node always runs on a server of its own. install.sh copies this file to <prefix>/edge/
 # and writes <prefix>/edge/.env: COMPOSE_PROJECT_NAME, COMPOSE_PROFILES (caddy, tunnel),
 # EDGE_IMAGE (pinned by digest), and the secrets from configure.sh (DNS_API_TOKEN,
 # TUNNEL_TOKEN). The public hostname of the tunnel (<CF_HOST> -> http://127.0.0.1:<port>) is
@@ -17,12 +18,21 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
+# Labels of every container of the edge (docs/operations/deployment.md, "Имена на общем сервере"):
+# MAILEXPERT_INSTALL_ID comes from <prefix>/edge/.env (install.conf INSTALL_ID). Containers only:
+# a changed label on a volume makes compose offer to recreate it, with its data.
+x-labels: &labels
+  io.mailexpert.managed: "true"
+  io.mailexpert.install: ${MAILEXPERT_INSTALL_ID:-}
+  io.mailexpert.component: edge
+
 services:
   caddy:
     profiles: ["caddy"]
     image: ${EDGE_IMAGE:?set EDGE_IMAGE; install.sh pins it}
     restart: unless-stopped
     logging: *logging
+    labels: *labels
     network_mode: host
     environment:
       DNS_API_TOKEN: ${DNS_API_TOKEN:-}
@@ -36,6 +46,7 @@ services:
     image: cloudflare/cloudflared:2026.9.1
     restart: unless-stopped
     logging: *logging
+    labels: *labels
     network_mode: host
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:

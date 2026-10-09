@@ -313,7 +313,7 @@ curl -fsS -X POST "$CF_API/accounts/<ACCOUNT_ID>/access/identity_providers" \
 
 Нужен для `cf` и `both`. Туннель «управляется удалённо» (remotely managed): его маршруты хранятся
 в Cloudflare, а сервер запускает `cloudflared` только с токеном. `cloudflared` ставит сам
-`install.sh` (контейнер в проекте `edge`), **на сервере ничего из инструкции Cloudflare не
+`install.sh` (контейнер в проекте края `mailexpert-edge`), **на сервере ничего из инструкции Cloudflare не
 запускайте**.
 
 **В панели Cloudflare.**
@@ -607,13 +607,13 @@ $M access allow <EMAIL>            # разрешить удалённого с�
 | Человека добавили в политику в Cloudflare, а пользователем панели он не стал | прогон остановлен лимитом (`access.import_aborted`), адрес удалён в панели или у него уже есть отключённая учётная запись | `mailexpert access status`, `access tombstones`; при первом включении поднимите `ACCESS_SYNC_MAX_IMPORTS`; при первом входе через Access учётная запись всё равно создастся |
 | Синхронизация: `failed` и «Следующая попытка в …» | сеть, тайм-аут, 5xx или 429 от Cloudflare | подождать: повторы через 1, 5 и 15 минут, затем ежечасный прогон; `access sync` запускает прогон сразу |
 | Бесконечные редиректы между `<CF_HOST>` и `<TEAM>.cloudflareaccess.com` | у маршрута туннеля `https://` вместо `http://`; второе приложение Access или правило перенаправления на `*.example.com`; браузер блокирует cookies `CF_Authorization` | Service URL — `http://127.0.0.1:<APP_HTTP_PORT>`; одно приложение на `<CF_HOST>` без пути; очистите cookies обоих имён, попробуйте другой браузер |
-| Cloudflare `Error 1033`, HTTP 530 (`tunnel_down`) | ни один коннектор этого туннеля не подключён, или `<CF_HOST>` — маршрут другого туннеля | `docker compose -p edge logs cloudflared`; на сервере тот ли `TUNNEL_TOKEN`; туннель в Zero Trust должен быть Healthy; исходящие 7844 TCP/UDP открыты ([ports.md](ports.md)) |
+| Cloudflare `Error 1033`, HTTP 530 (`tunnel_down`) | ни один коннектор этого туннеля не подключён, или `<CF_HOST>` — маршрут другого туннеля | `docker compose -p mailexpert-edge logs cloudflared` (у установок, сделанных раньше, проект `edge`); на сервере тот ли `TUNNEL_TOKEN`; туннель в Zero Trust должен быть Healthy; исходящие 7844 TCP/UDP открыты ([ports.md](ports.md)) |
 | HTTP 502 / 504 (`origin_error`) | туннель подключён, но не достучался до панели | маршрут на `http://127.0.0.1:<APP_HTTP_PORT>` (порт — `APP_HTTP_PORT` в `<prefix>/.env`); панель запущена: `status.sh` |
 | `<CF_HOST>` открывается без входа, `status.sh`: `access_missing` | приложения Access нет или оно на другом имени/пути | шаг 3: приложение ровно на `<CF_HOST>` |
 | `access_missing` с кодом 403, а в браузере вход через Access работает | раньше Access ответило правило безопасности Cloudflare (WAF, Bot Fight Mode) на запрос `curl` с сервера | проверка ошиблась, не установка; сверьте события Security → Events зоны, при желании разрешите адрес сервера |
 | `dns_missing` | у `<CF_HOST>` нет записи DNS или она ещё не разошлась | маршрут туннеля создаёт CNAME сам; через API — шаг 2; подождите несколько минут и повторите `status.sh` |
 | `redirect_elsewhere` | имя перенаправляет не на Access (правило Redirect, другой сервис) | уберите перенаправление, создайте приложение Access |
-| Caddy не получает сертификат `<DIRECT_HOST>` | у `DNS_API_TOKEN` нет DNS Edit или Zone Read на эту зону, или токен на другую зону | шаг 4; `docker compose -p edge logs caddy` |
+| Caddy не получает сертификат `<DIRECT_HOST>` | у `DNS_API_TOKEN` нет DNS Edit или Zone Read на эту зону, или токен на другую зону | шаг 4; `docker compose -p mailexpert-edge logs caddy` (у установок, сделанных раньше, проект `edge`) |
 | `configure.sh`: `TUNNEL_TOKEN: must be the token of a remotely managed tunnel` | скопирована вся команда, кавычки или токен туннеля, управляемого локально | только значение `eyJ...` после `install` или `--token`, шаг 2 |
 | Синхронизация: `policy_not_allow`, `policy_not_attached`, `Cloudflare getPolicy failed (403)` | не Allow-политика; политика не привязана к приложению; у токена нет «Access: Apps and Policies Edit» | раздел 5; «Проверить» в панели или `mailexpert access verify` называет, что именно не так |
 | «Проверить» зелёное, а прогон: `Cloudflare updatePolicy failed (403)` | у токена Access: Apps and Policies только Read | выпустите токен с Edit (раздел «Ключи и права») |

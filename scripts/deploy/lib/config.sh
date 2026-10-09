@@ -3,15 +3,20 @@
 # sign-in mode. Pure functions: no Docker, no network, no writes except the file passed in.
 
 # install.conf keys, in the order they are written. --prefix and --no-start are per run.
+# INSTALL_ID is no flag: install.sh generates it once (ensure_install_id); every container this
+# install starts carries it as the label io.mailexpert.install.
 INSTALL_CONF_KEYS=(VERSION SIGNIN CF_HOST DIRECT_HOST ADMIN_EMAILS LOCAL_AUTH EDGE EDGE_TLS
-  ACME_EMAIL PROJECT EDGE_PROJECT HTTP_PORT IMAGE_PREFIX REPO_URL SYSTEM)
+  ACME_EMAIL PROJECT EDGE_PROJECT HTTP_PORT IMAGE_PREFIX REPO_URL SYSTEM INSTALL_ID)
 declare -gA INSTALL_ARGS=()
+# The edge's compose project name before new installs got mailexpert-edge: an install keeps the
+# name its install.conf records.
+LEGACY_EDGE_PROJECT=edge
 
 # shellcheck disable=SC2034 # the CFG_* and OPT_* globals are read by install.sh and edge.sh
 install_defaults() {
-  CFG_VERSION='' CFG_SIGNIN='' CFG_CF_HOST='' CFG_DIRECT_HOST='' CFG_ADMIN_EMAILS='' CFG_ACME_EMAIL=''
+  CFG_VERSION='' CFG_INSTALL_ID='' CFG_SIGNIN='' CFG_CF_HOST='' CFG_DIRECT_HOST='' CFG_ADMIN_EMAILS='' CFG_ACME_EMAIL=''
   CFG_LOCAL_AUTH=0 CFG_EDGE=1 CFG_EDGE_TLS=acme CFG_SYSTEM=1
-  CFG_PROJECT=mailexpert CFG_EDGE_PROJECT=edge CFG_HTTP_PORT=8080
+  CFG_PROJECT=mailexpert CFG_EDGE_PROJECT=mailexpert-edge CFG_HTTP_PORT=8080
   CFG_IMAGE_PREFIX=ghcr.io/wyrtensi CFG_REPO_URL=https://github.com/wyrtensi/MailExpert.git
   OPT_PREFIX=/opt/mailexpert OPT_START=1
 }
@@ -57,6 +62,11 @@ resolve_install_config() {
     fi
     printf -v "CFG_$key" '%s' "$value"
   done
+  # An install.conf without EDGE_PROJECT predates the mailexpert-edge default: its edge runs as
+  # "edge", and the new default would start a second edge next to it.
+  if [ -f "$conf" ] && [ -z "${INSTALL_ARGS[EDGE_PROJECT]+set}" ] && ! env_get "$conf" EDGE_PROJECT >/dev/null; then
+    CFG_EDGE_PROJECT=$LEGACY_EDGE_PROJECT
+  fi
   for key in PREFIX START; do
     if [ -n "${INSTALL_ARGS[$key]+set}" ]; then printf -v "OPT_$key" '%s' "${INSTALL_ARGS[$key]}"; fi
   done
@@ -111,13 +121,15 @@ validate_install_config() {
   esac
   [[ $CFG_LOCAL_AUTH =~ ^[01]$ && $CFG_EDGE =~ ^[01]$ && $CFG_SYSTEM =~ ^[01]$ ]] ||
     errors+=("install.conf: LOCAL_AUTH, EDGE and SYSTEM must be 0 or 1")
+  is_install_id "$CFG_INSTALL_ID" || [ -z "$CFG_INSTALL_ID" ] ||
+    errors+=("install.conf: INSTALL_ID must be 16 lowercase hex characters (remove the line and run install.sh for a new one)")
   is_name "$CFG_PROJECT" || errors+=("--project must be lowercase letters, digits, '-' or '_'")
   is_name "$CFG_EDGE_PROJECT" || errors+=("--edge-project must be lowercase letters, digits, '-' or '_'")
   [ "$CFG_PROJECT" != "$CFG_EDGE_PROJECT" ] || errors+=("--project and --edge-project must differ")
   is_port "$CFG_HTTP_PORT" || errors+=("--http-port must be a port from 1024 to 65535")
   [[ $CFG_IMAGE_PREFIX =~ ^[a-z0-9][a-z0-9._:/-]*[a-z0-9]$ ]] || errors+=("--image-prefix is not an image repository prefix")
   if [ -z "$CFG_REPO_URL" ] || ! env_value_ok "$CFG_REPO_URL"; then errors+=("--repo-url is empty or has spaces"); fi
-  [[ $OPT_PREFIX =~ ^/[A-Za-z0-9._/-]+$ ]] || errors+=("--prefix must be an absolute path without spaces")
+  is_prefix "$OPT_PREFIX" || errors+=("--prefix must be an absolute path without spaces or .. segments")
   if [ "${#errors[@]}" -gt 0 ]; then
     printf '[mailexpert] error: %s\n' "${errors[@]}" >&2
     return 2
@@ -144,7 +156,8 @@ app_settings() {
     "AUTH_MODE=$auth" \
     "BOOTSTRAP_ADMIN_EMAILS=$CFG_ADMIN_EMAILS" \
     "GOOGLE_REDIRECT_URI=$url/oauth/google/callback" \
-    "UPDATE_SPOOL_HOST_DIR=$OPT_PREFIX/state/update-spool"
+    "UPDATE_SPOOL_HOST_DIR=$OPT_PREFIX/state/update-spool" \
+    "MAILEXPERT_INSTALL_ID=$CFG_INSTALL_ID"
 }
 
 # edge_services: the edge services this install runs, one per line.
@@ -258,10 +271,15 @@ ufw_allowed_ports() {
   if edge_services | grep -qx caddy; then printf '%s\n' 80/tcp 443/tcp 443/udp; fi
 }
 
-# port_conflicts <port...>: reads `ss -ltnpH` on stdin and prints "<port> <process>" for each
-# listed port held by anything but the edge's own caddy.
+# port_conflicts <own caddy running: 0|1> <port...>: reads `ss -ltnpH` on stdin and prints
+# "<port> <process>" for each listed port held by anything but the edge's own caddy. A process
+# named caddy counts as this install's only while the edge project's caddy container runs (it uses
+# the host network, so ss shows the process itself); otherwise any caddy (installed on the host,
+# another project's, or this install's edge under an earlier --edge-project) is a conflict.
 port_conflicts() {
-  local want=" $* " laddr rest port proc
+  local own=$1 want laddr rest port proc
+  shift
+  want=" $* "
   while read -r _ _ _ laddr _ rest; do
     port=${laddr##*:}
     case $want in
@@ -269,9 +287,51 @@ port_conflicts() {
       *) continue ;;
     esac
     proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$rest")
-    [ "$proc" = caddy ] && continue
+    if [ "$proc" = caddy ] && [ "$own" = 1 ]; then continue; fi
     printf '%s %s\n' "$port" "${proc:-unknown}"
   done
+}
+
+# loopback_port_holders <port>: reads `ss -ltnpH` on stdin and prints "<port> <process>" for each
+# listener that a bind of 127.0.0.1:<port> collides with: on 127.0.0.1 itself or on every address.
+loopback_port_holders() {
+  local laddr rest proc
+  while read -r _ _ _ laddr _ rest; do
+    [ "${laddr##*:}" = "$1" ] || continue
+    case ${laddr%:*} in
+      127.0.0.1 | 0.0.0.0 | '*' | '[::]' | '[::ffff:127.0.0.1]') ;;
+      *) continue ;;
+    esac
+    proc=$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<<"$rest")
+    printf '%s %s\n' "$1" "${proc:-unknown}"
+  done
+}
+
+# is_prefixed_name <compose project>: status 0 for mailexpert, mailexpert-* and mailexpert_*.
+is_prefixed_name() {
+  [[ $1 == mailexpert || $1 == mailexpert-* || $1 == mailexpert_* ]]
+}
+
+# generic_name_notes: one line per compose project name of this install without the mailexpert
+# prefix, which a neighbouring project on a shared host could also use, with how to move. Nothing
+# moves by itself: install.conf keeps the name an install started with.
+generic_name_notes() {
+  local doc='docs/operations/deployment.md, "Имена на общем сервере"'
+  if ! is_prefixed_name "$CFG_PROJECT"; then
+    echo "names: the panel's compose project '$CFG_PROJECT' has no mailexpert prefix; it holds the database (volume ${CFG_PROJECT}_postgres_data), so it stays; a move is a backup restored into an install with another --project ($doc)"
+  fi
+  if [ "$CFG_EDGE" = 1 ] && ! is_prefixed_name "$CFG_EDGE_PROJECT"; then
+    echo "names: the edge's compose project '$CFG_EDGE_PROJECT' has no mailexpert prefix (new installs use mailexpert-edge); to move: $(edge_move_steps)"
+  fi
+  return 0
+}
+
+# edge_move_steps: how this install's edge moves to the project mailexpert-edge. Only this install's
+# containers go, selected by project and working directory: `docker compose -p <name> down` would
+# also remove a neighbour's containers of the same project name. The volumes stay until removed by
+# hand once the new Caddy has its certificates.
+edge_move_steps() {
+  printf '%s\n' "docker ps -aq --filter label=com.docker.compose.project=$CFG_EDGE_PROJECT --filter label=com.docker.compose.project.working_dir=$(clean_path "$OPT_PREFIX/edge") | xargs -r docker rm -f, then install.sh --prefix $OPT_PREFIX --edge-project mailexpert-edge; Caddy gets its certificates again (docs/operations/deployment.md, \"Имена на общем сервере\")"
 }
 
 # resource_shortfalls <cpus> <MemTotal kB> <free disk kB>: one line per shortfall. A "4 GB"

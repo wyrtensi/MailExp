@@ -150,7 +150,7 @@ check_restored() {
 }
 
 main() {
-  local prefix=/opt/mailexpert snapshot='' host='' no_start=0 started files version counts f picked id from at missing placed
+  local prefix=/opt/mailexpert snapshot='' host='' no_start=0 started files version counts f picked id from at missing placed holders
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
@@ -180,11 +180,26 @@ main() {
   backup_configured "$ENV_FILE" ||
     die "the restic keys are missing in $ENV_FILE: add RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY with configure.sh first" 2
   take_lock "$STATE_DIR/update.lock" 60 "update.sh or restore.sh"
+  # Before the checks below, whose way out (down -v) must never reach another project's data.
+  guard_existing_projects 1
   if db_volume_exists; then
     die "volume ${CFG_PROJECT}_postgres_data exists: restore.sh runs only on a server without a database. If it holds nothing you need (for example after a rehearsal), remove it with: docker compose -p $CFG_PROJECT down -v; then run restore.sh again" 2
   fi
   [ -z "$(project_containers)" ] ||
     die "compose project $CFG_PROJECT has containers: restore.sh runs only where the panel never started; if they hold nothing you need: docker compose -p $CFG_PROJECT down -v" 2
+  # The panel starts at the end (install.sh): a port taken now would fail it after the restore.
+  # The project has no containers here, so whatever holds the port is not this panel.
+  # Without ss here nothing is known; install.sh, which requires it, checks again before the start.
+  holders=$(ss -ltnpH 2>/dev/null) || holders=''
+  holders=$(loopback_port_holders "$CFG_HTTP_PORT" <<<"$holders" | sort -u)
+  if [ -n "$holders" ]; then
+    holders="the panel's port 127.0.0.1:$CFG_HTTP_PORT is taken: $(paste -sd';' - <<<"$holders"); free it, or give the panel another port with install.sh --prefix $OPT_PREFIX --http-port <port> --no-start"
+    if [ "$no_start" = 1 ]; then
+      warn "$holders (before the panel is started)"
+    else
+      die "$holders, then run restore.sh again; nothing was changed" 2
+    fi
+  fi
 
   set_standby
   trap cleanup EXIT

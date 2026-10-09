@@ -65,6 +65,13 @@ PING_URL='' STARTED=0 DUMP_ROOT='' DUMP_DIR='' VERIFY_DIR='' VERIFY_SECONDS='' M
 MAILBOXES='' DUMP_KB=0
 # The node's restic containers carry a label, so the next run finds what a killed one left.
 RESTIC_DOCKER_ARGS=(--label "$NODE_BACKUP_LABEL")
+# The io.mailexpert.component label of the node's restic containers (lib/backup.sh restic_run);
+# the node's helpers carry io.mailexpert.managed=true too, no install ID (one node per host).
+# shellcheck disable=SC2034 # read by lib/backup.sh
+RESTIC_COMPONENT=node-restic
+# The labels of the archive checks in mailcow's backup image.
+CHECK_LABELS=()
+managed_label_args CHECK_LABELS node-backup-check
 
 usage() {
   sed -n '2,/^# shellcheck/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
@@ -122,7 +129,7 @@ dump_need() {
 # archive_list <dir> <archive>: tar -t of one of mailcow's archives, in mailcow's backup image
 # (restic's has no zstd), bounded.
 archive_list() {
-  timeout "$NODE_BACKUP_SHORT_TIMEOUT" docker run --rm --network none -v "$1:/backup:ro" "$MAILCOW_BACKUP_IMAGE" \
+  timeout "$NODE_BACKUP_SHORT_TIMEOUT" docker run --rm --network none "${CHECK_LABELS[@]}" -v "$1:/backup:ro" "$MAILCOW_BACKUP_IMAGE" \
     tar --use-compress-program=zstd -tf "/backup/$2" 2>/dev/null
 }
 
@@ -247,7 +254,7 @@ verify_snapshot() {
   [ -f "$VERIFY_DIR/backup/mailexpert/meta.json" ] || die "verify: the restored dump has no mailexpert/meta.json"
   ensure_image "$MAILCOW_BACKUP_IMAGE"
   # shellcheck disable=SC2016 # expanded by the container's shell
-  timeout "$timeout" docker run --rm --network none -v "$VERIFY_DIR/backup:/backup:ro" "$MAILCOW_BACKUP_IMAGE" /bin/sh -c \
+  timeout "$timeout" docker run --rm --network none "${CHECK_LABELS[@]}" -v "$VERIFY_DIR/backup:/backup:ro" "$MAILCOW_BACKUP_IMAGE" /bin/sh -c \
     'for f in /backup/*.tar.zst; do tar --use-compress-program=zstd -tf "$f" >/dev/null || { echo "${f#/backup/}"; exit 1; }; done' >/dev/null ||
     die "verify: one of mailcow's archives does not read back whole (tar -t failed)"
   if [ -n "$box" ]; then

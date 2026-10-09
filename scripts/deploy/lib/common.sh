@@ -135,6 +135,39 @@ is_port() {
   [[ $1 =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
 }
 
+# is_prefix <path>: an install prefix: absolute, letters, digits and . _ / - only, no ".." segment
+# (compose records the resolved directory, which the ownership check compares with).
+is_prefix() {
+  [[ $1 =~ ^/[A-Za-z0-9._/-]+$ ]] && ! [[ $1 =~ (^|/)\.\.(/|$) ]]
+}
+
+# clean_path <path>: the path without repeated slashes, "/./" and a trailing slash, as compose
+# records it.
+clean_path() {
+  local path=$1
+  while [[ $path == *//* ]]; do path=${path//\/\//\/}; done
+  while [[ $path == */./* ]]; do path=${path//\/.\//\/}; done
+  if [[ $path == ?*/. ]]; then path=${path%/.}; fi
+  if [ "$path" != / ]; then path=${path%/}; fi
+  printf '%s\n' "$path"
+}
+
+# is_install_id <id>: 16 lowercase hex characters (install.conf INSTALL_ID).
+is_install_id() {
+  [[ $1 =~ ^[0-9a-f]{16}$ ]]
+}
+
+# managed_label_args <array name> <component> [install id]: the --label arguments of a container
+# MailExpert starts by hand (docker run), the same labels compose gives the panel's and the edge's
+# services: io.mailexpert.managed=true lists every MailExpert container on a host,
+# io.mailexpert.component says which part it is, io.mailexpert.install which install owns it
+# (the panel host only; the mail node's helpers have no install ID).
+managed_label_args() {
+  local -n label_args=$1
+  label_args=(--label io.mailexpert.managed=true --label "io.mailexpert.component=$2")
+  if [ -n "${3:-}" ]; then label_args+=(--label "io.mailexpert.install=$3"); fi
+}
+
 # is_name <compose project name>
 is_name() {
   [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]

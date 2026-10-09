@@ -40,7 +40,7 @@ setup() {
   write_edge_files "$REPO_DIR" "$E" local.invalid/mailexpert-edge:sha-0123456789ab
   cmp "$REPO_DIR/deploy/edge/compose.yml" "$E/compose.yml"
   [ "$(stat -c %a "$E")" = 700 ]
-  [ "$(env_get "$E/.env" COMPOSE_PROJECT_NAME)" = edge ]
+  [ "$(env_get "$E/.env" COMPOSE_PROJECT_NAME)" = mailexpert-edge ]
   [ "$(env_get "$E/.env" COMPOSE_PROFILES)" = caddy ]
   [ "$(env_get "$E/.env" EDGE_IMAGE)" = local.invalid/mailexpert-edge:sha-0123456789ab ]
   grep -q '@app host panel.example.com' "$E/Caddyfile"

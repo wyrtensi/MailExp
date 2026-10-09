@@ -180,6 +180,7 @@ wait_scratch_db() {
 # restore time: the main part of the downtime of a move.
 verify_snapshot() {
   local snapshot=$1 id files expected restored key mailboxes expect=0 result started
+  local -a labels
   id=$(gen_hex 4)
   VERIFY_DIR=$BACKUP_DIR/verify-$id
   VERIFY_CONTAINER=$CFG_PROJECT-verify-$id
@@ -192,7 +193,8 @@ verify_snapshot() {
   key=$(env_get "$files/env" ENCRYPTION_KEY) || key=
   [ -n "$key" ] || die "verify: the snapshot has no ENCRYPTION_KEY in its .env"
   ensure_image "$SCRATCH_IMAGE"
-  docker run -d --name "$VERIFY_CONTAINER" --label "mailexpert.verify=$CFG_PROJECT" --network none \
+  managed_label_args labels verify "$CFG_INSTALL_ID"
+  docker run -d --name "$VERIFY_CONTAINER" --label "mailexpert.verify=$CFG_PROJECT" "${labels[@]}" --network none \
     -e POSTGRES_USER=mailexpert -e POSTGRES_DB=mailexpert -e POSTGRES_HOST_AUTH_METHOD=trust \
     -v "$VERIFY_DIR/data:/var/lib/postgresql/data" "$SCRATCH_IMAGE" >/dev/null
   wait_scratch_db
@@ -204,7 +206,7 @@ verify_snapshot() {
   [ "$restored" = "$expected" ] || die "verify: row counts differ after the restore (dump: $expected, restored: $restored)"
   mailboxes=$(json_number email_accounts <<<"$expected") || mailboxes=0
   if [ "$mailboxes" -gt 0 ]; then expect=1; fi
-  result=$(ENCRYPTION_KEY=$key VERIFY_EXPECT_MAILBOX=$expect docker run --rm --network "container:$VERIFY_CONTAINER" \
+  result=$(ENCRYPTION_KEY=$key VERIFY_EXPECT_MAILBOX=$expect docker run --rm --network "container:$VERIFY_CONTAINER" "${labels[@]}" \
     -e ENCRYPTION_KEY -e VERIFY_EXPECT_MAILBOX -e DB_HOST=127.0.0.1 -e DB_USER=mailexpert -e DB_NAME=mailexpert \
     -v "$LIB_DIR/verify-restore.mjs:/app/verify-restore.mjs:ro" --entrypoint node "$BACKEND_IMAGE" verify-restore.mjs) ||
     die "verify: the restored data failed the check: $result"

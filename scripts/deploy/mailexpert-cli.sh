@@ -137,7 +137,7 @@ main() {
 
   [ $# -gt 0 ] || die "a group and a command are required (see --help)" 2
   [[ $1 =~ ^[a-z][a-z-]*$ ]] || die "unknown group: $1 (see --help)" 2
-  [[ $prefix =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--prefix must be an absolute path without spaces" 2
+  is_prefix "$prefix" || die "--prefix must be an absolute path without spaces or .. segments" 2
 
   [ "$(id -u)" = 0 ] || die "run mailexpert-cli.sh as root" 2
   load_install "$prefix"

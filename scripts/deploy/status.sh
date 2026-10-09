@@ -91,6 +91,7 @@ lines_into() {
 collect_versions() {
   local head='' sha='' dirty=0
   FACT[version]=$CFG_VERSION
+  FACT[install_id]=$CFG_INSTALL_ID
   if head=$(git -C "$APP_DIR" rev-parse --verify --quiet HEAD 2>/dev/null); then
     FACT[checkout]=sha-${head:0:12}
     if [ -n "$(git -C "$APP_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]; then dirty=1; fi
@@ -148,6 +149,29 @@ collect_containers() {
     else
       problem "containers: docker compose ps failed for $CFG_EDGE_PROJECT"
     fi
+  fi
+}
+
+# collect_names: Docker objects of another owner in this install's compose projects (install.sh,
+# update.sh, rollback.sh and restore.sh refuse to run then: lib/app.sh guard_compose_projects), and
+# a note for each project name without the mailexpert prefix.
+collect_names() {
+  local line project foreign
+  for project in panel edge; do
+    # Inside ||: a Docker that does not answer is a warning here, not the end of the report.
+    if ! foreign=$("${project}_foreign_objects" 2>/dev/null); then
+      warning "ownership: docker did not answer; the $project's compose project was not checked"
+      continue
+    fi
+    while IFS= read -r line; do
+      if [ -z "$line" ]; then continue; fi
+      if [ "$project" = panel ]; then line="$CFG_PROJECT: $line"; else line="$CFG_EDGE_PROJECT: $line"; fi
+      problem "ownership: compose project $line is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone"
+    done <<<"$foreign"
+  done
+  lines_into INFO < <(generic_name_notes)
+  if [ -z "$CFG_INSTALL_ID" ]; then
+    info "names: install.conf has no INSTALL_ID yet (an install made before the IDs); the next install.sh or update.sh writes one and labels the containers with it"
   fi
 }
 
@@ -362,7 +386,7 @@ resolve_target_channel() {
 report_text() {
   local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
-  for key in version checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
+  for key in version install_id checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
     last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_commit; do
     [ -n "${FACT[$key]+set}" ] || continue
     printf '  %-20s %s\n' "$key" "${FACT[$key]:--}"
@@ -399,7 +423,7 @@ report_json() {
     'def num: if . == null or . == "" then null else tonumber end;
      def flag: . == "1";
      $ARGS.named as $f
-     | {prefix: $prefix, version: $f.version, checkout: ($f.checkout // null),
+     | {prefix: $prefix, version: $f.version, install_id: (if ($f.install_id // "") == "" then null else $f.install_id end), checkout: ($f.checkout // null),
       checkout_dirty: ($f.checkout_dirty | flag), running: (if ($f.running // "") == "" then null else $f.running end),
       ready: ($f.ready | flag), standby: ($f.standby | flag), tenant_worker: ($f.tenant_worker | flag),
       edge_services: (($f.edge_services // "") | split(",") | map(select(. != ""))),
@@ -447,6 +471,7 @@ main() {
   if lock_held "$STATE_DIR/update.lock"; then info "an update, rollback or restore is running now: results may be in flux"; fi
   collect_versions
   collect_containers
+  collect_names
   collect_cf_access
   collect_updater
   collect_disk_and_backups

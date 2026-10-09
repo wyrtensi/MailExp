@@ -349,8 +349,8 @@ mailexpert-updater.path`. За один запуск исполнитель бе
 | `status.sh`: «PostgreSQL major version» | `docker-compose.yml` целевой версии | скриптами не поддерживается: дамп, новый том, восстановление — отдельная задача |
 | `status.sh` / `healthcheck.sh`: «backup: ... hours old» | `journalctl -u mailexpert-backup` | бэкап вручную `backup.sh --tag manual`, проверить ключи restic |
 | `containers: tenant-worker ...` | `docker compose -p <project> logs tenant-worker` | нет PFX или файла пароля; [mail-node.md, раздел 6е](mail-node.md) |
-| `https://<DIRECT_HOST>` не отвечает | `docker compose -p edge logs caddy` | токен DNS, A-запись, `ufw` |
-| `<CF_HOST>` — ошибка туннеля | `docker compose -p edge logs cloudflared` | `TUNNEL_TOKEN`, public hostname в Zero Trust |
+| `https://<DIRECT_HOST>` не отвечает | `docker compose -p mailexpert-edge logs caddy` (у установок, сделанных раньше, проект `edge`) | токен DNS, A-запись, `ufw` |
+| `<CF_HOST>` — ошибка туннеля | `docker compose -p mailexpert-edge logs cloudflared` (у установок, сделанных раньше, проект `edge`) | `TUNNEL_TOKEN`, public hostname в Zero Trust |
 | `install.sh` / `status.sh`: «cloudflare access: ...» | `status.sh --json`, поле `cf_access` | следующий шаг назван в строке; таблица — [cloudflare.md, раздел 9](cloudflare.md) |
 | ящики узла красные после обновления узла | «Почтовый узел» в панели, `docker compose logs dovecot-mailcow` на узле | Dovecot перезапускался — подождать переподключения; правила файрвола: `setup.sh --dry-run` |
 | пинг EOP-диапазонов `/fail` | тело пинга в Healthchecks | [mail-node.md, раздел 4](mail-node.md) |
