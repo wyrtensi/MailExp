@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('../utils/mailUtils.js', () => ({
@@ -50,6 +50,54 @@ const mockImap = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe('applyInboxRules — forward loop header on a manual sweep', () => {
+  // A sweep (run rules now) has only DB metadata, no headers. A forward rule needs them: the
+  // loop header on them is how ruleForwarder knows this mailbox already forwarded the mail.
+  // By SQL, not a queue of answers: a skipped rule leaves later queries unasked.
+  const rulesQueryReturns = rule => query.mockImplementation(async sql => ({
+    rows: sql.includes('FROM inbox_rules') ? [rule] : [],
+  }));
+  afterEach(() => { query.mockReset(); });
+
+  it('fetches the headers for a forward rule and hands them to the forwarder', async () => {
+    const rule = mkRule([{ type: 'forward', value: 'recipient@example.com' }]);
+    rulesQueryReturns(rule);
+    forwardRuleMessage.mockResolvedValue('sent');
+    const imap = { ...mockImap, fetchHeaders: vi.fn(async () => 'X-MailExpert-Loop: 0123456789abcdef\r\nSubject: Test') };
+
+    const message = mkMsg({ parsedHeaders: undefined });
+    await applyInboxRules([message], account, imap);
+
+    expect(imap.fetchHeaders).toHaveBeenCalledWith(account, message.uid, message.folder);
+    expect(forwardRuleMessage.mock.calls[0][0].message.parsedHeaders['x-mailexpert-loop']).toBe('0123456789abcdef');
+  });
+
+  it('does not forward when the headers cannot be read: the loop check would be blind', async () => {
+    const rule = mkRule([{ type: 'forward', value: 'recipient@example.com' }]);
+    rulesQueryReturns(rule);
+    const imap = { ...mockImap, fetchHeaders: vi.fn(async () => { throw new Error('pool busy'); }) };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await applyInboxRules([mkMsg({ parsedHeaders: undefined })], account, imap);
+      expect(forwardRuleMessage).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('arrival messages already carry headers: nothing is fetched', async () => {
+    const rule = mkRule([{ type: 'forward', value: 'recipient@example.com' }]);
+    rulesQueryReturns(rule);
+    forwardRuleMessage.mockResolvedValue('sent');
+    const imap = { ...mockImap, fetchHeaders: vi.fn() };
+
+    await applyInboxRules([mkMsg()], account, imap);
+
+    expect(imap.fetchHeaders).not.toHaveBeenCalled();
+    expect(forwardRuleMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('applyInboxRules — forwarding', () => {

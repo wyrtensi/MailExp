@@ -1,11 +1,16 @@
+import { createHmac } from 'crypto';
 import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { query } from './db.js';
+import { deriveKey } from './encryption.js';
 import { sanitizeEmail } from './emailSanitizer.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { sendFailureIsDefinite } from './smtpErrors.js';
 import { isDisabledMailbox, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
 import { ATTACHMENT_LIMIT_ERROR, MAX_ATTACHMENT_BYTES } from '../utils/attachmentLimit.js';
 
+const LOOP_HEADER = 'X-MailExpert-Loop';
+// The most tokens a forward carries: its own and the newest nine it received.
+const MAX_LOOP_TOKENS = 10;
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -107,6 +112,35 @@ function forwardedHeaders(row) {
   ].filter(([, value]) => value);
 }
 
+// A forward is a new message, so when a copy lands back in a mailbox that forwards it (two
+// mailboxes whose rules forward to each other, an all-mailboxes rule forwarding to another of
+// the user's or a shared mailbox, a rule forwarding to its own alias) nothing ties it to the
+// mail it came from: the reservation in inbox_rule_forwards is keyed on the source row, and
+// every returning copy is a new row. It would go round forever, re-attaching up to the
+// attachment limit on every pass.
+//
+// So each forward carries the tokens of the message it was made from plus its own mailbox's,
+// and a mailbox that finds its own token has already forwarded this mail. The token is per
+// mailbox address, not per rule, recipient or account row: a copy that comes back cannot fan
+// out through the mailbox's other forward rules, and two connections of one shared mailbox
+// count as one. It is an HMAC of the address under a key derived from ENCRYPTION_KEY: a sender
+// knows the address but not the key, so cannot work out a mailbox's token to stop its rules
+// forwarding their mail, and the header does not list the addresses on the way.
+function loopToken(account) {
+  const key = deriveKey('rule-forward-loop');
+  if (!key) throw new Error('ENCRYPTION_KEY is not set or invalid — cannot make the forward loop token');
+  return createHmac('sha256', key)
+    .update((account.email_address || '').trim().toLowerCase())
+    .digest('hex')
+    .slice(0, 16);
+}
+
+// Only well-formed tokens are passed on: the header may have come from the sender.
+function receivedLoopTokens(message) {
+  const value = message?.parsedHeaders?.[LOOP_HEADER.toLowerCase()];
+  return typeof value === 'string' ? value.match(/\b[0-9a-f]{16}\b/g) || [] : [];
+}
+
 export function buildForwardMessage({
   row,
   account,
@@ -114,6 +148,7 @@ export function buildForwardMessage({
   text,
   html,
   attachments = [],
+  loopTokens = [],
 }) {
   const headers = forwardedHeaders(row);
   const forwardHeaderText = [
@@ -132,6 +167,13 @@ export function buildForwardMessage({
   return {
     from: `${account.sender_name || account.name} <${account.email_address}>`,
     to: recipient,
+    // The newest nine received tokens and this mailbox's. The header stays short, and tokens a
+    // sender adds are pushed out instead of stopping the forward, so the hop bound cannot be
+    // used to block it. A loop through up to ten mailboxes is caught; one through more is not.
+    // Both send paths carry it: SMTP through nodemailer, the Gmail API through MailComposer.
+    headers: {
+      [LOOP_HEADER]: [...loopTokens.slice(-(MAX_LOOP_TOKENS - 1)), loopToken(account)].join(', '),
+    },
     subject: forwardSubject(row.subject),
     text: `${forwardHeaderText}\n\n${plainBody}`,
     ...(safeHtml ? { html: `${forwardHeaderHtml}${safeHtml}` } : {}),
@@ -247,6 +289,12 @@ export async function forwardRuleMessage({
   imapManager,
   recipient,
 }) {
+  // Checked first: it needs no database, and a looping copy must not reserve anything.
+  const loopTokens = receivedLoopTokens(message);
+  if (loopTokens.includes(loopToken(account))) {
+    console.warn(`ruleForwarder: rule ${ruleId} did not forward message ${message.id}: forwarding loop detected`);
+    return 'loop';
+  }
   // A turned-off mailbox, or a read-only mail node mailbox (EOP seats design), does not forward. Read
   // fresh: the account object a rule runs with may predate the change.
   const { rows: [state] } = await query(
@@ -298,6 +346,7 @@ export async function forwardRuleMessage({
       row,
       account,
       recipient,
+      loopTokens,
       ...content,
     });
 
