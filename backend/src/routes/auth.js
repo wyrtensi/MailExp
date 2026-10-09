@@ -437,7 +437,9 @@ router.post('/2fa/challenge', twoFactorLimiter, async (req, res) => {
   res.json({ user: { id: user.id, username: user.username, displayName: user.display_name, avatar: user.avatar, isAdmin: user.is_admin, totpEnabled: user.totp_enabled } });
 });
 
-// Helper: generate and store an email OTP, send it to the given address
+// Helper: generate and store an email OTP, send it to the given address. The code is bound to that
+// address: the caller read it before this runs, and if the recovery email changes meanwhile, the
+// code mailed to the old address must not sign in (see /2fa/verify-email-otp).
 async function sendEmailOtpCode(userId, toEmail) {
   const codeNum = crypto.randomBytes(3).readUIntBE(0, 3) % 900000 + 100000;
   const code = String(codeNum);
@@ -447,8 +449,8 @@ async function sendEmailOtpCode(userId, toEmail) {
   // Remove any previous unused OTPs for this user to prevent confusion
   await query('DELETE FROM email_otp_tokens WHERE user_id = $1 AND used_at IS NULL', [userId]);
   await query(
-    'INSERT INTO email_otp_tokens (user_id, code_hash, expires_at) VALUES ($1, $2, $3)',
-    [userId, codeHash, expiresAt]
+    'INSERT INTO email_otp_tokens (user_id, code_hash, expires_at, sent_to) VALUES ($1, $2, $3, $4)',
+    [userId, codeHash, expiresAt, toEmail]
   );
 
   await sendSystemEmail({
@@ -520,18 +522,23 @@ router.post('/2fa/verify-email-otp', twoFactorLimiter, async (req, res) => {
   }
 
   const codeHash = crypto.createHash('sha256').update(String(code).trim()).digest('hex');
+  // Only a code sent to the current recovery email counts, and it is used up in the same
+  // statement that checks it. A code without an address predates the column and is refused.
   const tokenResult = await query(
-    `SELECT id FROM email_otp_tokens
-     WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL AND expires_at > NOW()
-     ORDER BY created_at DESC LIMIT 1`,
+    `UPDATE email_otp_tokens SET used_at = NOW()
+     WHERE id = (
+       SELECT t.id FROM email_otp_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.user_id = $1 AND t.code_hash = $2 AND t.used_at IS NULL AND t.expires_at > NOW()
+         AND t.sent_to = u.recovery_email
+       ORDER BY t.created_at DESC LIMIT 1
+     ) AND used_at IS NULL
+     RETURNING id`,
     [uid, codeHash]
   );
   if (!tokenResult.rows.length) {
     logAuthEvent('totp_fail', { userId: uid, ip: req.ip, success: false });
     return res.status(401).json({ error: 'Invalid or expired code' });
   }
-
-  await query('UPDATE email_otp_tokens SET used_at = NOW() WHERE id = $1', [tokenResult.rows[0].id]);
 
   const userResult = await query('SELECT * FROM users WHERE id = $1', [uid]);
   const user = userResult.rows[0];
@@ -1143,8 +1150,6 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
       const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1-hour window
       const resetUrl = `${process.env.APP_URL || ''}/?reset_token=${rawToken}`;
 
-      // Send the email before persisting the token. If delivery fails, nothing is
-      // saved and the user can retry cleanly.
       // Only the system SMTP sends password reset mail: mailboxes belong to the team, not to the account.
       const emailSubject = 'Reset your MailExpert password';
       const emailText = `You requested a password reset for your MailExpert account.\n\nClick the link below to set a new password. This link expires in 1 hour.\n\n${resetUrl}\n\nIf you did not request this, you can ignore this email.`;
@@ -1185,12 +1190,29 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
       }
 
       if (!transport) throw new Error('No email transport available');
-      await transport.sendMail({ from: fromHeader, to: trimmed, subject: emailSubject, text: emailText, html: emailHtml });
 
-      await query('DELETE FROM password_reset_tokens WHERE user_id = $1', [user.id]);
+      // The token is stored before the letter goes out, bound to the address it goes to: the
+      // recovery email may change after the lookup above, and that change deletes stored tokens,
+      // so one stored only after sending would survive it; a link sent to an address that is no
+      // longer the recovery email is refused by /reset-password. A letter that fails to send takes
+      // its token with it, and an earlier link still works until this one has gone out.
+      const inserted = await query(
+        'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, sent_to) VALUES ($1, $2, $3, $4) RETURNING seq',
+        [user.id, tokenHash, expiresAt, trimmed]
+      );
+      try {
+        await transport.sendMail({ from: fromHeader, to: trimmed, subject: emailSubject, text: emailText, html: emailHtml });
+      } catch (err) {
+        await query('DELETE FROM password_reset_tokens WHERE token_hash = $1', [tokenHash]);
+        throw err;
+      }
+      // Only links issued before this one go, so of two requests at once the later link stays.
+      // A link sent to an address that is no longer the recovery email removes nothing: a late
+      // request to the old address must not cancel a link already sent to the new one.
       await query(
-        'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)',
-        [user.id, tokenHash, expiresAt]
+        `DELETE FROM password_reset_tokens t USING users u
+         WHERE t.user_id = $1 AND t.seq < $2 AND u.id = t.user_id AND u.recovery_email = $3`,
+        [user.id, inserted.rows[0].seq, trimmed]
       );
     }
   } catch (err) {
@@ -1213,10 +1235,13 @@ router.post('/reset-password', resetLimiter, async (req, res) => {
   try {
     // Atomically consume the token — DELETE RETURNING prevents two concurrent resets
     // from both reading a valid token, both updating the password, and only then deleting.
+    // Only a link sent to the current recovery email counts; one without an address predates
+    // the column and is refused.
     const tokenResult = await query(
-      `DELETE FROM password_reset_tokens
-       WHERE token_hash = $1 AND expires_at > NOW()
-       RETURNING user_id`,
+      `DELETE FROM password_reset_tokens t USING users u
+       WHERE t.token_hash = $1 AND t.expires_at > NOW()
+         AND u.id = t.user_id AND t.sent_to = u.recovery_email
+       RETURNING t.user_id`,
       [tokenHash]
     );
     if (!tokenResult.rows.length) {

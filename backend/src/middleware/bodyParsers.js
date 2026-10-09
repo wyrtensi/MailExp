@@ -60,9 +60,30 @@ function answerAfterBody(check) {
   };
 }
 
+// The session each request had once it was read before its body: its id and the copy read.
+const readBeforeBody = new WeakMap();
+
 // A session store that fails (Redis restarting, say) gets its error answered after the body too.
 function loadSessionBeforeParsing(sessionMiddleware) {
-  return (req, res, next) => sessionMiddleware(req, res, (err) => (err ? discardBody(req, () => next(err)) : next()));
+  return (req, res, next) => sessionMiddleware(req, res, (err) => {
+    if (err) return discardBody(req, () => next(err));
+    readBeforeBody.set(req, { id: req.sessionID, copy: req.session });
+    dropCopyAtEnd(req, res);
+    next();
+  });
+}
+
+// express-session saves a session it finds changed when the response ends, and the copy read
+// before the body may have changed (the google identity gate refreshes isAdmin on it). A request
+// answered or failed before reloadSession still holds that copy, and saving it would put back a
+// session that signed out or locked during the upload. Such a request has nothing to save, so the
+// copy is dropped first; with `unset` left at 'keep', the stored session stays as it is.
+function dropCopyAtEnd(req, res) {
+  const end = res.end;
+  res.end = function endWithoutCopy(...args) {
+    if (req.session && req.session === readBeforeBody.get(req)?.copy) delete req.session;
+    return end.apply(this, args);
+  };
 }
 
 // A signed-out request gets requireAuth's 401 without its body being buffered, inflated or
@@ -76,8 +97,13 @@ function requireSignInBeforeParsing(req, res, next) {
 
 // The identity gate may have just bound a new session (a Cloudflare Access token with no session
 // yet), which the store holds only once saved. Saving it now lets reloadSession tell a session
-// that ended during the upload from one that was never stored.
+// that ended during the upload from one that was never stored. The gate binds a new session only
+// through bindSessionUser (services/auth/userIdentity.js), which calls regenerate whenever the
+// user or sign-in method differs, and regenerate gives the session a new id. So a session that
+// kept the id it was read under came from the store and is not written: that copy is already stale once read, and saving it
+// would undo a sign-out, lock or password reset that landed since.
 function saveSessionBeforeParsing(req, res, next) {
+  if (req.sessionID === readBeforeBody.get(req).id) return next();
   req.session.save((err) => (err ? discardBody(req, () => next(err)) : next()));
 }
 

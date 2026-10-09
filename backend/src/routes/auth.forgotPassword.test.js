@@ -65,6 +65,7 @@ beforeEach(() => {
       return { rows: [{ value: JSON.stringify({ host: 'smtp.example.com', ...stored, user: 'system@example.com', pass: 'x' }) }] };
     }
     if (sql.includes('FROM users WHERE recovery_email')) return { rows: [{ id: 'u1', password_hash: 'hash' }] };
+    if (sql.startsWith('INSERT INTO password_reset_tokens')) return { rows: [{ seq: '1' }] };
     return { rows: [] };
   });
   createSmtpTransport.mockReturnValue({ sendMail: vi.fn().mockResolvedValue({}) });
