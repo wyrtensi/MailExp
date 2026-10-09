@@ -42,7 +42,8 @@ export function recordImapLogin(host, label, { failed = false, now = Date.now() 
 }
 
 // Work that was skipped or refused: 'pool_busy' (any caller that gave up waiting for a pooled
-// connection, background or user action), 'integrity_slot_full', 'refusal'.
+// connection, background or user action), 'pool_refresh_failed' (a reused pooled session that did
+// not answer its NOOP and was closed), 'integrity_slot_full', 'refusal'.
 export function recordImapEvent(host, event, { now = Date.now() } = {}) {
   bump(counterFor(events, `${String(host || '').toLowerCase()}|${event}`), now, false);
 }

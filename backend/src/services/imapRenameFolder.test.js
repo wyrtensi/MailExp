@@ -86,10 +86,12 @@ function connectionTo(server) {
     async *fetch(range) {
       yield { uid: Number(range), headers: Buffer.from('Subject: hello\r\n') };
     },
-    // imapflow's ImapFlow.run dispatches to lib/commands; only the two a rename can reach.
+    // imapflow's ImapFlow.run dispatches to lib/commands; only the ones a rename can reach, and
+    // the NOOP the pool sends a reused session that has a mailbox selected.
     run(command, ...args) {
       if (command === 'RENAME') return imapflowRename(this, ...args);
       if (command === 'CLOSE') return imapflowClose(this);
+      if (command === 'NOOP') return Promise.resolve(true);
       throw new Error(`unexpected run ${command}`);
     },
     mailboxRename(path, newPath) {

@@ -35,8 +35,9 @@ vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 import {
   ImapManager, acquirePooledClient, releasePooledClient, evictPool, poolSizeFor, backgroundPoolCap,
   POOL_SIZE, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, POOLED_OPERATION_TIMEOUT_MS, BODY_FETCH_POOL_TIMEOUT_MS,
-  LONG_POOLED_OPERATION_TIMEOUT_MS,
+  LONG_POOLED_OPERATION_TIMEOUT_MS, POOL_REFRESH_TIMEOUT_MS,
 } from './imapManager.js';
+import { getImapSnapshot, _resetImapMetrics } from './imapMetrics.js';
 import { ImapFlow } from 'imapflow';
 import { query } from './db.js';
 import { resolveForConnection } from './hostValidation.js';
@@ -658,5 +659,135 @@ describe('bulk operations on a busy account', () => {
     expect(ok).toBe(false);
     expect(e.poolExhausted).toBe(true);
     for (const c of held) releasePooledClient(ACCOUNT, c);
+  });
+});
+
+// A reused session keeps the view of its selected mailbox it had when it was released, and Yahoo
+// does not catch that view up until the client sends a command that lets it: STATUS of the
+// selected mailbox returned SELECT-time counts (a frozen unread badge), and a UID STORE naming
+// mail delivered since answered OK and changed nothing (a mark-read that never reached the
+// server). The pool NOOPs a reused session before handing it out, and a session that cannot
+// answer is closed instead of being handed out or pooled again. (Upstream dbe04838.)
+describe('refreshing a reused pooled session', () => {
+  // Makes an acquired client look like a real ImapFlow session with INBOX selected. The NOOP goes
+  // through run('NOOP'), which resolves true on OK and false on a NO, BAD or broken connection:
+  // imapflow's own noop() discards that result and resolves undefined either way.
+  const selectInbox = (client, run = vi.fn(async () => true)) => {
+    client.mailbox = { path: 'INBOX', exists: 17 };
+    client.run = run;
+    client.noop = vi.fn(async () => {});
+    return client;
+  };
+  let warn;
+  beforeEach(() => { _resetImapMetrics(); warn = vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+  const refreshFailures = () => getImapSnapshot(() => 'generic').events
+    .filter(e => e.event === 'pool_refresh_failed').reduce((n, e) => n + e.total, 0);
+
+  it('answers within a short budget, well inside the interactive acquire wait', () => {
+    expect(POOL_REFRESH_TIMEOUT_MS).toBeLessThan(ACQUIRE_TIMEOUT_MS);
+    expect(POOL_REFRESH_TIMEOUT_MS).toBeLessThanOrEqual(5000);
+  });
+
+  it('NOOPs a reused session with a mailbox selected before handing it out', async () => {
+    const first = selectInbox(await acquirePooledClient(ACCOUNT));
+    releasePooledClient(ACCOUNT, first);
+
+    const again = await acquirePooledClient(ACCOUNT);
+
+    expect(again).toBe(first);
+    expect(first.run).toHaveBeenCalledTimes(1);
+    expect(first.run).toHaveBeenCalledWith('NOOP');
+    expect(ImapFlow).toHaveBeenCalledTimes(1);   // reuse, not a new login
+    releasePooledClient(ACCOUNT, again);
+  });
+
+  it('sends nothing for a reused session with no mailbox selected', async () => {
+    const first = await acquirePooledClient(ACCOUNT);
+    first.mailbox = false;
+    first.run = vi.fn(async () => true);
+    releasePooledClient(ACCOUNT, first);
+
+    releasePooledClient(ACCOUNT, await acquirePooledClient(ACCOUNT));
+
+    expect(first.run).not.toHaveBeenCalled();
+  });
+
+  it('closes a session whose NOOP fails instead of handing it out, and the next caller gets a new one', async () => {
+    const first = selectInbox(await acquirePooledClient(ACCOUNT), vi.fn(async () => false));
+    releasePooledClient(ACCOUNT, first);
+
+    await expect(acquirePooledClient(ACCOUNT)).rejects.toThrow(/NOOP/);
+    expect(first.close).toHaveBeenCalled();
+    expect(refreshFailures()).toBe(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('a***@example.com'));
+
+    const next = await acquirePooledClient(ACCOUNT);
+    expect(next).not.toBe(first);
+    expect(ImapFlow).toHaveBeenCalledTimes(2);
+    releasePooledClient(ACCOUNT, next);
+  });
+
+  it('closes a session whose NOOP throws', async () => {
+    const first = selectInbox(await acquirePooledClient(ACCOUNT), vi.fn(async () => { throw new Error('Connection not available'); }));
+    releasePooledClient(ACCOUNT, first);
+
+    await expect(acquirePooledClient(ACCOUNT)).rejects.toThrow(/NOOP/);
+    expect(first.close).toHaveBeenCalled();
+  });
+
+  it('closes a session whose NOOP hangs, since that command is still in flight', async () => {
+    const first = selectInbox(await acquirePooledClient(ACCOUNT), vi.fn(() => new Promise(() => {})));
+    releasePooledClient(ACCOUNT, first);
+
+    const attempt = settle(acquirePooledClient(ACCOUNT));
+    await vi.advanceTimersByTimeAsync(POOL_REFRESH_TIMEOUT_MS + 10);
+    const { ok, e } = await attempt;
+    expect(ok).toBe(false);
+    expect(e.message).toMatch(/refresh/i);
+    expect(first.close).toHaveBeenCalled();
+    expect(refreshFailures()).toBe(1);
+  });
+
+  it('also refreshes a session handed to a queued caller', async () => {
+    const held = await fillPool();
+    selectInbox(held[0]);
+
+    const queued = acquirePooledClient(ACCOUNT);
+    releasePooledClient(ACCOUNT, held[0]);
+    const got = await queued;
+
+    expect(got).toBe(held[0]);
+    expect(held[0].run).toHaveBeenCalledTimes(1);
+    for (const c of [got, ...held.slice(1)]) releasePooledClient(ACCOUNT, c);
+  });
+
+  it('a queued caller whose session fails the refresh is rejected, and the freed slot goes on', async () => {
+    const held = await fillPool();
+    selectInbox(held[0], vi.fn(async () => false));
+
+    const queuedFirst = settle(acquirePooledClient(ACCOUNT));
+    const queuedSecond = acquirePooledClient(ACCOUNT);
+    releasePooledClient(ACCOUNT, held[0]);
+
+    const { ok } = await queuedFirst;
+    expect(ok).toBe(false);
+    expect(held[0].close).toHaveBeenCalled();
+    // The dead session left the pool, so the next waiter opens a new one in its slot.
+    const second = await queuedSecond;
+    expect(second).not.toBe(held[0]);
+    expect(ImapFlow).toHaveBeenCalledTimes(POOL_SIZE + 1);
+    for (const c of [second, ...held.slice(1)]) releasePooledClient(ACCOUNT, c);
+  });
+
+  it('refreshes an idle session handed to background work while logins are held back', async () => {
+    const first = selectInbox(await acquirePooledClient(ACCOUNT));
+    releasePooledClient(ACCOUNT, first);
+
+    const again = await acquirePooledClient(ACCOUNT, { background: true, noNewLogin: true });
+
+    expect(again).toBe(first);
+    expect(first.run).toHaveBeenCalledTimes(1);
+    releasePooledClient(ACCOUNT, again);
   });
 });
