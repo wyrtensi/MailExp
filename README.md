@@ -137,7 +137,8 @@ configurable per account, and accounts with GTD off behave exactly as before.
 
 **For a production server use the scripted install**: [Quick start](docs/operations/quickstart.md)
 (Ubuntu 24.04, published images of the promoted `latest` build, Google or Cloudflare Access sign-in,
-backups, monitoring, updates from the panel). The two options below build MailExpert from this
+backups, monitoring, updates from the panel); why not plain `docker compose` and where to run it:
+[Where to run the panel, in Russian](docs/operations/deployment.md#где-запускать-панель-и-почему-не-голый-docker-compose). The two options below build MailExpert from this
 repository for development and evaluation; they start with local password sign-in, where the first
 registered account becomes the admin.
 
