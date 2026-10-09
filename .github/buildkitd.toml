@@ -1,0 +1,3 @@
+# Docker Hub base images through Google's pull-through cache (see .github/actions/docker-hub-mirror).
+[registry."docker.io"]
+  mirrors = ["mirror.gcr.io"]
