@@ -22,7 +22,7 @@
 | Браузер → Caddy → панель | 443 TCP | Входящий на `<PANEL_HOST>` из браузера | `direct` / `both`; TLS, API, OAuth, WebSocket `/ws`, SSE на одном порту |
 | Caddy, HTTP → HTTPS | 80 TCP | Входящий на `<PANEL_HOST>` | `direct` / `both`; перенаправление HTTP |
 | Caddy, HTTP/3 | 443 UDP | Входящий на `<PANEL_HOST>` | `direct` / `both`; необязателен для HTTP/1.1 и HTTP/2 |
-| Caddy или cloudflared → frontend nginx | 8080 TCP → 80 TCP | `127.0.0.1:8080` хоста → контейнер | `install.sh --http-port` меняет `APP_HTTP_PORT`; не открывать наружу |
+| Caddy или cloudflared → frontend nginx | 8080 TCP → 80 TCP | `127.0.0.1:8080` хоста → контейнер | `install.sh --http-port` меняет `APP_HTTP_PORT`; порт, занятый не своей панелью, останавливает `install.sh` до запуска; не открывать наружу |
 | frontend nginx → backend | 3000 TCP | Внутри Docker | `PORT=3000` в compose; при ручном изменении нужен согласованный upstream nginx |
 | backend → PostgreSQL | 5432 TCP | Внутри Docker | `DB_HOST` / `DB_PORT`; штатная установка использует свой контейнер |
 | backend → Redis | 6379 TCP | Внутри Docker | `REDIS_URL`; без публикации на хосте |

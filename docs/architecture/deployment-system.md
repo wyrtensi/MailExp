@@ -36,7 +36,10 @@ Healthchecks.io или совместимый сервис (пинги, опов
 Модули панели (frontend, backend, postgres, redis, tenant-worker) — один compose-проект
 (`docker-compose.yml` + `deploy/compose.prod.yml`, плюс необязательный `<PREFIX>/compose.local.yml`
 с локальными дополнениями оператора — [deployment.md, раздел 4](../operations/deployment.md)); край —
-отдельный compose-проект `edge`, он переживает обновления панели.
+отдельный compose-проект `mailexpert-edge` (у установок, сделанных раньше, — `edge` из
+`install.conf`), он переживает обновления панели. Перед командами compose скрипты проверяют, что в
+обоих проектах нет чужих контейнеров и томов (`lib/app.sh`, `guard_compose_projects`;
+[deployment.md, «Имена на общем сервере»](../operations/deployment.md#имена-на-общем-сервере)).
 
 ## 2. Связи и порты
 

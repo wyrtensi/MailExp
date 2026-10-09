@@ -261,7 +261,7 @@ Google OAuth — не plugin уровня UI: он является credential p
 
 `lib/`: `common.sh` (общие помощники), `env.sh` (разбор `KEY=VALUE` без `source`), `config.sh`
 (флаги, `install.conf`, проверка, производное от режима входа), `app.sh` (пути, compose, образы
-установленной панели), `edge.sh` (файлы проекта `edge`), `system.sh` (подготовка Ubuntu 24.04, ufw,
+установленной панели), `edge.sh` (файлы проекта края), `system.sh` (подготовка Ubuntu 24.04, ufw,
 таймеры и юниты исполнителя обновлений), `backup.sh` (restic), `channel.sh` (`latest` → `sha-<12>`),
 `health.sh`, `ops.sh`, `status.sh`, `updater.sh` (чистые решения соответствующих скриптов),
 `pg-dump.sh` и `counts.sql` (дамп и счётчики строк одним снимком), `verify-restore.mjs` (проверка
