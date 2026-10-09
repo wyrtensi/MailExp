@@ -4022,6 +4022,52 @@ describe('backfill stops on a provider refusal (#433)', () => {
     await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
     expect(mgr.backfillMessages.mock.calls.map(c => c[1])).toEqual(['INBOX', 'A', 'B']);
   });
+
+  // The follow-up jobs (bulk flags, snippet indexer, provider id backfill) open logins of their
+  // own: a walk that stopped because the account was disabled, needs reconnecting or had its
+  // logins refused must not be followed by more logins to it.
+  const followUps = (mgr) => [mgr.refreshBulkFlags, mgr.startSnippetIndexer, mgr.startProviderIdBackfill];
+
+  it('starts the follow-up jobs after a walk of a usable account', async () => {
+    query.mockImplementation(async () => ({ rows: [{ path: 'A' }] }));
+    const mgr = allFoldersManager(async () => undefined);
+    await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
+    for (const job of followUps(mgr)) expect(job).toHaveBeenCalledWith(acct);
+  });
+
+  it('starts no follow-up job once the walk was refused', async () => {
+    query.mockImplementation(async () => ({ rows: [{ path: 'A' }, { path: 'B' }] }));
+    const mgr = allFoldersManager(async (m, folder) => {
+      if (folder !== 'A') return undefined;
+      m._connectCooldown.set(acct.id, { until: Date.now() + 30000, failures: 1 });
+      return { aborted: 'refused' };
+    });
+    await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
+    for (const job of followUps(mgr)) expect(job).not.toHaveBeenCalled();
+  });
+
+  it('starts no follow-up job while a rejected background login holds logins back', async () => {
+    query.mockImplementation(async () => ({ rows: [{ path: 'A' }] }));
+    const mgr = allFoldersManager(async (m, folder) => {
+      if (folder === 'INBOX') m._secondaryAuthCooldown.set(acct.id, { until: Date.now() + AUTH_FAILURE_COOLDOWN_MS, failures: 1 });
+      return folder === 'INBOX' ? { aborted: 'auth' } : undefined;
+    });
+    await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
+    for (const job of followUps(mgr)) expect(job).not.toHaveBeenCalled();
+  });
+
+  it('starts no follow-up job for an account disabled or needing reconnect during the walk', async () => {
+    query.mockImplementation(async (sql) => (
+      /FROM email_accounts/.test(sql) ? { rows: [] } : { rows: [{ path: 'A' }] }
+    ));
+    const mgr = allFoldersManager(async () => ({ aborted: 'disabled' }));
+    await ImapManager.prototype.backfillAllFolders.call(mgr, acct);
+    for (const job of followUps(mgr)) expect(job).not.toHaveBeenCalled();
+    const [sql] = query.mock.calls.find(([q]) => /FROM email_accounts/.test(q));
+    expect(sql).toMatch(/enabled/);
+    expect(sql).toMatch(/oauth_reconnect_required = false/);
+    expect(mgr.broadcast).toHaveBeenCalledWith({ type: 'backfill_all_complete', accountId: acct.id });
+  });
 });
 
 describe('Yahoo connection budget (#433)', () => {

@@ -44,5 +44,6 @@ export const SYSTEM_EMAIL_ERROR_KEYS = Object.freeze({
   not_configured: 'admin.systemEmail.errorNotConfigured',
   config_corrupted: 'admin.systemEmail.errorConfigCorrupted',
   password_missing: 'admin.systemEmail.errorPasswordMissing',
+  insecure_tls_not_allowed: 'admin.systemEmail.errorInsecureTlsNotAllowed',
   smtp_failed: 'admin.systemEmail.errorSmtpFailed',
 });

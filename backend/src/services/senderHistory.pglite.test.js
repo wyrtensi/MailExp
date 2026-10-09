@@ -21,7 +21,7 @@ beforeAll(async () => {
     CREATE TABLE email_accounts (id uuid PRIMARY KEY, email_address text NOT NULL, folder_mappings jsonb);
     CREATE TABLE account_aliases (account_id uuid NOT NULL, email text NOT NULL);
     CREATE TABLE folders (account_id uuid NOT NULL, path text NOT NULL, name text NOT NULL,
-                          special_use text, no_select boolean NOT NULL DEFAULT false);
+                          delimiter varchar(10), special_use text, no_select boolean NOT NULL DEFAULT false);
     CREATE TABLE messages (
       id uuid PRIMARY KEY, account_id uuid NOT NULL, message_id text,
       folder text NOT NULL, subject text, snippet text, date timestamptz,

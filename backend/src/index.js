@@ -9,7 +9,8 @@ import './loadEnv.js';
 import { redisClient } from './services/redis.js';
 import { buildSessionOptions } from './utils/sessionConfig.js';
 import { parseTrustProxy } from './utils/trustProxy.js';
-import { composeJson } from './middleware/composeBody.js';
+import { mountBodyParsers } from './middleware/bodyParsers.js';
+import { requireCsrfHeader } from './middleware/csrf.js';
 import { bodyErrorHandler, finalErrorHandler } from './middleware/errorHandlers.js';
 
 import sendRoutes from './routes/send.js';
@@ -155,12 +156,11 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'same-origin');
   next();
 });
-// 25 MiB attachment limit as base64 plus the body (middleware/composeBody.js).
-app.use('/api/mail/send', composeJson());
-app.use('/api/mail/draft', composeJson());
-// A pet-import body carries a base64 spritesheet (~33% larger than the 5 MB sheet cap
-// enforced after decode in gtdPet.importPet), so it needs more than the global 1 MB.
-app.use('/api/gtd/pet/import', express.json({ limit: '8mb' }));
+// The routes with a body over the global 1 MB (the composer's attachments, a pet import) load the
+// session and pass the identity gate, the CSRF check and a sign-in check before their body is
+// read (middleware/bodyParsers.js). Every other route parses here, before the session: sign-in
+// and the node agent need their body without a signed-in user.
+mountBodyParsers(app, { sessionMiddleware, identityGate, csrf: requireCsrfHeader });
 app.use(express.json({ limit: '1mb' }));
 // Express 5 leaves req.body undefined when no parser ran; handlers destructure it directly.
 app.use(defaultEmptyBody);
@@ -176,18 +176,10 @@ app.use(sessionMiddleware);
 // Cloudflare Access token or a direct Google sign-in session); local sign-in routes are 404.
 app.use(['/api', '/oauth', '/auth/oidc'], identityGate);
 
-// CSRF defense-in-depth for the cookie-authenticated /api surface. A mutating
-// request must carry a custom header that a cross-site <form> cannot set and a
-// cross-origin fetch cannot send without a CORS preflight — which the CORS policy
-// above restricts to FRONTEND_URL. SameSite=lax cookies are the primary defense;
-// this closes same-site/subdomain and legacy-browser gaps. OAuth flows (/oauth) are
-// mounted outside /api and use their own auth, so they are intentionally not gated here.
-const CSRF_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
-app.use('/api', (req, res, next) => {
-  if (CSRF_SAFE_METHODS.has(req.method)) return next();
-  if (req.get('X-Requested-With')) return next();
-  return res.status(403).json({ error: 'Missing required X-Requested-With header' });
-});
+// CSRF defense-in-depth for the cookie-authenticated /api surface (middleware/csrf.js). OAuth
+// flows (/oauth) are mounted outside /api and use their own auth, so they are intentionally not
+// gated here.
+app.use('/api', requireCsrfHeader);
 
 // Screen-lock enforcement (#235). A locked session may only reach the endpoints
 // needed to render the lock screen, unlock, or sign out; everything else returns

@@ -2,12 +2,12 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import QRCode from 'qrcode';
-import { query, pool } from '../services/db.js';
+import { query, pool, withTransaction } from '../services/db.js';
 import { loadSyncSettings } from '../services/syncSettings.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { pushConfigured } from '../services/pushNotifications.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
-import { createSmtpTransport } from '../services/smtpTransport.js';
+import { createSmtpTransport, systemSmtpOptions } from '../services/smtpTransport.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { authLimiterConfig, createAuthRateLimit, createLoginLimit, limitedIdentity } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
@@ -636,6 +636,15 @@ router.post('/logout', async (req, res) => {
       .catch(err => console.error('logout: failed to delete trusted device:', err.message));
   }
 
+  // A push subscription belongs to the user, not the session, so without this the
+  // signed-out user's new-mail notifications keep arriving on this device. Only this
+  // browser's endpoint goes; the user's other devices keep theirs.
+  const pushEndpoint = req.body?.pushEndpoint;
+  if (userId && pushEndpoint && typeof pushEndpoint === 'string') {
+    query('DELETE FROM push_subscriptions WHERE user_id = $1 AND endpoint = $2', [userId, pushEndpoint])
+      .catch(err => console.error('logout: failed to delete push subscription:', err.message));
+  }
+
   // If this session signed in via an OIDC provider with RP-initiated logout enabled,
   // build the end-session URL (using the still-present id_token) before destroying the
   // session. buildEndSessionUrl never throws and returns null when it does not apply, so
@@ -1084,7 +1093,18 @@ router.patch('/profile/recovery-email', async (req, res) => {
   if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
     return res.status(400).json({ error: 'Invalid email address' });
   }
-  await query('UPDATE users SET recovery_email = $1 WHERE id = $2', [trimmed || null, req.session.userId]);
+  const userId = req.session.userId;
+  const current = await query('SELECT recovery_email FROM users WHERE id = $1', [userId]);
+  const changed = (trimmed || null) !== (current.rows[0]?.recovery_email ?? null);
+  await withTransaction(async client => {
+    await client.query('UPDATE users SET recovery_email = $1 WHERE id = $2', [trimmed || null, userId]);
+    // A reset link or sign-in code already sent to the old address must stop working: the old
+    // address may be the reason it is changing.
+    if (changed) {
+      await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
+      await client.query('DELETE FROM email_otp_tokens WHERE user_id = $1', [userId]);
+    }
+  });
   res.json({ ok: true });
 });
 
@@ -1152,17 +1172,17 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
           if (cfg.host && cfg.user && pass) {
             const policy = await getConnectionPolicy();
             const sysResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
-            const sysTls = { rejectUnauthorized: true };
-            if (sysResolved.servername) sysTls.servername = sysResolved.servername;
-            transport = createSmtpTransport(sysResolved, {
-              port: cfg.port || 587,
-              secure: (cfg.port || 587) === 465,
-              auth: { user: cfg.user, pass }, tls: sysTls,
-            });
+            transport = createSmtpTransport(sysResolved, systemSmtpOptions({
+              port: cfg.port || 587, tls: cfg.tls, user: cfg.user, pass, resolved: sysResolved, policy,
+            }));
             fromHeader = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
           }
         }
-      } catch { /* no usable system SMTP */ }
+      } catch (err) {
+        // This route answers 200 whatever happens, so the operator learns only from the log why
+        // reset letters are not sent (e.g. plain text not allowed, host refused).
+        console.error('forgot-password: system SMTP unusable:', err.message);
+      }
 
       if (!transport) throw new Error('No email transport available');
       await transport.sendMail({ from: fromHeader, to: trimmed, subject: emailSubject, text: emailText, html: emailHtml });

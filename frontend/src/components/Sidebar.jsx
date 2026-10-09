@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from '../store/index.js';
 import { unreadBadge } from '../utils/unreadBadge.js';
+import { signOut } from '../utils/signOut.js';
 import { filterAccounts } from '../utils/accountFilter.js';
 import { useStableAccountOrder } from '../hooks/useStableAccountOrder.js';
 import { useRovingRows } from '../hooks/useRovingRows.js';
@@ -657,28 +658,8 @@ export default function Sidebar() {
     return () => { cancelled = true; };
   }, []);
 
-  const handleLogout = async () => {
-    // The logout response may carry an OIDC end-session URL when the account signed in
-    // through a provider with RP-initiated logout enabled; navigating there also clears
-    // the upstream SSO session. Falls back to /login otherwise. (#310)
-    const res = await api.logout().catch(() => ({}));
-    // Appearance/localization prefs (theme, font, layout, language) are deliberately
-    // NOT cleared: keeping them means the login screen and the next visit retain the
-    // last-used look instead of snapping back to the default dark theme (issue #208).
-    // They are re-synced from the account's server-side preferences after login.
-    // The keys below are mailbox/session state that can reference the previous user's
-    // accounts or folders, so they are cleared on sign-out.
-    [
-      'mailexpert_notification_sound', 'mailexpert_custom_sound', 'mailexpert_custom_sound_name',
-      'mailexpert_page_size', 'mailexpert_scroll_mode',
-      'mailexpert_threaded_view', 'mailexpert_plaintext_email',
-      'mailexpert_hover_quick_actions', 'mailexpert_swipe_actions',
-      'mailexpert_expanded_accounts', 'mailexpert_collapsed_folders', 'mailexpert_pinned_accounts',
-      'mailexpert_sort_accounts_by_latest',
-    ].forEach(k => localStorage.removeItem(k));
-    setUser(null);
-    window.location.href = res?.endSessionUrl || '/login';
-  };
+  // Clears this user's mailbox state and follows the SSO end-session URL when there is one (#310).
+  const handleLogout = () => signOut({ setUser });
 
   const isUnified = selectedAccountId === null;
 

@@ -24,7 +24,7 @@ beforeAll(async () => {
     CREATE TABLE message_delivery_status (account_id uuid NOT NULL, message_id text NOT NULL, recipient text NOT NULL,
                           state text NOT NULL, event_at timestamptz, updated_at timestamptz NOT NULL DEFAULT NOW());
     CREATE TABLE folders (account_id uuid NOT NULL, path text NOT NULL, name text NOT NULL,
-                          special_use text, no_select boolean NOT NULL DEFAULT false);
+                          delimiter varchar(10), special_use text, no_select boolean NOT NULL DEFAULT false);
     CREATE TABLE messages (
       id uuid PRIMARY KEY, account_id uuid NOT NULL, thread_key text, message_id text,
       folder text NOT NULL, subject text, snippet text, date timestamptz,

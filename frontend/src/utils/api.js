@@ -50,6 +50,22 @@ async function request(method, path, body, extraHeaders) {
   return res.json();
 }
 
+// A push subscription outlives the session, so sign-out ends this browser's one and returns
+// its endpoint for the server to delete. It must not hang sign-out: getRegistration(), not
+// serviceWorker.ready, because ready never settles when the worker failed to register; and
+// unsubscribe() is not awaited, because it can wait on the push service.
+async function endPushSubscription() {
+  let sub;
+  try {
+    const reg = await globalThis.navigator?.serviceWorker?.getRegistration();
+    sub = await reg?.pushManager?.getSubscription();
+  } catch {
+    return null;
+  }
+  sub?.unsubscribe().catch(() => {});
+  return sub?.endpoint ?? null;
+}
+
 const EMPTY_ZIP_DATA_URL = 'data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
 const TRANSPARENT_GIF_DATA_URL = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
@@ -141,6 +157,10 @@ export function createDirectApi({
       const data = await res.json().catch(() => ({}));
       if (res.ok) return data;
       if (data.signedOut) {
+        // A lockout signs out without api.logout(), and the session is already gone, so only
+        // the browser's subscription can be ended here. Once it is, the push service answers
+        // the next send with 404/410, which prunes the row.
+        await endPushSubscription();
         window.dispatchEvent(new CustomEvent('mailexpert:session_expired'));
         const error = new Error('signed_out');
         error.signedOut = true;
@@ -292,7 +312,10 @@ export const api = {
   // Auth
   login: (username, password) => request('POST', '/auth/login', { username, password }),
   register: (username, password, inviteToken) => request('POST', '/auth/register', { username, password, inviteToken }),
-  logout: () => request('POST', '/auth/logout'),
+  logout: async () => {
+    const pushEndpoint = isDemoMode ? null : await endPushSubscription();
+    return request('POST', '/auth/logout', pushEndpoint ? { pushEndpoint } : undefined);
+  },
   lock: () => request('POST', '/auth/lock'),
   // Custom response handling is kept inside the direct transport so lockout state is
   // preserved in production while demo mode remains entirely local.

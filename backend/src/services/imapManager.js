@@ -6117,16 +6117,28 @@ export class ImapManager {
       if (slotHeld) this._bgConnSem.release(host); // free the per-host slot for the next background job
       this.backfillAllRunning.delete(account.id);
       this.broadcast({ type: 'backfill_all_complete', accountId: account.id });
-      // Both run as background jobs after the complete signal — neither should block the UI.
-      this.refreshBulkFlags(account).catch(err =>
-        console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
-      );
-      this.startSnippetIndexer(account).catch(err =>
-        console.error(`Snippet indexer failed for ${logAccount(account)}:`, err.message)
-      );
-      this.startProviderIdBackfill(account).catch(err =>
-        console.warn(`Provider id backfill failed to start for ${logAccount(account)}:`, err.message)
-      );
+      // The follow-up jobs open logins of their own. A walk that stopped because the account was
+      // disabled, needs reconnecting or had its logins refused must not be followed by more
+      // logins to it; the next successful connect (or a manual reindex) starts them again.
+      const canLogIn = !this._secondaryLoginBlocked(account.id) && await query(
+        'SELECT 1 FROM email_accounts WHERE id = $1 AND enabled AND oauth_reconnect_required = false',
+        [account.id]
+      ).then(r => r.rows.length > 0, err => {
+        console.warn(`Backfill follow-up check failed for ${logAccount(account)}:`, err.message);
+        return false;
+      });
+      if (canLogIn) {
+        // Background jobs after the complete signal — none should block the UI.
+        this.refreshBulkFlags(account).catch(err =>
+          console.warn(`Bulk flag refresh failed for ${logAccount(account)}:`, err.message)
+        );
+        this.startSnippetIndexer(account).catch(err =>
+          console.error(`Snippet indexer failed for ${logAccount(account)}:`, err.message)
+        );
+        this.startProviderIdBackfill(account).catch(err =>
+          console.warn(`Provider id backfill failed to start for ${logAccount(account)}:`, err.message)
+        );
+      }
     }
   }
 

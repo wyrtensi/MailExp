@@ -21,7 +21,8 @@ vi.mock('../services/hostValidation.js', async (importOriginal) => ({
   resolveForConnection: vi.fn(async (host) => ({ host: '192.0.2.10', servername: host })),
 }));
 const smtp = vi.hoisted(() => ({ verify: null, sendMail: null }));
-vi.mock('../services/smtpTransport.js', () => ({
+vi.mock('../services/smtpTransport.js', async (importOriginal) => ({
+  ...(await importOriginal()),
   createSmtpTransport: vi.fn(() => ({ verify: smtp.verify, sendMail: smtp.sendMail })),
   createAccountSmtpTransport: vi.fn(),
 }));
@@ -190,6 +191,14 @@ describe('mailexpert system-email', () => {
     expect(await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'u', '--password-stdin'], { stdin: '' }))
       .toMatchObject({ code: 1, err: expect.stringContaining('(password_missing)') });
     expect((await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'u', '--port', 'abc'])).code).toBe(2);
+  });
+
+  it('refuses a plain-text test before connecting while insecure TLS is not allowed', async () => {
+    await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'relay', '--port', '25', '--tls', 'none', '--password-stdin'], { stdin: 'smtp-pass' });
+    expect(await cli(['system-email', 'test'])).toMatchObject({
+      code: 1, err: expect.stringContaining('(insecure_tls_not_allowed)'),
+    });
+    expect(smtp.verify).not.toHaveBeenCalled();
   });
 
   it('tests the stored server without sending a letter, and removes it after confirmation', async () => {
