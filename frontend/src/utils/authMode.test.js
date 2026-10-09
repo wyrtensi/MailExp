@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { SIGN_IN_PATH, isGoogleAuthMode, signInErrorKey } from './authMode.js';
+import { SIGN_IN_PATH, accessRefusalCode, isGoogleAuthMode, signInErrorKey } from './authMode.js';
 
 describe('isGoogleAuthMode', () => {
   it('reads the mode from a user or from the sign-in config', () => {
@@ -8,6 +8,17 @@ describe('isGoogleAuthMode', () => {
     assert.equal(isGoogleAuthMode({ mode: 'google' }), true);
     assert.equal(isGoogleAuthMode({ authMode: 'local' }), false);
     assert.equal(isGoogleAuthMode(null), false);
+  });
+});
+
+describe('accessRefusalCode', () => {
+  it('reads the gate refusal codes from a 403 and ignores everything else', () => {
+    assert.equal(accessRefusalCode({ status: 403, code: 'user_deleted' }), 'user_deleted');
+    assert.equal(accessRefusalCode({ status: 403, code: 'user_disabled' }), 'user_disabled');
+    assert.equal(accessRefusalCode({ status: 403, code: 'not_allowed' }), 'not_allowed');
+    assert.equal(accessRefusalCode({ status: 403, code: 'csrf' }), null);
+    assert.equal(accessRefusalCode({ status: 401, code: 'user_deleted' }), null);
+    assert.equal(accessRefusalCode(null), null);
   });
 });
 

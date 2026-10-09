@@ -13,6 +13,15 @@ const ERROR_KEYS = {
   locked: 'login.google.errorLocked',
 };
 
+// Codes the identity gate answers a refused Access user with (HTTP 403 {error, code}).
+const ACCESS_REFUSAL_CODES = new Set(['not_allowed', 'user_disabled', 'user_deleted']);
+
+// The refusal code of a failed API call, or null when it is not an access refusal.
+export function accessRefusalCode(err) {
+  if (err?.status !== 403) return null;
+  return ACCESS_REFUSAL_CODES.has(err.code) ? err.code : null;
+}
+
 // Translation key for an ?auth_error= code, or null when there is none.
 export function signInErrorKey(code) {
   if (typeof code !== 'string' || !code) return null;

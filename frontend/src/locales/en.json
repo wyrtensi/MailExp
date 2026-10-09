@@ -70,6 +70,7 @@
       "errorDeleted": "Access for this address is closed: the account was deleted or its address was changed. Contact the panel administrator.",
       "errorEmailNotVerified": "Google has not verified this email address. Verify it with Google and try again.",
       "errorLocked": "MailExpert is locked. Unlock it, then sign in again.",
+      "noAccessTitle": "No access to MailExpert",
       "errorGeneric": "Google sign-in failed. Try again."
     },
     "tagline": "Your unified inbox",

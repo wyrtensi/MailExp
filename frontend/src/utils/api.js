@@ -1,6 +1,7 @@
 import { demoRequest } from '../demo/index.js';
 import { isDemoMode } from '../demo/mode.js';
 import { exitDeleteBodies } from './deleteIntent.js';
+import { accessRefusalCode } from './authMode.js';
 
 const BASE = '/api';
 
@@ -33,6 +34,11 @@ async function request(method, path, body, extraHeaders) {
       window.dispatchEvent(new CustomEvent('mailexpert:session_expired'));
     }
     const err = await res.json().catch(() => ({ error: 'Request failed' }));
+    const refusalCode = accessRefusalCode({ status: res.status, code: err?.code });
+    if (refusalCode) {
+      // The identity gate refused this Access user: App shows a full-page "no access" screen.
+      window.dispatchEvent(new CustomEvent('mailexpert:access_denied', { detail: { code: refusalCode } }));
+    }
     const e = new Error(err.error || 'Request failed');
     // Stable machine-readable code (e.g. send_in_progress) for callers that branch on it.
     if (err.code) e.code = err.code;
