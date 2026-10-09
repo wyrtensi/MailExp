@@ -1,7 +1,8 @@
 // Load check of the panel against a real mailcow (scripts/deploy/test/e2e-mailcow.sh --scenario
 // load). Runs in the backend image next to the panel, in phases the shell script sequences:
 //
-//   PHASE=setup      admin, mail node, one domain, MAILBOXES mailboxes; time until all connected
+//   PHASE=setup      admin, mail node, one domain (marked ready, EOP seats entered), MAILBOXES
+//                    mailboxes; time from the first creation until all connected
 //   PHASE=delivery   one letter to every mailbox; time until each shows it in MailExpert
 //   PHASE=restart    after the script restarted the backend: time until all connected again
 //   PHASE=sessions   10 sessions of the shared user: a read flag set in one is seen by the rest
@@ -151,6 +152,16 @@ if (PHASE === 'setup') {
   assert.equal(r.status, 200, JSON.stringify(r.data));
   r = await s.call('POST', '/mail-node/domains', { domain: DOMAIN, mailboxes: ALL_MAILBOXES + 10 });
   assert.equal(r.status, 200, JSON.stringify(r.data));
+  // Onboarding, before the clock starts: the stand has no tenant, so the domain is marked ready the
+  // way the panel offers for a pilot or a test stand, and the purchased EOP seats (one per node
+  // mailbox) are entered as the Licenses field of the EOP settings.
+  r = await s.call('POST', `/mail-node/domains/${DOMAIN}/ready`);
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  r = await s.call('PUT', '/mail-node/eop', { licenses: MAILBOXES + 10 });
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  r = await s.call('GET', '/mail-node/seats');
+  assert.equal(r.status, 200, JSON.stringify(r.data));
+  assert.ok(r.data.mode === 'manual' && r.data.free >= MAILBOXES, `EOP seats: ${JSON.stringify(r.data)}`);
 
   const since = Date.now();
   const createMs = [];

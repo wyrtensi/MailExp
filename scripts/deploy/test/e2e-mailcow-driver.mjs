@@ -119,7 +119,15 @@ assert.equal(Number(nodeDomain.max_quota_for_mbox) / 1048576, 102400);
 assert.equal(domain.state, 'node_created');
 r = await panel('POST', `/mail-node/domains/${DOMAIN}/ready`);
 assert.equal(r.status, 200, JSON.stringify(r.data));
-pass(`domain ${DOMAIN} created on the node with 50 mailboxes and marked ready`);
+// Every node mailbox holds an EOP seat. Without a tenant the purchased number is the Licenses field
+// of the EOP settings, as an administrator enters it.
+r = await panel('PUT', '/mail-node/eop', { licenses: 50 });
+assert.equal(r.status, 200, JSON.stringify(r.data));
+r = await panel('GET', '/mail-node/seats');
+assert.equal(r.status, 200, JSON.stringify(r.data));
+assert.equal(r.data.mode, 'manual', JSON.stringify(r.data));
+assert.equal(r.data.free, 50, JSON.stringify(r.data));
+pass(`domain ${DOMAIN} created on the node with 50 mailboxes and marked ready; 50 EOP seats entered`);
 
 // 4. Two mailboxes: created on the node with 5 GB and connected by the panel.
 for (const localPart of ['sales', 'support']) {
