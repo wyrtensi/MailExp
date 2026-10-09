@@ -27,7 +27,7 @@ vi.mock('../services/connectionPolicy.js', () => ({
   getConnectionPolicy: vi.fn(async () => ({ allowPrivateHosts: true })),
   invalidateConnectionPolicyCache: vi.fn(),
 }));
-vi.mock('../services/smtpTransport.js', () => ({ createSmtpTransport: vi.fn(), createAccountSmtpTransport: vi.fn() }));
+vi.mock('../services/smtpTransport.js', async (importOriginal) => ({ ...(await importOriginal()), createSmtpTransport: vi.fn(), createAccountSmtpTransport: vi.fn() }));
 vi.mock('../services/authLimiter.js', () => ({ reloadAuthSettings: vi.fn() }));
 vi.mock('../services/categorizer.js', () => ({ invalidateGlobalCategorizationCache: vi.fn() }));
 vi.mock('../plugins/registry.js', () => ({ pluginRegistry: { runHook: vi.fn(async () => {}) } }));

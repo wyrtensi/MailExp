@@ -193,6 +193,14 @@ describe('mailexpert system-email', () => {
     expect((await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'u', '--port', 'abc'])).code).toBe(2);
   });
 
+  it('refuses a plain-text test before connecting while insecure TLS is not allowed', async () => {
+    await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'relay', '--port', '25', '--tls', 'none', '--password-stdin'], { stdin: 'smtp-pass' });
+    expect(await cli(['system-email', 'test'])).toMatchObject({
+      code: 1, err: expect.stringContaining('(insecure_tls_not_allowed)'),
+    });
+    expect(smtp.verify).not.toHaveBeenCalled();
+  });
+
   it('tests the stored server without sending a letter, and removes it after confirmation', async () => {
     expect(await cli(['system-email', 'test'])).toMatchObject({ code: 1, err: expect.stringContaining('(not_configured)') });
     await cli(['system-email', 'set', '--host', 'smtp.example.com', '--user', 'relay', '--password-stdin'], { stdin: 'smtp-pass' });

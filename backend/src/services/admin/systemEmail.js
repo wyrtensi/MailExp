@@ -1,7 +1,9 @@
 import { query } from '../db.js';
 import { decrypt, encrypt } from '../encryption.js';
 import { validateHost, resolveForConnection } from '../hostValidation.js';
-import { createSmtpTransport, systemSmtpOptions } from '../smtpTransport.js';
+import {
+  INSECURE_TLS_NOT_ALLOWED, INSECURE_TLS_NOT_ALLOWED_MESSAGE, createSmtpTransport, systemSmtpOptions,
+} from '../smtpTransport.js';
 import { getConnectionPolicy } from '../connectionPolicy.js';
 
 // The system SMTP (system_settings.system_email_config) that sends invites, sign-in codes and other
@@ -17,6 +19,7 @@ export const SYSTEM_EMAIL_ERRORS = Object.freeze({
   config_corrupted: [500, 'Corrupted system email config'],
   password_missing: [400, 'No password stored — save the configuration first'],
   smtp_failed: [400, 'The SMTP server refused'],
+  [INSECURE_TLS_NOT_ALLOWED]: [400, INSECURE_TLS_NOT_ALLOWED_MESSAGE],
 });
 
 // What the screen shows in place of a stored password; saving it back keeps the password.
@@ -93,11 +96,13 @@ export async function testSystemEmail() {
     const policy = await getConnectionPolicy();
     const testResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
     const transport = createSmtpTransport(testResolved, systemSmtpOptions({
-      port: cfg.port, user: cfg.user, pass, resolved: testResolved, policy,
+      port: cfg.port, tls: cfg.tls, user: cfg.user, pass, resolved: testResolved, policy,
     }));
     await transport.verify(cfg.fromEmail || cfg.user);
     return { ok: true };
   } catch (err) {
+    // Refused before connecting: the saved encryption is none and insecure TLS is not allowed.
+    if (err.code === INSECURE_TLS_NOT_ALLOWED) return { error: INSECURE_TLS_NOT_ALLOWED };
     return { error: 'smtp_failed', message: err.message };
   }
 }

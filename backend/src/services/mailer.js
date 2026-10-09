@@ -17,7 +17,7 @@ export async function sendSystemEmail({ to, subject, text, html }) {
   const policy = await getConnectionPolicy();
   const resolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
   const transport = createSmtpTransport(resolved, systemSmtpOptions({
-    port: cfg.port || 587, user: cfg.user, pass, resolved, policy,
+    port: cfg.port || 587, tls: cfg.tls, user: cfg.user, pass, resolved, policy,
   }));
   const from = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
   await transport.sendMail({ from, to, subject, text, html });

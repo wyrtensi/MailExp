@@ -37,11 +37,12 @@ import { query } from '../services/db.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { createSmtpTransport } from '../services/smtpTransport.js';
 
-// The password reset letter goes through the system SMTP, which must require STARTTLS on a
-// non-465 port like the rest of the system mail (see services/systemSmtp.test.js), unless the
-// admin allows insecure connections.
+// The password reset letter goes through the system SMTP and its saved encryption, like the rest
+// of the system mail (see services/systemSmtp.test.js). The route always answers 200, so a letter
+// it cannot send is logged for the operator.
 let server;
 let base;
+let stored;
 
 beforeAll(async () => {
   const app = express();
@@ -58,9 +59,10 @@ afterAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  stored = { port: 587, tls: 'STARTTLS' };
   query.mockImplementation(async (sql) => {
     if (sql.includes('system_email_config')) {
-      return { rows: [{ value: JSON.stringify({ host: 'smtp.example.com', port: 587, user: 'system@example.com', pass: 'x' }) }] };
+      return { rows: [{ value: JSON.stringify({ host: 'smtp.example.com', ...stored, user: 'system@example.com', pass: 'x' }) }] };
     }
     if (sql.includes('FROM users WHERE recovery_email')) return { rows: [{ id: 'u1', password_hash: 'hash' }] };
     return { rows: [] };
@@ -80,9 +82,25 @@ describe('POST /api/auth/forgot-password through the system SMTP', () => {
     expect(createSmtpTransport.mock.calls[0][1]).toMatchObject({ port: 587, secure: false, requireTLS: true });
   });
 
-  it('lets the admin allow a server without STARTTLS', async () => {
+  it('sends in plain text for tls none only when insecure TLS is allowed', async () => {
+    stored = { port: 25, tls: 'none' };
     getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: false, allowInsecureTls: true });
     expect((await forgot()).status).toBe(200);
-    expect(createSmtpTransport.mock.calls[0][1]).toMatchObject({ requireTLS: false });
+    expect(createSmtpTransport.mock.calls[0][1]).toMatchObject({ secure: false, ignoreTLS: true });
+  });
+
+  it('logs why the letter was not sent when plain text is refused', async () => {
+    stored = { port: 25, tls: 'none' };
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: false, allowInsecureTls: false });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect((await forgot()).status).toBe(200);
+      expect(createSmtpTransport).not.toHaveBeenCalled();
+      expect(errors).toHaveBeenCalledWith(
+        'forgot-password: system SMTP unusable:', expect.stringMatching(/Plain-text SMTP is not allowed/),
+      );
+    } finally {
+      errors.mockRestore();
+    }
   });
 });

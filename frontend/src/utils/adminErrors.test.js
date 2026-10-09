@@ -49,7 +49,8 @@ describe('admin screen error keys', () => {
       'login_match_claim_invalid', 'not_found', 'slug_invalid', 'slug_taken',
     ]);
     assert.deepEqual(Object.keys(SYSTEM_EMAIL_ERROR_KEYS).sort(), [
-      'config_corrupted', 'fields_required', 'host_refused', 'not_configured', 'password_missing', 'smtp_failed',
+      'config_corrupted', 'fields_required', 'host_refused', 'insecure_tls_not_allowed', 'not_configured',
+      'password_missing', 'smtp_failed',
     ]);
   });
 });
@@ -63,6 +64,14 @@ describe('admin refusals as the screens show them', () => {
     const fields = refusal('required', 'fields_required');
     assert.match(apiErrorText(fields, tFor(en), { keys: OIDC_ERROR_KEYS }), /issuer/i);
     assert.match(apiErrorText(fields, tFor(en), { keys: SYSTEM_EMAIL_ERROR_KEYS }), /SMTP/);
+  });
+
+  it('a plain-text system SMTP refused for insecure TLS is explained in both languages', () => {
+    const err = refusal('Plain-text SMTP is not allowed: admin must enable "Allow insecure TLS"', 'insecure_tls_not_allowed');
+    assert.match(apiErrorText(err, tFor(en), { keys: SYSTEM_EMAIL_ERROR_KEYS }), /Allow insecure TLS/);
+    const ruText = apiErrorText(err, tFor(ru), { keys: SYSTEM_EMAIL_ERROR_KEYS });
+    assert.notEqual(ruText, apiErrorText(err, tFor(en), { keys: SYSTEM_EMAIL_ERROR_KEYS }));
+    assert.match(ruText, /[а-я]/i);
   });
 
   it('turning password login off without SSO is explained in both languages', () => {

@@ -1173,12 +1173,16 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
             const policy = await getConnectionPolicy();
             const sysResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
             transport = createSmtpTransport(sysResolved, systemSmtpOptions({
-              port: cfg.port || 587, user: cfg.user, pass, resolved: sysResolved, policy,
+              port: cfg.port || 587, tls: cfg.tls, user: cfg.user, pass, resolved: sysResolved, policy,
             }));
             fromHeader = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
           }
         }
-      } catch { /* no usable system SMTP */ }
+      } catch (err) {
+        // This route answers 200 whatever happens, so the operator learns only from the log why
+        // reset letters are not sent (e.g. plain text not allowed, host refused).
+        console.error('forgot-password: system SMTP unusable:', err.message);
+      }
 
       if (!transport) throw new Error('No email transport available');
       await transport.sendMail({ from: fromHeader, to: trimmed, subject: emailSubject, text: emailText, html: emailHtml });

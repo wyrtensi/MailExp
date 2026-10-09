@@ -8,7 +8,7 @@ vi.mock('../index.js', () => ({
 }));
 vi.mock('../services/encryption.js', () => ({ encrypt: (v) => v, decrypt: (v) => v }));
 vi.mock('../services/hostValidation.js', () => ({ validateHost: vi.fn(), resolveForConnection: vi.fn() }));
-vi.mock('../services/smtpTransport.js', () => ({ createSmtpTransport: vi.fn(), createAccountSmtpTransport: vi.fn() }));
+vi.mock('../services/smtpTransport.js', async (importOriginal) => ({ ...(await importOriginal()), createSmtpTransport: vi.fn(), createAccountSmtpTransport: vi.fn() }));
 vi.mock('../services/connectionPolicy.js', () => ({
   getConnectionPolicy: vi.fn(async () => ({})),
   invalidateConnectionPolicyCache: vi.fn(),

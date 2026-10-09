@@ -82,20 +82,32 @@ async function runWithAddressFallback({
   throw lastError;
 }
 
+// The code and message of a refusal to send in plain text: the system SMTP's saved encryption is
+// "none" while the admin does not allow insecure connections.
+export const INSECURE_TLS_NOT_ALLOWED = 'insecure_tls_not_allowed';
+export const INSECURE_TLS_NOT_ALLOWED_MESSAGE = 'Plain-text SMTP is not allowed: admin must enable "Allow insecure TLS"';
+
 // Transport options for the system SMTP (system_settings.system_email_config): invites, sign-in
-// codes, password resets and its connection test. Port 465 is implicit TLS; any other port must
-// upgrade with STARTTLS, because nodemailer only upgrades when EHLO advertises it, so a server
-// that leaves it out, or anyone on the path who strips it, would get AUTH and the letter in
-// cleartext. Fail instead, as mailbox sending does (createAccountSmtpTransport), unless the admin
-// allows insecure connections. The certificate is always verified.
-export function systemSmtpOptions({ port, user, pass, resolved, policy }) {
-  const secure = port === 465;
+// codes, password resets and its connection test. It honors the saved encryption (`tls`, from the
+// screen or `system-email set --tls`) as createAccountSmtpTransport honors smtp_tls: SSL is
+// implicit TLS on any port, as is STARTTLS on 465; STARTTLS elsewhere must upgrade, because
+// nodemailer only upgrades when EHLO advertises it, so a server that leaves it out, or anyone on
+// the path who strips it, would get AUTH and the letter in cleartext; "none" is plain text, sent
+// only when the admin allows insecure connections and refused here, before any connection,
+// otherwise. A config saved without a value counts as STARTTLS, the screen's default. The
+// certificate is always verified.
+export function systemSmtpOptions({ port, tls: mode = 'STARTTLS', user, pass, resolved, policy }) {
+  if (mode === 'none' && !policy?.allowInsecureTls) {
+    throw Object.assign(new Error(INSECURE_TLS_NOT_ALLOWED_MESSAGE), { code: INSECURE_TLS_NOT_ALLOWED });
+  }
+  const secure = mode === 'SSL' || (mode !== 'none' && port === 465);
   const tls = { rejectUnauthorized: true };
   if (resolved?.servername) tls.servername = resolved.servername;
   return {
     port,
     secure,
-    requireTLS: !secure && !policy?.allowInsecureTls,
+    ...(mode === 'none' ? { ignoreTLS: true } : {}),
+    ...(mode !== 'none' && !secure ? { requireTLS: true } : {}),
     auth: { user, pass },
     tls,
   };

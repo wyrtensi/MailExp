@@ -1914,6 +1914,7 @@
       "errorNotConfigured": "No system email is set up yet. Save the settings first.",
       "errorConfigCorrupted": "The saved system email settings cannot be read. Enter them again and save.",
       "errorPasswordMissing": "No password is saved. Enter the password and save the settings first.",
+      "errorInsecureTlsNotAllowed": "Plain-text SMTP is not allowed. Choose STARTTLS or SSL/TLS, or have an admin enable \"Allow insecure TLS\".",
       "errorSmtpFailed": "The SMTP server refused: {{detail}}"
     },
     "sso": {
