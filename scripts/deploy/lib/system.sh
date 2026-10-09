@@ -191,6 +191,117 @@ remove_project_units_after_downgrade() {
   if [ "$removed" = 1 ]; then systemctl daemon-reload || true; fi
 }
 
+# save_foreign_fixed_units: run before install.sh of a version that may be older than the
+# per-project unit names (rollback.sh, the updater's automatic rollback). Such an install.sh
+# writes this install's units under the default names and restarts mailexpert-updater.path; when
+# those names belong to another install on this host (the default project), its updater, backup
+# and health check would serve this one from then on. For another project, each kind (updater,
+# backup, health) whose default-name units exist and do not serve this prefix is copied into
+# <state>/foreign-units/<kind>, with whether its path unit or timer was enabled and active;
+# units_after_downgrade puts it back. A kind already saved there (an earlier run whose restore
+# failed) is kept as it is: the files under the default names may be this install's by now.
+# Status 1 when a copy fails.
+save_foreign_fixed_units() {
+  local dir=$STATE_DIR/foreign-units name kind unit tmp
+  [ "${CFG_PROJECT:-mailexpert}" != mailexpert ] || return 0
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    [ -e "$SYSTEMD_DIR/mailexpert-$name.$kind" ] || [ -e "$SYSTEMD_DIR/mailexpert-$name.service" ] || continue
+    if unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.$kind" "$OPT_PREFIX" ||
+      unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.service" "$OPT_PREFIX"; then
+      continue
+    fi
+    [ ! -d "$dir/$name" ] || continue
+    tmp=$dir/.$name
+    rm -rf "$tmp" || return 1
+    mkdir -p "$tmp" || return 1
+    for unit in "$kind" service; do
+      if [ -e "$SYSTEMD_DIR/mailexpert-$name.$unit" ]; then
+        cp -p "$SYSTEMD_DIR/mailexpert-$name.$unit" "$tmp/" || return 1
+      fi
+    done
+    if [ -e "$SYSTEMD_DIR/mailexpert-$name.$kind" ]; then
+      if systemctl is-enabled --quiet "mailexpert-$name.$kind" 2>/dev/null; then : >"$tmp/enabled" || return 1; fi
+      if systemctl is-active --quiet "mailexpert-$name.$kind" 2>/dev/null; then : >"$tmp/active" || return 1; fi
+    fi
+    mv "$tmp" "$dir/$name" || return 1
+    log "systemd units: mailexpert-$name.$kind belongs to another install on this host; saved in $dir/$name until install.sh is done"
+  done
+}
+
+# foreign_units_unchanged <saved dir> <name> <kind>: status 0 when the default-name files of
+# <name> are what was saved (a file that was not there is still not there).
+foreign_units_unchanged() {
+  local unit
+  for unit in "$3" service; do
+    if [ -e "$1/mailexpert-$2.$unit" ]; then
+      cmp -s "$1/mailexpert-$2.$unit" "$SYSTEMD_DIR/mailexpert-$2.$unit" || return 1
+    else
+      [ ! -e "$SYSTEMD_DIR/mailexpert-$2.$unit" ] || return 1
+    fi
+  done
+}
+
+# restore_foreign_fixed_units: what save_foreign_fixed_units saved and install.sh changed is put
+# back exactly, systemd reloads, and the path unit or timer gets back its state: restarted when it
+# was active (it then watches or runs for its own install again), stopped and disabled when it was
+# not. A service is never stopped or restarted: one started meanwhile runs to its end. The saved
+# copies are removed once everything is back; when a step fails they stay, the output says what
+# to do by hand, and the status is 1.
+restore_foreign_fixed_units() {
+  local dir=$STATE_DIR/foreign-units name kind unit saved failed=0 reloaded=0
+  local -a changed=()
+  [ -d "$dir" ] || return 0
+  for name in updater backup health; do
+    saved=$dir/$name
+    [ -d "$saved" ] || continue
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    if foreign_units_unchanged "$saved" "$name" "$kind"; then continue; fi
+    for unit in "$kind" service; do
+      if [ -e "$saved/mailexpert-$name.$unit" ]; then
+        cp -p "$saved/mailexpert-$name.$unit" "$SYSTEMD_DIR/" || failed=1
+      else
+        rm -f "$SYSTEMD_DIR/mailexpert-$name.$unit" || failed=1
+      fi
+    done
+    changed+=("$name")
+  done
+  if [ "${#changed[@]}" -gt 0 ] && [ "$failed" = 0 ]; then
+    if systemctl daemon-reload; then reloaded=1; else failed=1; fi
+  fi
+  if [ "$reloaded" = 1 ]; then
+    for name in "${changed[@]}"; do
+      saved=$dir/$name
+      if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+      [ -e "$saved/mailexpert-$name.$kind" ] || continue
+      if [ ! -e "$saved/enabled" ]; then systemctl disable "mailexpert-$name.$kind" >/dev/null 2>&1 || failed=1; fi
+      if [ -e "$saved/active" ]; then
+        systemctl reset-failed "mailexpert-$name.$kind" >/dev/null 2>&1 || true
+        systemctl restart "mailexpert-$name.$kind" || failed=1
+      else
+        systemctl stop "mailexpert-$name.$kind" || failed=1
+      fi
+      log "systemd units: mailexpert-$name.$kind belongs to another install on this host and is back as it was; this install keeps $(unit_name "$name" "$kind")"
+    done
+  fi
+  if [ "$failed" = 1 ]; then
+    warn "systemd units: the units of another install on this host that install.sh rewrote for $OPT_PREFIX could not all be put back (${changed[*]}); their saved copies are in $dir: copy the files of each kind to $SYSTEMD_DIR, run systemctl daemon-reload, restart their .path or .timer, then remove $dir"
+    return 1
+  fi
+  rm -rf "$dir" || warn "systemd units: could not remove $dir; remove it by hand"
+}
+
+# units_after_downgrade: after install.sh of a version that may be older than the per-project
+# unit names, whether it succeeded or not (the pair of save_foreign_fixed_units). The units of
+# another install go back first (restore_foreign_fixed_units); then the kinds whose default-name
+# units now serve this prefix lose their suffixed units (remove_project_units_after_downgrade),
+# which leaves the suffixed units of every kind put back. When the restore failed, nothing is
+# removed (this install's suffixed units keep running) and the status is 1.
+units_after_downgrade() {
+  restore_foreign_fixed_units || return 1
+  remove_project_units_after_downgrade
+}
+
 # install_updater: the host side of "update from the panel" (updater.sh): the updater path unit
 # (mailexpert-updater.path, see unit_name) watches the spool's request directory and starts the
 # updater service. Installed only when the checked-out commit has updater.sh; reruns rewrite the

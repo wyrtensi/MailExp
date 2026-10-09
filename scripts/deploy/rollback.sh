@@ -120,9 +120,7 @@ database_bytes() {
 
 # after_install <version> <version left>: what the panel and the host updater are told once the
 # old version runs: the version left is not offered again until a newer build is promoted, and a
-# version without updater.sh gets no updater units. A version older than the per-project unit
-# names put the units back under the default names: the suffixed ones go
-# (remove_project_units_after_downgrade).
+# version without updater.sh gets no updater units.
 after_install() {
   record_rolled_back "$STATE_DIR" "$2"
   if [ ! -f "$APP_DIR/scripts/deploy/updater.sh" ]; then
@@ -130,7 +128,6 @@ after_install() {
   elif [ -f "$STATE_DIR/update-spool/result/updater.json" ]; then
     write_updater_installed "$STATE_DIR" "$1"
   fi
-  remove_project_units_after_downgrade
 }
 
 main() {
@@ -240,12 +237,23 @@ main() {
     log "the database $db is now the dump; the one it replaced is kept as $kept (drop it once sure: dropdb $kept in the postgres container)"
   fi
   if [ -n "$edge" ]; then env_set "$EDGE_ENV" EDGE_IMAGE "$edge"; fi
+  # install.sh of a version older than the per-project unit names writes the default-name units
+  # of another install on this host (the default project) for this prefix: they are saved first
+  # and put back after it, whatever its outcome.
+  save_foreign_fixed_units ||
+    die "could not save the systemd units of another install on this host to $STATE_DIR/foreign-units; install.sh was not run: fix that and run rollback.sh again (it goes on after the database swap)"
   log "switching the code and images to $to"
   if ! MAILEXPERT_READY_TIMEOUT=$READY_TIMEOUT bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX" --version "$to"; then
+    restore_foreign_fixed_units || warn "the systemd units of another install on this host could not all be put back (see the warning above)"
     die "install.sh --version $to failed; the database already holds the dump: fix what install.sh reported and run install.sh --prefix $OPT_PREFIX"
   fi
   after_install "$to" "$from"
   rm -f "$marker"
+  # A version older than the per-project unit names put the units back under the default names:
+  # those of another install on this host go back to it, and the suffixed units of the kinds now
+  # under the default names go.
+  units_after_downgrade ||
+    die "rolled back to $to, but the systemd units of another install on this host that install.sh of $to rewrote could not all be put back (see the warning above): until they are, that install's updater, backup or health check may serve $OPT_PREFIX"
   log "rolled back to $to; the panel will not offer $from again until a newer build is promoted"
 }
 
