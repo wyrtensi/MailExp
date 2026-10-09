@@ -32,8 +32,9 @@
 | Администратор → SSH | Обычно 22 TCP | Входящий на `<PANEL_HOST>` от администратора | Фактический порт SSH; установщик учитывает слушающие порты и SSH socket activation |
 | cloudflared, метрики | 20241–20245 TCP, первый свободный; при занятости всех — случайный | HTTP listener процесса в сети хоста | В контейнере vendor default — `0.0.0.0`; не открывать публике, это не вход туннеля |
 
-Установщик разрешает SSH и, при наличии Caddy, `80/tcp`, `443/tcp`, `443/udp`; другие входящие
-соединения UFW запрещает. В режиме `cf` входящие HTTP/HTTPS на сервере не нужны. Docker может
+Без `--no-system` установщик разрешает SSH и, при наличии Caddy, `80/tcp`, `443/tcp`, `443/udp`;
+другие входящие соединения UFW запрещает. С `--no-system` (общий сервер) UFW не трогается: входящие
+правила, в том числе закрытие слушателя метрик cloudflared, — файрволом оператора. В режиме `cf` входящие HTTP/HTTPS на сервере не нужны. Docker может
 обходить правила UFW для опубликованных портов, поэтому production frontend привязан именно к
 loopback. Внутренний HTTPS listener nginx `443/tcp` существует, но production overlay его на хост
 не публикует. Caddy admin API отключён (`admin off`), отдельный порт управления не требуется.
@@ -92,13 +93,14 @@ healthcheck не создают сетевых серверов. Desktop/Android
 | Postfix узла → EOP | 25 TCP, SMTP STARTTLS | Исходящий с узла к endpoint тенанта | Relay через EOP; провайдер VPS должен разрешать исходящий 25 |
 | backend → IMAPS узла | 993 TCP, TLS | Панель → узел, разрешены только IP панели | `IMAPS_PORT`, default 993 |
 | backend → submission узла | 587 TCP, STARTTLS | Панель → узел, разрешены только IP панели | `SUBMISSION_PORT`, default 587 |
-| backend / администратор → API / web mailcow | 443 TCP, HTTPS | Панель / администратор → узел | `HTTPS_PORT` / `HTTPS_BIND` у mailcow; панель использует `https://<MAIL_HOST>/api/v1` |
+| backend / администратор → API / web mailcow | 443 TCP, HTTPS | Панель / администратор → узел | `HTTPS_PORT` / `HTTPS_BIND` у mailcow; панель использует `https://<MAIL_HOST>/api/v1` с ключом `X-API-Key`, ключ разрешён только с `<PANEL_IP>` («Allow API access from») |
+| Служба узла → панель | 443 TCP, HTTPS | Исходящий с узла на `<APP_HOST>` | `PANEL_URL` в `/etc/mailexpert-node/agent.env`; токен Bearer, за Cloudflare Access — ещё service token; входящих портов на узле не открывает ([mail-node.md, «Панель и узел на разных серверах»](mail-node.md#панель-и-узел-на-разных-серверах)) |
 | ACME HTTP-01 → nginx узла | 80 TCP | Входящий на узел при штатном HTTP-01 | `HTTP_PORT` / `HTTP_BIND`; при другом способе выпуска сертификата условие меняется |
 | POP3, IMAP без TLS, SMTPS, POP3S, ManageSieve узла | 110, 143, 465, 995, 4190 TCP | Входящий к контейнерам **запрещён** правилами MailExpert | Mailcow может публиковать их; это не список разрешённых портов |
 | Администратор → SSH узла | Обычно 22 TCP | Входящий от администратора | Порт фактического SSH daemon; правила почтового узла не заменяют защиту SSH |
 | Узел → DNS | 53 UDP и TCP | Исходящий; Unbound выполняет рекурсивные запросы | Внутри mailcow DNS тоже 53, без публичной публикации |
 | Узел → Microsoft endpoints API | 443 TCP | Исходящий | Получение актуальных диапазонов EOP |
-| Узел → ACME, обновления, базы антиспама/антивируса, S3, мониторинг | Обычно 443 TCP; 80 TCP по URL сервисов | Исходящий, по включённым компонентам | Антивирус/антиспам и другие upstream-компоненты сверять с выбранной версией mailcow |
+| Узел → ACME, обновления (GitHub для скриптов узла), базы антиспама/антивируса, S3, мониторинг | Обычно 443 TCP; 80 TCP по URL сервисов | Исходящий, по включённым компонентам | Антивирус/антиспам и другие upstream-компоненты сверять с выбранной версией mailcow |
 | Clamd → Sanesecurity | 873 TCP | Исходящий, rsync сигнатур | При включённом ClamAV; `rsync.sanesecurity.net` |
 | Rspamd → mailcow fuzzy | 11445 UDP | Исходящий | При включённой соответствующей проверке; `fuzzy.mailcow.email` |
 | Rspamd → Rspamd fuzzy | 11335 UDP | Исходящий | При включённой соответствующей проверке; `fuzzy1.rspamd.com`, `fuzzy2.rspamd.com` |

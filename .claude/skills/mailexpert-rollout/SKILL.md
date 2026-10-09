@@ -10,7 +10,8 @@ description: Use when installing MailExpert on a fresh server, or updating, veri
 MailExpert is a self-hosted panel for a team working shared mailboxes (Gmail, Microsoft 365, IMAP,
 and optionally mailboxes on the owner's domains on a mailcow **mail node** behind Microsoft EOP).
 A deployment is: the **panel** on one server (docker compose project: frontend, backend, postgres,
-redis, optional tenant-worker; a separate `edge` project with Caddy and/or cloudflared; systemd
+redis, optional tenant-worker; a separate edge project, `mailexpert-edge` (`edge` on installs made
+before that default, see `EDGE_PROJECT` in `install.conf`), with Caddy and/or cloudflared; systemd
 timers for backup and health; the updater units behind the panel's "Обновить" button) and an
 optional **mail node** on a second server. `AGENTS.md` is the project primer.
 
@@ -173,8 +174,11 @@ shred -u /root/mailexpert-secrets.env
 invalid input (it lists the problems, nothing stored). Then rerun the same command line, with its
 `reset-failed` and `stop` of `mailexpert-install` first (GATE 4). `install.sh` is
 idempotent: rerunning after a failure or a dropped connection is the fix, not a risk. Exit 0 ends
-with `done`; exit 1 shows the failing step (`docker compose -p mailexpert logs backend`, `-p edge
-logs caddy`); exit 2 is invalid flags.
+with `done`; exit 1 shows the failing step (`docker compose -p mailexpert logs backend`,
+`-p mailexpert-edge logs caddy`); exit 2 is invalid flags or the ownership guard (the panel's or the
+edge's compose project holds another owner's containers, volumes or networks, listed in the message;
+nothing was run): stop and show the human the list, never remove those objects yourself
+(`docs/operations/deployment.md`, "Имена на общем сервере").
 
 Run detached, `install.sh` has no terminal and does **not** print the restic recovery key; it logs
 how to show it. Tell the human to run `<PREFIX>/app/scripts/deploy/backup.sh --show-recovery-key`
