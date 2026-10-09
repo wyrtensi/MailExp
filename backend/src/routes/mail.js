@@ -2103,6 +2103,15 @@ router.post('/messages/bulk-archive', async (req, res) => {
   }
 });
 
+// A snooze record counts only while its message still sits in the folder it was snoozed into.
+// Moving a snoozed message out by hand leaves the record behind until the wake-up sweep removes
+// it, a few minutes after its wake time (imapManager's sweep uses this same test), and until
+// then the message could not be snoozed again. Expects the record aliased as sm.
+export const LIVE_SNOOZE_SQL = `EXISTS (
+  SELECT 1 FROM messages m
+  WHERE m.account_id = sm.account_id AND m.message_id = sm.message_id_header
+    AND m.folder = sm.snoozed_folder AND m.is_deleted = false)`;
+
 // Gather the reply-chain conversation that should be snoozed alongside `msg`.
 //
 // Snoozing a single message doesn't work on Gmail: Gmail groups the inbox by
@@ -2169,7 +2178,8 @@ export async function gatherSnoozeConversation(msg) {
   // any already snoozed. Already-snoozed messages stay valid graph connectors above.
   const already = new Set(
     (await query(
-      'SELECT message_id_header FROM snoozed_messages WHERE account_id = $1 AND message_id_header = ANY($2)',
+      `SELECT sm.message_id_header FROM snoozed_messages sm
+       WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND ${LIVE_SNOOZE_SQL}`,
       [msg.account_id, [...seen]]
     )).rows.map(r => r.message_id_header)
   );
@@ -2227,7 +2237,8 @@ router.post('/messages/:id/snooze', async (req, res) => {
 
   // Check if already snoozed
   const existing = await query(
-    'SELECT id FROM snoozed_messages WHERE account_id = $1 AND message_id_header = $2',
+    `SELECT sm.id FROM snoozed_messages sm
+     WHERE sm.account_id = $1 AND sm.message_id_header = $2 AND ${LIVE_SNOOZE_SQL}`,
     [msg.account_id, msg.message_id]
   );
   if (existing.rows.length) return res.status(400).json({ error: 'Message is already snoozed' });
@@ -2240,6 +2251,14 @@ router.post('/messages/:id/snooze', async (req, res) => {
   // to the header reply chain rather than thread_id).
   // Letters of the conversation whose own move is pending are not in this folder on the server.
   const convo = (await gatherSnoozeConversation(msg)).filter(m => m.id === msg.id || !isPendingUid(m.uid));
+
+  // Drop the leftover records of earlier snoozes of these messages, so the new snooze is the
+  // only one and an old wake time cannot wake the message early.
+  await query(
+    `DELETE FROM snoozed_messages sm
+     WHERE sm.account_id = $1 AND sm.message_id_header = ANY($2) AND NOT ${LIVE_SNOOZE_SQL}`,
+    [msg.account_id, convo.map(m => m.message_id)]
+  );
 
   try {
     await imapManager.ensureFolder(account, snoozedFolder);

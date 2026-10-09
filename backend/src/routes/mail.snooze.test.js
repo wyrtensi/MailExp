@@ -4,7 +4,7 @@ vi.mock('../services/db.js', () => ({ query: vi.fn() }));
 vi.mock('../middleware/auth.js', () => ({ requireAuth: (_req, _res, next) => next() }));
 vi.mock('../index.js', () => ({ imapManager: {} }));
 
-import { gatherSnoozeConversation } from './mail.js';
+import { gatherSnoozeConversation, LIVE_SNOOZE_SQL } from './mail.js';
 import { query } from '../services/db.js';
 
 // Column subset that the pool query selects.
@@ -81,6 +81,17 @@ describe('gatherSnoozeConversation', () => {
     mockPool([A, B, C], ['<b>']);
     const out = await gatherSnoozeConversation(msgOf(A));
     expect(ids(out)).toEqual(['<a>', '<c>']);
+  });
+
+  it('counts a member as snoozed only while it still sits in its Snoozed folder', async () => {
+    // A message moved out of Snoozed by hand keeps its record until the wake-up sweep; that
+    // leftover must not keep it out of a new snooze (see mail.snooze.pglite.test.js).
+    mockPool([A, B, C], []);
+    await gatherSnoozeConversation(msgOf(A));
+    const [sql] = query.mock.calls[1];
+    expect(sql).toContain(LIVE_SNOOZE_SQL);
+    expect(LIVE_SNOOZE_SQL).toMatch(/m\.folder = sm\.snoozed_folder/);
+    expect(LIVE_SNOOZE_SQL).toMatch(/m\.is_deleted = false/);
   });
 
   it('dedupes by Message-ID so a doubled source row is snoozed once', async () => {
