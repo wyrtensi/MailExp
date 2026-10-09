@@ -165,13 +165,15 @@ old_units() {
   [ ! -s "$SYSTEMCTL_LOG" ]
 }
 
-# systemctl_stub: the systemctl stub that also answers: is-active and is-enabled fail for the
-# units in STUB_INACTIVE, and the command named in STUB_SYSTEMCTL_FAIL (daemon-reload) fails.
+# systemctl_stub: the systemctl stub that also answers: is-active fails for the units in
+# STUB_INACTIVE, is-enabled for those in STUB_DISABLED, and the command named in
+# STUB_SYSTEMCTL_FAIL (daemon-reload) fails.
 systemctl_stub() {
   cat >"$BATS_TEST_TMPDIR/sbin/systemctl" <<'STUB_EOF'
 #!/usr/bin/env bash
 case $1 in
-  is-active | is-enabled) [[ " ${STUB_INACTIVE:-} " != *" ${!#} "* ]]; exit ;;
+  is-active) [[ " ${STUB_INACTIVE:-} " != *" ${!#} "* ]]; exit ;;
+  is-enabled) [[ " ${STUB_DISABLED:-} " != *" ${!#} "* ]]; exit ;;
 esac
 printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 [ "$1" != "${STUB_SYSTEMCTL_FAIL:-}" ]
@@ -203,8 +205,9 @@ default_units_unchanged() {
 
 @test "units_after_downgrade: another install's default-name units rewritten by an older install.sh go back; this project keeps its own" {
   two_installs updater backup health
-  # The other install's health timer is stopped and disabled.
-  STUB_INACTIVE=mailexpert-health.timer save_foreign_fixed_units 2>/dev/null
+  # The other install's updater path unit is enabled and active, its backup timer active but
+  # disabled, its health timer enabled but stopped.
+  STUB_DISABLED=mailexpert-backup.timer STUB_INACTIVE=mailexpert-health.timer save_foreign_fixed_units 2>/dev/null
   [ -d "$STATE_DIR/foreign-units/updater" ] && [ -d "$STATE_DIR/foreign-units/health" ]
   # install.sh of a version older than the per-project names: the default names, for this prefix.
   old_units "$OPT_PREFIX" updater backup health
@@ -221,9 +224,9 @@ default_units_unchanged() {
   [ "$(units)" = "mailexpert-backup-p2.service mailexpert-backup-p2.timer mailexpert-backup.service mailexpert-backup.timer mailexpert-health-p2.service mailexpert-health-p2.timer mailexpert-health.service mailexpert-health.timer mailexpert-updater-p2.path mailexpert-updater-p2.service mailexpert-updater.path mailexpert-updater.service" ]
   unit_runs_prefix "$SYSTEMD_DIR/mailexpert-updater-p2.path" "$OPT_PREFIX"
   unit_runs_prefix "$SYSTEMD_DIR/mailexpert-backup-p2.service" "$OPT_PREFIX"
-  # The active path unit and timer restart, the stopped and disabled timer is so again; no service
-  # is touched (the updater may be running inside one).
-  [ "$(paste -sd'|' "$SYSTEMCTL_LOG")" = "daemon-reload|reset-failed mailexpert-updater.path|restart mailexpert-updater.path|reset-failed mailexpert-backup.timer|restart mailexpert-backup.timer|disable mailexpert-health.timer|stop mailexpert-health.timer" ]
+  # Each path unit and timer gets back its enabled and active state; no service is touched (the
+  # updater may be running inside one).
+  [ "$(paste -sd'|' "$SYSTEMCTL_LOG")" = "daemon-reload|enable mailexpert-updater.path|reset-failed mailexpert-updater.path|restart mailexpert-updater.path|disable mailexpert-backup.timer|reset-failed mailexpert-backup.timer|restart mailexpert-backup.timer|enable mailexpert-health.timer|stop mailexpert-health.timer" ]
   [[ $output == *"mailexpert-updater.path belongs to another install on this host and is back as it was; this install keeps mailexpert-updater-p2.path"* ]]
   [ ! -e "$STATE_DIR/foreign-units" ]
 }
@@ -248,7 +251,21 @@ default_units_unchanged() {
   [ -e "$SYSTEMD_DIR/mailexpert-updater-p2.path" ]
   [ ! -e "$SYSTEMD_DIR/mailexpert-backup-p2.timer" ] && [ ! -e "$SYSTEMD_DIR/mailexpert-health-p2.timer" ]
   unit_runs_prefix "$SYSTEMD_DIR/mailexpert-backup.service" "$OPT_PREFIX"
-  [ "$(paste -sd'|' "$SYSTEMCTL_LOG")" = "daemon-reload|reset-failed mailexpert-updater.path|restart mailexpert-updater.path|disable --now mailexpert-backup-p2.timer|disable --now mailexpert-health-p2.timer|daemon-reload" ]
+  [ "$(paste -sd'|' "$SYSTEMCTL_LOG")" = "daemon-reload|enable mailexpert-updater.path|reset-failed mailexpert-updater.path|restart mailexpert-updater.path|disable --now mailexpert-backup-p2.timer|disable --now mailexpert-health-p2.timer|daemon-reload" ]
+}
+
+@test "units_after_downgrade: a timer install.sh added next to the other install's lone service is disabled and removed" {
+  two_installs
+  render_unit "$APP_DIR/deploy/systemd/mailexpert-backup.service" "${OPT_PREFIX}2" >"$SYSTEMD_DIR/mailexpert-backup.service"
+  cp "$SYSTEMD_DIR/mailexpert-backup.service" "$BATS_TEST_TMPDIR/before/"
+  save_foreign_fixed_units 2>/dev/null
+  [ "$(ls -A "$STATE_DIR/foreign-units/backup")" = mailexpert-backup.service ]
+  old_units "$OPT_PREFIX" backup
+  units_after_downgrade 2>/dev/null
+  default_units_unchanged
+  [ ! -e "$SYSTEMD_DIR/mailexpert-backup.timer" ]
+  [ -e "$SYSTEMD_DIR/mailexpert-backup-p2.timer" ] && [ -e "$SYSTEMD_DIR/mailexpert-backup-p2.service" ]
+  [ "$(paste -sd'|' "$SYSTEMCTL_LOG")" = "disable --now mailexpert-backup.timer|daemon-reload" ]
 }
 
 @test "units_after_downgrade: a restore that fails keeps the saved copies and this project's units, and says so" {
@@ -261,12 +278,27 @@ default_units_unchanged() {
   [ -d "$STATE_DIR/foreign-units/updater" ]
   [ -e "$SYSTEMD_DIR/mailexpert-updater-p2.path" ] && [ -e "$SYSTEMD_DIR/mailexpert-backup-p2.timer" ]
   run ! grep -q "disable --now" "$SYSTEMCTL_LOG"
-  # A later run keeps what was saved, not the default-name units it finds then.
+  # A later run keeps what was saved while the default-name units serve this prefix.
   old_units "$OPT_PREFIX" updater backup health
   save_foreign_fixed_units 2>/dev/null
+  grep -qx "ExecStart=${OPT_PREFIX}2/app/scripts/deploy/backup.sh --prefix ${OPT_PREFIX}2" "$STATE_DIR/foreign-units/backup/mailexpert-backup.service"
   units_after_downgrade 2>/dev/null
   default_units_unchanged
   [ ! -e "$STATE_DIR/foreign-units" ]
+}
+
+@test "save_foreign_fixed_units: a copy left by a failed restore is replaced by another install's current units, dropped when there are none" {
+  two_installs updater backup health
+  save_foreign_fixed_units 2>/dev/null
+  # Fixed by hand meanwhile: the other install has moved to ${OPT_PREFIX}3, and has no health units.
+  old_units "${OPT_PREFIX}3" updater backup
+  rm -f "$SYSTEMD_DIR"/mailexpert-health.*
+  save_foreign_fixed_units 2>/dev/null
+  grep -qx "ExecStart=${OPT_PREFIX}3/app/scripts/deploy/backup.sh --prefix ${OPT_PREFIX}3" "$STATE_DIR/foreign-units/backup/mailexpert-backup.service"
+  grep -qx "PathExistsGlob=${OPT_PREFIX}3/state/update-spool/request/\*.json" "$STATE_DIR/foreign-units/updater/mailexpert-updater.path"
+  [ ! -e "$STATE_DIR/foreign-units/health" ]
+  [ "$(ls -A "$STATE_DIR/foreign-units")" = "backup
+updater" ]
 }
 
 @test "save_foreign_fixed_units: nothing for the default project or for default-name units of this prefix" {

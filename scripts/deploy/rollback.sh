@@ -245,7 +245,7 @@ main() {
   log "switching the code and images to $to"
   if ! MAILEXPERT_READY_TIMEOUT=$READY_TIMEOUT bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX" --version "$to"; then
     restore_foreign_fixed_units || warn "the systemd units of another install on this host could not all be put back (see the warning above)"
-    die "install.sh --version $to failed; the database already holds the dump: fix what install.sh reported and run install.sh --prefix $OPT_PREFIX"
+    die "install.sh --version $to failed; the database already holds the dump: fix what install.sh reported and run install.sh --prefix $OPT_PREFIX (when $to predates the per-project unit names and another install on this host has the default ones, that install.sh rewrites the other install's units again: see the rollback section of docs/operations/deployment.md)"
   fi
   after_install "$to" "$from"
   rm -f "$marker"

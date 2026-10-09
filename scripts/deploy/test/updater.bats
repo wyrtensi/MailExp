@@ -646,6 +646,20 @@ STUB_EOF
   run ! grep -q disable "$SYSTEMCTL_LOG"
 }
 
+@test "an automatic rollback that cannot save another install's units does not run install.sh" {
+  stub_install
+  two_installs_host
+  # Nothing can be created under it.
+  : >"$P/state/foreign-units"
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' STUB_UPDATE=1 run_updater
+  [ "$(result "$ID1" .state)" = rollback_failed ]
+  [[ $(result "$ID1" .message) == *"going back to sha-${NEW:0:12} was not started: the systemd units of another install on this host could not be saved first"* ]]
+  [[ $stderr == *"could not save the systemd units of another install on this host; not rolling back"* ]]
+  [ ! -e "$INSTALL_LOG" ]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+}
+
 # hold_updater_lock <seconds>: another updater.sh holds the lock that long, from now.
 hold_updater_lock() {
   mkdir -p "$P/state/updater"

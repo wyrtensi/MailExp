@@ -198,20 +198,23 @@ remove_project_units_after_downgrade() {
 # and health check would serve this one from then on. For another project, each kind (updater,
 # backup, health) whose default-name units exist and do not serve this prefix is copied into
 # <state>/foreign-units/<kind>, with whether its path unit or timer was enabled and active;
-# units_after_downgrade puts it back. A kind already saved there (an earlier run whose restore
-# failed) is kept as it is: the files under the default names may be this install's by now.
-# Status 1 when a copy fails.
+# units_after_downgrade puts it back. A copy left by an earlier run whose restore failed is kept
+# only while the default-name units serve this prefix (they are then not the other install's);
+# when they serve another prefix now, the copy is replaced by them, and when there are none, it
+# is dropped. Status 1 when a copy fails.
 save_foreign_fixed_units() {
   local dir=$STATE_DIR/foreign-units name kind unit tmp
   [ "${CFG_PROJECT:-mailexpert}" != mailexpert ] || return 0
   for name in updater backup health; do
     if [ "$name" = updater ]; then kind=path; else kind=timer; fi
-    [ -e "$SYSTEMD_DIR/mailexpert-$name.$kind" ] || [ -e "$SYSTEMD_DIR/mailexpert-$name.service" ] || continue
+    if [ ! -e "$SYSTEMD_DIR/mailexpert-$name.$kind" ] && [ ! -e "$SYSTEMD_DIR/mailexpert-$name.service" ]; then
+      rm -rf "${dir:?}/$name" || return 1
+      continue
+    fi
     if unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.$kind" "$OPT_PREFIX" ||
       unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.service" "$OPT_PREFIX"; then
       continue
     fi
-    [ ! -d "$dir/$name" ] || continue
     tmp=$dir/.$name
     rm -rf "$tmp" || return 1
     mkdir -p "$tmp" || return 1
@@ -224,6 +227,7 @@ save_foreign_fixed_units() {
       if systemctl is-enabled --quiet "mailexpert-$name.$kind" 2>/dev/null; then : >"$tmp/enabled" || return 1; fi
       if systemctl is-active --quiet "mailexpert-$name.$kind" 2>/dev/null; then : >"$tmp/active" || return 1; fi
     fi
+    rm -rf "${dir:?}/$name" || return 1
     mv "$tmp" "$dir/$name" || return 1
     log "systemd units: mailexpert-$name.$kind belongs to another install on this host; saved in $dir/$name until install.sh is done"
   done
@@ -243,9 +247,11 @@ foreign_units_unchanged() {
 }
 
 # restore_foreign_fixed_units: what save_foreign_fixed_units saved and install.sh changed is put
-# back exactly, systemd reloads, and the path unit or timer gets back its state: restarted when it
-# was active (it then watches or runs for its own install again), stopped and disabled when it was
-# not. A service is never stopped or restarted: one started meanwhile runs to its end. The saved
+# back exactly, systemd reloads, and the path unit or timer gets back its state: enabled or
+# disabled as it was, restarted when it was active (it then watches or runs for its own install
+# again), stopped when it was not. A path unit or timer install.sh added next to a lone service of
+# the other install is disabled and stopped before its file goes. A service is never stopped or
+# restarted: one started meanwhile runs to its end. The saved
 # copies are removed once everything is back; when a step fails they stay, the output says what
 # to do by hand, and the status is 1.
 restore_foreign_fixed_units() {
@@ -260,7 +266,8 @@ restore_foreign_fixed_units() {
     for unit in "$kind" service; do
       if [ -e "$saved/mailexpert-$name.$unit" ]; then
         cp -p "$saved/mailexpert-$name.$unit" "$SYSTEMD_DIR/" || failed=1
-      else
+      elif [ -e "$SYSTEMD_DIR/mailexpert-$name.$unit" ]; then
+        if [ "$unit" = "$kind" ]; then systemctl disable --now "mailexpert-$name.$unit" >/dev/null 2>&1 || failed=1; fi
         rm -f "$SYSTEMD_DIR/mailexpert-$name.$unit" || failed=1
       fi
     done
@@ -274,7 +281,11 @@ restore_foreign_fixed_units() {
       saved=$dir/$name
       if [ "$name" = updater ]; then kind=path; else kind=timer; fi
       [ -e "$saved/mailexpert-$name.$kind" ] || continue
-      if [ ! -e "$saved/enabled" ]; then systemctl disable "mailexpert-$name.$kind" >/dev/null 2>&1 || failed=1; fi
+      if [ -e "$saved/enabled" ]; then
+        systemctl enable "mailexpert-$name.$kind" >/dev/null 2>&1 || failed=1
+      else
+        systemctl disable "mailexpert-$name.$kind" >/dev/null 2>&1 || failed=1
+      fi
       if [ -e "$saved/active" ]; then
         systemctl reset-failed "mailexpert-$name.$kind" >/dev/null 2>&1 || true
         systemctl restart "mailexpert-$name.$kind" || failed=1

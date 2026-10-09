@@ -218,6 +218,48 @@ STUB_EOF
   [ ! -e "$P/state/rollback-in-progress" ]
 }
 
+@test "a rollback that cannot save another install's units stops before install.sh, and can be run again" {
+  stub_install
+  two_installs_host
+  # Nothing can be created under it.
+  : >"$P/state/foreign-units"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 1 ]
+  [[ $output == *"could not save the systemd units of another install on this host"*"install.sh was not run"* ]]
+  [ ! -e "$INSTALL_LOG" ]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+  # The database was swapped: a rerun goes on from there.
+  [ -e "$P/state/rollback-in-progress" ]
+  rm -f "$P/state/foreign-units"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  [[ $output == *"an earlier run already swapped the database"* ]]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+}
+
+@test "a rollback of the default project leaves the units under the default names to the old install.sh" {
+  stub_install
+  two_installs_host
+  sed -i 's/^PROJECT=me-test$/PROJECT=mailexpert/' "$P/install.conf"
+  # The default project of $P owns the default names; another project's units are suffixed.
+  rm -f "$UNITS"/*
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "$P" >"$UNITS/mailexpert-$name.$unit"
+      CFG_PROJECT=other render_project_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "${P}2" >"$UNITS/mailexpert-$name-other.$unit"
+    done
+  done
+  rm -rf "$BATS_TEST_TMPDIR/before"
+  cp -r "$UNITS" "$BATS_TEST_TMPDIR/before"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+  # Only the old install.sh's own restart: nothing is saved, put back or removed.
+  [ "$(cat "$SYSTEMCTL_LOG")" = "restart mailexpert-updater.path" ]
+  [ ! -e "$P/state/foreign-units" ]
+}
+
 @test "not enough space for the restored copy next to the database: exit 2 before anything stops" {
   stub_install
   STUB_DB_BYTES=999999999999999 run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
