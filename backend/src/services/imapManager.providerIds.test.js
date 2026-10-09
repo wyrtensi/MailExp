@@ -519,11 +519,21 @@ describe('Gmail id backfill triggers', () => {
 
   it('a finished full backfill starts the id backfill', async () => {
     const mgr = newManager();
-    mgr._connectCooldown.set(gmail.id, { until: Date.now() + 60 * 1000 });
+    mgr.backfillMessages = vi.fn(async () => undefined);
     mgr.refreshBulkFlags = vi.fn(async () => {});
     mgr.startSnippetIndexer = vi.fn(async () => {});
     mgr.startProviderIdBackfill = vi.fn(async () => {});
     await mgr.backfillAllFolders(gmail);
     expect(mgr.startProviderIdBackfill).toHaveBeenCalledWith(gmail);
+  });
+
+  it('a full backfill stopped by a refusal does not start the id backfill', async () => {
+    const mgr = newManager();
+    mgr._connectCooldown.set(gmail.id, { until: Date.now() + 60 * 1000 });
+    mgr.refreshBulkFlags = vi.fn(async () => {});
+    mgr.startSnippetIndexer = vi.fn(async () => {});
+    mgr.startProviderIdBackfill = vi.fn(async () => {});
+    await mgr.backfillAllFolders(gmail);
+    expect(mgr.startProviderIdBackfill).not.toHaveBeenCalled();
   });
 });
