@@ -54,15 +54,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A Docker Hub image through Google's pull-through cache first, tagged under its own name (Docker
+# Hub's unauthenticated pull limit and token timeouts fail CI runs), then Docker Hub itself.
+pull_hub() {
+  local image=$1 path=$1
+  [[ $path == */* ]] || path="library/$path"
+  if docker pull --quiet "mirror.gcr.io/$path" >/dev/null 2>&1; then
+    docker tag "mirror.gcr.io/$path" "$image"
+  else
+    docker pull --quiet "$image" >/dev/null
+  fi
+}
+
 IMAGES=("$IMAGE_PREFIX/mailexpert-backend:$VERSION" "$IMAGE_PREFIX/mailexpert-frontend:$VERSION"
   "$IMAGE_PREFIX/mailexpert-edge:$VERSION" postgres:16-alpine redis:7-alpine "$RESTIC_IMAGE" "$S3_IMAGE")
 for image in "${IMAGES[@]}"; do
   if docker image inspect "$image" >/dev/null 2>&1; then continue; fi
   case $image in
     "$IMAGE_PREFIX"/*) die "image $image is missing: build it from HEAD first" ;;
-    *) docker pull --quiet "$image" >/dev/null ;;
+    *) pull_hub "$image" ;;
   esac
 done
+docker image inspect "$DIND_IMAGE" >/dev/null 2>&1 || pull_hub "$DIND_IMAGE"
 
 log "starting $NAME from $DIND_IMAGE"
 docker run -d --privileged --name "$NAME" "$DIND_IMAGE" >/dev/null
