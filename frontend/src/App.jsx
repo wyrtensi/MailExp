@@ -7,6 +7,7 @@ import { applyFontSet, effectiveFontSet } from './fonts.js'; // still used for t
 import { applyLayout } from './layouts.js';
 import LoginPage from './components/LoginPage.jsx';
 import GoogleLoginPage from './components/GoogleLoginPage.jsx';
+import AccessDeniedPage from './components/AccessDeniedPage.jsx';
 import { isGoogleAuthMode } from './utils/authMode.js';
 import { isDemoMode } from './demo/mode.js';
 import { demoRole } from './utils/demoRole.js';
@@ -34,6 +35,7 @@ export default function App() {
   const { user, setUser, loadPreferences, isLocked, setLocked } = useStore();
   const [checking, setChecking] = useState(true);
   const [authConfig, setAuthConfig] = useState(null);
+  const [accessDenied, setAccessDenied] = useState(null);
 
   // Register service worker on first mount — independent of auth state.
   // The SW itself does nothing until the user explicitly grants push permission.
@@ -48,11 +50,14 @@ export default function App() {
   useEffect(() => {
     const onExpired = () => { setUser(null); setLocked(false); };
     const onLocked = () => setLocked(true);
+    const onDenied = (e) => { setUser(null); setLocked(false); setAccessDenied(e.detail?.code || 'not_allowed'); };
     window.addEventListener('mailexpert:session_expired', onExpired);
     window.addEventListener('mailexpert:locked', onLocked);
+    window.addEventListener('mailexpert:access_denied', onDenied);
     return () => {
       window.removeEventListener('mailexpert:session_expired', onExpired);
       window.removeEventListener('mailexpert:locked', onLocked);
+      window.removeEventListener('mailexpert:access_denied', onDenied);
     };
   }, [setUser, setLocked]);
 
@@ -165,6 +170,8 @@ export default function App() {
       </div>
     );
   }
+
+  if (accessDenied) return <AccessDeniedPage code={accessDenied} />;
 
   const loginPage = isGoogleAuthMode(authConfig) ? <GoogleLoginPage config={authConfig} /> : <LoginPage />;
 
