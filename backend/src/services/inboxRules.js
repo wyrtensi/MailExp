@@ -196,12 +196,8 @@ export async function applyInboxRules(messages, account, imapManager) {
     }
   }
 
-  // Rules that need the message headers: a header condition, or a forward, whose loop check
-  // reads the loop header (ruleForwarder.js). Without the headers a forward could send a copy
-  // that has already been round this mailbox once more, so it is skipped like a header rule.
   const headerRules = new Set(rules.filter(r =>
-    (Array.isArray(r.conditions) && r.conditions.some(c => c?.field === 'header')) ||
-    (Array.isArray(r.actions) && r.actions.some(a => a?.type === 'forward'))
+    Array.isArray(r.conditions) && r.conditions.some(c => c?.field === 'header')
   ));
 
   // Lazy resolver cache shared across the message loop. Populated on first actual use

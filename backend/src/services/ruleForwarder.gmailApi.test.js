@@ -36,6 +36,7 @@ describe('forwardRuleMessage on a Gmail mailbox', () => {
     transport = { sendMail: vi.fn().mockResolvedValue({ via: 'api', messageId: '<fwd@gmail.com>' }) };
     createAccountSendTransport.mockResolvedValue({ account, transport });
     imapManager = {
+      fetchHeaders: vi.fn(async () => 'Subject: Quarterly review'),
       fetchMessageBody: vi.fn(),
       fetchMultipleAttachments: vi.fn().mockResolvedValue(new Map()),
       moveQueue: { serverLocation: vi.fn(async (row) => ({ folder: row.folder, uid: Number(row.uid) })) },

@@ -3,6 +3,7 @@ import { embedInlineDataImages } from '../utils/inlineImages.js';
 import { query } from './db.js';
 import { deriveKey } from './encryption.js';
 import { sanitizeEmail } from './emailSanitizer.js';
+import { parseHeadersInput } from './messageParser.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { sendFailureIsDefinite } from './smtpErrors.js';
 import { isDisabledMailbox, isReadOnlyNodeMailbox } from '../utils/senderNames.js';
@@ -136,9 +137,25 @@ function loopToken(account) {
 }
 
 // Only well-formed tokens are passed on: the header may have come from the sender.
-function receivedLoopTokens(message) {
-  const value = message?.parsedHeaders?.[LOOP_HEADER.toLowerCase()];
+function receivedLoopTokens(parsedHeaders) {
+  const value = parsedHeaders?.[LOOP_HEADER.toLowerCase()];
   return typeof value === 'string' ? value.match(/\b[0-9a-f]{16}\b/g) || [] : [];
+}
+
+// A message from a manual sweep (run rules now) is a DB row with no headers. Read them only for a
+// message a forward rule matched, not for the whole sweep. Unreadable headers fail the forward
+// (the rule engine leaves the source in place and a later sweep retries it): forwarding without
+// the loop check could send a copy that has already been round this mailbox once more.
+async function fetchLoopTokens(message, account, imapManager) {
+  const headers = parseHeadersInput(await imapManager.fetchHeaders(account, message.uid, message.folder));
+  if (!Object.keys(headers).length) throw new Error('Forward source headers unavailable');
+  return receivedLoopTokens(headers);
+}
+
+function isForwardLoop(loopTokens, account, ruleId, message) {
+  if (!loopTokens.includes(loopToken(account))) return false;
+  console.warn(`ruleForwarder: rule ${ruleId} did not forward message ${message.id}: forwarding loop detected`);
+  return true;
 }
 
 export function buildForwardMessage({
@@ -289,12 +306,10 @@ export async function forwardRuleMessage({
   imapManager,
   recipient,
 }) {
-  // Checked first: it needs no database, and a looping copy must not reserve anything.
-  const loopTokens = receivedLoopTokens(message);
-  if (loopTokens.includes(loopToken(account))) {
-    console.warn(`ruleForwarder: rule ${ruleId} did not forward message ${message.id}: forwarding loop detected`);
-    return 'loop';
-  }
+  // An arrival carries its headers: checked first, it needs no database, and a looping copy must
+  // not reserve anything. A swept row is checked once the mailbox is known to send at all.
+  let loopTokens = message.parsedHeaders ? receivedLoopTokens(message.parsedHeaders) : null;
+  if (loopTokens && isForwardLoop(loopTokens, account, ruleId, message)) return 'loop';
   // A turned-off mailbox, or a read-only mail node mailbox (EOP seats design), does not forward. Read
   // fresh: the account object a rule runs with may predate the change.
   const { rows: [state] } = await query(
@@ -307,6 +322,10 @@ export async function forwardRuleMessage({
   if (isReadOnlyNodeMailbox(state)) {
     console.warn(`ruleForwarder: rule ${ruleId} not forwarded: the mailbox is read-only`);
     return 'read_only';
+  }
+  if (!loopTokens) {
+    loopTokens = await fetchLoopTokens(message, account, imapManager);
+    if (isForwardLoop(loopTokens, account, ruleId, message)) return 'loop';
   }
   const reserved = await query(
     `INSERT INTO inbox_rule_forwards (rule_id, message_id)

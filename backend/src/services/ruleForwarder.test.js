@@ -217,6 +217,8 @@ describe('forwardRuleMessage', () => {
     transport = { sendMail: vi.fn().mockResolvedValue({ accepted: true }) };
     createAccountSmtpTransport.mockResolvedValue({ account, transport });
     imapManager = {
+      // A manual sweep hands over DB rows without headers: the forwarder reads them itself.
+      fetchHeaders: vi.fn(async () => 'Subject: Quarterly review\r\nFrom: sender@example.com'),
       fetchMessageBody: vi.fn(),
       fetchMultipleAttachments: vi.fn().mockResolvedValue(new Map()),
       // A letter with no pending move is read where its row says (moveQueue.serverLocation).
@@ -892,6 +894,63 @@ describe('forwardRuleMessage', () => {
     const delivered = await deliveredHeaders(transport.sendMail.mock.calls[0][0]);
     expect(delivered['x-mailexpert-loop']).toMatch(/^[0-9a-f]{16}$/);
     expect(delivered.to).toBe('recipient@example.com');
+  });
+
+  // A manual sweep (run rules now) has only DB metadata. Only a message a forward rule matched
+  // pays for a header FETCH, and only once the mailbox may send at all.
+  describe('a message from a manual sweep, without headers', () => {
+    const swept = { id: messageRow.id, uid: 42, folder: 'INBOX' };
+
+    it('reads the headers and stops a forward that has been here before', async () => {
+      reserveEveryForward();
+      await forwardRuleMessage({ ...input, recipient: 'other@example.org' });
+      const ownToken = transport.sendMail.mock.calls[0][0].headers['X-MailExpert-Loop'];
+      imapManager.fetchHeaders.mockResolvedValueOnce(`Subject: Fwd: Quarterly review\r\nX-MailExpert-Loop: ${ownToken}`);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await expect(forwardRuleMessage({ ...input, message: swept })).resolves.toBe('loop');
+      } finally {
+        warn.mockRestore();
+      }
+      expect(imapManager.fetchHeaders).toHaveBeenLastCalledWith(account, 42, 'INBOX');
+      expect(transport.sendMail).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO inbox_rule_forwards'))).toHaveLength(1);
+    });
+
+    it('passes the received tokens on when it is not a loop', async () => {
+      reserveEveryForward();
+      imapManager.fetchHeaders.mockResolvedValueOnce(`X-MailExpert-Loop: ${'cd'.repeat(8)}`);
+      await expect(forwardRuleMessage({ ...input, message: swept })).resolves.toBe('sent');
+      const delivered = await deliveredHeaders(transport.sendMail.mock.calls[0][0]);
+      expect(delivered['x-mailexpert-loop']).toMatch(new RegExp(`^${'cd'.repeat(8)}, [0-9a-f]{16}$`));
+    });
+
+    it('does not forward when the headers cannot be read: the loop check would be blind', async () => {
+      reserveEveryForward();
+      for (const failure of [async () => { throw new Error('pool busy'); }, async () => '']) {
+        imapManager.fetchHeaders.mockImplementationOnce(failure);
+        await expect(forwardRuleMessage({ ...input, message: swept })).rejects.toThrow();
+      }
+      expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO inbox_rule_forwards'))).toBe(false);
+      expect(transport.sendMail).not.toHaveBeenCalled();
+    });
+
+    it('reads nothing for a mailbox that may not send', async () => {
+      query.mockResolvedValueOnce({ rows: [{ enabled: false, mail_node: false, delete_after: null, deactivated_at: null }] });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        await expect(forwardRuleMessage({ ...input, message: swept })).resolves.toBe('disabled');
+      } finally {
+        warn.mockRestore();
+      }
+      expect(imapManager.fetchHeaders).not.toHaveBeenCalled();
+    });
+
+    it('arrival messages already carry headers: nothing is fetched', async () => {
+      reserveEveryForward();
+      await expect(forwardRuleMessage({ ...input, message: { ...swept, parsedHeaders: {} } })).resolves.toBe('sent');
+      expect(imapManager.fetchHeaders).not.toHaveBeenCalled();
+    });
   });
 
   it('a mailbox that is disabled still refuses after the loop check passes', async () => {
