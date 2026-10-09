@@ -106,7 +106,7 @@ const failActiveJobs = (client, error) => client.query(
 
 export async function issueToken(userId) {
   const token = newToken();
-  return withTransaction(async (client) => {
+  const issued = await withTransaction(async (client) => {
     const { rows: before } = await client.query('SELECT token_hash FROM node_agent WHERE id = 1 FOR UPDATE');
     const rotated = !!before[0]?.token_hash;
     const { rows } = await client.query(
@@ -121,18 +121,22 @@ export async function issueToken(userId) {
     if (rotated) await failActiveJobs(client, 'agent_token_rotated');
     return { token, createdAt: rows[0].token_created_at, rotated };
   });
+  resetStoredHashCopy();
+  return issued;
 }
 
 // Revokes the token: the agent is refused from its next request. Its waiting and running jobs fail
 // now, since nobody can report them any more. Returns whether there was a token.
 export async function revokeToken() {
-  return withTransaction(async (client) => {
+  const revoked = await withTransaction(async (client) => {
     const { rowCount } = await client.query(
       'UPDATE node_agent SET token_hash = NULL, last_seen_at = NULL WHERE id = 1 AND token_hash IS NOT NULL'
     );
     await failActiveJobs(client, 'agent_revoked');
     return rowCount > 0;
   });
+  resetStoredHashCopy();
+  return revoked;
 }
 
 // The stored hash when a presented token is the agent's (compared by hash, in constant time), or
@@ -160,28 +164,40 @@ function matchesHash(token, stored) {
 // Whether a token may be the agent's, against a copy of the stored hash this process reads at most
 // once per STORED_HASH_TTL_MS: the refusal limit (routes/mailNodeAgent.js) asks it while refused
 // tokens are answered 429, so they cost no database read, and only a match goes on to
-// authenticateAgent (which reads the hash afresh and refuses a revoked token). The copy may lag a
-// rotation, in this process or another (the panel CLI), by up to the TTL: a new token can be
-// answered 429 that long while the limit holds, and the agent retries after its backoff.
-const STORED_HASH_TTL_MS = 1000;
+// authenticateAgent (which reads the hash afresh and refuses a revoked token). issueToken and
+// revokeToken drop the copy, so a rotation in this process is seen at once; one in another process
+// (the panel CLI) can lag by up to the TTL: a new token can be answered 429 that long while the
+// limit holds, and the agent retries after its backoff.
+export const STORED_HASH_TTL_MS = 1000;
 let storedHashCopy = { hash: null, at: -Infinity };
-// One read at a time: concurrent requests share it.
+// One read at a time: concurrent requests share it. A read started before a drop does not fill the
+// copy after it (the generation moved on).
 let storedHashRead = null;
+let storedHashGeneration = 0;
 
 export async function mayBeAgentToken(token) {
   if (!token || !TOKEN_PATTERN.test(token)) return false;
   if (Date.now() - storedHashCopy.at >= STORED_HASH_TTL_MS) {
-    storedHashRead ??= readStoredHash()
-      .then((hash) => { storedHashCopy = { hash, at: Date.now() }; })
-      .finally(() => { storedHashRead = null; });
-    await storedHashRead;
+    if (!storedHashRead) {
+      const generation = storedHashGeneration;
+      const read = readStoredHash()
+        .then((hash) => {
+          if (generation === storedHashGeneration) storedHashCopy = { hash, at: Date.now() };
+          return hash;
+        })
+        .finally(() => { if (storedHashRead === read) storedHashRead = null; });
+      storedHashRead = read;
+    }
+    return matchesHash(token, await storedHashRead);
   }
   return matchesHash(token, storedHashCopy.hash);
 }
 
-// Tests: the next mayBeAgentToken reads the stored hash.
+// Drops the copy: the next mayBeAgentToken reads the stored hash.
 export function resetStoredHashCopy() {
+  storedHashGeneration += 1;
   storedHashCopy = { hash: null, at: -Infinity };
+  storedHashRead = null;
 }
 
 const TOKEN_CURRENT = 'EXISTS (SELECT 1 FROM node_agent WHERE id = 1 AND token_hash = $1)';

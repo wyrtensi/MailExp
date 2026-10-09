@@ -34,7 +34,7 @@ const { default: adminRoutes, agentRouter } = await import('./mailNodeAgent.js')
 const { recordAudit } = await import('../services/auditLog.js');
 const {
   hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle, queueNodeUpdateIfBehind, getNodeUpdateState,
-  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS, pinnedMailcow, resetStoredHashCopy,
+  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS, pinnedMailcow, resetStoredHashCopy, STORED_HASH_TTL_MS,
 } = await import('../services/mailNode/nodeAgent.js');
 const { updateNodeAfterPanel } = await import('../services/panelUpdate/reconcile.js');
 const { AGENT_AUTH_FAILURES, AGENT_AUTH_GLOBAL_FAILURES, AGENT_AUTH_GLOBAL_KEY } = await import('./mailNodeAgent.js');
@@ -342,17 +342,33 @@ describe('restarts, rotations and polls', () => {
   it('while limited, refusals read the stored hash at most once a second, and a revoked token stays refused', async () => {
     const token = await issue();
     limits.set(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES);
-    dbState.hashReads = 0;
-    for (let i = 0; i < 10; i += 1) {
-      expect((await agent(`mxna_wrong${String(i).padStart(30, 'x')}`, 'GET', '/next?wait=0')).status).toBe(429);
+    // Only Date is faked (fetch and the server keep real timers): the copy's age is exact, however
+    // slow the run.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      dbState.hashReads = 0;
+      for (let i = 0; i < 10; i += 1) {
+        expect((await agent(`mxna_wrong${String(i).padStart(30, 'x')}`, 'GET', '/next?wait=0')).status).toBe(429);
+      }
+      expect(dbState.hashReads).toBe(1);
+      vi.setSystemTime(Date.now() + STORED_HASH_TTL_MS);
+      expect((await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0')).status).toBe(429);
+      expect(dbState.hashReads).toBe(2);
+    } finally {
+      vi.useRealTimers();
     }
-    expect(dbState.hashReads).toBe(1);
     expect((await admin('DELETE', '/agent/token')).status).toBe(200);
-    // The copy still holds the revoked hash; authenticateAgent reads it afresh and refuses.
     expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(429);
-    resetStoredHashCopy();
+  });
+
+  it('a rotation while limited is seen at once: the new token is accepted, the old one refused', async () => {
+    const old = await issue();
+    limits.set(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES);
+    // The copy now holds the old hash.
+    expect((await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0')).status).toBe(429);
     const fresh = await issue();
     expect((await agent(fresh, 'GET', '/next?wait=0')).status).toBe(204);
+    expect((await agent(old, 'GET', '/next?wait=0')).status).toBe(429);
   });
 });
 

@@ -92,8 +92,11 @@ agentRouter.use(async (req, res, next) => {
   const key = `node-agent-auth:${req.ip}`;
   try {
     const token = bearerToken(req.get('authorization'));
-    const limited = (await rlPeek(key, AGENT_AUTH_FAILURES, AGENT_AUTH_WINDOW_MS)).limited
-      || (await rlPeek(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES, AGENT_AUTH_WINDOW_MS)).limited;
+    const peeks = await Promise.all([
+      rlPeek(key, AGENT_AUTH_FAILURES, AGENT_AUTH_WINDOW_MS),
+      rlPeek(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES, AGENT_AUTH_WINDOW_MS),
+    ]);
+    const limited = peeks.some((peek) => peek.limited);
     const hash = !limited || await mayBeAgentToken(token) ? await authenticateAgent(token) : null;
     if (hash) {
       req.agentTokenHash = hash;
