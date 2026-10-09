@@ -33,16 +33,24 @@ const CSRF = { 'X-Requested-With': 'MailExpert' };
 // `answered` records whether the whole request had arrived by the time its response went out.
 // `sessionReads` fires once the large-body paths have read a request's session, so a test can
 // change that session while the body is still arriving, and `failStoreReads` makes the session
-// store fail as Redis does while it restarts.
+// store fail as Redis does while it restarts. `heldWrites`, while set, holds back every write of
+// one session's unlocked copy until released, so a test decides when such a write lands.
 const parsed = [];
 const answered = [];
 const sessionReads = new EventEmitter();
 let failStoreReads = false;
+let heldWrites = null;
 function buildApp({ identityGate }) {
   const app = express();
   const store = new session.MemoryStore();
   const get = store.get.bind(store);
   store.get = (sid, callback) => (failStoreReads ? callback(new Error('store unavailable')) : get(sid, callback));
+  const set = store.set.bind(store);
+  store.set = (sid, sess, callback) => {
+    if (heldWrites?.sid !== sid || sess.locked) return set(sid, sess, callback);
+    heldWrites.held.push(sid);
+    heldWrites.released.then(() => set(sid, sess, callback));
+  };
   const sessionMiddleware = session(buildSessionOptions(store, 'test-secret-'.padEnd(40, 'x')));
   app.use((req, res, next) => {
     res.on('finish', () => answered.push({ status: res.statusCode, bodyReceived: req.complete }));
@@ -152,11 +160,11 @@ const post = (path, body, headers = {}, at = base) => fetchFully(path, {
 // Sends OVER_1MB to `path` in two halves and runs `meanwhile(sessionCookie)` after the session
 // has been read but before the second half goes out. Resolves to the response status once the
 // response has been read in full.
-async function postWhile(path, sessionCookie, meanwhile) {
-  const request = http.request(`${base}${path}`, {
+async function postWhile(path, sessionCookie, meanwhile, { at = base, headers = CSRF } = {}) {
+  const request = http.request(`${at}${path}`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(OVER_1MB), cookie: sessionCookie, ...CSRF,
+      'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(OVER_1MB), cookie: sessionCookie, ...headers,
     },
   });
   const status = new Promise((resolve, reject) => {
@@ -253,6 +261,49 @@ describe('JSON body limits and sign-in', () => {
     expect(signedOut).toBe(401);
     const locked = await postWhile(path, await signIn('u1'), (c) => fetchFully('/lock', { headers: { cookie: c } }));
     expect(locked).toBe(423);
+  });
+
+  // Signs out or locks the session while every write of the copy this request read is held back,
+  // then lets such a write land: it would put back the session as it was before the sign-out or
+  // lock. Resolves to the status of the request and of the next one with the same cookie, and to
+  // the writes that were held.
+  async function endSessionDuringUpload(path, end, { at = base, headers = CSRF } = {}) {
+    const sessionCookie = await signIn('u1', at);
+    let release;
+    const released = new Promise((resolve) => { release = resolve; });
+    // connect.sid=s%3A<id>.<signature>
+    const sid = decodeURIComponent(sessionCookie.split('=')[1]).slice(2).replace(/\.[^.]*$/, '');
+    heldWrites = { sid, released, held: [] };
+    try {
+      const status = await postWhile(path, sessionCookie, async (c) => {
+        await fetchFully(`/${end}`, { headers: { cookie: c } }, at);
+        release();
+      }, { at, headers });
+      const held = heldWrites.held;
+      heldWrites = null;
+      const next = await post(path, OVER_1MB, { cookie: sessionCookie }, at);
+      return { status, next: next.status, held };
+    } finally {
+      release();
+      heldWrites = null;
+    }
+  }
+
+  it.each(LARGE_BODY_PATHS)('never writes back the session %s read before its body', async (path) => {
+    // The bug: the session read before the body was saved before the body was read, so a
+    // sign-out or lock landing between that read and the save was undone, and the request and
+    // every later one with the same cookie went through.
+    expect(await endSessionDuringUpload(path, 'logout')).toEqual({ status: 401, next: 401, held: [] });
+    expect(await endSessionDuringUpload(path, 'lock')).toEqual({ status: 423, next: 423, held: [] });
+  });
+
+  it('never writes back the session read before the body of a request refused before its body', async () => {
+    // The google identity gate refreshes isAdmin on the copy it reads, and express-session saves a
+    // changed copy when the response ends. A request refused before its body (here for its missing
+    // CSRF header) never reads the session again, so that save would put back a session signed
+    // out during the upload.
+    const refused = await endSessionDuringUpload('/api/mail/draft', 'logout', { at: google.base, headers: {} });
+    expect(refused).toEqual({ status: 403, next: 401, held: [] });
   });
 
   it('answers a session store failure as an error, and only once the body has arrived', async () => {
