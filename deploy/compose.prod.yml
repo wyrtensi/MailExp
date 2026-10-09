@@ -13,6 +13,9 @@
 #   image.
 # - The frontend serves plain HTTP on loopback only; the edge (Caddy or cloudflared) terminates
 #   TLS and sends X-Forwarded-Proto. PostgreSQL and Redis publish no host ports.
+# - CPU caps are optional: BACKEND_CPUS, TENANT_WORKER_CPUS and POSTGRES_CPUS in .env (for example
+#   1.5) limit a host shared with other projects. 0, the default, means no cap; Docker refuses a
+#   value above the host's CPU count, so the default must stay 0.
 
 services:
   frontend:
@@ -25,6 +28,7 @@ services:
     image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-backend:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
     build: !reset null
     mem_limit: 1536m
+    cpus: ${BACKEND_CPUS:-0}
     environment:
       NODE_OPTIONS: --max-old-space-size=1024
       # The edge (Caddy or cloudflared) and the frontend's nginx both append to X-Forwarded-For:
@@ -45,9 +49,11 @@ services:
     image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-tenant-worker:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
     build: !reset null
     mem_limit: 768m
+    cpus: ${TENANT_WORKER_CPUS:-0}
 
   postgres:
     mem_limit: 2g
+    cpus: ${POSTGRES_CPUS:-0}
     command:
       - postgres
       - -c

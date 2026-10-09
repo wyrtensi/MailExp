@@ -9,11 +9,20 @@
 # TUNNEL_TOKEN). The public hostname of the tunnel (<CF_HOST> -> http://127.0.0.1:<port>) is
 # set in Cloudflare Zero Trust, not here.
 
+# Log rotation for the edge's containers only (the daemon's defaults are left alone): Docker's
+# default json-file driver never rotates.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   caddy:
     profiles: ["caddy"]
     image: ${EDGE_IMAGE:?set EDGE_IMAGE; install.sh pins it}
     restart: unless-stopped
+    logging: *logging
     network_mode: host
     environment:
       DNS_API_TOKEN: ${DNS_API_TOKEN:-}
@@ -26,6 +35,7 @@ services:
     profiles: ["tunnel"]
     image: cloudflare/cloudflared:2026.9.1
     restart: unless-stopped
+    logging: *logging
     network_mode: host
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:
