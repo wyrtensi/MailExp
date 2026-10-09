@@ -119,7 +119,15 @@ assert.equal(Number(nodeDomain.max_quota_for_mbox) / 1048576, 102400);
 assert.equal(domain.state, 'node_created');
 r = await panel('POST', `/mail-node/domains/${DOMAIN}/ready`);
 assert.equal(r.status, 200, JSON.stringify(r.data));
-pass(`domain ${DOMAIN} created on the node with 50 mailboxes and marked ready`);
+// Every node mailbox holds an EOP seat. Without a tenant the purchased number is the Licenses field
+// of the EOP settings, as an administrator enters it.
+r = await panel('PUT', '/mail-node/eop', { licenses: 50 });
+assert.equal(r.status, 200, JSON.stringify(r.data));
+r = await panel('GET', '/mail-node/seats');
+assert.equal(r.status, 200, JSON.stringify(r.data));
+assert.equal(r.data.mode, 'manual', JSON.stringify(r.data));
+assert.equal(r.data.free, 50, JSON.stringify(r.data));
+pass(`domain ${DOMAIN} created on the node with 50 mailboxes and marked ready; 50 EOP seats entered`);
 
 // 4. Two mailboxes: created on the node with 5 GB and connected by the panel.
 for (const localPart of ['sales', 'support']) {
@@ -167,11 +175,23 @@ assert.equal(r.status, 400);
 assert.equal(r.data.code, 'mail_node_connection_locked');
 pass('server settings of a node mailbox are locked');
 
-// 8. Deleting a node mailbox is scheduled: the address typed and a reason given, the mailbox keeps
-// working until its date (the deletion job then deletes it on the node; covered by
-// mailboxDeletion.pglite.test.js, since this run cannot wait days). While pending, the address
-// cannot be created again; anyone may cancel. A disabled mailbox left on the node is refused
-// instead of taken over.
+// 8. Deleting a node mailbox is scheduled: the address typed and a reason given. Until its date the
+// mailbox is read-only (EOP seats design): its seat on hold, the node's read-only filter refuses
+// incoming mail, the panel refuses sending, IMAP stays open (the deletion job then deletes it on the
+// node; covered by mailboxDeletion.pglite.test.js, since this run cannot wait days). While pending,
+// the address cannot be created again; anyone may cancel, which takes the seat back and opens
+// delivery. A disabled mailbox left on the node is refused instead of taken over.
+const readOnlyFilter = async (email) => {
+  const filters = await mailcow('GET', `get/filters/${encodeURIComponent(email)}`);
+  return (Array.isArray(filters) ? filters : []).find((f) => f.filter_type === 'prefilter'
+    && String(f.script_desc ?? '').startsWith('mailexpert-read-only') && Number(f.active_int ?? f.active) === 1);
+};
+const seats = async () => {
+  const { status, data } = await panel('GET', '/mail-node/seats');
+  assert.equal(status, 200, JSON.stringify(data));
+  return { used: data.used, held: data.held, free: data.free };
+};
+assert.deepEqual(await seats(), { used: 2, held: 0, free: 48 });
 r = await panel('DELETE', `/accounts/${support.id}`);
 assert.equal(r.status, 409, JSON.stringify(r.data));
 assert.equal(r.data.code, 'mail_node_deletion_request_required');
@@ -180,13 +200,24 @@ assert.equal(r.status, 200, JSON.stringify(r.data));
 assert.ok(r.data.delete_after, JSON.stringify(r.data));
 assert.equal(r.data.deletion_reason, 'e2e check');
 const stillThere = await nodeMailbox(`support@${DOMAIN}`);
-assert.equal(Number(stillThere.active_int ?? stillThere.active), 1, 'the mailbox keeps working until its date');
+assert.equal(Number(stillThere.active_int ?? stillThere.active), 1, 'the mailbox stays on the node until its date');
+assert.ok(await readOnlyFilter(`support@${DOMAIN}`), 'the node refuses mail for a mailbox pending deletion');
+assert.deepEqual(await seats(), { used: 1, held: 1, free: 48 });
+r = await panel('POST', '/mail/send', { accountId: support.id, to: [`sales@${DOMAIN}`], subject: 'e2e from a closed mailbox', body: 'Refused.' });
+assert.equal(r.status, 409, JSON.stringify(r.data));
+assert.equal(r.data.code, 'mailbox_read_only');
 const pendingLetter = `e2e while pending ${Date.now()}`;
-r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: pendingLetter, body: 'Still delivered.' });
+const salesBefore = new Set((await inbox(sales.id)).map((m) => m.id));
+r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: pendingLetter, body: 'Refused by the node.' });
 assert.equal(r.status, 200, JSON.stringify(r.data));
-await until('the letter sent while the deletion is pending', async () => {
-  await panel('POST', '/mail/sync', { accountId: support.id });
-  return (await inbox(support.id)).find((m) => m.subject === pendingLetter);
+// The panel sends after its undo window; the node's refusal comes back to sales as a rejection
+// notice that names the letter. Waited for before the cancel, which would open delivery again.
+await until('the rejection of the letter sent while pending', async () => {
+  await panel('POST', '/mail/sync', { accountId: sales.id });
+  // Only a letter that arrived after the send counts: a notice naming the letter, or a bounce,
+  // whose subject is the server's own.
+  return (await inbox(sales.id)).find((m) => !salesBefore.has(m.id)
+    && (String(m.subject ?? '').includes(pendingLetter) || /undelivered mail returned/i.test(String(m.subject ?? ''))));
 }, 180000);
 r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'support', domain: DOMAIN, name: 'support again' });
 assert.equal(r.status, 409, JSON.stringify(r.data));
@@ -194,6 +225,17 @@ assert.equal(r.data.code, 'mailbox_pending_deletion');
 r = await panel('DELETE', `/accounts/${support.id}/deletion`);
 assert.equal(r.status, 200, JSON.stringify(r.data));
 assert.equal(r.data.delete_after, null);
+assert.equal(await readOnlyFilter(`support@${DOMAIN}`), undefined, 'the cancel opens delivery again');
+assert.deepEqual(await seats(), { used: 2, held: 0, free: 48 });
+// A letter sent after the cancel arrives; the one sent while pending never does.
+const reopenedLetter = `e2e after cancel ${Date.now()}`;
+r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: reopenedLetter, body: 'Delivered again.' });
+assert.equal(r.status, 200, JSON.stringify(r.data));
+await until('the letter sent after the cancel', async () => {
+  await panel('POST', '/mail/sync', { accountId: support.id });
+  return (await inbox(support.id)).find((m) => m.subject === reopenedLetter);
+}, 180000);
+assert.equal((await inbox(support.id)).some((m) => m.subject === pendingLetter), false, 'a letter reached the mailbox while it was pending deletion');
 const parkedPassword = 'Parked-password-1!';
 const parked = await mailcow('POST', 'add/mailbox', {
   local_part: 'parked', domain: DOMAIN, name: 'parked', password: parkedPassword, password2: parkedPassword, quota: 1024, active: 0,
@@ -202,7 +244,7 @@ assert.equal(parked[0]?.type, 'success', JSON.stringify(parked));
 r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'parked', domain: DOMAIN });
 assert.equal(r.status, 409, JSON.stringify(r.data));
 assert.equal(r.data.code, 'mailbox_disabled_on_node');
-pass('deletion scheduled with a reason, mailbox kept working, address refused while pending, cancelled; a disabled one is refused');
+pass('deletion scheduled with a reason: read-only (seat on hold, mail and sending refused), address refused while pending; cancelled (seat back, delivery open); a disabled one is refused');
 
 // 9. A mailbox made by hand in mailcow is taken over: its old password stops working.
 const handPassword = 'Hand-made-password-1!';
