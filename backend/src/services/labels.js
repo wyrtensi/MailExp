@@ -1,5 +1,5 @@
 import { query } from './db.js';
-import { fanOutReadToSiblings } from '../utils/mailUtils.js';
+import { fanOutReadToSiblings, resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../utils/mailUtils.js';
 import { movePendingError } from '../utils/mailboxBusy.js';
 
 // A negative uid is the placeholder of a letter whose DB-first move has not reached the server
@@ -94,6 +94,53 @@ export async function removeLabel(imapManager, message, labelFolder) {
   if (uid == null) return { removed: false };
   await imapManager.removeMessageCopy(message.account_id, uid, labelFolder);
   return { removed: true };
+}
+
+// Whether a message keeps a live copy once its copies in the `removing` folders are deleted.
+// Removing a label deletes its copy, and a label folder can hold a message's only copy: mail the
+// user filed there by moving it. Drafts, Trash and Junk do not count, since those get emptied. A
+// row can outlive its message for a while after another client moves it, so a copy counts only
+// once the server confirms its uid still carries the Message-ID; a failed check, or a copy whose
+// move is pending (no server uid yet), counts as no copy, which keeps the mail. Without a
+// Message-ID the other copies cannot be found, so the answer is no. On a label store (Gmail) it is
+// always yes: a folder is a label there, and removing it leaves the message in All Mail.
+// `message` needs { account_id, message_id }. background: see imapManager.hasMessageCopy.
+export async function hasSurvivingCopy(imapManager, account, message, removing, { background = false } = {}) {
+  if (imapManager.isLabelStore(account)) return true;
+  if (!message.message_id) return false;
+  const [drafts, trash, spam, { rows }] = await Promise.all([
+    resolveAllDraftsPaths(account.id, account.folder_mappings),
+    resolveAllTrashPaths(account.id, account.folder_mappings),
+    resolveAllSpamPaths(account.id, account.folder_mappings),
+    query(
+      'SELECT folder, uid FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false',
+      [message.account_id, message.message_id]
+    ),
+  ]);
+  const unsafe = new Set([...removing, ...drafts, ...trash, ...spam]);
+  for (const { folder, uid } of rows) {
+    if (unsafe.has(folder) || uid == null || pendingUid(uid)) continue;
+    try {
+      if (await imapManager.hasMessageCopy(account, uid, folder, message.message_id, { background })) return true;
+    } catch (err) {
+      console.warn(`labels: could not confirm the copy in ${folder}: ${err.message}`);
+    }
+  }
+  return false;
+}
+
+// Best-effort \Seen on one copy, for when a copy other than INBOX becomes the durable one (GTD
+// Done keeping a message's only copy). The DB side is markThreadRead's fan-out; without the flag
+// the next sync of the destination folder reads the copy back as unread. Never throws.
+// `message` needs { uid, folder, is_read }.
+export async function markCopySeen(imapManager, account, message) {
+  if (message.is_read) return {};
+  try {
+    await imapManager.setFlag(account, message.uid, message.folder, '\\Seen', true);
+  } catch (err) {
+    return { error: err };
+  }
+  return {};
 }
 
 // Ensure a set of label folders exist on the IMAP server, resolving each to its REAL server

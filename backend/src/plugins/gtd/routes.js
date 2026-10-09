@@ -4,7 +4,7 @@ import { getGtdSections } from './gtdSections.js';
 import { queueGistGeneration } from './gtdGist.js';
 import { importPet, decodeUploadedSheet, getPetMeta, getPetSheet, parsePetSlug, customPetSlug } from './gtdPet.js';
 import { getGtdConfig, resolveGtdStateFolder, sanitizeGtdFolders, sanitizeGtdFoldersDetailed, DEFAULT_GTD_FOLDERS, planGtdFolderPersist, invalidateGtdConfigCache } from './gtdConfig.js';
-import { applyLabel, removeExactLabelCopy, removeLabel, markThreadRead, ensureLabelFolders, archiveInboxCopy, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getAccountConfig, setAccountConfig, assertNoPendingCopies } from '../api.js';
+import { applyLabel, removeExactLabelCopy, removeLabel, resolveLabelCopyUid, markThreadRead, markCopySeen, hasSurvivingCopy, ensureLabelFolders, archiveInboxCopy, moveCopyToInbox, broadcast, loadOwnedMessage, getOwnedAccount, getMessageCopyFolders, getAccountConfig, setAccountConfig, assertNoPendingCopies } from '../api.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -18,6 +18,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // uid: label work on it throws an error with movePending, answered 409 { code: 'move_pending' }
 // ("try again in a few seconds"), the same answer the mail routes give.
 const sendMovePending = (res, err) => res.status(409).json({ error: err.message, code: err.code });
+
+// A label copy that is the message's only copy is never deleted (see hasSurvivingCopy). When the
+// copy cannot be kept by moving it either, the action refuses with 409 { code: 'only_copy' }.
+const sendOnlyCopy = (res) => res.status(409).json({ error: 'This is the only copy of the message. Archive or move it instead.', code: 'only_copy' });
 
 // Shared classify precondition: an account must have GTD enabled and the request's
 // state must resolve to a designated folder. Returns { folder } to proceed, or
@@ -231,7 +235,23 @@ router.delete('/classify', async (req, res) => {
   if (msg.folder !== stateFolder && !msg.message_id) {
     return res.status(400).json({ error: 'Message has no Message-ID — cannot resolve GTD copy' });
   }
+  const account = await getOwnedAccount(req.session.userId, msg.account_id);
   try {
+    // Never delete the message's last copy. When the state folder holds the only copy (mail the
+    // user filed there by moving it), the acted copy moves back to INBOX instead: the label is
+    // gone and the message is where unlabelled mail lives. A state copy the acted row cannot
+    // stand for (the acted row is in Trash, say) is refused instead. On Gmail removing a label
+    // never deletes (see hasSurvivingCopy).
+    if (!await hasSurvivingCopy(account, msg, [stateFolder])) {
+      if (msg.folder !== stateFolder) {
+        if (await resolveLabelCopyUid(msg, stateFolder) == null) return res.json({ ok: true, removed: false });
+        return sendOnlyCopy(res);
+      }
+      const { moved } = await moveCopyToInbox(account, msg, stateFolder);
+      if (moved) broadcast({ type: 'folder_updated', folder: 'INBOX', accountId: msg.account_id });
+      broadcast({ type: 'gtd_sections_updated', accountId: msg.account_id });
+      return res.json({ ok: true, removed: moved, folder: stateFolder, movedToInbox: moved });
+    }
     const { removed } = await removeLabel(msg, stateFolder);
     if (!removed) return res.json({ ok: true, removed: false });
   } catch (err) {
@@ -318,9 +338,22 @@ router.post('/done', async (req, res) => {
     ...target.folders.filter(f => f !== msg.folder),
     ...target.folders.filter(f => f === msg.folder),
   ];
+
+  // Never delete the message's last copy. A GTD folder can hold its only copy (mail the user
+  // filed there by moving it), so without an INBOX copy, ask whether another copy survives the
+  // strip (see hasSurvivingCopy). When none does, the acted GTD copy is kept and archived in
+  // (c) instead of deleted; its other GTD copies are still stripped. Without an acted GTD copy
+  // to keep, refuse rather than delete them all. On Gmail a strip only drops a label.
+  let keepActed = false;
+  if (!inboxCopy && stripOrder.length && !await hasSurvivingCopy(account, msg, stripOrder)) {
+    if (!stripOrder.includes(msg.folder)) return sendOnlyCopy(res);
+    keepActed = true;
+  }
+
   const removed = [];
   try {
     for (const folder of stripOrder) {
+      if (keepActed && folder === msg.folder) continue;
       const { removed: didRemove } = await removeLabel(msg, folder);
       if (didRemove) removed.push(folder);
     }
@@ -334,20 +367,36 @@ router.post('/done', async (req, res) => {
   // (resolveArchiveFolder + guarded moveMessage + race-safe DB repoint + count adjust, with
   // the Gmail All-Mail DELETE branch). No archive folder configured is a soft outcome, not a
   // failure — the GTD labels are already gone, so the thread has left all GTD sections regardless.
+  //
+  // A kept GTD copy (keepActed) is archived from its own folder. It is now the durable copy, so
+  // it first takes the \Seen that (a) set on INBOX only. With no archive folder it goes to INBOX
+  // instead, where a done message without an archive folder stays, so it still leaves its GTD
+  // section rather than staying labelled.
   let archived = false;
   let noArchiveFolder = false;
   let archiveFailed = false;
-  if (inboxCopy) {
+  let movedToInbox = false;
+  const toArchive = inboxCopy || (keepActed ? msg : null);
+  if (toArchive) {
     try {
-      const result = await archiveInboxCopy(account, inboxCopy);
+      if (keepActed) {
+        const { error } = await markCopySeen(account, msg);
+        if (error) console.warn(`GTD done: mark-read for ${id} degraded:`, error.message);
+      }
+      const result = await archiveInboxCopy(account, toArchive, inboxCopy ? 'INBOX' : msg.folder);
       archived = result.archived;
       noArchiveFolder = result.noArchiveFolder;
+      if (keepActed && noArchiveFolder) {
+        // The thread is read by now; the copy's own is_read is the value from before (a).
+        ({ moved: movedToInbox } = await moveCopyToInbox(account, { ...msg, is_read: true }, msg.folder));
+        if (movedToInbox) broadcast({ type: 'folder_updated', folder: 'INBOX', accountId: msg.account_id });
+      }
     } catch (err) {
       // Step (b) already stripped the labels (or had nothing to strip). A failed archive must
       // not 500: that misreports a mostly-successful action, and — with the label row now
       // gone — a retry by the same id would 404. Report a partial success (200, archiveFailed
       // true, archived false) so the client can surface it and the id stays retryable.
-      console.error(`GTD done: archive of INBOX copy for ${id} failed:`, err.message);
+      console.error(`GTD done: archive of the ${inboxCopy ? 'INBOX' : 'kept'} copy for ${id} failed:`, err.message);
       archiveFailed = true;
     }
   }
@@ -356,7 +405,7 @@ router.post('/done', async (req, res) => {
   // also emits mid-op, but this covers the archive that follows it).
   broadcast({ type: 'gtd_sections_updated', accountId: msg.account_id });
 
-  res.json({ ok: true, removed, archived, noArchiveFolder, archiveFailed });
+  res.json({ ok: true, removed, archived, noArchiveFolder, archiveFailed, ...(keepActed && { keptOnlyCopy: true, movedToInbox }) });
 });
 
 // POST /api/gtd/folders/ensure { accountId, folders } — create any of the account's

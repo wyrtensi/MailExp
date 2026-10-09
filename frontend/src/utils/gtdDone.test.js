@@ -86,6 +86,25 @@ describe('doneGtdRow', () => {
     }
   });
 
+  it('says why when the server refuses because it would delete the only copy', async () => {
+    const calls = [];
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      await doneGtdRow(thread, states, deps({
+        gtdDone: async () => { throw Object.assign(new Error('only copy'), { status: 409, code: 'only_copy' }); },
+        restoreGtdThread: () => calls.push(['restore']),
+        addNotification: notification => calls.push(['notify', notification]),
+      }));
+      assert.deepEqual(calls, [
+        ['restore'],
+        ['notify', { title: 'gtd.doneFailed', body: 'gtd.onlyCopy' }],
+      ]);
+    } finally {
+      console.error = originalError;
+    }
+  });
+
   it('keeps the row removed but reports a partial archive failure', async () => {
     const calls = [];
     await doneGtdRow(thread, states, deps({

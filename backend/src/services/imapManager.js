@@ -7948,6 +7948,33 @@ export class ImapManager {
     }, { background });
   }
 
+  // Whether the account's folders are label memberships (Gmail): removing a message from one
+  // drops that label and leaves the message in All Mail, which is never synced.
+  isLabelStore(account) {
+    return providerProfile(account).labelStore === true;
+  }
+
+  // Whether the server copy at `uid` in `folder` still carries this Message-ID. A local row can
+  // outlive its message for a while after another client moves it, so a row alone is no proof
+  // that a copy survives a label delete (GTD). Errors propagate; callers treat them as no copy.
+  async hasMessageCopy(account, uid, folder, messageId, { background = false } = {}) {
+    const bare = id => String(id ?? '').replace(/[<>]/g, '').trim();
+    const expected = bare(messageId);
+    const physicalUid = Number(uid); // BIGINT rows arrive as strings
+    if (!expected || !folder || !Number.isSafeInteger(physicalUid) || physicalUid <= 0) return false;
+    return withFreshClient(account, async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        for await (const msg of client.fetch(String(physicalUid), { uid: true, envelope: true }, { uid: true })) {
+          if (msg.uid === physicalUid) return bare(msg.envelope?.messageId) === expected;
+        }
+        return false;
+      } finally {
+        lock.release();
+      }
+    }, { background });
+  }
+
   // Apply a label = COPY the message into the label folder, keeping the source copy.
   // Mirrors moveMessage's connection acquisition, folder lock, and error discipline,
   // but uses COPY (not MOVE) so the source row stays put and the label becomes a

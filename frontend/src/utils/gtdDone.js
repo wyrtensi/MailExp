@@ -28,7 +28,8 @@ export async function doneGtdRow(thread, states, {
     clearGtdRemovalGuard(identity, states);
     restoreGtdThread(snapshot);
     console.error('GTD done failed:', err.message);
-    addNotification({ title: t('gtd.doneFailed'), body: thread.subject || t('common.noSubject') });
+    // only_copy: stripping its GTD copies would delete the message's only copy.
+    addNotification({ title: t('gtd.doneFailed'), body: err.code === 'only_copy' ? t('gtd.onlyCopy') : (thread.subject || t('common.noSubject')) });
     scheduleGtdSectionsFetch();
     return null;
   }

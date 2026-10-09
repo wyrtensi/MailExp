@@ -17,7 +17,7 @@
 
 import { getMailEngine } from './mailEngine.js';
 import * as labelsWrite from '../services/labels.js';
-import { archiveInboxCopy as _archiveInboxCopy } from '../services/archiveInbox.js';
+import { archiveInboxCopy as _archiveInboxCopy, moveCopyToInbox as _moveCopyToInbox } from '../services/archiveInbox.js';
 
 // ── Labels (read) ─────────────────────────────────────────────────────────────
 // Thread-aware read over a set of label folders: heads grouped by label with thread-level
@@ -35,6 +35,11 @@ export const applyLabel = (account, message, labelFolder) => labelsWrite.applyLa
 export const removeLabel = (message, labelFolder) => labelsWrite.removeLabel(getMailEngine(), message, labelFolder);
 export const removeExactLabelCopy = (message, labelFolder, uid) => labelsWrite.removeExactLabelCopy(getMailEngine(), message, labelFolder, uid);
 export const markThreadRead = (account, message) => labelsWrite.markThreadRead(getMailEngine(), account, message);
+export const markCopySeen = (account, message) => labelsWrite.markCopySeen(getMailEngine(), account, message);
+// Whether a message keeps a server-confirmed copy outside `removingFolders` (and outside Drafts,
+// Trash and Junk); always true on a label store (Gmail). Ask before deleting a label copy that
+// may be the message's only one.
+export const hasSurvivingCopy = (account, message, removingFolders) => labelsWrite.hasSurvivingCopy(getMailEngine(), account, message, removingFolders);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
 // Throws an error with movePending: true when the message or one of its copies in `folders` is
@@ -42,8 +47,11 @@ export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
 export const assertNoPendingCopies = labelsWrite.assertNoPendingCopies;
 
 // ── Archive ───────────────────────────────────────────────────────────────────
-// Archive a message's INBOX copy (used by GTD "done"). Engine bound by the platform.
-export const archiveInboxCopy = (account, inboxCopy) => _archiveInboxCopy(getMailEngine(), account, inboxCopy);
+// Archive a message's INBOX copy (used by GTD "done"), or its copy in `fromFolder` when that copy
+// is the one to keep. Move a label copy back to INBOX (a label removal that would otherwise
+// delete the message's only copy). Engine bound by the platform.
+export const archiveInboxCopy = (account, copy, fromFolder) => _archiveInboxCopy(getMailEngine(), account, copy, fromFolder);
+export const moveCopyToInbox = (account, copy, fromFolder) => _moveCopyToInbox(getMailEngine(), account, copy, fromFolder);
 
 // ── Realtime broadcast ────────────────────────────────────────────────────────
 // Push a payload to live sessions: every client for a mailbox event, or one user's sessions when
@@ -78,9 +86,9 @@ export { isPluginEnabled } from './activation.js';
 export { getAccountConfig, setAccountConfig } from './accountConfig.js';
 
 // ── Folder resolution ─────────────────────────────────────────────────────────
-// Resolve an account's Drafts folder paths (across provider naming). A safe read over the
-// account's folder mapping — no mail engine, no raw DB.
-export { resolveAllDraftsPaths } from '../utils/mailUtils.js';
+// Resolve an account's Drafts, Trash and Junk folder paths (across provider naming). A safe read
+// over the account's folder mapping — no mail engine, no raw DB.
+export { resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../utils/mailUtils.js';
 
 // ── Mail/account reads ────────────────────────────────────────────────────────
 // A fixed, reviewed set of ownership-scoped read queries (see services/mailAccess.js). A plugin

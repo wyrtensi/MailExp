@@ -733,12 +733,14 @@ export async function classifyThread(id, state, { gtdClassify, addNotification, 
 
 export async function unclassifyThread(id, state, { gtdUnclassify, addNotification, scheduleGtdSectionsFetch, t }) {
   try {
-    await gtdUnclassify(id, state);
+    const result = await gtdUnclassify(id, state);
     scheduleGtdSectionsFetch();
-    addNotification({ title: t('gtd.removed'), body: t(`gtd.state.${state}`) });
+    // movedToInbox: the label folder held the message's only copy, so it went back to the Inbox.
+    addNotification({ title: t('gtd.removed'), body: result?.movedToInbox ? t('gtd.movedToInbox') : t(`gtd.state.${state}`) });
   } catch (err) {
     console.error('GTD unclassify failed:', err.message);
-    addNotification({ title: t('gtd.removeFailed'), body: t(`gtd.state.${state}`) });
+    // only_copy: the label holds the message's only copy, and the server would not delete it.
+    addNotification({ title: t('gtd.removeFailed'), body: err.code === 'only_copy' ? t('gtd.onlyCopy') : t(`gtd.state.${state}`) });
   }
 }
 
