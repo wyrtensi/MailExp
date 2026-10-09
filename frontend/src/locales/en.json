@@ -67,6 +67,9 @@
       "cloudflareOnly": "Open MailExpert through your organization's Cloudflare Access link.",
       "errorNotAllowed": "This Google account is not approved for MailExpert. Ask an administrator to add it.",
       "errorDisabled": "Your access to MailExpert has been turned off.",
+      "errorDeleted": "Access for this address is closed: the account was deleted or its address was changed. Contact the panel administrator.",
+      "errorEmailNotVerified": "Google has not verified this email address. Verify it with Google and try again.",
+      "errorLocked": "MailExpert is locked. Unlock it, then sign in again.",
       "errorGeneric": "Google sign-in failed. Try again."
     },
     "tagline": "Your unified inbox",

@@ -8,6 +8,9 @@ export function isGoogleAuthMode(value) {
 const ERROR_KEYS = {
   not_allowed: 'login.google.errorNotAllowed',
   user_disabled: 'login.google.errorDisabled',
+  user_deleted: 'login.google.errorDeleted',
+  email_not_verified: 'login.google.errorEmailNotVerified',
+  locked: 'login.google.errorLocked',
 };
 
 // Translation key for an ?auth_error= code, or null when there is none.

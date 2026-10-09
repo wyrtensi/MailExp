@@ -15,6 +15,9 @@ describe('signInErrorKey', () => {
   it('maps known codes and falls back to a generic message', () => {
     assert.equal(signInErrorKey('not_allowed'), 'login.google.errorNotAllowed');
     assert.equal(signInErrorKey('user_disabled'), 'login.google.errorDisabled');
+    assert.equal(signInErrorKey('user_deleted'), 'login.google.errorDeleted');
+    assert.equal(signInErrorKey('email_not_verified'), 'login.google.errorEmailNotVerified');
+    assert.equal(signInErrorKey('locked'), 'login.google.errorLocked');
     assert.equal(signInErrorKey('invalid_state'), 'login.google.errorGeneric');
     assert.equal(signInErrorKey(''), null);
     assert.equal(signInErrorKey(null), null);
