@@ -16,7 +16,10 @@
 сервер панели для SSH, `<MAIL_HOST>` — почтовый узел, `<PANEL_IP>` — публичный IPv4 панели (адрес,
 с которого она выходит в интернет), `<ADMIN_EMAIL>` — адрес первого администратора, `<PREFIX>` —
 каталог установки (по умолчанию `/opt/mailexpert`), `<PROJECT>` — имя compose-проекта панели (по
-умолчанию `mailexpert`), `<HTTP_PORT>` — порт панели на `127.0.0.1` (по умолчанию `8080`).
+умолчанию `mailexpert`), `<HTTP_PORT>` — порт панели на `127.0.0.1` (по умолчанию `8080`),
+`<INSTALL_ID>` — ID установки (`INSTALL_ID` в `<PREFIX>/install.conf`, строка `install_id` в
+`status.sh`), `<PANEL_COMMIT>` — коммит панели, 12 символов из `$V` (шаг 3), `<FILE>` — файл токена
+службы узла (шаг 11), `<PING_URL>` — ссылка проверки Healthchecks.
 
 ## Установить с помощью ИИ-агента
 
@@ -105,7 +108,7 @@ Access — пошагово в [cloudflare.md](cloudflare.md). Сделайте 
 Сервер всегда запускает её неизменяемый тег образов `sha-<12 символов коммита>`.
 
 ```bash
-apt-get update && apt-get install -y git        # сценарий Б: git ставите как принято на сервере
+apt-get update && apt-get install -y git        # только сценарий А; в Б git ставите как принято на сервере
 git clone --branch latest https://github.com/wyrtensi/MailExpert.git <PREFIX>/app
 cd <PREFIX>/app
 git merge-base --is-ancestor HEAD origin/main && echo "on main"     # должно напечатать: on main
@@ -255,19 +258,24 @@ $D/backup.sh --prefix <PREFIX> --tag manual --verify; echo "exit $?"   # 0
 Порядок — [mail-node.md, разделы 2-6е](mail-node.md), коротко:
 
 1. DNS: A-запись `<MAIL_HOST>` и PTR на IP узла.
-2. Docker и mailcow по инструкции mailcow, `./generate_config.sh` (имя — `<MAIL_HOST>`).
-3. Скрипты MailExpert на узле — на **том же коммите**, что панель:
+2. Docker по инструкции mailcow, клон MailExpert в `/opt/mailexpert-node-src` на **том же
+   коммите**, что панель (`<PANEL_COMMIT>`), и mailcow **той версии, которую закрепляет выпуск**
+   (`deploy/mailcow-version`), затем `./generate_config.sh` (имя — `<MAIL_HOST>`). Точные команды —
+   [mail-node.md, раздел 3, шаг 2](mail-node.md#3-установка-mailcow): непроверенный mailcow может
+   сломать совместимость с панелью. mailcow на этом шаге не запускается.
+3. Настройки хоста узла (файрвол, диапазоны EOP, Dovecot) — до первого запуска mailcow, тогда смена
+   `mailcow.conf` не требует пересоздания контейнеров. `--ping-url` необязателен (проверка диапазонов
+   EOP в Healthchecks), его можно добавить позже:
 
    ```bash
-   git clone https://github.com/wyrtensi/MailExpert.git /opt/mailexpert-node-src
-   git -C /opt/mailexpert-node-src checkout --detach <коммит панели, 12 символов из $V>
-   /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-ip <PANEL_IP> --ping-url <ссылка проверки> --dry-run
-   /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-ip <PANEL_IP> --ping-url <ссылка проверки>
+   /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-ip <PANEL_IP> [--ping-url <PING_URL>] --dry-run
+   /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-ip <PANEL_IP> [--ping-url <PING_URL>]
    ```
 
    `<PANEL_IP>` — адрес, с которым панель **выходит** в интернет; на общем сервере с несколькими
    адресами или NAT он может отличаться от адреса, на который указывает DNS.
-4. `docker compose up -d` в каталоге mailcow, ключ API с доступом только с `<PANEL_IP>`.
+4. Запуск mailcow и ключ API с доступом только с `<PANEL_IP>` —
+   [mail-node.md, раздел 3, шаги 5-6](mail-node.md#3-установка-mailcow).
 5. В панели: «Настройки → Администрирование → Почтовый узел» — имя узла и ключ API, затем домены и
    тенант Microsoft ([mail-node.md, разделы 5-6е](mail-node.md)).
 
@@ -302,20 +310,46 @@ $D/backup.sh --prefix <PREFIX> --tag manual --verify; echo "exit $?"   # 0
    ([deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)).
 3. Бэкапы restic (шаг 5) — рекомендуются: без них перед обновлением делается только локальный дамп
    на этом же сервере.
-4. Почтовый узел: подключить службу узла (токен — `mailexpert-cli.sh agent token issue --out
-   <FILE> --yes`, на узле — `setup.sh --panel-url https://<APP_HOST> --agent-token-file <FILE>`),
-   тогда скрипты узла и mailcow (только до версии из `deploy/mailcow-version`) обновляются вслед за
-   панелью.
+4. Почтовый узел: подключить службу узла, тогда скрипты узла и mailcow (только до версии из
+   `deploy/mailcow-version`) обновляются вслед за панелью
+   ([mail-node.md, раздел 7а](mail-node.md#7а-служба-узла)):
+
+   ```bash
+   # на хосте панели: токен — в новый файл 0600 (файл не должен существовать)
+   D=<PREFIX>/app/scripts/deploy
+   $D/mailexpert-cli.sh --prefix <PREFIX> agent token issue --out <FILE> --yes
+   # перенести <FILE> на узел по SSH (scp, права 0600), на панели: shred -u <FILE>
+   # на узле:
+   sudo /opt/mailexpert-node-src/scripts/deploy/mail-node/setup.sh --panel-url https://<DIRECT_HOST> --agent-token-file <FILE>
+   sudo shred -u <FILE>
+   systemctl is-active mailexpert-node-agent      # active
+   ```
+
+   `--panel-url` — публичный адрес панели: при `direct` и `both` — адрес Caddy `<DIRECT_HOST>`. При
+   `cf` — `https://<CF_HOST>`, и узел проходит через Cloudflare Access: допишите в `<FILE>` строки
+   service token Access (а токен панели — строкой `AGENT_TOKEN=`):
+
+   ```
+   AGENT_TOKEN=<токен из файла>
+   CF_ACCESS_CLIENT_ID=<Client ID>.access
+   CF_ACCESS_CLIENT_SECRET=<Client Secret>
+   ```
+
+   Service token создаётся в Zero Trust и разрешается в приложении Access панели политикой
+   **Service Auth** ([cloudflare.md](cloudflare.md)).
 
 - **Кнопкой**: «Настройки → Администрирование → Обновление панели» — показывает текущую версию,
   продвинутую `latest`, предпроверку и кнопку «Обновить»; ставит только `latest`.
-- **По SSH** (с `--project` называйте временный юнит по проекту: `mailexpert-update-<PROJECT>`):
+- **По SSH** (`U` — имя временного юнита: `mailexpert-update` для проекта по умолчанию,
+  `mailexpert-update-<PROJECT>` с `--project`, чтобы две установки на хосте не делили юнит):
 
   ```bash
+  D=<PREFIX>/app/scripts/deploy
+  U=mailexpert-update                  # с --project: U=mailexpert-update-<PROJECT>
   $D/update.sh --prefix <PREFIX> --check latest      # предпроверка, ничего не меняет
-  systemctl reset-failed mailexpert-update 2>/dev/null; systemctl stop mailexpert-update 2>/dev/null
-  systemd-run --unit=mailexpert-update --property=RemainAfterExit=yes $D/update.sh latest --prefix <PREFIX>
-  journalctl -u mailexpert-update -f -o cat
+  systemctl reset-failed "$U" 2>/dev/null; systemctl stop "$U" 2>/dev/null
+  systemd-run --unit="$U" --property=RemainAfterExit=yes $D/update.sh latest --prefix <PREFIX>
+  journalctl -u "$U" -f -o cat
   ```
 
 Перед обновлением `update.sh` сам делает дамп базы. Первое обновление с версии старее 2026-10-09
