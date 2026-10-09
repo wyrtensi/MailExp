@@ -641,6 +641,26 @@ describe('hasMessageCopy', () => {
     expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>')).toBe(false);
   });
 
+  // A Message-ID can be reused (a resent or re-imported letter), so the caller can also pass the
+  // row's stored date, which for a synced copy is the server's INTERNALDATE.
+  it('also matches the copy\'s INTERNALDATE when the caller passes the row date', async () => {
+    const { account, client } = arrange(new Map([[7, '<m@example.test>']]));
+    client.fetch.mockImplementation(async function* () {
+      yield { uid: 7, envelope: { messageId: '<m@example.test>' }, internalDate: new Date('2026-07-01T10:00:00.400Z') };
+    });
+    const hasCopy = (date) => ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>', { date });
+    expect(await hasCopy('2026-07-01T10:00:00.000Z')).toBe(true);
+    expect(await hasCopy(new Date('2026-07-01T10:00:00Z'))).toBe(true);
+    expect(await hasCopy('2026-06-30T10:00:00Z')).toBe(false);
+    expect(client.fetch.mock.calls[0][1]).toEqual({ uid: true, envelope: true, internalDate: true });
+  });
+
+  it('skips the date match when either side has no date', async () => {
+    const { account } = arrange(new Map([[7, '<m@example.test>']]));
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>', { date: '2026-07-01T10:00:00Z' })).toBe(true);
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>', { date: null })).toBe(true);
+  });
+
   it('is false when the uid is gone from the server', async () => {
     const { account } = arrange(new Map());
     expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>')).toBe(false);

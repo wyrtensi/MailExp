@@ -8,6 +8,7 @@ vi.mock('../../services/logger.js', () => ({ logger: { debug: vi.fn(), info: vi.
 import {
   getOwnerAddresses,
   invalidateOwnerAddressesCache,
+  clearCopyCheckCache,
   runGtdTransitions,
   runTransitionsForSentMessage,
   threadKeysForMessageIds,
@@ -71,6 +72,7 @@ describe('getOwnerAddresses', () => {
     await getOwnerAddresses('acct-1');
     expect(query).toHaveBeenCalledTimes(1);
     invalidateOwnerAddressesCache('acct-1');
+    clearCopyCheckCache();
     await getOwnerAddresses('acct-1');
     expect(query).toHaveBeenCalledTimes(2);
   });
@@ -83,6 +85,7 @@ describe('getOwnerAddresses', () => {
     expect(cached.has('old@example.com')).toBe(true);
 
     invalidateOwnerAddressesCache('acct-1');
+    clearCopyCheckCache();
     const refreshed = await getOwnerAddresses('acct-1');
     expect(refreshed.has('old@example.com')).toBe(false);
     expect(refreshed.has('masked@user.masked.fastmail.com')).toBe(true);
@@ -97,6 +100,7 @@ describe('runGtdTransitions', () => {
     getGtdConfig.mockReset();
     resolveAllDraftsPaths.mockReset();
     invalidateOwnerAddressesCache('acct-1');
+    clearCopyCheckCache();
     getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_FOLDERS });
     resolveAllDraftsPaths.mockResolvedValue(new Set(['Drafts']));
     resolveAllTrashPaths.mockResolvedValue(new Set(['Trash']));
@@ -185,6 +189,7 @@ describe('runGtdTransitions', () => {
 
     // last message from them
     invalidateOwnerAddressesCache('acct-1');
+    clearCopyCheckCache();
     mockQuery({ rows: [
       { thread_key: 't1', uid: 42, folder: 'INBOX',     from_email: 'them@other.com', date: '2026-07-09T10:00:00Z', id: 'r3' },
       { thread_key: 't1', uid: 43, folder: 'Reference', from_email: 'them@other.com', date: '2026-07-09T10:00:00Z', id: 'r4' },
@@ -293,6 +298,7 @@ describe('runTransitionsForSentMessage', () => {
     getGtdConfig.mockReset();
     resolveAllDraftsPaths.mockReset();
     invalidateOwnerAddressesCache('acct-1');
+    clearCopyCheckCache();
     getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_FOLDERS });
     resolveAllDraftsPaths.mockResolvedValue(new Set(['Drafts']));
     resolveAllTrashPaths.mockResolvedValue(new Set(['Trash']));
@@ -402,6 +408,7 @@ describe('runGtdTransitions — the last copy of a message', () => {
     query.mockReset();
     getGtdConfig.mockReset();
     invalidateOwnerAddressesCache('acct-1');
+    clearCopyCheckCache();
     getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_FOLDERS });
     resolveAllDraftsPaths.mockResolvedValue(new Set(['Drafts']));
     resolveAllTrashPaths.mockResolvedValue(new Set(['Trash']));
@@ -438,7 +445,7 @@ describe('runGtdTransitions — the last copy of a message', () => {
     ]) });
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
-    expect(mgr.hasMessageCopy).toHaveBeenCalledWith(account, 10, 'Receipts', '<in@x>', { background: true });
+    expect(mgr.hasMessageCopy).toHaveBeenCalledWith(account, 10, 'Receipts', '<in@x>', { background: true, date: '2026-07-01' });
     expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 98, 'Todo', { background: true });
   });
 
@@ -482,6 +489,47 @@ describe('runGtdTransitions — the last copy of a message', () => {
     const mgr = fakeManager();
     await runGtdTransitions(mgr, account, ['t1']);
     expect(mgr.removeMessageCopy).not.toHaveBeenCalled();
+  });
+
+  // Every GTD tick re-evaluates the thread; a copy the server just said is gone is not asked
+  // about again for a few minutes.
+  it('remembers a negative answer for a few minutes instead of asking on every run', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    try {
+      const rows = onlyInTodo([
+        { thread_key: 't1', uid: 10, folder: 'INBOX', message_id: '<in@x>', from_email: 'them@other.com', date: '2026-07-01', id: 'gone' },
+      ]);
+      const mgr = fakeManager();
+      mgr.hasMessageCopy.mockResolvedValue(false);
+      mockQuery({ rows });
+      await runGtdTransitions(mgr, account, ['t1']);
+      mockQuery({ rows });
+      await runGtdTransitions(mgr, account, ['t1']);
+      expect(mgr.hasMessageCopy).toHaveBeenCalledTimes(1);
+      expect(mgr.removeMessageCopy).not.toHaveBeenCalled();
+
+      now.mockReturnValue(1_000_000 + 10 * 60 * 1000);
+      mockQuery({ rows });
+      await runGtdTransitions(mgr, account, ['t1']);
+      expect(mgr.hasMessageCopy).toHaveBeenCalledTimes(2);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('does not remember a failed check or a positive answer', async () => {
+    const rows = onlyInTodo([
+      { thread_key: 't1', uid: 10, folder: 'INBOX', message_id: '<in@x>', from_email: 'them@other.com', date: '2026-07-01', id: 'inbox' },
+    ]);
+    const mgr = fakeManager();
+    mgr.hasMessageCopy.mockRejectedValueOnce(new Error('connection refused'));
+    mockQuery({ rows });
+    await runGtdTransitions(mgr, account, ['t1']);
+    expect(mgr.removeMessageCopy).not.toHaveBeenCalled();
+    mockQuery({ rows });
+    await runGtdTransitions(mgr, account, ['t1']);
+    expect(mgr.hasMessageCopy).toHaveBeenCalledTimes(2);
+    expect(mgr.removeMessageCopy).toHaveBeenCalledWith('acct-1', 98, 'Todo', { background: true });
   });
 
   // Gmail: a strip only drops the label; the message stays in All Mail.

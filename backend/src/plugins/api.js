@@ -36,15 +36,21 @@ export const removeLabel = (message, labelFolder) => labelsWrite.removeLabel(get
 export const removeExactLabelCopy = (message, labelFolder, uid) => labelsWrite.removeExactLabelCopy(getMailEngine(), message, labelFolder, uid);
 export const markThreadRead = (account, message) => labelsWrite.markThreadRead(getMailEngine(), account, message);
 export const markCopySeen = (account, message) => labelsWrite.markCopySeen(getMailEngine(), account, message);
-// Whether a message keeps a server-confirmed copy outside `removingFolders` (and outside Drafts,
-// Trash and Junk); always true on a label store (Gmail). Ask before deleting a label copy that
-// may be the message's only one.
-export const hasSurvivingCopy = (account, message, removingFolders) => labelsWrite.hasSurvivingCopy(getMailEngine(), account, message, removingFolders);
+// Ask before deleting a label copy that may be the message's only one. findSurvivingCopy: does a
+// server-confirmed copy exist outside `excludedFolders` (and outside Drafts, Trash and Junk)?
+// checkMessageCopy: is this one copy still on the server? Both answer 'kept', 'none' or
+// 'unknown' (the check failed: neither delete nor act as if the copy were gone); always 'kept' on
+// a label store (Gmail).
+export const findSurvivingCopy = (account, message, excludedFolders) => labelsWrite.findSurvivingCopy(getMailEngine(), account, message, excludedFolders);
+export const checkMessageCopy = (account, copy, folder, messageId) => labelsWrite.checkMessageCopy(getMailEngine(), account, copy, folder, messageId);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
 // Throws an error with movePending: true when the message or one of its copies in `folders` is
 // waiting for its move to reach the mail server; answer it with 409 { code: 'move_pending' }.
 export const assertNoPendingCopies = labelsWrite.assertNoPendingCopies;
+// The 503 body { error, code: 'mailbox_busy' } for mail work that could not reach the server;
+// the client shows its own localized "try again in a few seconds".
+export { mailboxBusyBody } from '../utils/mailboxBusy.js';
 
 // ── Archive ───────────────────────────────────────────────────────────────────
 // Archive a message's INBOX copy (used by GTD "done"), or its copy in `fromFolder` when that copy

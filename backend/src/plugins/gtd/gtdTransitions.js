@@ -183,20 +183,49 @@ export async function runGtdTransitions(imapManager, account, threadKeys) {
 // message, so a sibling counts only once the server confirms its uid still carries the
 // Message-ID; a failed check, or a sibling whose move is pending, counts as no copy. A copy with
 // no Message-ID has no findable siblings, so it is kept.
+// The server's "no such copy" is remembered for a few minutes: every GTD tick re-evaluates the
+// thread, and the stale row usually stays until reconcile removes it, so asking again each tick
+// would cost a login for the same answer. A positive answer or a failed check is not remembered.
 async function hasConfirmedCopyElsewhere(imapManager, account, copy, threadRows, excludedFolders) {
   if (!copy.message_id) return false;
   const siblings = threadRows.filter(row =>
     row.message_id === copy.message_id && !excludedFolders.has(row.folder) && Number(row.uid) > 0
   );
   for (const sibling of siblings) {
+    const key = `${account.id}\u0000${sibling.folder}\u0000${sibling.uid}\u0000${copy.message_id}`;
+    if ((missingCopies.get(key) ?? 0) > Date.now()) continue;
     try {
       // background: see removeMessageCopy below; nobody waits on a transition run.
-      if (await imapManager.hasMessageCopy(account, sibling.uid, sibling.folder, copy.message_id, { background: true })) return true;
+      if (await imapManager.hasMessageCopy(account, sibling.uid, sibling.folder, copy.message_id, { background: true, date: sibling.date ?? null })) return true;
+      rememberMissingCopy(key);
     } catch (err) {
       logger.debug(`gtdTransitions: could not confirm the ${sibling.folder} copy ${sibling.id}: ${err.message}`);
     }
   }
   return false;
+}
+
+const MISSING_COPY_TTL_MS = 5 * 60 * 1000;
+const MISSING_COPY_MAX = 10_000;
+const missingCopies = new Map(); // key -> expiry (ms)
+
+function rememberMissingCopy(key) {
+  // Bounded: drop the oldest entries first (Map keeps insertion order).
+  if (missingCopies.size >= MISSING_COPY_MAX) {
+    const drop = missingCopies.size - MISSING_COPY_MAX + 1;
+    let n = 0;
+    for (const k of missingCopies.keys()) {
+      if (n++ >= drop) break;
+      missingCopies.delete(k);
+    }
+  }
+  missingCopies.delete(key);
+  missingCopies.set(key, Date.now() + MISSING_COPY_TTL_MS);
+}
+
+// Exported for tests, which reuse one account across cases.
+export function clearCopyCheckCache() {
+  missingCopies.clear();
 }
 
 // ── Sent-message hook ────────────────────────────────────────────────────────

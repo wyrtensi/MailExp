@@ -3722,6 +3722,8 @@
     "done": "Mark done",
     "doneFailed": "Couldn't mark done",
     "doneArchiveFailed": "Marked done, but archiving failed — still in your Inbox",
+    "doneArchiveFailedKept": "Marked done, but archiving failed — the message is still in its GTD folder",
+    "copyMoved": "The message was moved meanwhile. Refresh and try again.",
     "state": {
       "todo": "Todo",
       "watch": "Watch",

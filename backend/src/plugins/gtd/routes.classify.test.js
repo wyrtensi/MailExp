@@ -61,7 +61,7 @@ const account = { id: ACCT_ID, user_id: 'u1', folder_mappings: {} };
 // copy keeps the message. `moveWrite` is the rowCount of a move's DB repoint.
 function stubQueries({ msg = inboxMsg, acct = account, sibling = null, exact = { uid: 77 }, copies = [['INBOX', 10]], moveWrite = { rowCount: 1 } } = {}) {
   query.mockImplementation(async (sql) => {
-    if (sql.startsWith('SELECT folder, uid FROM messages')) return { rows: copies.map(([folder, uid]) => ({ folder, uid })) };
+    if (sql.startsWith('SELECT folder, uid, date FROM messages')) return { rows: copies.map(([folder, uid]) => ({ folder, uid })) };
     if (sql.includes("special_use = '\\Trash'")) return { rows: [{ path: 'Trash' }] };
     if (sql.startsWith('UPDATE messages SET folder')) return moveWrite;
     if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: msg ? [msg] : [] };
@@ -343,14 +343,34 @@ describe('DELETE /api/gtd/classify — a GTD folder holding the only copy', () =
     expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
   });
 
-  it('removes the label when another GTD label still keeps the message', async () => {
+  // Every GTD folder is excluded, so two removals on two labels at once cannot each count on the
+  // other's copy and delete both.
+  it('does not count a copy under another GTD label', async () => {
     stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['Watch', 41]] });
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo', movedToInbox: true });
+    expect(imapManager.hasMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
+  });
+
+  it('removes the label when a confirmed copy outside GTD keeps the message', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['Receipts', 41]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
-    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 41, 'Watch', '<m@x>', { background: false });
     expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
     expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+
+  // A concurrent action moved the copy first: nothing was done here, so say so.
+  it('refuses with 409 copy_moved when the copy left the folder before the move applied', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10]], moveWrite: { rowCount: 0 } });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'copy_moved' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
   });
 
   // A row can outlive its message for a while after another client moves it.
@@ -359,17 +379,20 @@ describe('DELETE /api/gtd/classify — a GTD folder holding the only copy', () =
     imapManager.hasMessageCopy.mockResolvedValue(false);
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
-    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 55, 'INBOX', '<m@x>', { background: false });
+    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 55, 'INBOX', '<m@x>', { background: false, date: null });
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
     expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
   });
 
-  it('keeps the copy when the confirmation fails', async () => {
+  // A failed check cannot tell whether the other copy is there: change nothing, say "busy".
+  it('answers 503 mailbox_busy when the check fails, deleting and moving nothing', async () => {
     stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['INBOX', 55]] });
     imapManager.hasMessageCopy.mockRejectedValue(new Error('connection refused'));
-    await unclassify({ messageId: MSG_ID, state: 'todo' });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'mailbox_busy' });
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
-    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
   });
 
   // Gmail: removing a GTD label leaves the message in All Mail.

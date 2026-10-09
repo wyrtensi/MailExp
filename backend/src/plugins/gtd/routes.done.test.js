@@ -70,10 +70,10 @@ function buildApp() {
 // `copies` are the message's rows as [folder, uid] pairs, for the only-copy check.
 function stubQueries({ row = msg, inbox = inboxCopy, archiveWrite = { rowCount: 1 }, copies = [] } = {}) {
   query.mockImplementation(async (sql) => {
-    if (sql.startsWith('SELECT folder, uid FROM messages')) return { rows: copies.map(([folder, uid]) => ({ folder, uid })) };
+    if (sql.startsWith('SELECT folder, uid, date FROM messages')) return { rows: copies.map(([folder, uid]) => ({ folder, uid })) };
     if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: [row] };
     if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [account] };
-    if (sql.startsWith('SELECT id, uid, is_read FROM messages')) return { rows: inbox ? [inbox] : [] };
+    if (sql.startsWith('SELECT id, uid, is_read, date FROM messages')) return { rows: inbox ? [inbox] : [] };
     if (sql.startsWith('SELECT uid FROM messages')) return { rows: [{ uid: 10 }] };
     if (sql.startsWith('DELETE FROM messages') || sql.startsWith('UPDATE messages SET folder')) return archiveWrite;
     return { rows: [] };
@@ -159,7 +159,7 @@ describe('POST /api/gtd/done — strip-ok + archive-fail', () => {
     query.mockImplementation(async (sql) => {
       if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: [msg] };
       if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: [account] };
-      if (sql.startsWith('SELECT id, uid, is_read FROM messages')) return { rows: [inboxCopy] };
+      if (sql.startsWith('SELECT id, uid, is_read, date FROM messages')) return { rows: [inboxCopy] };
       if (sql.startsWith('SELECT uid FROM messages')) return { rows: [{ uid: 10 }] };
       if (sql.startsWith('UPDATE messages SET folder')) throw new Error('archive write failed');
       return { rows: [] };
@@ -273,7 +273,7 @@ describe('POST /api/gtd/done — a GTD folder holding the only copy', () => {
     const res = await done({ id: MSG_ID, states: ['watch'] });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ removed: ['Watch'], archived: false });
-    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 8, 'Receipts', '<m@x>', { background: false });
+    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 8, 'Receipts', '<m@x>', { background: false, date: null });
     expect(imapManager.removeMessageCopy.mock.calls.map(c => c[2])).toEqual(['Watch']);
     expect(imapManager.moveMessage).not.toHaveBeenCalled();
   });
@@ -288,13 +288,36 @@ describe('POST /api/gtd/done — a GTD folder holding the only copy', () => {
     expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Watch', 'Archive');
   });
 
-  it('treats a failed confirmation as no copy', async () => {
+  // A failed check cannot tell whether the other copy is there: change nothing, say "busy".
+  it('answers 503 mailbox_busy when the check of the other copy fails', async () => {
     stubQueries({ inbox: null, copies: [['Watch', 10], ['Receipts', 8]] });
     imapManager.hasMessageCopy.mockRejectedValue(new Error('connection refused'));
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'mailbox_busy' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+
+  // Every GTD folder is excluded, so two actions on two labels at once cannot each count on the
+  // other's copy and delete both.
+  it('does not count a copy under another GTD label', async () => {
+    stubQueries({ inbox: null, copies: [['Watch', 10], ['Todo', 12]] });
     imapManager.moveMessage.mockResolvedValue(91);
-    await done({ id: MSG_ID, states: ['watch'] });
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(await res.json()).toMatchObject({ keptOnlyCopy: true, archived: true });
+    expect(imapManager.hasMessageCopy).not.toHaveBeenCalled();
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
     expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Watch', 'Archive');
+  });
+
+  it('reports a failed archive of the kept copy as keptOnlyCopy, so the client says where it is', async () => {
+    stubQueries({ inbox: null, copies: [['Watch', 10]] });
+    imapManager.moveMessage.mockRejectedValue(new Error('IMAP move failed'));
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ archived: false, archiveFailed: true, keptOnlyCopy: true });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
   });
 
   // Gmail: removing a GTD label leaves the message in All Mail.
@@ -355,11 +378,38 @@ describe('POST /api/gtd/done — a GTD folder holding the only copy', () => {
     expect(await res.json()).toMatchObject({ archived: true });
   });
 
-  it('does not ask when an INBOX copy keeps the message', async () => {
-    stubQueries({ copies: [['Watch', 10]] });
+  // The INBOX row is checked on the server before it is trusted to keep the message.
+  it('strips the GTD copy and archives the INBOX copy once the server confirms it', async () => {
+    stubQueries({ copies: [['INBOX', 77], ['Watch', 10]] });
     imapManager.moveMessage.mockResolvedValue(88);
-    await done({ id: MSG_ID, states: ['watch'] });
-    expect(imapManager.hasMessageCopy).not.toHaveBeenCalled();
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(await res.json()).toMatchObject({ archived: true, removed: ['Watch'] });
+    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 77, 'INBOX', '<m@x>', { background: false, date: null });
     expect(imapManager.removeMessageCopy.mock.calls.map(c => c[2])).toEqual(['Watch']);
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 77, 'INBOX', 'Archive');
+  });
+
+  // The user deleted the letter on the phone: the INBOX row is stale until reconcile, and the
+  // letter is only in Trash and Watch. Trusting the row would delete Watch and archive nothing.
+  it('keeps and archives the GTD copy when the INBOX row is stale on the server', async () => {
+    stubQueries({ copies: [['INBOX', 77], ['Watch', 10], ['Trash', 5]] });
+    imapManager.hasMessageCopy.mockImplementation(async (_account, _uid, folder) => folder !== 'INBOX');
+    imapManager.moveMessage.mockResolvedValue(91);
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ archived: true, keptOnlyCopy: true, removed: [] });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledTimes(1);
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Watch', 'Archive');
+  });
+
+  it('answers 503 mailbox_busy when the INBOX copy cannot be checked', async () => {
+    stubQueries({ copies: [['INBOX', 77], ['Watch', 10]] });
+    imapManager.hasMessageCopy.mockRejectedValue(new Error('connection refused'));
+    const res = await done({ id: MSG_ID, states: ['watch'] });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'mailbox_busy' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
   });
 });

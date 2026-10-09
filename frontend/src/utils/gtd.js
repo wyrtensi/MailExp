@@ -1,5 +1,15 @@
 // Pure helpers for GTD display surfaces. Kept free of React/DOM so they can be
 // unit-tested under `node --test` at their pure seams.
+import { mailboxBusyOr } from './mailboxBusy.js';
+
+// Why a GTD label action was refused, for the failure toast's body, else `fallback`:
+// only_copy (the label holds the message's only copy), copy_moved (another action moved it
+// first), or a busy mailbox / pending move (nothing changed, try again in a few seconds).
+export function gtdRefusalText(err, t, fallback) {
+  if (err?.code === 'only_copy') return t('gtd.onlyCopy');
+  if (err?.code === 'copy_moved') return t('gtd.copyMoved');
+  return mailboxBusyOr(err, t, fallback);
+}
 
 // A commitment older than this many days is shown with a red-tinted aging chip.
 // Module constant (no "N stale" header aggregate — per-row only).
@@ -739,8 +749,7 @@ export async function unclassifyThread(id, state, { gtdUnclassify, addNotificati
     addNotification({ title: t('gtd.removed'), body: result?.movedToInbox ? t('gtd.movedToInbox') : t(`gtd.state.${state}`) });
   } catch (err) {
     console.error('GTD unclassify failed:', err.message);
-    // only_copy: the label holds the message's only copy, and the server would not delete it.
-    addNotification({ title: t('gtd.removeFailed'), body: err.code === 'only_copy' ? t('gtd.onlyCopy') : t(`gtd.state.${state}`) });
+    addNotification({ title: t('gtd.removeFailed'), body: gtdRefusalText(err, t, t(`gtd.state.${state}`)) });
   }
 }
 

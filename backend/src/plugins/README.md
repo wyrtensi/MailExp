@@ -53,8 +53,8 @@ npm test               # full suite
 
 Everything a plugin may do, grouped:
 
-- **Labels (read):** `listThreadHeadsByLabels`, `notifyOnLabelTouch`, `hasSurvivingCopy` (ask before deleting a label copy that may be the only one)
-- **Labels (write):** `applyLabel`, `removeLabel`, `markThreadRead`, `markCopySeen`, `ensureLabelFolders`, `resolveLabelCopyUid`
+- **Labels (read):** `listThreadHeadsByLabels`, `notifyOnLabelTouch`, `findSurvivingCopy`, `checkMessageCopy` (ask before deleting a label copy that may be the only one)
+- **Labels (write):** `applyLabel`, `removeLabel`, `markThreadRead`, `markCopySeen`, `ensureLabelFolders`, `resolveLabelCopyUid` · **Busy answer:** `mailboxBusyBody`
 - **Archive:** `archiveInboxCopy`, `moveCopyToInbox`
 - **Realtime:** `broadcast` (scoped to one user)
 - **Summarize:** `summarizeMessage`, `summarizeAvailable` (fails closed when the AI provider is off)

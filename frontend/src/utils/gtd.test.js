@@ -1645,6 +1645,20 @@ describe('unclassifyThread', () => {
     await unclassifyThread('m1', 'todo', deps);
     assert.deepEqual(calls, [['notify', 'gtd.removeFailed', 'gtd.onlyCopy']]);
   });
+
+  for (const [code, body] of [['copy_moved', 'gtd.copyMoved'], ['mailbox_busy', 'common.mailboxBusy'], ['move_pending', 'common.movePending']]) {
+    it(`says why when the server answers ${code}`, async () => {
+      const calls = [];
+      const deps = {
+        gtdUnclassify: async () => { throw Object.assign(new Error(code), { code }); },
+        addNotification: (n) => calls.push(['notify', n.title, n.body]),
+        scheduleGtdSectionsFetch: () => calls.push(['schedule']),
+        t,
+      };
+      await unclassifyThread('m1', 'todo', deps);
+      assert.deepEqual(calls, [['notify', 'gtd.removeFailed', body]]);
+    });
+  }
 });
 
 describe('applyGtdThreadRead', () => {

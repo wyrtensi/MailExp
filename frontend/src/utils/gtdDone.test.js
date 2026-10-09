@@ -118,4 +118,32 @@ describe('doneGtdRow', () => {
     ]);
     assert.equal(completedGtdRemovalMap.size, 1);
   });
+
+  // The server kept the message's only copy in its GTD folder and could not archive it: it is
+  // not in the Inbox, so say where it is.
+  it('says the message is still in its GTD folder when archiving the kept only copy failed', async () => {
+    const calls = [];
+    await doneGtdRow(thread, states, deps({
+      gtdDone: async () => ({ ok: true, archiveFailed: true, keptOnlyCopy: true }),
+      addNotification: notification => calls.push(['notify', notification]),
+    }));
+    assert.deepEqual(calls, [
+      ['notify', { title: 'gtd.doneArchiveFailedKept', body: 'A subject' }],
+    ]);
+  });
+
+  it('says the mailbox is busy when the server could not check the other copies', async () => {
+    const calls = [];
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      await doneGtdRow(thread, states, deps({
+        gtdDone: async () => { throw Object.assign(new Error('busy'), { status: 503, code: 'mailbox_busy' }); },
+        addNotification: notification => calls.push(['notify', notification]),
+      }));
+      assert.deepEqual(calls, [['notify', { title: 'gtd.doneFailed', body: 'common.mailboxBusy' }]]);
+    } finally {
+      console.error = originalError;
+    }
+  });
 });

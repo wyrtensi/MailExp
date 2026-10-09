@@ -96,37 +96,59 @@ export async function removeLabel(imapManager, message, labelFolder) {
   return { removed: true };
 }
 
-// Whether a message keeps a live copy once its copies in the `removing` folders are deleted.
-// Removing a label deletes its copy, and a label folder can hold a message's only copy: mail the
-// user filed there by moving it. Drafts, Trash and Junk do not count, since those get emptied. A
-// row can outlive its message for a while after another client moves it, so a copy counts only
-// once the server confirms its uid still carries the Message-ID; a failed check, or a copy whose
-// move is pending (no server uid yet), counts as no copy, which keeps the mail. Without a
-// Message-ID the other copies cannot be found, so the answer is no. On a label store (Gmail) it is
-// always yes: a folder is a label there, and removing it leaves the message in All Mail.
-// `message` needs { account_id, message_id }. background: see imapManager.hasMessageCopy.
-export async function hasSurvivingCopy(imapManager, account, message, removing, { background = false } = {}) {
-  if (imapManager.isLabelStore(account)) return true;
-  if (!message.message_id) return false;
+// Whether a copy of a message survives on the server, as one of three answers:
+//   'kept'    the server confirmed it (its uid still carries the Message-ID and its date),
+//   'none'    it is gone, or there is nothing to check (no Message-ID, a pending move's
+//             placeholder uid),
+//   'unknown' the check failed (no session, a dropped connection): the caller cannot tell, and
+//             must neither delete on the strength of it nor act as if the copy were gone.
+// A row can outlive its message for a while after another client moves it, which is why a row
+// alone is no proof. On a label store (Gmail) the answer is always 'kept': a folder is a label
+// there, and removing one leaves the message in All Mail. `copy` needs { uid, date? }.
+export const COPY_KEPT = 'kept';
+export const COPY_NONE = 'none';
+export const COPY_UNKNOWN = 'unknown';
+
+export async function checkMessageCopy(imapManager, account, copy, folder, messageId, { background = false } = {}) {
+  if (imapManager.isLabelStore(account)) return COPY_KEPT;
+  if (!messageId || copy?.uid == null || pendingUid(copy.uid)) return COPY_NONE;
+  try {
+    const live = await imapManager.hasMessageCopy(account, copy.uid, folder, messageId, { background, date: copy.date ?? null });
+    return live ? COPY_KEPT : COPY_NONE;
+  } catch (err) {
+    console.warn(`labels: could not check the copy in ${folder}: ${err.message}`);
+    return COPY_UNKNOWN;
+  }
+}
+
+// Whether a message keeps a live copy outside the `excluded` folders, answered as in
+// checkMessageCopy. Removing a label deletes its copy, and a label folder can hold a message's
+// only copy: mail the user filed there by moving it. The caller excludes every label folder it
+// may strip (GTD: all of its folders, so two actions on two labels at once cannot each count on
+// the other's copy); Drafts, Trash and Junk never count, since those get emptied. 'kept' as soon
+// as one copy is confirmed; 'unknown' when none is and a check failed. Without a Message-ID the
+// other copies cannot be found: 'none'. `message` needs { account_id, message_id }.
+export async function findSurvivingCopy(imapManager, account, message, excluded, { background = false } = {}) {
+  if (imapManager.isLabelStore(account)) return COPY_KEPT;
+  if (!message.message_id) return COPY_NONE;
   const [drafts, trash, spam, { rows }] = await Promise.all([
     resolveAllDraftsPaths(account.id, account.folder_mappings),
     resolveAllTrashPaths(account.id, account.folder_mappings),
     resolveAllSpamPaths(account.id, account.folder_mappings),
     query(
-      'SELECT folder, uid FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false',
+      'SELECT folder, uid, date FROM messages WHERE account_id = $1 AND message_id = $2 AND is_deleted = false',
       [message.account_id, message.message_id]
     ),
   ]);
-  const unsafe = new Set([...removing, ...drafts, ...trash, ...spam]);
-  for (const { folder, uid } of rows) {
-    if (unsafe.has(folder) || uid == null || pendingUid(uid)) continue;
-    try {
-      if (await imapManager.hasMessageCopy(account, uid, folder, message.message_id, { background })) return true;
-    } catch (err) {
-      console.warn(`labels: could not confirm the copy in ${folder}: ${err.message}`);
-    }
+  const unsafe = new Set([...excluded, ...drafts, ...trash, ...spam]);
+  let unknown = false;
+  for (const row of rows) {
+    if (unsafe.has(row.folder)) continue;
+    const state = await checkMessageCopy(imapManager, account, row, row.folder, message.message_id, { background });
+    if (state === COPY_KEPT) return COPY_KEPT;
+    if (state === COPY_UNKNOWN) unknown = true;
   }
-  return false;
+  return unknown ? COPY_UNKNOWN : COPY_NONE;
 }
 
 // Best-effort \Seen on one copy, for when a copy other than INBOX becomes the durable one (GTD
@@ -174,7 +196,7 @@ export async function ensureLabelFolders(imapManager, account, folderPaths) {
 // `message` needs { account_id, message_id }.
 export async function markThreadRead(imapManager, account, message) {
   const { rows } = await query(
-    'SELECT id, uid, is_read FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false LIMIT 1',
+    'SELECT id, uid, is_read, date FROM messages WHERE account_id = $1 AND folder = $2 AND message_id = $3 AND is_deleted = false LIMIT 1',
     [message.account_id, 'INBOX', message.message_id]
   );
   const inboxCopy = rows[0] || null;
