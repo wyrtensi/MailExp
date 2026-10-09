@@ -118,12 +118,14 @@ COMPOSE_PROJECT_FORMAT=$'{{.Name}}\t{{.Label "com.docker.compose.project"}}'
 # ones the compose files declare) and every volume of the project when they exist with another
 # project's label or none, or when a foreign container uses the volume.
 compose_foreign_objects() {
-  local project=$1 dir=$2 volumes networks kind name list line label users
+  local project=$1 dir=$2 containers volumes networks kind name list line label users
   shift 2
-  docker ps -a --filter "label=com.docker.compose.project=$project" --format "$COMPOSE_DIR_FORMAT" </dev/null |
-    foreign_containers "$dir" | sed 's/^/container /'
-  volumes=$(docker volume ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null)
-  networks=$(docker network ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null)
+  # Every docker call returns 1 on failure: callers often run this where -e is off.
+  containers=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format "$COMPOSE_DIR_FORMAT" </dev/null) ||
+    return 1
+  foreign_containers "$dir" <<<"$containers" | sed 's/^/container /'
+  volumes=$(docker volume ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
+  networks=$(docker network ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   {
     printf '%s\n' "$@"
     awk -F'\t' -v p="$project" '$2 == p {print "volume:" $1}' <<<"$volumes"
@@ -139,7 +141,8 @@ compose_foreign_objects() {
       continue
     fi
     [ "$kind" = volume ] || continue
-    users=$(docker ps -a --filter "volume=$name" --format "$COMPOSE_DIR_FORMAT" </dev/null | foreign_containers "$dir" | paste -sd, -)
+    users=$(docker ps -a --filter "volume=$name" --format "$COMPOSE_DIR_FORMAT" </dev/null) || return 1
+    users=$(foreign_containers "$dir" <<<"$users" | paste -sd, -)
     if [ -n "$users" ]; then printf 'volume %s (used by %s)\n' "$name" "$users"; fi
   done
 }
@@ -160,10 +163,12 @@ edge_foreign_objects() {
 # that are not this install's; nothing is run against them.
 guard_compose_projects() {
   local foreign
-  foreign=$(panel_foreign_objects)
+  foreign=$(panel_foreign_objects) ||
+    die "cannot list Docker's containers, volumes and networks to check compose project $CFG_PROJECT (the error is above); nothing was run"
   [ -z "$foreign" ] ||
     die "compose project $CFG_PROJECT is not only this install's (its directory is $APP_DIR): $(paste -sd';' - <<<"$foreign"); nothing was run against them; $1" 2
-  foreign=$(edge_foreign_objects)
+  foreign=$(edge_foreign_objects) ||
+    die "cannot list Docker's containers, volumes and networks to check compose project $CFG_EDGE_PROJECT (the error is above); nothing was run"
   [ -z "$foreign" ] ||
     die "compose project $CFG_EDGE_PROJECT is not only this install's (its directory is $EDGE_DIR): $(paste -sd';' - <<<"$foreign"); nothing was run against them; $2" 2
 }

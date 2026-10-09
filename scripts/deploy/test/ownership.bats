@@ -24,6 +24,8 @@ setup() {
 # volume ls and network ls from volumes and networks ("<name>\t<project label>").
 D=$FAKE_DOCKER
 printf '%s\n' "$*" >>"$D/calls"
+# A file "down": the daemon does not answer.
+if [ -f "$D/down" ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi
 case $1 in
   ps)
     f=''
@@ -127,6 +129,16 @@ compose_calls() { grep -c '^compose' "$FAKE_DOCKER/calls" || true; }
   run guard_projects
   [ "$status" -eq 2 ]
   [[ $output == *"volume me-test_extra (used by neighbour-db (/srv/neighbour))"* ]]
+}
+
+@test "guard: a Docker that does not answer stops the script, nothing is run" {
+  : >"$FAKE_DOCKER/down"
+  run guard_projects
+  [ "$status" -eq 1 ]
+  [[ $output == *"cannot list Docker's containers, volumes and networks to check compose project me-test"* ]]
+  [ "$(compose_calls)" = 0 ]
+  run compose_foreign_objects me-test "$P/app"
+  [ "$status" -eq 1 ]
 }
 
 @test "guard: without an edge the edge project is not checked" {

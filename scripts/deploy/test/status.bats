@@ -199,6 +199,8 @@ stub_install() {
   cat >"$STUB/docker" <<'STUB_EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DOCKER_LOG"
+# STUB_DOCKER_DOWN=1: the daemon does not answer.
+if [ "${STUB_DOCKER_DOWN:-0}" = 1 ]; then echo "Cannot connect to the Docker daemon" >&2; exit 1; fi
 case " $* " in
   *" ps -a --filter label=com.docker.compose.project=me-test --format "*)
     # STUB_FOREIGN: a container of the panel's project that another directory's compose made.
@@ -612,4 +614,26 @@ STUB_EOF
   updater_install inactive
   MAILEXPERT_SYSTEMD=0 run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
   [[ $stderr != *"updater:"* ]]
+}
+
+@test "healthcheck.sh and status.sh: a Docker that does not answer is reported, the ownership check does not end the run" {
+  updater_install active
+  STUB_DOCKER_DOWN=1 run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"problem: containers: docker compose ps failed for me-test"* ]]
+  [[ $stderr == *"problem: backup:"* ]]
+  [[ $stderr != *"a command failed"* ]]
+  STUB_DOCKER_DOWN=1 run --separate-stderr bash "$SCRIPT" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $output == *"warning: ownership: docker did not answer; the panel's compose project was not checked"* ]]
+  [[ $output == *"result: "* ]]
+  [[ $stderr != *"a command failed"* ]]
+}
+
+@test "healthcheck.sh: another owner's container in the panel's project is a problem; a generic edge name is info" {
+  updater_install active
+  STUB_FOREIGN=neighbour-web run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $stderr == *"problem: ownership: compose project me-test holds another owner's container neighbour-web (/srv/neighbour)"* ]]
+  [[ $stderr == *"info: names: the panel's compose project 'me-test' has no mailexpert prefix"* ]]
 }

@@ -155,13 +155,19 @@ collect_containers() {
 # update.sh, rollback.sh and restore.sh refuse to run then: lib/app.sh guard_compose_projects), and
 # a note for each project name without the mailexpert prefix.
 collect_names() {
-  local line
-  while IFS= read -r line; do
-    if [ -n "$line" ]; then problem "ownership: compose project $CFG_PROJECT: $line is not this install's; install.sh and update.sh refuse to run until it is gone"; fi
-  done < <(panel_foreign_objects)
-  while IFS= read -r line; do
-    if [ -n "$line" ]; then problem "ownership: compose project $CFG_EDGE_PROJECT: $line is not this install's; install.sh and update.sh refuse to run until it is gone"; fi
-  done < <(edge_foreign_objects)
+  local line project foreign
+  for project in panel edge; do
+    # Inside ||: a Docker that does not answer is a warning here, not the end of the report.
+    if ! foreign=$("${project}_foreign_objects" 2>/dev/null); then
+      warning "ownership: docker did not answer; the $project's compose project was not checked"
+      continue
+    fi
+    while IFS= read -r line; do
+      if [ -z "$line" ]; then continue; fi
+      if [ "$project" = panel ]; then line="$CFG_PROJECT: $line"; else line="$CFG_EDGE_PROJECT: $line"; fi
+      problem "ownership: compose project $line is not this install's; install.sh and update.sh refuse to run until it is gone"
+    done <<<"$foreign"
+  done
   lines_into INFO < <(generic_name_notes)
 }
 
