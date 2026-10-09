@@ -174,11 +174,11 @@ $D/backup.sh --show-recovery-key
 **Один раз — включить обновления** (подробно и с причинами —
 [deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)):
 
-1. Сервер: ничего дополнительно — `install.sh` из шагов 3-5 (без `--no-system`) уже поставил
+1. Сервер: ничего дополнительно — `install.sh` из шагов 3-5 уже поставил
    `mailexpert-updater.path` и `.service` и каталоги спула. Проверка:
    `systemctl is-active mailexpert-updater.path` — `active`;
    `cat /opt/mailexpert/state/update-spool/result/updater.json` — `"installed":true`.
-   С `--no-system` исполнителя нет: обновления только по SSH.
+   На хосте без systemd (контейнер) исполнителя нет: обновления только по SSH.
 2. GitHub: ничего настраивать не нужно. Ruleset на тег `latest` не используется (личный репозиторий,
    см. [deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)): тег двигает
    только владелец через `promote.yml`.
