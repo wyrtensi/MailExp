@@ -29,6 +29,11 @@ const imapManager = {
   copyMessage: vi.fn(),
   removeMessageCopy: vi.fn(),
   broadcast: vi.fn(),
+  hasMessageCopy: vi.fn(),
+  isLabelStore: vi.fn(),
+  moveMessage: vi.fn(),
+  _guardMoveUid: vi.fn(),
+  _unguardMoveUid: vi.fn(),
 };
 setMailEngine(imapManager);
 
@@ -51,9 +56,14 @@ const account = { id: ACCT_ID, user_id: 'u1', folder_mappings: {} };
 
 // Route every query classify issues: the ownership-scoped message load, the account fetch
 // (POST copy path), and resolveCopyUid's sibling lookup (DELETE). Each is individually swappable
-// so a test can drive the not-owned (msg:null) / no-sibling (sibling:null) branches.
-function stubQueries({ msg = inboxMsg, acct = account, sibling = null, exact = { uid: 77 } } = {}) {
+// so a test can drive the not-owned (msg:null) / no-sibling (sibling:null) branches. `copies` are
+// the message's rows as [folder, uid] pairs, for DELETE's only-copy check; by default an INBOX
+// copy keeps the message. `moveWrite` is the rowCount of a move's DB repoint.
+function stubQueries({ msg = inboxMsg, acct = account, sibling = null, exact = { uid: 77 }, copies = [['INBOX', 10]], moveWrite = { rowCount: 1 } } = {}) {
   query.mockImplementation(async (sql) => {
+    if (sql.startsWith('SELECT folder, uid, date FROM messages')) return { rows: copies.map(([folder, uid]) => ({ folder, uid })) };
+    if (sql.includes("special_use = '\\Trash'")) return { rows: [{ path: 'Trash' }] };
+    if (sql.startsWith('UPDATE messages SET folder')) return moveWrite;
     if (sql.startsWith('SELECT m.* FROM messages m WHERE m.id')) return { rows: msg ? [msg] : [] };
     if (sql.startsWith('SELECT * FROM email_accounts')) return { rows: acct ? [acct] : [] };
     if (sql.includes('thread_key = $4') || sql.includes('message_id = $4')) return { rows: exact ? [exact] : [] };
@@ -100,6 +110,10 @@ beforeEach(() => {
   getGtdConfig.mockReset();
   getGtdConfig.mockResolvedValue({ enabled: true, folders: DEFAULT_GTD_FOLDERS });
   imapManager.copyMessage.mockResolvedValue(77);
+  // By default the server confirms a surviving copy, and the account is not Gmail.
+  imapManager.hasMessageCopy.mockResolvedValue(true);
+  imapManager.isLabelStore.mockReturnValue(false);
+  imapManager.moveMessage.mockResolvedValue(300);
   stubQueries();
 });
 
@@ -215,12 +229,14 @@ describe('DELETE /api/gtd/classify — remove a GTD label', () => {
   it('does NOT require a Message-ID when the acted row already lives in the state folder', async () => {
     // The acted-row case resolves its own uid directly, so a null Message-ID must not 400 here.
     // Pins the recently-narrowed guard (folder !== stateFolder) against a regression back to an
-    // unconditional Message-ID requirement.
+    // unconditional Message-ID requirement. Without one its other copies cannot be found, so the
+    // copy is kept: it moves to INBOX instead of being deleted.
     stubQueries({ msg: { ...inboxMsg, folder: 'Todo', message_id: null } });
     const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
-    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo', movedToInbox: true });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
   });
 
   it("404s a message the caller doesn't own", async () => {
@@ -298,5 +314,120 @@ describe('GTD classify of a letter whose move is pending', () => {
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe('move_pending');
     expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+  });
+});
+
+// A GTD folder can hold a message's only copy: mail the user filed there by moving it (upstream
+// #524). Removing the label must not delete it; the copy moves back to INBOX instead.
+describe('DELETE /api/gtd/classify — a GTD folder holding the only copy', () => {
+  const todoMsg = { ...inboxMsg, folder: 'Todo' };
+
+  it('moves the copy to INBOX instead of deleting it', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo', movedToInbox: true });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
+    const write = query.mock.calls.find(([sql]) => sql.startsWith('UPDATE messages SET folder'));
+    expect(write[1]).toEqual(['INBOX', 300, MSG_ID, 'Todo']);
+    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'folder_updated', folder: 'INBOX', accountId: ACCT_ID });
+    expect(imapManager.broadcast).toHaveBeenCalledWith({ type: 'gtd_sections_updated', accountId: ACCT_ID });
+  });
+
+  it('does not count a copy in Trash, which gets emptied', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['Trash', 3]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
+  });
+
+  // Every GTD folder is excluded, so two removals on two labels at once cannot each count on the
+  // other's copy and delete both.
+  it('does not count a copy under another GTD label', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['Watch', 41]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo', movedToInbox: true });
+    expect(imapManager.hasMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
+  });
+
+  it('removes the label when a confirmed copy outside GTD keeps the message', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['Receipts', 41]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, removed: true, folder: 'Todo' });
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+
+  // A concurrent action moved the copy first: nothing was done here, so say so.
+  it('refuses with 409 copy_moved when the copy left the folder before the move applied', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10]], moveWrite: { rowCount: 0 } });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'copy_moved' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+  });
+
+  // A row can outlive its message for a while after another client moves it.
+  it('keeps the copy when the server does not confirm the other copy', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['INBOX', 55]] });
+    imapManager.hasMessageCopy.mockResolvedValue(false);
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    expect(imapManager.hasMessageCopy).toHaveBeenCalledWith(account, 55, 'INBOX', '<m@x>', { background: false, date: null });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).toHaveBeenCalledWith(account, 10, 'Todo', 'INBOX');
+  });
+
+  // A failed check cannot tell whether the other copy is there: change nothing, say "busy".
+  it('answers 503 mailbox_busy when the check fails, deleting and moving nothing', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10], ['INBOX', 55]] });
+    imapManager.hasMessageCopy.mockRejectedValue(new Error('connection refused'));
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'mailbox_busy' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+
+  // Gmail: removing a GTD label leaves the message in All Mail.
+  it('removes the label on Gmail even when it holds the only synced copy', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10]] });
+    imapManager.isLabelStore.mockReturnValue(true);
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(200);
+    expect(imapManager.removeMessageCopy).toHaveBeenCalledWith(ACCT_ID, 10, 'Todo');
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+    expect(imapManager.hasMessageCopy).not.toHaveBeenCalled();
+  });
+
+  it('refuses with 409 only_copy when the acted row is elsewhere and the state copy is the only one kept', async () => {
+    stubQueries({ msg: { ...inboxMsg, folder: 'Trash' }, sibling: { uid: 42 }, copies: [['Trash', 10], ['Todo', 42]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'only_copy' });
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
+  });
+
+  it('maps a failed move to 500 and deletes nothing', async () => {
+    stubQueries({ msg: todoMsg, copies: [['Todo', 10]] });
+    imapManager.moveMessage.mockRejectedValue(new Error('IMAP move failed'));
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(500);
+    expect(imapManager.removeMessageCopy).not.toHaveBeenCalled();
+  });
+
+  it('answers 409 move_pending when the only copy is waiting for its move', async () => {
+    stubQueries({ msg: { ...todoMsg, uid: -8 }, copies: [['Todo', -8]] });
+    const res = await unclassify({ messageId: MSG_ID, state: 'todo' });
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe('move_pending');
+    expect(imapManager.moveMessage).not.toHaveBeenCalled();
   });
 });

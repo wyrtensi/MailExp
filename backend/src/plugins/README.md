@@ -53,16 +53,16 @@ npm test               # full suite
 
 Everything a plugin may do, grouped:
 
-- **Labels (read):** `listThreadHeadsByLabels`, `notifyOnLabelTouch`
-- **Labels (write):** `applyLabel`, `removeLabel`, `markThreadRead`, `ensureLabelFolders`, `resolveLabelCopyUid`
-- **Archive:** `archiveInboxCopy`
+- **Labels (read):** `listThreadHeadsByLabels`, `notifyOnLabelTouch`, `findSurvivingCopy`, `checkMessageCopy` (ask before deleting a label copy that may be the only one)
+- **Labels (write):** `applyLabel`, `removeLabel`, `markThreadRead`, `markCopySeen`, `ensureLabelFolders`, `resolveLabelCopyUid` · **Busy answer:** `mailboxBusyBody`
+- **Archive:** `archiveInboxCopy`, `moveCopyToInbox`
 - **Realtime:** `broadcast` (scoped to one user)
 - **Summarize:** `summarizeMessage`, `summarizeAvailable` (fails closed when the AI provider is off)
 - **Per-plugin storage:** `storage.*` (the `plugin_data` table — KV + blobs, owner-scoped, cascade-cleaned)
 - **Per-account plugin config:** `getAccountConfig`, `setAccountConfig` (the `plugin_account_config` table)
 - **Per-message annotations:** `getMessageAnnotations`, `setMessageAnnotation` (namespaced `messages.plugin_annotations`)
 - **Panel-wide switch:** `isPluginEnabled`
-- **Logging:** `logger` · **Auth middleware:** `requireAuth` · **Folder resolution:** `resolveAllDraftsPaths`
+- **Logging:** `logger` · **Auth middleware:** `requireAuth` · **Folder resolution:** `resolveAllDraftsPaths`, `resolveAllTrashPaths`, `resolveAllSpamPaths`
 - **Ownership-scoped mail/account reads:** `loadOwnedMessage`, `getOwnedAccount`, `listUserAccounts`, `getAccountAddresses`, `getMessagesByThreadKeys`, `getMessageCopyFolders`, `getMessageFields`, the thread-key resolvers, …
 
 If you need something not here, **don't reach around the boundary** — ask, and we add a reviewed

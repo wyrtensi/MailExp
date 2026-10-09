@@ -7989,6 +7989,44 @@ export class ImapManager {
     }, { background });
   }
 
+  // Whether the account's folders are label memberships (Gmail): removing a message from one
+  // drops that label and leaves the message in All Mail, which is never synced.
+  isLabelStore(account) {
+    return providerProfile(account).labelStore === true;
+  }
+
+  // Whether the server copy at `uid` in `folder` still carries this Message-ID. A local row can
+  // outlive its message for a while after another client moves it, so a row alone is no proof
+  // that a copy survives a label delete (GTD). A Message-ID can be reused (a resent or re-imported
+  // letter), so `date`, the row's stored date (the INTERNALDATE it was synced with), must match
+  // the server's INTERNALDATE to the second as well; skipped when either side has none. Errors
+  // propagate: the caller cannot tell, and must not delete on the strength of it.
+  async hasMessageCopy(account, uid, folder, messageId, { background = false, date = null } = {}) {
+    const bare = id => String(id ?? '').replace(/[<>]/g, '').trim();
+    const expected = bare(messageId);
+    const physicalUid = Number(uid); // BIGINT rows arrive as strings
+    if (!expected || !folder || !Number.isSafeInteger(physicalUid) || physicalUid <= 0) return false;
+    const seconds = value => {
+      const ms = value == null ? NaN : new Date(value).getTime();
+      return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+    };
+    const expectedSecond = seconds(date);
+    return withFreshClient(account, async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        for await (const msg of client.fetch(String(physicalUid), { uid: true, envelope: true, internalDate: true }, { uid: true })) {
+          if (msg.uid !== physicalUid) continue;
+          if (bare(msg.envelope?.messageId) !== expected) return false;
+          const serverSecond = seconds(msg.internalDate);
+          return expectedSecond == null || serverSecond == null || serverSecond === expectedSecond;
+        }
+        return false;
+      } finally {
+        lock.release();
+      }
+    }, { background });
+  }
+
   // Apply a label = COPY the message into the label folder, keeping the source copy.
   // Mirrors moveMessage's connection acquisition, folder lock, and error discipline,
   // but uses COPY (not MOVE) so the source row stays put and the label becomes a

@@ -17,7 +17,7 @@
 
 import { getMailEngine } from './mailEngine.js';
 import * as labelsWrite from '../services/labels.js';
-import { archiveInboxCopy as _archiveInboxCopy } from '../services/archiveInbox.js';
+import { archiveInboxCopy as _archiveInboxCopy, moveCopyToInbox as _moveCopyToInbox } from '../services/archiveInbox.js';
 
 // ── Labels (read) ─────────────────────────────────────────────────────────────
 // Thread-aware read over a set of label folders: heads grouped by label with thread-level
@@ -35,15 +35,29 @@ export const applyLabel = (account, message, labelFolder) => labelsWrite.applyLa
 export const removeLabel = (message, labelFolder) => labelsWrite.removeLabel(getMailEngine(), message, labelFolder);
 export const removeExactLabelCopy = (message, labelFolder, uid) => labelsWrite.removeExactLabelCopy(getMailEngine(), message, labelFolder, uid);
 export const markThreadRead = (account, message) => labelsWrite.markThreadRead(getMailEngine(), account, message);
+export const markCopySeen = (account, message) => labelsWrite.markCopySeen(getMailEngine(), account, message);
+// Ask before deleting a label copy that may be the message's only one. findSurvivingCopy: does a
+// server-confirmed copy exist outside `excludedFolders` (and outside Drafts, Trash and Junk)?
+// checkMessageCopy: is this one copy still on the server? Both answer 'kept', 'none' or
+// 'unknown' (the check failed: neither delete nor act as if the copy were gone); always 'kept' on
+// a label store (Gmail).
+export const findSurvivingCopy = (account, message, excludedFolders) => labelsWrite.findSurvivingCopy(getMailEngine(), account, message, excludedFolders);
+export const checkMessageCopy = (account, copy, folder, messageId) => labelsWrite.checkMessageCopy(getMailEngine(), account, copy, folder, messageId);
 export const ensureLabelFolders = (account, folderPaths) => labelsWrite.ensureLabelFolders(getMailEngine(), account, folderPaths);
 export const resolveLabelCopyUid = labelsWrite.resolveLabelCopyUid;
 // Throws an error with movePending: true when the message or one of its copies in `folders` is
 // waiting for its move to reach the mail server; answer it with 409 { code: 'move_pending' }.
 export const assertNoPendingCopies = labelsWrite.assertNoPendingCopies;
+// The 503 body { error, code: 'mailbox_busy' } for mail work that could not reach the server;
+// the client shows its own localized "try again in a few seconds".
+export { mailboxBusyBody } from '../utils/mailboxBusy.js';
 
 // ── Archive ───────────────────────────────────────────────────────────────────
-// Archive a message's INBOX copy (used by GTD "done"). Engine bound by the platform.
-export const archiveInboxCopy = (account, inboxCopy) => _archiveInboxCopy(getMailEngine(), account, inboxCopy);
+// Archive a message's INBOX copy (used by GTD "done"), or its copy in `fromFolder` when that copy
+// is the one to keep. Move a label copy back to INBOX (a label removal that would otherwise
+// delete the message's only copy). Engine bound by the platform.
+export const archiveInboxCopy = (account, copy, fromFolder) => _archiveInboxCopy(getMailEngine(), account, copy, fromFolder);
+export const moveCopyToInbox = (account, copy, fromFolder) => _moveCopyToInbox(getMailEngine(), account, copy, fromFolder);
 
 // ── Realtime broadcast ────────────────────────────────────────────────────────
 // Push a payload to live sessions: every client for a mailbox event, or one user's sessions when
@@ -78,9 +92,9 @@ export { isPluginEnabled } from './activation.js';
 export { getAccountConfig, setAccountConfig } from './accountConfig.js';
 
 // ── Folder resolution ─────────────────────────────────────────────────────────
-// Resolve an account's Drafts folder paths (across provider naming). A safe read over the
-// account's folder mapping — no mail engine, no raw DB.
-export { resolveAllDraftsPaths } from '../utils/mailUtils.js';
+// Resolve an account's Drafts, Trash and Junk folder paths (across provider naming). A safe read
+// over the account's folder mapping — no mail engine, no raw DB.
+export { resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../utils/mailUtils.js';
 
 // ── Mail/account reads ────────────────────────────────────────────────────────
 // A fixed, reviewed set of ownership-scoped read queries (see services/mailAccess.js). A plugin

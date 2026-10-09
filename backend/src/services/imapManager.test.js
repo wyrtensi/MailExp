@@ -602,6 +602,85 @@ describe('permanentDeleteMessage — expectMessageId', () => {
   });
 });
 
+// ── hasMessageCopy / isLabelStore (upstream e5a63380) ─────────────────────────
+// Before GTD deletes a label copy it confirms that another copy really is on the server: a local
+// row can outlive its message for a while after another client moves it.
+describe('hasMessageCopy', () => {
+  let seq = 0;
+  function arrange(serverCopies) {
+    const account = { id: `acct-hmc-${++seq}`, user_id: 'u1', imap_host: 'imap.example.com', email_address: 'me@example.test', auth_user: 'me', auth_pass: 'enc' };
+    const client = Object.assign(new EventEmitter(), {
+      usable: true,
+      connect: vi.fn(() => Promise.resolve()),
+      logout: vi.fn(() => Promise.resolve()),
+      close: vi.fn(),
+      getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      fetch: vi.fn(async function* (range) {
+        for (const uid of String(range).split(',').map(Number)) {
+          if (serverCopies.has(uid)) yield { uid, envelope: { messageId: serverCopies.get(uid) } };
+        }
+      }),
+    });
+    ImapFlow.mockImplementation(function () { return client; });
+    getConnectionPolicy.mockResolvedValue({ allowPrivateHosts: true, allowInsecureTls: true });
+    resolveForConnection.mockResolvedValue({ host: '127.0.0.1', addresses: ['127.0.0.1'], servername: null });
+    query.mockReset();
+    query.mockResolvedValue({ rows: [account] });
+    return { account, client };
+  }
+  afterEach(() => evictPool(`acct-hmc-${seq}`));
+
+  it('is true when the uid carries the Message-ID, compared without angle brackets', async () => {
+    const { account, client } = arrange(new Map([[7, '<m@example.test>']]));
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, '7', 'INBOX', 'm@example.test')).toBe(true);
+    expect(client.getMailboxLock).toHaveBeenCalledWith('INBOX');
+  });
+
+  it('is false when another message now holds the uid', async () => {
+    const { account } = arrange(new Map([[7, '<other@example.test>']]));
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>')).toBe(false);
+  });
+
+  // A Message-ID can be reused (a resent or re-imported letter), so the caller can also pass the
+  // row's stored date, which for a synced copy is the server's INTERNALDATE.
+  it('also matches the copy\'s INTERNALDATE when the caller passes the row date', async () => {
+    const { account, client } = arrange(new Map([[7, '<m@example.test>']]));
+    client.fetch.mockImplementation(async function* () {
+      yield { uid: 7, envelope: { messageId: '<m@example.test>' }, internalDate: new Date('2026-07-01T10:00:00.400Z') };
+    });
+    const hasCopy = (date) => ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>', { date });
+    expect(await hasCopy('2026-07-01T10:00:00.000Z')).toBe(true);
+    expect(await hasCopy(new Date('2026-07-01T10:00:00Z'))).toBe(true);
+    expect(await hasCopy('2026-06-30T10:00:00Z')).toBe(false);
+    expect(client.fetch.mock.calls[0][1]).toEqual({ uid: true, envelope: true, internalDate: true });
+  });
+
+  it('skips the date match when either side has no date', async () => {
+    const { account } = arrange(new Map([[7, '<m@example.test>']]));
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>', { date: '2026-07-01T10:00:00Z' })).toBe(true);
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>', { date: null })).toBe(true);
+  });
+
+  it('is false when the uid is gone from the server', async () => {
+    const { account } = arrange(new Map());
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, 7, 'INBOX', '<m@example.test>')).toBe(false);
+  });
+
+  it.each([[null, 7], ['<m@example.test>', -3], ['<m@example.test>', 0]])('is false without asking the server for Message-ID %j and uid %j', async (messageId, uid) => {
+    const { account, client } = arrange(new Map([[7, '<m@example.test>']]));
+    expect(await ImapManager.prototype.hasMessageCopy.call({}, account, uid, 'INBOX', messageId)).toBe(false);
+    expect(client.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('isLabelStore', () => {
+  it('is true only for Gmail, where folders are labels', () => {
+    expect(ImapManager.prototype.isLabelStore({ imap_host: 'imap.gmail.com' })).toBe(true);
+    expect(ImapManager.prototype.isLabelStore({ imap_host: 'imap.example.com' })).toBe(false);
+    expect(ImapManager.prototype.isLabelStore({ imap_host: 'outlook.office365.com' })).toBe(false);
+  });
+});
+
 // ── ensureMailbox — provider-correct folder creation ─────────────────────────
 // The namespace matrix (no-prefix + '/', 'INBOX.' + '.') is resolved INSIDE imapflow's
 // normalizePath, which runs on mailboxCreate. So the unit here mocks mailboxCreate and

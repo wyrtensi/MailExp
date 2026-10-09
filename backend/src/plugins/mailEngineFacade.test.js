@@ -17,4 +17,13 @@ describe('plugin mail facade', () => {
     await createPluginMailFacade(e).removeMessageCopy('a1', 7, 'Todo', { background: true });
     expect(e.removeMessageCopy).toHaveBeenCalledWith('a1', 7, 'Todo', { background: true });
   });
+
+  it('passes a copy check and the label-store question to the engine', async () => {
+    const e = { hasMessageCopy: vi.fn(async () => true), isLabelStore: vi.fn(() => true) };
+    const facade = createPluginMailFacade(e);
+    expect(await facade.hasMessageCopy({ id: 'a1' }, 55, 'INBOX', '<m@x>', { background: true })).toBe(true);
+    expect(e.hasMessageCopy).toHaveBeenCalledWith({ id: 'a1' }, 55, 'INBOX', '<m@x>', { background: true });
+    expect(facade.isLabelStore({ id: 'a1' })).toBe(true);
+    expect(e.isLabelStore).toHaveBeenCalledWith({ id: 'a1' });
+  });
 });

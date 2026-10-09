@@ -3717,9 +3717,13 @@
     "undoFailed": "Couldn't undo label",
     "removed": "Label removed",
     "removeFailed": "Couldn't remove label",
+    "movedToInbox": "This was the only copy of the message, so it moved to the Inbox",
+    "onlyCopy": "This is the only copy of the message, and removing its label would delete it. Archive or move the message instead.",
     "done": "Mark done",
     "doneFailed": "Couldn't mark done",
     "doneArchiveFailed": "Marked done, but archiving failed — still in your Inbox",
+    "doneArchiveFailedKept": "Marked done, but archiving failed — the message is still in its GTD folder",
+    "copyMoved": "The message was moved meanwhile. Refresh and try again.",
     "state": {
       "todo": "Todo",
       "watch": "Watch",

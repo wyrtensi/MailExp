@@ -1,10 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('./db.js', () => ({ query: vi.fn() }));
-vi.mock('../utils/mailUtils.js', () => ({ fanOutReadToSiblings: vi.fn() }));
+vi.mock('../utils/mailUtils.js', () => ({
+  fanOutReadToSiblings: vi.fn(),
+  resolveAllDraftsPaths: vi.fn(),
+  resolveAllTrashPaths: vi.fn(),
+  resolveAllSpamPaths: vi.fn(),
+}));
 import { query } from './db.js';
-import { fanOutReadToSiblings } from '../utils/mailUtils.js';
+import { fanOutReadToSiblings, resolveAllDraftsPaths, resolveAllTrashPaths, resolveAllSpamPaths } from '../utils/mailUtils.js';
 import {
+  findSurvivingCopy,
+  checkMessageCopy,
+  markCopySeen,
   applyLabel,
   removeExactLabelCopy,
   removeLabel,
@@ -239,5 +247,140 @@ describe('a letter whose move is pending', () => {
     expect(query.mock.calls.at(-1)[1]).toEqual(['a', '<m>', ['INBOX', 'Todo']]);
     query.mockResolvedValueOnce({ rows: [] });
     await expect(assertNoPendingCopies({ uid: 5, account_id: 'a', message_id: '<m>' }, ['INBOX'])).resolves.toBeUndefined();
+  });
+});
+
+/// GTD deletes a label copy outright, and a label folder can hold a message's only copy: mail the
+// user filed there by moving it (upstream #524). findSurvivingCopy answers whether another copy
+// keeps the message outside the excluded folders: 'kept', 'none', or 'unknown' when it could not
+// tell.
+describe('findSurvivingCopy', () => {
+  const msg = { id: 'm1', account_id: 'acct-1', uid: 10, folder: 'Todo', message_id: '<m@x>' };
+  const mkEngine = ({ labelStore = false, live = () => true } = {}) => ({
+    isLabelStore: vi.fn(() => labelStore),
+    hasMessageCopy: vi.fn(async (_account, uid, folder) => live(uid, folder)),
+  });
+  // `copies` are the message's rows as [folder, uid, date?] triples.
+  const stubCopies = (copies) => query.mockImplementation(async (sql) => {
+    if (sql.startsWith('SELECT folder, uid, date FROM messages')) return { rows: copies.map(([folder, uid, date = null]) => ({ folder, uid, date })) };
+    return { rows: [] };
+  });
+  beforeEach(() => {
+    resolveAllDraftsPaths.mockResolvedValue(new Set(['Drafts']));
+    resolveAllTrashPaths.mockResolvedValue(new Set(['Trash']));
+    resolveAllSpamPaths.mockResolvedValue(new Set(['Junk']));
+  });
+
+  it('is kept when the server confirms a copy outside the excluded folders, matching its date', async () => {
+    stubCopies([['Todo', 10], ['INBOX', 55, '2026-07-01T10:00:00Z']]);
+    const engine = mkEngine();
+    expect(await findSurvivingCopy(engine, account, msg, ['Todo'])).toBe('kept');
+    expect(engine.hasMessageCopy).toHaveBeenCalledWith(account, 55, 'INBOX', '<m@x>', { background: false, date: '2026-07-01T10:00:00Z' });
+    expect(engine.hasMessageCopy).toHaveBeenCalledTimes(1);
+  });
+
+  it('is none when the excluded folder holds the only copy', async () => {
+    stubCopies([['Todo', 10]]);
+    const engine = mkEngine();
+    expect(await findSurvivingCopy(engine, account, msg, ['Todo'])).toBe('none');
+    expect(engine.hasMessageCopy).not.toHaveBeenCalled();
+  });
+
+  it('does not count Drafts, Trash or Junk, which get emptied', async () => {
+    stubCopies([['Todo', 10], ['Trash', 3], ['Junk', 4], ['Drafts', 5]]);
+    expect(await findSurvivingCopy(mkEngine(), account, msg, ['Todo'])).toBe('none');
+  });
+
+  it('does not count a copy in another excluded label folder', async () => {
+    stubCopies([['Todo', 10], ['Watch', 41]]);
+    expect(await findSurvivingCopy(mkEngine(), account, msg, ['Todo', 'Watch'])).toBe('none');
+  });
+
+  it('does not count a row the server no longer has', async () => {
+    stubCopies([['Todo', 10], ['INBOX', 55], ['Receipts', 8]]);
+    expect(await findSurvivingCopy(mkEngine({ live: (_uid, folder) => folder === 'Receipts' }), account, msg, ['Todo'])).toBe('kept');
+    stubCopies([['Todo', 10], ['INBOX', 55]]);
+    expect(await findSurvivingCopy(mkEngine({ live: () => false }), account, msg, ['Todo'])).toBe('none');
+  });
+
+  it('is unknown when no copy is confirmed and a check failed', async () => {
+    stubCopies([['Todo', 10], ['INBOX', 55]]);
+    const engine = mkEngine();
+    engine.hasMessageCopy.mockRejectedValue(new Error('connection refused'));
+    expect(await findSurvivingCopy(engine, account, msg, ['Todo'])).toBe('unknown');
+  });
+
+  it('is kept when one check failed but another copy is confirmed', async () => {
+    stubCopies([['Todo', 10], ['INBOX', 55], ['Receipts', 8]]);
+    const engine = mkEngine();
+    engine.hasMessageCopy.mockRejectedValueOnce(new Error('connection refused'));
+    expect(await findSurvivingCopy(engine, account, msg, ['Todo'])).toBe('kept');
+  });
+
+  it('does not count a copy whose move is pending: it has no server uid to confirm', async () => {
+    stubCopies([['Todo', 10], ['INBOX', '-4']]);
+    const engine = mkEngine();
+    expect(await findSurvivingCopy(engine, account, msg, ['Todo'])).toBe('none');
+    expect(engine.hasMessageCopy).not.toHaveBeenCalled();
+  });
+
+  it('is none without a Message-ID, since the other copies cannot be found', async () => {
+    expect(await findSurvivingCopy(mkEngine(), account, { ...msg, message_id: null }, ['Todo'])).toBe('none');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  // Gmail: a folder is a label, and removing it leaves the message in All Mail.
+  it('is always kept on a label store, with no lookups', async () => {
+    const engine = mkEngine({ labelStore: true });
+    expect(await findSurvivingCopy(engine, account, msg, ['Todo'])).toBe('kept');
+    expect(query).not.toHaveBeenCalled();
+    expect(engine.hasMessageCopy).not.toHaveBeenCalled();
+  });
+
+  it('passes background through to the server check', async () => {
+    stubCopies([['Todo', 10], ['INBOX', 55]]);
+    const engine = mkEngine();
+    await findSurvivingCopy(engine, account, msg, ['Todo'], { background: true });
+    expect(engine.hasMessageCopy).toHaveBeenCalledWith(account, 55, 'INBOX', '<m@x>', { background: true, date: null });
+  });
+});
+
+describe('checkMessageCopy', () => {
+  const mkEngine = (impl, labelStore = false) => ({ isLabelStore: vi.fn(() => labelStore), hasMessageCopy: vi.fn(impl) });
+
+  it('answers kept, none or unknown from the server check', async () => {
+    expect(await checkMessageCopy(mkEngine(async () => true), account, { uid: 7 }, 'INBOX', '<m@x>')).toBe('kept');
+    expect(await checkMessageCopy(mkEngine(async () => false), account, { uid: 7 }, 'INBOX', '<m@x>')).toBe('none');
+    expect(await checkMessageCopy(mkEngine(async () => { throw new Error('down'); }), account, { uid: 7 }, 'INBOX', '<m@x>')).toBe('unknown');
+  });
+
+  it('is none with nothing to check, and kept on a label store', async () => {
+    const engine = mkEngine(async () => true);
+    expect(await checkMessageCopy(engine, account, { uid: -2 }, 'INBOX', '<m@x>')).toBe('none');
+    expect(await checkMessageCopy(engine, account, { uid: 7 }, 'INBOX', null)).toBe('none');
+    expect(engine.hasMessageCopy).not.toHaveBeenCalled();
+    expect(await checkMessageCopy(mkEngine(async () => false, true), account, { uid: 7 }, 'INBOX', '<m@x>')).toBe('kept');
+  });
+});
+
+// When a label copy becomes the durable one (GTD Done keeps a message's only copy), it takes the
+// \Seen that markThreadRead set on INBOX only; otherwise the next sync reads it back as unread.
+describe('markCopySeen', () => {
+  it('sets \\Seen on an unread copy', async () => {
+    const imap = { setFlag: vi.fn() };
+    expect(await markCopySeen(imap, account, { uid: 10, folder: 'Watch', is_read: false })).toEqual({});
+    expect(imap.setFlag).toHaveBeenCalledWith(account, 10, 'Watch', '\\Seen', true);
+  });
+
+  it('sends nothing for a copy already read', async () => {
+    const imap = { setFlag: vi.fn() };
+    await markCopySeen(imap, account, { uid: 10, folder: 'Watch', is_read: true });
+    expect(imap.setFlag).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed flag push instead of throwing', async () => {
+    const err = new Error('STORE failed');
+    const imap = { setFlag: vi.fn().mockRejectedValue(err) };
+    expect(await markCopySeen(imap, account, { uid: 10, folder: 'Watch', is_read: false })).toEqual({ error: err });
   });
 });
