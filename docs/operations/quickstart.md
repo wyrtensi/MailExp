@@ -44,7 +44,7 @@ Access — пошагово в [cloudflare.md](cloudflare.md). Сделайте 
 
 | Что | Зачем |
 |---|---|
-| VPS **Ubuntu 24.04**, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска; почтовый узел — всегда отдельный сервер, 4 vCPU / 8 ГБ (раздел 8) | `install.sh` ставит Docker, файрвол, swap и таймеры только на Ubuntu 24.04 и проверяет ресурсы; другая ОС — только с `--no-system`, а Docker Engine с Compose 2.24.4+ тогда ставите вы |
+| VPS **Ubuntu 24.04**, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска; почтовый узел — всегда отдельный сервер, 4 vCPU / 8 ГБ (раздел 8) | `install.sh` ставит Docker, файрвол, swap и автообновления только на Ubuntu 24.04 и проверяет ресурсы; другая ОС или сервер, где уже живут другие проекты, — только с `--no-system`, а Docker Engine с Compose 2.24.4+ тогда ставите вы ([общий сервер](deployment.md#установка-на-общий-сервер-минимальное-влияние-полный-функционал)). Таймеры и кнопку обновления `install.sh` ставит в обоих случаях, если на хосте есть systemd |
 | SSH-доступ root по ключу | все команды ниже — от root |
 | Зона DNS `example.com` в Cloudflare, A-запись `<DIRECT_HOST>` → IP сервера (TTL 300) | сертификат выпускается через DNS-01 Cloudflare |
 | Токен Cloudflare API только на эту зону: DNS Edit и Zone Read (`DNS_API_TOKEN`, [cloudflare.md, раздел 4](cloudflare.md)) | для сертификата |
@@ -52,8 +52,8 @@ Access — пошагово в [cloudflare.md](cloudflare.md). Сделайте 
 | Необязательно: S3-бакет у другого провайдера (`RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RESTIC_PASSWORD` не короче 16 символов) | ночные зашифрованные бэкапы; без них панель работает, но `install.sh` предупреждает «backups are off» |
 | Необязательно: проверка в Healthchecks.io (`HEALTHCHECK_PING_URL`) | оповещения о сбоях |
 
-Порты: в режиме `direct` снаружи открыты только SSH, 80 и 443 (`install.sh` включает `ufw`); порты 80 и
-443 на сервере должны быть свободны. Панель слушает `127.0.0.1:8080` и наружу не публикуется.
+Порты: в режиме `direct` снаружи открыты только SSH, 80 и 443 (`install.sh` включает `ufw`, если нет
+`--no-system`); порты 80 и 443 на сервере должны быть свободны. Панель слушает `127.0.0.1:8080` и наружу не публикуется.
 
 Другие режимы входа: `cf` — через Cloudflare Tunnel и Access (нужны `TUNNEL_TOKEN`,
 `CF_ACCESS_ISSUER`, `CF_ACCESS_AUDIENCE`, входящие порты не нужны), `both` — оба адреса сразу;
@@ -178,7 +178,8 @@ $D/backup.sh --show-recovery-key
    `mailexpert-updater.path` и `.service` и каталоги спула. Проверка:
    `systemctl is-active mailexpert-updater.path` — `active`;
    `cat /opt/mailexpert/state/update-spool/result/updater.json` — `"installed":true`.
-   На хосте без systemd (контейнер) исполнителя нет: обновления только по SSH.
+   С `--project <имя>` юнит называется `mailexpert-updater-<имя>.path`. На хосте без systemd
+   (контейнер) исполнителя нет: обновления только по SSH.
 2. GitHub: ничего настраивать не нужно. Ruleset на тег `latest` не используется (личный репозиторий,
    см. [deployment.md, раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)): тег двигает
    только владелец через `promote.yml`.

@@ -27,9 +27,9 @@ compose-развёртывания (может совпадать с `<PANEL_HOS
 
 | Что | Подробности |
 |---|---|
-| ОС и ресурсы | Ubuntu 24.04, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска: `install.sh` проверяет это сам и первую установку с нехваткой останавливает |
-| systemd | обязателен на хосте. Только с systemd `install.sh` ставит таймеры `mailexpert-backup.timer`, `mailexpert-health.timer` и исполнитель обновлений `mailexpert-updater.path` / `.service` (с `--project <имя>` — с суффиксом `-<имя>`), с `--no-system` тоже: этот флаг отключает только настройку хоста (пакеты, swap, ufw, `unattended-upgrades`). На хосте без systemd юнитов нет и отдельной команды, которая поставила бы их потом, тоже нет — кнопка обновления снова будет писать «механизм обновления не установлен» |
-| Порты | в режиме `direct` снаружи нужны 80 и 443 (TCP, и необязательный UDP 443), они должны быть свободны: `install.sh` останавливается, если их держит что-то кроме Caddy края. `install.sh` включает `ufw`: открыты только порты SSH и, для Caddy, 80/443. В режиме `cf` входящие порты не нужны. Панель слушает `127.0.0.1:8080` ([ports.md](ports.md)) |
+| ОС и ресурсы | Ubuntu 24.04, минимум 2 vCPU / 4 ГБ RAM / 20 ГБ свободного диска: `install.sh` проверяет это сам и первую установку с нехваткой останавливает. Сервер, где живут и другие проекты, — с `--no-system`: ОС и ресурсы тогда не проверяются, Docker с Compose 2.24.4+ ставите вы ([общий сервер](deployment.md#установка-на-общий-сервер-минимальное-влияние-полный-функционал)) |
+| systemd | обязателен на хосте. Только с systemd `install.sh` ставит таймеры `mailexpert-backup.timer`, `mailexpert-health.timer` и исполнитель обновлений `mailexpert-updater.path` / `.service` (с `--project <имя>` — с суффиксом `-<имя>`), с `--no-system` тоже: этот флаг отключает только настройку хоста (проверки ОС и ресурсов, пакеты, запуск Docker, swap, ufw, `unattended-upgrades`). На хосте без systemd юнитов нет и отдельной команды, которая поставила бы их потом, тоже нет — кнопка обновления снова будет писать «механизм обновления не установлен» |
+| Порты | в режиме `direct` снаружи нужны 80 и 443 (TCP, и необязательный UDP 443), они должны быть свободны: `install.sh` останавливается, если их держит что-то кроме Caddy края. Без `--no-system` `install.sh` включает `ufw`: открыты только порты SSH и, для Caddy, 80/443. В режиме `cf` входящие порты не нужны. Панель слушает `127.0.0.1:8080` ([ports.md](ports.md)) |
 | Исходящие соединения хоста | `github.com` (`git fetch` коммита и тега `latest`) и `ghcr.io` (образы и сверка digest) |
 | Исходящие соединения контейнера backend | `api.github.com`: оттуда карточка обновления узнаёт, куда указывает `latest`. Без него карточка не видит новую сборку |
 | Реестр | образы `mailexpert-backend`, `-frontend`, `-edge`, `-tenant-worker` в GHCR публичные: `docker login` не нужен |
@@ -237,11 +237,12 @@ stop`, тома не удалять) до запуска новой панели
    `--prefix` нужен, только если `<PREFIX>` не `/opt/mailexpert`. Флаги запоминаются в
    `<PREFIX>/install.conf`: повторный запуск без флагов повторяет последнюю установку.
 
-Что `install.sh` делает (по порядку): пакеты, Docker Engine с Compose, swap, автообновления
-безопасности; `<PREFIX>/install.conf`; checkout коммита; образы; каталоги спула обновлений
+Что `install.sh` делает (по порядку): без `--no-system` — пакеты, Docker Engine с Compose, swap,
+автообновления безопасности; `<PREFIX>/install.conf`; checkout коммита; образы; каталоги спула обновлений
 `<PREFIX>/state/update-spool/{request,result}` (uid процесса backend он спрашивает у образа и пишет в
 `<PREFIX>/state/spool-uid`); генерирует недостающие `SESSION_SECRET`, `ENCRYPTION_KEY`, `DB_PASSWORD`,
-пару VAPID; файлы края; затем запускает панель и край (без `--no-start`), включает `ufw`, ждёт
+пару VAPID; файлы края; затем запускает панель и край (без `--no-start`), включает `ufw` (без
+`--no-system`), ждёт
 готовности и сверяет `/api/version` с `--version`, проверяет `https://<DIRECT_HOST>` через Caddy
 (для `cf` — что `<CF_HOST>` закрыт Access); открывает или создаёт репозиторий restic; ставит таймеры
 `mailexpert-backup.timer` (03:30) и `mailexpert-health.timer` (каждые 5 минут) и исполнитель
@@ -432,7 +433,7 @@ $D/update.sh --check latest; echo "exit $?"       # предпроверка к�
 |---|---|
 | `RESTIC_REPOSITORY` и `RESTIC_PASSWORD` (ключ восстановления, `backup.sh --show-recovery-key`) | без них снимки не прочитать |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (и `AWS_DEFAULT_REGION`, если нужен) | доступ к бакету |
-| флаги установки: `--signin`, хосты, `--admin-email`, `--project`, `--prefix` | сервер B ставится с теми же |
+| флаги установки: `--signin`, хосты, `--admin-email` | сервер B ставится с теми же; `--project`, `--edge-project`, `--http-port`, `--prefix`, `--no-system` у B могут быть свои ([deployment.md, раздел 6](deployment.md#6-переезд-панели-на-другой-сервер)) |
 | доступ к Cloudflare (DNS, туннель) | переключение адреса |
 
 Остальное приходит из снимка и вручную не переносится: `.env` (`ENCRYPTION_KEY`, `DB_PASSWORD`,
@@ -441,10 +442,10 @@ $D/update.sh --check latest; echo "exit $?"       # предпроверка к�
 `app.pfx` с файлом пароля. `restore.sh` берёт сгенерированные ключи из снимка вместо своих, а секреты
 владельца — только там, где на B их нет.
 
-**Команды.** На сервере B (Ubuntu 24.04, требования раздела 1):
+**Команды.** На сервере B (требования раздела 1; `mailexpert` в `docker compose -p` — имя проекта B):
 
 ```bash
-# 1. та же версия, что работает на A (status.sh на A: running), с теми же флагами, но --no-start
+# 1. та же версия, что работает на A (status.sh на A: running), тот же режим входа и хосты, --no-start
 git clone https://github.com/wyrtensi/MailExpert.git <PREFIX>/app
 git -C <PREFIX>/app checkout --detach <12 символов версии A>
 install -m 600 /dev/null /root/restic.env      # RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY

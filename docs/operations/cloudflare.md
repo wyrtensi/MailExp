@@ -432,7 +432,8 @@ curl -fsS -X POST "$CF_API/accounts/<ACCOUNT_ID>/access/apps" \
 
 Caddy выпускает по нему сертификат через DNS-01 — для `<DIRECT_HOST>` из трёх и более частей это
 сертификат на `*.example.com`, чтобы точное имя не попадало в журналы Certificate Transparency.
-Порты 80 и 443 на сервере при этом открыты (`install.sh` включает их в `ufw`).
+Порты 80 и 443 на сервере при этом открыты (`install.sh` открывает их в `ufw`; с `--no-system`
+файрвол настраиваете вы).
 
 **Через API.**
 

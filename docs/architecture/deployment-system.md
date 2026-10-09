@@ -23,9 +23,9 @@ IPv4 панели, `<PREFIX>` — каталог установки (по умо
 | postgres | PostgreSQL 16, единственная база панели | `postgres:16-alpine`, том `<project>_postgres_data` | всё: пользователи, ящики, письма, журнал, зашифрованные пароли |
 | redis | Redis 7: сессии, кэш | `redis:7-alpine`, том `<project>_redis_data` | сессии (`noeviction`) |
 | tenant-worker | необязательный: EXO PowerShell за белым списком операций, подписывает ассерции Graph сертификатом приложения | `ghcr.io/wyrtensi/mailexpert-tenant-worker:sha-<12>`, профиль compose `tenant` | PFX и пароль — файлы на хосте, только чтение; входят в снимок restic панели |
-| edge: caddy | TLS для `<DIRECT_HOST>` (DNS-01 через Cloudflare) | `ghcr.io/wyrtensi/mailexpert-edge:sha-<12>`, **закреплён по digest** в `<PREFIX>/edge/.env` (`EDGE_IMAGE`) | сертификаты в томе `caddy_data` |
+| edge: caddy | TLS для `<DIRECT_HOST>` (DNS-01 через Cloudflare) | `ghcr.io/wyrtensi/mailexpert-edge:sha-<12>`, **закреплён по digest** в `<PREFIX>/edge/.env` (`EDGE_IMAGE`) | сертификаты в томе `<edge-project>_caddy_data` |
 | edge: cloudflared | исходящий туннель к `<CF_HOST>` | `cloudflare/cloudflared:<версия>` из `deploy/edge/compose.yml` | нет (токен в `edge/.env`) |
-| таймеры панели | `mailexpert-backup.timer` (restic в S3), `mailexpert-health.timer` (Healthchecks) | systemd на хосте панели, скрипты из `<PREFIX>/app/scripts/deploy` | `<PREFIX>/state/` |
+| таймеры панели | `mailexpert-backup.timer` (restic в S3), `mailexpert-health.timer` (Healthchecks) | systemd на хосте панели (с `--no-system` тоже), скрипты из `<PREFIX>/app/scripts/deploy`; с `--project <имя>` имена юнитов с суффиксом `-<имя>` | `<PREFIX>/state/` |
 | исполнитель обновлений | `mailexpert-updater.path` следит за спулом запросов, `mailexpert-updater.service` (root) запускает `updater.sh` — обновление кнопкой из панели (раздел 9) | systemd на хосте панели, юниты из `deploy/systemd/`, ставит `install.sh`, когда хостом управляет systemd (с `--no-system` тоже); с `--project <имя>` имена юнитов с суффиксом `-<имя>` | `<PREFIX>/state/update-spool/`, `<PREFIX>/state/updater/` |
 | почтовый узел | mailcow и его скрипты хоста: `setup.sh`, таймер диапазонов EOP и файрвола, ночной бэкап узла | отдельный сервер; mailcow в `/opt/mailcow-dockerized`, копия репозитория MailExpert, копии скриптов в `/opt/mailexpert-node` | почта (vmail), mysql mailcow, `/etc/mailexpert-node/node.env` |
 
@@ -56,7 +56,7 @@ EOP ──25──> узел (mailcow) ──25──> EOP (smart host)
 
 | Откуда → куда | Порт | Доступ |
 |---|---|---|
-| интернет → caddy | 80, 443 | режимы `direct`/`both`; иначе закрыт `ufw` |
+| интернет → caddy | 80, 443 | режимы `direct`/`both`; иначе закрыт `ufw` (с `--no-system` — файрволом оператора) |
 | caddy, cloudflared → frontend | `127.0.0.1:8080` | только loopback |
 | frontend → backend; backend → postgres, redis, tenant-worker | сеть compose | наружу не публикуются; к исполнителю — общий токен `TENANT_WORKER_TOKEN` |
 | backend → `<MAIL_HOST>` | 443 (API), 993 (IMAP), 587 (SMTP) | ключ API mailcow с «Allow API access from» = `<PANEL_IP>`; 993/587 файрвол узла открывает только `<PANEL_IP>` |
@@ -122,7 +122,7 @@ fail2ban, API). Смена IP панели — правка `--panel-ip` на у
 | Топология | Серверы | Когда |
 |---|---|---|
 | **A. Панель + узел** (основная) | панель: Ubuntu 24.04, 4 vCPU / 8 ГБ (под эти лимиты рассчитан `deploy/compose.prod.yml`); узел: Ubuntu 24.04, 4 vCPU / 8 ГБ до 500 ящиков ([mail-node.md, раздел 2](../operations/mail-node.md)) | ящики на своих доменах, EOP; tenant-worker на сервере панели, если подключён тенант |
-| **B. Только панель** | панель; минимум, который проверяет `install.sh`: 2 vCPU / 4 ГБ / 20 ГБ свободного диска | только Gmail и внешние IMAP-ящики, без своих доменов |
+| **B. Только панель** | панель; минимум, который проверяет `install.sh`: 2 vCPU / 4 ГБ / 20 ГБ свободного диска. Отдельный сервер или общий с другими проектами (`--no-system`, [что панель трогает на общем сервере](../operations/deployment.md#сосед-на-общем-сервере-что-панель-трогает-и-что-нет)) | только Gmail и внешние IMAP-ящики, без своих доменов |
 | **C. Стенд** | один сервер или локальный Docker; `--local-auth`, `--no-edge` или `--edge-tls internal` | проверка версии перед продом; см. [local-stand.md](../operations/local-stand.md) |
 
 Обе машины топологии A — у провайдеров с требованиями из mail-node.md (порт 25, PTR для узла);
