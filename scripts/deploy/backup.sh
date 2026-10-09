@@ -12,7 +12,8 @@
 # mark_moved_away). Pings BACKUP_PING_URL (or HEALTHCHECK_PING_URL) at the start, on success and
 # on failure.
 #
-# Exit codes: 0 done (or skipped on a standby server), 1 failure, 2 invalid input.
+# Exit codes: 0 done (or skipped on a standby server), 1 failure (containers of another owner in
+# the panel's compose project included: nothing is dumped then), 2 invalid input.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
@@ -274,6 +275,11 @@ main() {
     backup_configured "$ENV_FILE" ||
       die "backups are not configured: add RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY with configure.sh, then run install.sh"
   fi
+  # The dump (compose run) and --with-redis (compose exec, cp) go into the panel's compose project
+  # by name: with a neighbour's containers in it they would dump the neighbour's database. A
+  # failure like any other: exit 1 and, with restic configured, the fail ping (finish).
+  local problem
+  problem=$(panel_exec_problem) || die "$problem"
 
   mkdir -p "$BACKUP_DIR"
   STAGING=$BACKUP_DIR/staging

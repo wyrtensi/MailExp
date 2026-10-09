@@ -17,8 +17,9 @@
 #   google-app.sh replace-secret <id> <secret file | ->   new client secret from a file or stdin
 #
 # Exit codes: 0 done, 1 refused (unknown app, app still has mailboxes, invalid value), 2 invalid
-# input or a wrapper error (not root, no installation: the same as mailexpert-cli.sh), 3 the CLI
-# failed (database or Redis down). A label that starts with - goes after --:
+# input or a wrapper error (not root, no installation, containers of another owner in the panel's
+# compose project: the same as mailexpert-cli.sh), 3 the CLI failed (database or Redis down) or
+# docker could not be asked. A label that starts with - goes after --:
 # google-app.sh set-label <id> -- -label.
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
@@ -56,7 +57,8 @@ replace-secret reads the new client secret (plain text) from a file, or from std
 never an argument; on a terminal it is typed without echo.
 A label (or any argument) that starts with - goes after --, e.g. set-label <id> -- -label.
 Exit codes: 0 done, 1 refused (unknown app, app still has mailboxes, invalid value), 2 invalid
-input or a wrapper error (not root, no installation), 3 the CLI failed (database or Redis down).
+input or a wrapper error (not root, no installation, containers of another owner in the panel's
+compose project), 3 the CLI failed (database or Redis down) or docker could not be asked.
 EOF
 }
 
@@ -184,6 +186,9 @@ main() {
 
   [ "$(id -u)" = 0 ] || die "run google-app.sh as root" 2
   load_install "$prefix"
+  # Before the secret is read or piped anywhere: exec would reach a neighbour's backend of the same
+  # compose project name (lib/app.sh panel_exec_problem).
+  guard_panel_exec 2 3
 
   # The CLI's own status (1 refused, 2 invalid input, 3 failed) is the script's: capture it, since
   # the ERR trap would otherwise turn every nonzero status into 1.

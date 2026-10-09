@@ -61,7 +61,10 @@ setup() {
 
 # --- past the root check and install.conf, with docker and id stubbed on PATH ---
 
-# id -u answers 0; docker logs its arguments and answers as the STUB_* variables say.
+# id -u answers 0; docker logs its arguments and answers as the STUB_* variables say. docker ps (the
+# ownership check, lib/app.sh panel_exec_problem) lists the panel project's containers: by default
+# one this install's compose made (working directory <prefix>/app); STUB_CONTAINERS replaces the
+# list ("<name>\037<working dir>\037<install ID>" lines), STUB_DOCKER_PS_STATUS fails it.
 stub_root() {
   STUB=$BATS_TEST_TMPDIR/bin
   mkdir -p "$STUB"
@@ -69,6 +72,11 @@ stub_root() {
   cat >"$STUB/docker" <<'STUB_EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DOCKER_LOG"
+if [ "$1" = ps ]; then
+  if [ -n "${STUB_DOCKER_PS_STATUS:-}" ]; then echo "Cannot connect to the Docker daemon" >&2; exit "$STUB_DOCKER_PS_STATUS"; fi
+  printf "${STUB_CONTAINERS-me-test-backend-1\037$P/app\037}\n"
+  exit 0
+fi
 case " $* " in
   *" ps "*) printf '%s\n' "${STUB_SERVICES-backend}"; exit "${STUB_PS_STATUS:-0}" ;;
   # docker compose exec forwards stdin: a call that reads it would take what the CLI should get.
@@ -79,7 +87,7 @@ exit 0
 STUB_EOF
   chmod +x "$STUB/id" "$STUB/docker"
   export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log
-  P=$BATS_TEST_TMPDIR/p
+  export P=$BATS_TEST_TMPDIR/p
   mkdir -p "$P"
   printf '%s\n' VERSION=sha-0123456789ab SIGNIN=direct DIRECT_HOST=panel.example.com LOCAL_AUTH=1 \
     PROJECT=me-test HTTP_PORT=18090 >"$P/install.conf"
@@ -92,6 +100,42 @@ STUB_EOF
   [[ $output == *"cli says hi"* ]]
   grep -q -- "exec -T backend node src/cli/mailexpert.js mailbox show a b@example.com --json" "$DOCKER_LOG"
   grep -q -- "-p me-test" "$DOCKER_LOG"
+}
+
+@test "a container of another owner in the panel's project: exit 2 naming it, nothing is exec'd" {
+  stub_root
+  STUB_CONTAINERS='me-test-backend-1\037/srv/neighbour/app\037fedcba9876543210' run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 2 ]
+  [[ $output == *"compose project me-test is not only this install's (its directory is $P/app): container me-test-backend-1 (/srv/neighbour/app, install fedcba9876543210); nothing was run in it"* ]]
+  grep -q -- "ps -a --filter label=com.docker.compose.project=me-test" "$DOCKER_LOG"
+  ! grep -q '^compose' "$DOCKER_LOG"
+  # agent token --out: the file is not made either.
+  STUB_CONTAINERS='x\037\037' run bash "$SCRIPT" --prefix "$P" agent token issue --out "$BATS_TEST_TMPDIR/t" --yes
+  [ "$status" -eq 2 ]
+  [[ $output == *"container x (no compose working directory)"* ]]
+  [ ! -e "$BATS_TEST_TMPDIR/t" ]
+}
+
+@test "this install's containers pass the ownership check: by install ID from any directory, or by directory" {
+  stub_root
+  printf 'INSTALL_ID=0123456789abcdef\n' >>"$P/install.conf"
+  STUB_CONTAINERS="me-test-backend-1\037/moved/app\0370123456789abcdef\nme-test-postgres-1\037$P//app/\037" run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 0 ]
+  [[ $output == *"cli says hi"* ]]
+  # One docker ps for the check, then compose.
+  [ "$(grep -c '^ps ' "$DOCKER_LOG")" = 1 ]
+  # Nothing in the project at all (a stopped panel): the check passes, the running check answers.
+  STUB_CONTAINERS='' STUB_SERVICES=postgres run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 3 ]
+  [[ $output == *"backend container is not running"* ]]
+}
+
+@test "docker that does not answer the ownership check: exit 3, nothing is exec'd" {
+  stub_root
+  STUB_DOCKER_PS_STATUS=1 run bash "$SCRIPT" --prefix "$P" domain list
+  [ "$status" -eq 3 ]
+  [[ $output == *"cannot list Docker's containers to check compose project me-test"* ]]
+  ! grep -q '^compose' "$DOCKER_LOG"
 }
 
 @test "stdin reaches the CLI whole: the checks before it do not read it" {

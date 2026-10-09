@@ -21,9 +21,10 @@
 # would merge the CLI's stderr into its stdout and break the JSON.
 #
 # Exit codes: the CLI's own (0 done, 1 refused, 2 usage or a missing confirmation, 3 a failure);
-# 2 when the wrapper's input or the installation is not right (not root included); 3 when docker
-# cannot run the CLI (the backend container is not running, the image predates the CLI, docker
-# itself failed).
+# 2 when the wrapper's input or the installation is not right (not root included, or the panel's
+# compose project holds containers of another owner: nothing is exec'd then); 3 when docker cannot
+# run the CLI (the backend container is not running, the image predates the CLI, docker itself
+# failed).
 # shellcheck source-path=SCRIPTDIR
 set -euo pipefail
 
@@ -58,7 +59,8 @@ container). "mailexpert-cli.sh
 this host (0600).
 --prefix is this wrapper's own option and comes first (default /opt/mailexpert).
 Exit codes: the CLI's (0 done, 1 refused, 2 usage or a missing confirmation, 3 a failure);
-2 for the wrapper's own input, root or installation problems; 3 when docker cannot run the CLI.
+2 for the wrapper's own input, root or installation problems (containers of another owner in the
+panel's compose project among them); 3 when docker cannot run the CLI.
 EOF
 }
 
@@ -166,7 +168,10 @@ main() {
     out_file=""
   fi
 
-  # Checked first, so that a failure of docker is never read as the CLI's own exit code.
+  # Checked first, so that a failure of docker is never read as the CLI's own exit code. The
+  # panel's compose project must hold only this install's containers: exec would otherwise reach a
+  # neighbour's backend of the same project name (lib/app.sh panel_exec_problem).
+  guard_panel_exec 2 3
   local running
   running=$(app_compose ps --status running --services 2>/dev/null) || die "docker compose failed for the panel in $prefix" 3
   grep -qx backend <<<"$running" || die "the panel's backend container is not running (start it: docker compose up -d)" 3
