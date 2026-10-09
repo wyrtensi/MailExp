@@ -6,7 +6,7 @@
     "mailexpert": "src/cli/mailexpert.js"
   },
   "engines": {
-    "node": ">=22.19 <23"
+    "node": ">=24 <25"
   },
   "scripts": {
     "start": "node src/index.js",

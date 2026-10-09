@@ -75,6 +75,6 @@ export function safeFetch(url, options = {}, { allowPrivate = false, requireHttp
     return Promise.reject(insecure());
   }
   // Use undici's own fetch: its Agent speaks the v2 dispatcher handler API, which the
-  // undici bundled into Node's global fetch does not (Node 22 ships undici 6).
+  // undici bundled into Node's global fetch does not (Node 24 ships undici 7).
   return undiciFetch(url, { ...options, dispatcher: agentFor(allowPrivate, requireHttps) });
 }

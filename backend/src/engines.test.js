@@ -18,7 +18,7 @@ describe('backend engines', () => {
   it('does not admit a Node version below what undici requires', () => {
     const undici = readJson('../node_modules/undici/package.json');
     expect(atLeast(lowerBound(pkg.engines.node), lowerBound(undici.engines.node))).toBe(true);
-    expect(pkg.engines.node).toMatch(/<23$/);
+    expect(pkg.engines.node).toMatch(/<25$/);
   });
 
   it('keeps the lockfile root engines in step with package.json', () => {

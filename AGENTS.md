@@ -39,7 +39,7 @@ model:
 
 | Area | Entry points |
 |---|---|
-| Backend (Node 22, Express 5, ESM) | `backend/src/index.js` (composition root: middleware, route mounts, migrations at start, IMAP manager, job worker, pollers); routes in `backend/src/routes/` (`/api/accounts`, `/api/mail`, `/api/mail-node`, `/api/admin`, `/oauth`, ...); logic in `backend/src/services/` |
+| Backend (Node 24, Express 5, ESM) | `backend/src/index.js` (composition root: middleware, route mounts, migrations at start, IMAP manager, job worker, pollers); routes in `backend/src/routes/` (`/api/accounts`, `/api/mail`, `/api/mail-node`, `/api/admin`, `/oauth`, ...); logic in `backend/src/services/` |
 | Mail engine | `services/imapManager.js` (connections, IDLE, sync; very large: change surgically), `smtpTransport.js`, `gmailApiSender.js`, `sendQueue.js`, `threading/` |
 | Mail node and tenant | `services/mailNode/*` (mailcow client, domains, mailbox actions, quarantine, alerts, outages), `services/tenant/*` (driver, jobs, quarantine release), routes `mailNode*.js` |
 | Panel updates | `routes/adminUpdate.js`, `services/panelUpdate/{latest,spool,reconcile}.js` (the panel only writes a request file; the host's `updater.sh` acts) |

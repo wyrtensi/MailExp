@@ -220,7 +220,7 @@ No container runtime required. The steps below use Ubuntu/Debian; adapt package 
 
 ### Prerequisites
 
-- **Node.js 22.19+ (LTS)** — [nodejs.org](https://nodejs.org) or via your package manager.
+- **Node.js 24+ (Active LTS)** — [nodejs.org](https://nodejs.org) or via your package manager.
 - **PostgreSQL 16+**
 - **Redis 7+**
 - **nginx** — serves the built frontend and proxies API/WebSocket requests to the backend
@@ -229,14 +229,14 @@ No container runtime required. The steps below use Ubuntu/Debian; adapt package 
 
 **Ubuntu / Debian:**
 ```bash
-# Node.js 22 via NodeSource
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+# Node.js 24 via NodeSource
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt-get install -y nodejs postgresql redis-server nginx
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install node@22 postgresql@16 redis nginx
+brew install node@24 postgresql@16 redis nginx
 brew services start postgresql@16
 brew services start redis
 ```
