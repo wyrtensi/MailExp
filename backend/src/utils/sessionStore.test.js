@@ -3,6 +3,7 @@ import { EventEmitter, once } from 'node:events';
 import express from 'express';
 import session from 'express-session';
 import { buildSessionOptions } from './sessionConfig.js';
+import { guardedSessionStore } from './sessionStore.js';
 
 // express-session saves the whole session when a request that changed it ends. A request that
 // read the session, then waits (on IMAP, SMTP, an IdP) and changes it would put back the copy it
@@ -119,5 +120,93 @@ describe('concurrent session writes', () => {
 
     const fresh = cookieFrom(await get('/slow-write?note=first-visit'));
     expect(await sessionOf(fresh)).toEqual({ userId: null, locked: false, note: 'first-visit', step: null });
+  });
+});
+
+// The guarded store on its own, in front of a store whose calls a test sees and can hold back.
+describe('guarded session store', () => {
+  const cookie = () => ({ originalMaxAge: 60_000, expires: new Date(Date.now() + 60_000).toISOString() });
+  function innerStore() {
+    const inner = {
+      data: new Map(), sets: [], touches: [], getError: null, holdSets: false, heldSets: [],
+      get(sid, callback) {
+        setImmediate(() => callback(inner.getError, inner.data.has(sid) ? JSON.parse(inner.data.get(sid)) : undefined));
+      },
+      set(sid, sess, callback) {
+        inner.data.set(sid, JSON.stringify(sess));
+        inner.sets.push(JSON.parse(JSON.stringify(sess)));
+        if (inner.holdSets) inner.heldSets.push(callback);
+        else setImmediate(callback);
+      },
+      touch(sid, _sess, callback) { inner.touches.push(sid); setImmediate(callback); },
+      destroy(sid, callback) { inner.data.delete(sid); setImmediate(callback); },
+    };
+    return inner;
+  }
+  // A session read from the store, as express-session's load builds it.
+  function load(store, inner, sid) {
+    return store.createSession({ sessionID: sid, sessionStore: store }, JSON.parse(inner.data.get(sid)));
+  }
+  const save = (sess) => new Promise((resolve, reject) => sess.save((err) => (err ? reject(err) : resolve())));
+  const stored = (inner, sid) => {
+    const fields = JSON.parse(inner.data.get(sid));
+    delete fields.cookie;
+    return fields;
+  };
+  const until = (check) => new Promise((resolve) => {
+    const wait = () => (check() ? resolve() : setImmediate(wait));
+    wait();
+  });
+
+  it('saves a change made while its previous write was under way', async () => {
+    const inner = innerStore();
+    const store = guardedSessionStore(inner);
+    inner.data.set('s1', JSON.stringify({ cookie: cookie(), userId: 'u1' }));
+    const sess = load(store, inner, 's1');
+    sess.note = 'first';
+    inner.holdSets = true;
+    const saving = save(sess);
+    // The write has reached the store but not been answered yet.
+    await until(() => inner.heldSets.length);
+    sess.note = 'second';
+    inner.holdSets = false;
+    inner.heldSets.pop()();
+    await saving;
+    expect(stored(inner, 's1')).toEqual({ userId: 'u1', note: 'first' });
+    await save(sess);
+    expect(stored(inner, 's1')).toEqual({ userId: 'u1', note: 'second' });
+  });
+
+  it('removes a field the request deleted and keeps one another request changed meanwhile', async () => {
+    const inner = innerStore();
+    const store = guardedSessionStore(inner);
+    inner.data.set('s1', JSON.stringify({ cookie: cookie(), userId: 'u1', oauthNonce: 'n', locked: false }));
+    const sess = load(store, inner, 's1');
+    delete sess.oauthNonce;
+    const other = load(store, inner, 's1');
+    other.locked = true;
+    await save(other);
+    await save(sess);
+    expect(stored(inner, 's1')).toEqual({ userId: 'u1', locked: true });
+  });
+
+  it('only refreshes the expiry when the request changed nothing', async () => {
+    const inner = innerStore();
+    const store = guardedSessionStore(inner);
+    inner.data.set('s1', JSON.stringify({ cookie: cookie(), userId: 'u1' }));
+    await save(load(store, inner, 's1'));
+    expect(inner.sets).toEqual([]);
+    expect(inner.touches).toEqual(['s1']);
+  });
+
+  it('passes on a store failure while reading before a write', async () => {
+    const inner = innerStore();
+    const store = guardedSessionStore(inner);
+    inner.data.set('s1', JSON.stringify({ cookie: cookie(), userId: 'u1' }));
+    const sess = load(store, inner, 's1');
+    sess.note = 'x';
+    inner.getError = new Error('store unavailable');
+    await expect(save(sess)).rejects.toThrow('store unavailable');
+    expect(inner.sets).toEqual([]);
   });
 });

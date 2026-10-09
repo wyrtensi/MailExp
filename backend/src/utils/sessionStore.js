@@ -18,7 +18,9 @@ import session from 'express-session';
 
 // The fields of each session as it was read from the store or last written, by Session object.
 // express-session's own load, req.session.reload() and middleware/bodyParsers.js's reloadSession
-// all build the session through createSession.
+// all build the session through createSession, so every session read from the store has one.
+// A session from generate or regenerate (a new visitor, a sign-in) deliberately has none until
+// its first write: nobody else can hold its new id, so it is written whole.
 const baseOf = new WeakMap();
 
 // A session's fields as JSON text, by name. The cookie is the request's to set, and is left out
@@ -55,27 +57,37 @@ class GuardedStore extends session.Store {
   }
 
   set(sid, sess, callback = () => {}) {
+    // Taken now, before any store call: what is written and what becomes the new baseline are the
+    // same copy, so a change the request makes while this write is under way is neither lost nor
+    // taken as written, and goes out with its next save.
+    const mine = fieldsOf(sess);
     const written = (err) => {
-      if (!err) baseOf.set(sess, fieldsOf(sess));
+      if (!err) baseOf.set(sess, mine);
       callback(err);
     };
     const base = baseOf.get(sess);
-    if (!base) return this.inner.set(sid, sess, written);
+    if (!base) return this.inner.set(sid, withFields({ cookie: sess.cookie }, mine, mine.keys()), written);
     this.inner.get(sid, (err, stored) => {
       if (err) return callback(err);
       // Ended since this request read it. Nothing to write; not an error to the request either.
       if (!stored) return callback();
-      const mine = fieldsOf(sess);
       const changed = [...new Set([...base.keys(), ...mine.keys()])].filter((key) => base.get(key) !== mine.get(key));
       if (!changed.length) return this.touch(sid, sess, callback);
-      for (const key of changed) {
-        if (mine.has(key)) stored[key] = sess[key];
-        else delete stored[key];
-      }
       stored.cookie = sess.cookie;
-      this.inner.set(sid, stored, written);
+      this.inner.set(sid, withFields(stored, mine, changed), written);
     });
   }
+}
+
+// Sets each of `keys` on `target` to a fresh copy of its value in `fields`, or deletes it there
+// when `fields` has no value for it.
+function withFields(target, fields, keys) {
+  for (const key of keys) {
+    const json = fields.get(key);
+    if (json === undefined) delete target[key];
+    else target[key] = JSON.parse(json);
+  }
+  return target;
 }
 
 export function guardedSessionStore(inner) {
