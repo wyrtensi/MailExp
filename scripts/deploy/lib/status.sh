@@ -136,8 +136,8 @@ applied_note() {
 # reads the paths changed between two versions (git diff --name-only) on stdin and prints one line
 # per part of the system the change touches outside the panel's images: "next <text>" for a step a
 # person has to take, "info <text>" for what update.sh does by itself or what only matters for a
-# rollback. Nothing for a change inside the panel's images. The third argument is install.conf's
-# SYSTEM (default 1): without systemd (--no-system) install.sh installs no units.
+# rollback. Nothing for a change inside the panel's images. The third argument says whether systemd
+# runs the host (has_systemd, default 1): without it install.sh installs no units.
 update_notes() {
   local tenant=$1 edge=",${2:-}," system=${3:-1}
   local paths
@@ -163,7 +163,7 @@ update_notes() {
     if [ "$system" = 1 ]; then
       echo "info timers: the systemd units changed; install.sh (run by update.sh) installs them"
     else
-      echo "info timers: the systemd units changed; this install runs without systemd (--no-system), so install.sh does not install them"
+      echo "info timers: the systemd units changed; this host runs without systemd, so install.sh does not install them"
     fi
   fi
   return 0

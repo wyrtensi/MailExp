@@ -10,6 +10,8 @@ setup() {
   # shellcheck source=/dev/null
   source "$DEPLOY_DIR/lib/status.sh"
   SCRIPT=$DEPLOY_DIR/status.sh
+  # Whether systemd runs the host is the test's choice, not the machine's (updater_install sets 1).
+  export MAILEXPERT_SYSTEMD=0
 }
 
 # --- lib/status.sh ---
@@ -135,7 +137,7 @@ setup() {
 
 @test "update_notes: without systemd the units are not said to be installed" {
   run update_notes 0 "" 0 <<<"deploy/systemd/mailexpert-updater.path"
-  [ "$output" = "info timers: the systemd units changed; this install runs without systemd (--no-system), so install.sh does not install them" ]
+  [ "$output" = "info timers: the systemd units changed; this host runs without systemd, so install.sh does not install them" ]
   run update_notes 0 "" 1 <<<"deploy/systemd/mailexpert-updater.path"
   [ "$output" = "info timers: the systemd units changed; install.sh (run by update.sh) installs them" ]
 }
@@ -499,23 +501,24 @@ STUB_EOF
   [ "$status" -eq 2 ]
 }
 
-# updater_install <absent|active|inactive>: the install of stub_install with systemd (SYSTEM=1), the
-# updater script in the checkout and a systemctl stub that knows mailexpert-updater.path in that state.
+# updater_install <absent|active|inactive>: the install of stub_install (--no-system, project
+# me-test) on a host that systemd runs (MAILEXPERT_SYSTEMD=1), the updater script in the checkout
+# and a systemctl stub that knows the updater path unit in that state.
 updater_install() {
   stub_install
   mkdir -p "$P/app/scripts/deploy"
   printf '#!/bin/sh\n' >"$P/app/scripts/deploy/updater.sh"
   chmod +x "$P/app/scripts/deploy/updater.sh"
-  sed -i 's/^SYSTEM=0$/SYSTEM=1/' "$P/install.conf"
   cat >"$STUB/systemctl" <<'STUB_EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 case $1 in
   cat) [ "$UPDATER_UNIT" != absent ] ;;
   is-active) [ "$UPDATER_UNIT" = active ] ;;
 esac
 STUB_EOF
   chmod +x "$STUB/systemctl"
-  export UPDATER_UNIT=$1
+  export UPDATER_UNIT=$1 MAILEXPERT_SYSTEMD=1 SYSTEMCTL_LOG=$BATS_TEST_TMPDIR/systemctl.log
 }
 
 @test "updater: an active path unit is reported, no warning" {
@@ -524,20 +527,30 @@ STUB_EOF
   [ "$status" -eq 0 ]
   [ "$(jq -c '.updater' <<<"$output")" = '{"state":"active","expected":true}' ]
   [ "$(jq -r '.warnings | map(select(startswith("updater:"))) | length' <<<"$output")" = 0 ]
+  grep -qx 'is-active --quiet mailexpert-updater-me-test.path' "$SYSTEMCTL_LOG"
   run bash "$SCRIPT" --prefix "$P"
   [[ $output == *"updater              active"* ]]
 }
 
-@test "updater: a missing or inactive path unit where it is expected is a warning, not a problem" {
+@test "updater: a missing or inactive path unit where it is expected is a warning, not a problem, also with --no-system" {
   updater_install absent
+  grep -qx SYSTEM=0 "$P/install.conf"
   run bash "$SCRIPT" --prefix "$P" --json
   [ "$status" -eq 0 ]
-  [ "$(jq -r '.updater.state' <<<"$output")" = not_installed ]
-  [ "$(jq -r '.warnings | map(select(startswith("updater: mailexpert-updater.path is not installed"))) | length' <<<"$output")" = 1 ]
+  [ "$(jq -c '.updater' <<<"$output")" = '{"state":"not_installed","expected":true}' ]
+  [ "$(jq -r '.warnings | map(select(startswith("updater: mailexpert-updater-me-test.path is not installed"))) | length' <<<"$output")" = 1 ]
   [ "$(jq -r '.problems | length' <<<"$output")" = 0 ]
   UPDATER_UNIT=inactive run bash "$SCRIPT" --prefix "$P"
   [ "$status" -eq 0 ]
-  [[ $output == *"warning: updater: mailexpert-updater.path is installed but not active"* ]]
+  [[ $output == *"warning: updater: mailexpert-updater-me-test.path is installed but not active (systemctl enable --now mailexpert-updater-me-test.path)"* ]]
+}
+
+@test "updater: the default project keeps the fixed unit name" {
+  updater_install absent
+  sed -i 's/^PROJECT=me-test$/PROJECT=mailexpert/' "$P/install.conf"
+  run bash "$SCRIPT" --prefix "$P" --json
+  [ "$(jq -r '.warnings | map(select(startswith("updater: mailexpert-updater.path is not installed"))) | length' <<<"$output")" = 1 ]
+  grep -qx 'cat mailexpert-updater.path' "$SYSTEMCTL_LOG"
 }
 
 @test "updater: a checkout without updater.sh does not expect the units" {
@@ -548,22 +561,30 @@ STUB_EOF
   [ "$(jq -r '.warnings | map(select(startswith("updater:"))) | length' <<<"$output")" = 0 ]
 }
 
-@test "updater: a --no-system install says so and is not an error" {
-  stub_install
+@test "updater: a host without systemd says so and is not an error" {
+  updater_install absent
+  export MAILEXPERT_SYSTEMD=0
   run bash "$SCRIPT" --prefix "$P" --json
   [ "$status" -eq 0 ]
-  [ "$(jq -c '.updater' <<<"$output")" = '{"state":"no_system","expected":false}' ]
-  [ "$(jq -r '.info | map(select(startswith("updater: not installed, this install runs without systemd"))) | length' <<<"$output")" = 1 ]
+  [ "$(jq -c '.updater' <<<"$output")" = '{"state":"no_systemd","expected":false}' ]
+  [ "$(jq -r '.info | map(select(startswith("updater: not installed, this host runs without systemd"))) | length' <<<"$output")" = 1 ]
   [ "$(jq -r '.warnings | map(select(startswith("updater:"))) | length' <<<"$output")" = 0 ]
+  [ ! -e "$SYSTEMCTL_LOG" ]
 }
 
 @test "healthcheck.sh: an installed but inactive path unit is a problem, active or absent is not" {
   updater_install inactive
   run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
   [ "$status" -eq 1 ]
-  [[ $stderr == *"problem: updater: mailexpert-updater.path is installed but not active"* ]]
+  [[ $stderr == *"problem: updater: mailexpert-updater-me-test.path is installed but not active"* ]]
   UPDATER_UNIT=active run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
   [[ $stderr != *"updater:"* ]]
   UPDATER_UNIT=absent run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
+  [[ $stderr != *"updater:"* ]]
+}
+
+@test "healthcheck.sh: a host without systemd is not an updater problem" {
+  updater_install inactive
+  MAILEXPERT_SYSTEMD=0 run --separate-stderr bash "$DEPLOY_DIR/healthcheck.sh" --prefix "$P"
   [[ $stderr != *"updater:"* ]]
 }

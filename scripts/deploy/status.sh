@@ -194,27 +194,27 @@ collect_disk_and_backups() {
 }
 
 # collect_updater: the host updater units install.sh installs when the checkout has updater.sh and
-# the install uses systemd. A missing or inactive one is a warning (update from the panel does not
-# work, update.sh itself does); without systemd (--no-system) it is only said so.
+# systemd runs the host (also with --no-system). A missing or inactive one is a warning (update from
+# the panel does not work, update.sh itself does); without systemd it is only said so.
 collect_updater() {
-  local state expected=0
-  state=$(updater_state "$CFG_SYSTEM")
-  if [ "$CFG_SYSTEM" = 1 ] && [ -x "$APP_DIR/scripts/deploy/updater.sh" ]; then expected=1; fi
+  local state expected=0 path
+  path=$(unit_name updater path)
+  state=$(updater_state)
+  if [ "$state" != no_systemd ] && [ -x "$APP_DIR/scripts/deploy/updater.sh" ]; then expected=1; fi
   FACT[updater]=$state
   FACT[updater_expected]=$expected
   case $state in
-    no_system) info "updater: not installed, this install runs without systemd (--no-system); update from the panel is unavailable" ;;
-    no_systemd) info "updater: systemctl is not available here, the units cannot be checked" ;;
+    no_systemd) info "updater: not installed, this host runs without systemd; update from the panel is unavailable (update with update.sh)" ;;
     not_installed)
       if [ "$expected" = 1 ]; then
-        warning "updater: mailexpert-updater.path is not installed, so update from the panel does not work (install.sh --prefix $OPT_PREFIX installs it)"
+        warning "updater: $path is not installed, so update from the panel does not work (install.sh --prefix $OPT_PREFIX installs it)"
       fi
       ;;
     inactive)
       if [ "$expected" = 1 ]; then
-        warning "updater: mailexpert-updater.path is installed but not active (systemctl enable --now mailexpert-updater.path)"
+        warning "updater: $path is installed but not active (systemctl enable --now $path)"
       else
-        info "updater: mailexpert-updater.path is installed but not active, and this checkout has no scripts/deploy/updater.sh"
+        info "updater: $path is installed but not active, and this checkout has no scripts/deploy/updater.sh"
       fi
       ;;
   esac
@@ -325,7 +325,7 @@ collect_target() {
       "next "*) NEXT+=("${line#next }") ;;
       "info "*) INFO+=("${line#info }") ;;
     esac
-  done < <(update_notes "${FACT[tenant_worker]}" "${FACT[edge_services]}" "$CFG_SYSTEM" <<<"$changed")
+  done < <(update_notes "${FACT[tenant_worker]}" "${FACT[edge_services]}" "$(systemd_flag)" <<<"$changed")
   if ! git -C "$APP_DIR" merge-base --is-ancestor "$head" "$full" 2>/dev/null; then
     info "target: $target is not a descendant of the running commit (a downgrade or another branch)"
   fi

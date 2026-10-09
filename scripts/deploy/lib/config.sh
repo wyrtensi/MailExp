@@ -294,3 +294,61 @@ render_unit() {
   text=$(<"$1")
   printf '%s\n' "${text//@PREFIX@/"$2"}"
 }
+
+# unit_name <updater|backup|health> <path|service|timer>: the name of a panel unit on this host.
+# The default project keeps the names it always had (mailexpert-updater.path); any other project
+# gets its name as a suffix (mailexpert-updater-<project>.path), so two panels on one host keep
+# their own units. A suffix, not a prefix: mail node hosts already have mailexpert-node-agent and
+# mailexpert-node-backup, which a prefix would collide with for a project called "node".
+unit_name() {
+  local project=${CFG_PROJECT:-mailexpert}
+  if [ "$project" = mailexpert ]; then
+    printf 'mailexpert-%s.%s\n' "$1" "$2"
+  else
+    printf 'mailexpert-%s-%s.%s\n' "$1" "$project" "$2"
+  fi
+}
+
+# render_project_unit <template> <prefix>: render_unit, and the names of the panel's units inside
+# it (Unit= of mailexpert-updater.path, the hints in comments) follow unit_name.
+render_project_unit() {
+  local text name kind
+  text=$(render_unit "$1" "$2")
+  if [ "${CFG_PROJECT:-mailexpert}" != mailexpert ]; then
+    for name in updater backup health; do
+      for kind in path service timer; do
+        text=${text//"mailexpert-$name.$kind"/"$(unit_name "$name" "$kind")"}
+      done
+    done
+  fi
+  printf '%s\n' "$text"
+}
+
+# has_systemd: status 0 when systemd runs this host (the standard check: /run/systemd/system) and
+# systemctl is there. MAILEXPERT_SYSTEMD=1 or 0 overrides the check (the tests).
+has_systemd() {
+  case ${MAILEXPERT_SYSTEMD:-} in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1
+}
+
+# systemd_flag: 1 when has_systemd, else 0.
+systemd_flag() {
+  if has_systemd; then echo 1; else echo 0; fi
+}
+
+# unit_runs_prefix <unit file> <prefix>: status 0 when the unit file serves the install at <prefix>:
+# its ExecStart runs a script of <prefix>/app with --prefix <prefix>, or it watches <prefix>'s
+# spool. /opt/mailexpert never matches a unit of /opt/mailexpert2.
+unit_runs_prefix() {
+  local line
+  [ -f "$1" ] || return 1
+  while IFS= read -r line; do
+    case $line in
+      "ExecStart=$2/app/"*" --prefix $2" | "PathExistsGlob=$2/state/"*) return 0 ;;
+    esac
+  done <"$1"
+  return 1
+}

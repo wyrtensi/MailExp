@@ -86,7 +86,7 @@ collect_problems() {
   else
     echo "backup: not configured (add the restic keys with configure.sh, then run install.sh)"
   fi
-  updater_problem "$(updater_state "$CFG_SYSTEM")"
+  updater_problem "$(updater_state)"
   if grep -qx caddy <<<"$services" && [ "$CFG_EDGE_TLS" = acme ]; then
     expiry=$(cert_expiry_epoch) || expiry=''
     cert_problem "$CFG_DIRECT_HOST" "$now" "$expiry"

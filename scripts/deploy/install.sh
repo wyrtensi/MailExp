@@ -60,7 +60,10 @@ Usage: install.sh --version sha-<commit> --signin cf|direct|both
 --no-edge       run neither Caddy nor cloudflared
 --edge-tls      acme (default): certificate through Cloudflare DNS-01;
                 internal: Caddy's own CA (test stands)
---no-system     skip Ubuntu checks, packages, swap, ufw and timers
+--no-system     leave the host as it is: no Ubuntu and resource checks, no packages, swap, ufw
+                or unattended-upgrades, Docker is not started; the panel's own systemd units
+                (backup and health timers, the updater behind the update button) are still
+                installed when systemd runs the host
 --no-start      prepare everything, start neither the panel nor the tunnel (before a move)
 
 Values are stored in <prefix>/install.conf: a rerun without flags repeats the last install.
@@ -390,14 +393,7 @@ main() {
   lock_install
   load_restic_host mailexpert
   if panel_ready; then PANEL_WAS_RUNNING=1; fi
-  if [ "$CFG_SYSTEM" = 1 ]; then
-    check_os
-    check_resources
-    install_packages
-    ensure_docker_running
-    ensure_swap
-    enable_unattended_upgrades
-  fi
+  prepare_host
   check_tools
   check_docker
   check_ports
@@ -429,10 +425,7 @@ main() {
   fi
   admin_notice
   setup_backups
-  if [ "$CFG_SYSTEM" = 1 ]; then
-    install_timers
-    install_updater
-  fi
+  install_units
   log "done"
 }
 

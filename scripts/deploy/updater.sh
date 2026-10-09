@@ -240,7 +240,7 @@ do_check() {
   new_log "$logfile"
   set_result "$id" "id=$(json_str "$id")" "action=\"check\"" "target=$(json_str "$target")" \
     "state=\"checking\"" "from=$(json_str "$CFG_VERSION")" "receivedAt=$(json_str "$(now)")" \
-    "logFile=$(json_str "$logfile")" "journal=\"journalctl -u mailexpert-updater.service\""
+    "logFile=$(json_str "$logfile")" "journal=$(json_str "journalctl -u $(unit_name updater service)")"
   reason=$(check_target "$target")
   if [ -n "$reason" ]; then refuse "$id" check "$target" "$reason"; return 0; fi
   preflight "$id" "$target" "$logfile"
@@ -282,7 +282,7 @@ do_update() {
   new_log "$logfile"
   set_result "$id" "id=$(json_str "$id")" "action=\"update\"" "target=$(json_str "$target")" \
     "state=\"checking\"" "from=$(json_str "$from")" "receivedAt=$(json_str "$(now)")" \
-    "logFile=$(json_str "$logfile")" "journal=\"journalctl -u mailexpert-updater.service\""
+    "logFile=$(json_str "$logfile")" "journal=$(json_str "journalctl -u $(unit_name updater service)")"
   reason=$(check_target "$target")
   if [ -n "$reason" ]; then refuse "$id" update "$target" "$reason"; return 0; fi
   preflight "$id" "$target" "$logfile"
@@ -403,7 +403,7 @@ finish_on_exit() {
   [ -n "$CURRENT_ID" ] && [ "$CURRENT_ID" = "$RESULT_ID" ] || return 0
   if jq -e '.terminal == false' >/dev/null 2>&1 <<<"$RESULT_JSON"; then
     set_result "$CURRENT_ID" "state=\"error\"" "finishedAt=$(json_str "$(now)")" \
-      "message=$(json_str "updater.sh stopped unexpectedly; see journalctl -u mailexpert-updater.service and status.sh")"
+      "message=$(json_str "updater.sh stopped unexpectedly; see journalctl -u $(unit_name updater service) and status.sh")"
   fi
 }
 

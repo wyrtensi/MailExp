@@ -65,7 +65,7 @@ finish() {
   if [ -n "$VERIFY_DIR" ]; then rm -rf "$VERIFY_DIR"; fi
   if [ -n "$STAGING" ]; then rm -rf "$STAGING"; fi
   if [ "$status" != 0 ] && [ "$STARTED" = 1 ]; then
-    send_ping "$PING_URL" fail "backup.sh failed with exit $status; see journalctl -u mailexpert-backup"
+    send_ping "$PING_URL" fail "backup.sh failed with exit $status; see journalctl -u $(unit_name backup service)"
   fi
   exit "$status"
 }
