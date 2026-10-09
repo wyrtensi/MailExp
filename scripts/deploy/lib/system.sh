@@ -1,7 +1,22 @@
 # shellcheck shell=bash
-# Setup of a dedicated Ubuntu 24.04 server. install.sh skips all of it with --no-system.
+# Setup of a dedicated Ubuntu 24.04 server (OS and resource checks, packages, Docker, swap,
+# unattended-upgrades, ufw), which install.sh skips with --no-system, and the panel's own systemd
+# units, which it installs whenever systemd runs the host.
 
 DOCKER_APT_PACKAGES=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+# Where the units go; MAILEXPERT_SYSTEMD_DIR moves it (the tests).
+SYSTEMD_DIR=${MAILEXPERT_SYSTEMD_DIR:-/etc/systemd/system}
+
+# prepare_host: the host changes before Docker is checked; none with --no-system (SYSTEM=0).
+prepare_host() {
+  [ "$CFG_SYSTEM" = 1 ] || return 0
+  check_os
+  check_resources
+  install_packages
+  ensure_docker_running
+  ensure_swap
+  enable_unattended_upgrades
+}
 
 check_os() {
   local id version
@@ -120,61 +135,121 @@ apply_ufw() {
   log "ufw: enabled, SSH ports ${ports[*]}${rules[*]:+, allowed now: ${rules[*]}}"
 }
 
-# install_updater: the host side of "update from the panel" (updater.sh): mailexpert-updater.path
-# watches the spool's request directory and starts mailexpert-updater.service. Installed only when
-# the checked-out commit has updater.sh; reruns rewrite the units.
+# install_units: the panel's own systemd units (timers and updater), installed whenever systemd runs
+# the host, with or without --no-system: they change nothing outside the panel. Without systemd (a
+# plain container, docker-in-docker) there is nothing to install them into.
+install_units() {
+  if ! has_systemd; then
+    log "systemd units: skipped, this host runs without systemd: no update button in the panel, no nightly backup, no health timer; run $APP_DIR/scripts/deploy/backup.sh --prefix $OPT_PREFIX and healthcheck.sh --prefix $OPT_PREFIX from cron, update with update.sh"
+    return 0
+  fi
+  remove_stale_fixed_units
+  install_timers
+  install_updater
+}
+
+# remove_stale_fixed_units: before the unit names followed --project, every install used the
+# default names (mailexpert-updater.path, ...). For another project, a unit under a default name
+# that serves this prefix is this install's own old copy: left in place it would watch the spool
+# and run the timers a second time. It is disabled and removed; a unit under a default name that
+# serves another prefix belongs to another install and stays.
+remove_stale_fixed_units() {
+  local name kind removed=0
+  [ "$CFG_PROJECT" != mailexpert ] || return 0
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.service" "$OPT_PREFIX" ||
+      unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.$kind" "$OPT_PREFIX" || continue
+    systemctl disable --now "mailexpert-$name.$kind" >/dev/null 2>&1 || true
+    rm -f "$SYSTEMD_DIR/mailexpert-$name.$kind" "$SYSTEMD_DIR/mailexpert-$name.service"
+    log "systemd units: removed mailexpert-$name.$kind of $OPT_PREFIX, it is $(unit_name "$name" "$kind") now"
+    removed=1
+  done
+  if [ "$removed" = 1 ]; then systemctl daemon-reload; fi
+}
+
+# remove_project_units_after_downgrade: after install.sh of a version older than the per-project
+# names ran (rollback.sh, the updater's automatic rollback), it has put this install's units back
+# under the default names; this install's suffixed units, left enabled, would watch the spool and
+# run the timers a second time. For another project, each unit kind whose default-name unit now
+# serves this prefix loses its suffixed units: the path unit or timer is disabled and both files
+# are removed. A running service is never stopped (the updater may be running inside it).
+remove_project_units_after_downgrade() {
+  local name kind removed=0 suffixed
+  [ "$CFG_PROJECT" != mailexpert ] || return 0
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.service" "$OPT_PREFIX" ||
+      unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.$kind" "$OPT_PREFIX" || continue
+    suffixed=$(unit_name "$name" "$kind")
+    [ -e "$SYSTEMD_DIR/$suffixed" ] || [ -e "$SYSTEMD_DIR/$(unit_name "$name" service)" ] || continue
+    systemctl disable --now "$suffixed" >/dev/null 2>&1 || true
+    rm -f "$SYSTEMD_DIR/$suffixed" "$SYSTEMD_DIR/$(unit_name "$name" service)"
+    log "systemd units: removed $suffixed, the installed version uses mailexpert-$name.$kind"
+    removed=1
+  done
+  if [ "$removed" = 1 ]; then systemctl daemon-reload || true; fi
+}
+
+# install_updater: the host side of "update from the panel" (updater.sh): the updater path unit
+# (mailexpert-updater.path, see unit_name) watches the spool's request directory and starts the
+# updater service. Installed only when the checked-out commit has updater.sh; reruns rewrite the
+# units.
 #
 # The service is never restarted or stopped here: install.sh runs inside the update that service
 # started (update.sh -> install.sh), and a restart would kill that update half-way. A changed
 # service unit applies from its next start (daemon-reload only). Restarting the path unit is safe:
 # stopping a path unit never stops the unit it triggers.
 install_updater() {
-  local unit
+  local unit path
+  path=$(unit_name updater path)
   if [ ! -x "$APP_DIR/scripts/deploy/updater.sh" ]; then
     log "updater: skipped, $CFG_VERSION has no scripts/deploy/updater.sh"
     return 0
   fi
   for unit in service path; do
-    render_unit "$APP_DIR/deploy/systemd/mailexpert-updater.$unit" "$OPT_PREFIX" >"/etc/systemd/system/mailexpert-updater.$unit"
+    render_project_unit "$APP_DIR/deploy/systemd/mailexpert-updater.$unit" "$OPT_PREFIX" >"$SYSTEMD_DIR/$(unit_name updater "$unit")"
   done
   systemctl daemon-reload
-  systemctl enable mailexpert-updater.path >/dev/null 2>&1
-  systemctl reset-failed mailexpert-updater.path >/dev/null 2>&1 || true
-  systemctl restart mailexpert-updater.path
+  systemctl enable "$path" >/dev/null 2>&1
+  systemctl reset-failed "$path" >/dev/null 2>&1 || true
+  systemctl restart "$path"
   write_updater_installed "$STATE_DIR" "$CFG_VERSION"
-  log "updater: mailexpert-updater.path watches $STATE_DIR/update-spool/request"
+  log "updater: $path watches $STATE_DIR/update-spool/request"
 }
 
 # remove_updater <version>: after going back to a version without updater.sh: the path unit stops watching,
 # both units are removed and the panel is told the mechanism is not installed. Never stops a
 # running service (the caller is not inside one).
 remove_updater() {
-  local unit
+  local unit path service
+  path=$(unit_name updater path) service=$(unit_name updater service)
   rm -f "$STATE_DIR/update-spool/result/updater.json"
-  [ -e /etc/systemd/system/mailexpert-updater.path ] || [ -e /etc/systemd/system/mailexpert-updater.service ] || return 0
-  systemctl disable --now mailexpert-updater.path >/dev/null 2>&1 || true
-  for unit in path service; do rm -f "/etc/systemd/system/mailexpert-updater.$unit"; done
+  [ -e "$SYSTEMD_DIR/$path" ] || [ -e "$SYSTEMD_DIR/$service" ] || return 0
+  systemctl disable --now "$path" >/dev/null 2>&1 || true
+  for unit in "$path" "$service"; do rm -f "$SYSTEMD_DIR/$unit"; done
   systemctl daemon-reload || true
   log "updater: removed, $1 has no scripts/deploy/updater.sh"
 }
 
 # install_timers: a timer is enabled only when its script exists in the checked-out commit.
 install_timers() {
-  local name script unit
+  local name script unit timer
   for name in backup health; do
     case $name in
       backup) script=backup.sh ;;
       health) script=healthcheck.sh ;;
     esac
+    timer=$(unit_name "$name" timer)
     if [ ! -x "$APP_DIR/scripts/deploy/$script" ]; then
-      log "timer mailexpert-$name: skipped, $CFG_VERSION has no scripts/deploy/$script"
+      log "timer ${timer%.timer}: skipped, $CFG_VERSION has no scripts/deploy/$script"
       continue
     fi
     for unit in service timer; do
-      render_unit "$APP_DIR/deploy/systemd/mailexpert-$name.$unit" "$OPT_PREFIX" >"/etc/systemd/system/mailexpert-$name.$unit"
+      render_project_unit "$APP_DIR/deploy/systemd/mailexpert-$name.$unit" "$OPT_PREFIX" >"$SYSTEMD_DIR/$(unit_name "$name" "$unit")"
     done
     systemctl daemon-reload
-    systemctl enable --now "mailexpert-$name.timer" >/dev/null
-    log "timer mailexpert-$name: enabled"
+    systemctl enable --now "$timer" >/dev/null
+    log "timer ${timer%.timer}: enabled"
   done
 }

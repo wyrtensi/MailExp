@@ -120,7 +120,9 @@ database_bytes() {
 
 # after_install <version> <version left>: what the panel and the host updater are told once the
 # old version runs: the version left is not offered again until a newer build is promoted, and a
-# version without updater.sh gets no updater units.
+# version without updater.sh gets no updater units. A version older than the per-project unit
+# names put the units back under the default names: the suffixed ones go
+# (remove_project_units_after_downgrade).
 after_install() {
   record_rolled_back "$STATE_DIR" "$2"
   if [ ! -f "$APP_DIR/scripts/deploy/updater.sh" ]; then
@@ -128,6 +130,7 @@ after_install() {
   elif [ -f "$STATE_DIR/update-spool/result/updater.json" ]; then
     write_updater_installed "$STATE_DIR" "$1"
   fi
+  remove_project_units_after_downgrade
 }
 
 main() {

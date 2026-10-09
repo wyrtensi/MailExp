@@ -14,40 +14,58 @@ setup() {
   [ "$output" = $'containers: backend is restarting\ncontainers: postgres is unhealthy\ncontainers: redis is exited\ncontainers: edge-missing does not exist' ]
 }
 
-# stub_systemctl <absent|active|inactive>: a systemctl that knows mailexpert-updater.path in that state.
+# stub_systemctl <absent|active|inactive>: a host that systemd runs (MAILEXPERT_SYSTEMD=1) and a
+# systemctl that knows the updater path unit in that state; the units it was asked about go to
+# $SYSTEMCTL_LOG.
 stub_systemctl() {
   mkdir -p "$BATS_TEST_TMPDIR/sbin"
-  printf '%s\n' '#!/usr/bin/env bash' 'case $1 in' '  cat) [ "$UPDATER_UNIT" != absent ] ;;' \
-    '  is-active) [ "$UPDATER_UNIT" = active ] ;;' 'esac' >"$BATS_TEST_TMPDIR/sbin/systemctl"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$SYSTEMCTL_LOG"' 'case $1 in' \
+    '  cat) [ "$UPDATER_UNIT" != absent ] ;;' '  is-active) [ "$UPDATER_UNIT" = active ] ;;' 'esac' \
+    >"$BATS_TEST_TMPDIR/sbin/systemctl"
   chmod +x "$BATS_TEST_TMPDIR/sbin/systemctl"
-  export UPDATER_UNIT=$1 PATH="$BATS_TEST_TMPDIR/sbin:$PATH"
+  export UPDATER_UNIT=$1 PATH="$BATS_TEST_TMPDIR/sbin:$PATH" MAILEXPERT_SYSTEMD=1
+  export SYSTEMCTL_LOG=$BATS_TEST_TMPDIR/systemctl.log
 }
 
-@test "updater_state: no_system for --no-system installs, whatever systemctl says" {
+@test "updater_state: no_systemd on a host that systemd does not run, whatever systemctl says" {
   stub_systemctl inactive
-  [ "$(updater_state 0)" = no_system ]
+  [ "$(MAILEXPERT_SYSTEMD=0 updater_state)" = no_systemd ]
 }
 
-@test "updater_state: not_installed, active and inactive from systemctl" {
+@test "updater_state: not_installed, active and inactive from systemctl, also with --no-system" {
+  CFG_SYSTEM=0
   stub_systemctl absent
-  [ "$(updater_state 1)" = not_installed ]
+  [ "$(updater_state)" = not_installed ]
   stub_systemctl active
-  [ "$(updater_state 1)" = active ]
+  [ "$(updater_state)" = active ]
   stub_systemctl inactive
-  [ "$(updater_state 1)" = inactive ]
+  [ "$(updater_state)" = inactive ]
+  grep -qx 'cat mailexpert-updater.path' "$SYSTEMCTL_LOG"
+}
+
+@test "updater_state: another project asks for its own unit" {
+  CFG_PROJECT=p2
+  stub_systemctl active
+  [ "$(updater_state)" = active ]
+  grep -qx 'cat mailexpert-updater-p2.path' "$SYSTEMCTL_LOG"
+  run ! grep -q 'mailexpert-updater.path' "$SYSTEMCTL_LOG"
 }
 
 @test "updater_state: no_systemd without systemctl" {
+  export MAILEXPERT_SYSTEMD=1
   local PATH=$BATS_TEST_TMPDIR/empty
-  [ "$(updater_state 1)" = no_systemd ]
+  [ "$(updater_state)" = no_systemd ]
 }
 
 @test "updater_problem: only an installed but inactive path unit is a problem" {
   run updater_problem inactive
-  [[ $output == "updater: mailexpert-updater.path is installed but not active"* ]]
-  for state in active not_installed no_system no_systemd; do
+  [ "$output" = "updater: mailexpert-updater.path is installed but not active, so update requests from the panel are not served (systemctl enable --now mailexpert-updater.path)" ]
+  for state in active not_installed no_systemd; do
     [ -z "$(updater_problem "$state")" ]
   done
+  CFG_PROJECT=p2
+  run updater_problem inactive
+  [ "$output" = "updater: mailexpert-updater-p2.path is installed but not active, so update requests from the panel are not served (systemctl enable --now mailexpert-updater-p2.path)" ]
 }
 
 @test "service_problems: healthy, starting and services without a health check are fine" {

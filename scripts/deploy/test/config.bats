@@ -242,6 +242,57 @@ LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:*'
   [ "$(render_unit "$BATS_TEST_TMPDIR/u.service" /opt/mailexpert)" = "ExecStart=/opt/mailexpert/app/x.sh --prefix /opt/mailexpert" ]
 }
 
+@test "unit_name: the default project keeps the fixed names, another project gets a suffix" {
+  [ "$CFG_PROJECT" = mailexpert ]
+  [ "$(unit_name updater path)" = mailexpert-updater.path ]
+  [ "$(unit_name updater service)" = mailexpert-updater.service ]
+  [ "$(unit_name backup timer)" = mailexpert-backup.timer ]
+  [ "$(unit_name health service)" = mailexpert-health.service ]
+  CFG_PROJECT=node
+  [ "$(unit_name updater path)" = mailexpert-updater-node.path ]
+  [ "$(unit_name backup timer)" = mailexpert-backup-node.timer ]
+  [ "$(unit_name health service)" = mailexpert-health-node.service ]
+  unset CFG_PROJECT
+  [ "$(unit_name updater service)" = mailexpert-updater.service ]
+}
+
+@test "render_project_unit: the updater path unit starts the service of its own project" {
+  local units=$REPO_DIR/deploy/systemd
+  run render_project_unit "$units/mailexpert-updater.path" /opt/mailexpert
+  [[ $output == *$'\nUnit=mailexpert-updater.service\n'* ]]
+  [[ $output == *"PathExistsGlob=/opt/mailexpert/state/update-spool/request/*.json"* ]]
+  [ "$output" = "$(render_unit "$units/mailexpert-updater.path" /opt/mailexpert)" ]
+  CFG_PROJECT=p2
+  run render_project_unit "$units/mailexpert-updater.path" /opt/p2
+  [[ $output == *$'\nUnit=mailexpert-updater-p2.service\n'* ]]
+  [[ $output != *"mailexpert-updater.service"* ]]
+  run render_project_unit "$units/mailexpert-updater.service" /opt/p2
+  [[ $output == *"ExecStart=/opt/p2/app/scripts/deploy/updater.sh --prefix /opt/p2"* ]]
+  [[ $output == *"systemctl reset-failed mailexpert-updater-p2.service mailexpert-updater-p2.path"* ]]
+  [[ $output != *"mailexpert-updater.path"* ]]
+}
+
+@test "has_systemd: MAILEXPERT_SYSTEMD overrides the check" {
+  MAILEXPERT_SYSTEMD=1 has_systemd
+  MAILEXPERT_SYSTEMD=0 run ! has_systemd
+  [ "$(MAILEXPERT_SYSTEMD=1 systemd_flag)" = 1 ]
+  [ "$(MAILEXPERT_SYSTEMD=0 systemd_flag)" = 0 ]
+}
+
+@test "unit_runs_prefix: only a unit of exactly that prefix" {
+  local units=$REPO_DIR/deploy/systemd f=$BATS_TEST_TMPDIR/u
+  render_unit "$units/mailexpert-backup.service" /opt/me >"$f"
+  unit_runs_prefix "$f" /opt/me
+  run ! unit_runs_prefix "$f" /opt/me2
+  run ! unit_runs_prefix "$f" /opt
+  render_unit "$units/mailexpert-updater.path" /opt/me >"$f"
+  unit_runs_prefix "$f" /opt/me
+  run ! unit_runs_prefix "$f" /opt/m
+  render_unit "$units/mailexpert-backup.timer" /opt/me >"$f"
+  run ! unit_runs_prefix "$f" /opt/me
+  run ! unit_runs_prefix "$BATS_TEST_TMPDIR/missing" /opt/me
+}
+
 @test "install.sh --help prints the usage" {
   run bash "$DEPLOY_DIR/install.sh" --help
   [ "$status" -eq 0 ]

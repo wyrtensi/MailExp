@@ -26,7 +26,7 @@ IPv4 панели, `<PREFIX>` — каталог установки (по умо
 | edge: caddy | TLS для `<DIRECT_HOST>` (DNS-01 через Cloudflare) | `ghcr.io/wyrtensi/mailexpert-edge:sha-<12>`, **закреплён по digest** в `<PREFIX>/edge/.env` (`EDGE_IMAGE`) | сертификаты в томе `caddy_data` |
 | edge: cloudflared | исходящий туннель к `<CF_HOST>` | `cloudflare/cloudflared:<версия>` из `deploy/edge/compose.yml` | нет (токен в `edge/.env`) |
 | таймеры панели | `mailexpert-backup.timer` (restic в S3), `mailexpert-health.timer` (Healthchecks) | systemd на хосте панели, скрипты из `<PREFIX>/app/scripts/deploy` | `<PREFIX>/state/` |
-| исполнитель обновлений | `mailexpert-updater.path` следит за спулом запросов, `mailexpert-updater.service` (root) запускает `updater.sh` — обновление кнопкой из панели (раздел 9) | systemd на хосте панели, юниты из `deploy/systemd/`, ставит `install.sh` без `--no-system` | `<PREFIX>/state/update-spool/`, `<PREFIX>/state/updater/` |
+| исполнитель обновлений | `mailexpert-updater.path` следит за спулом запросов, `mailexpert-updater.service` (root) запускает `updater.sh` — обновление кнопкой из панели (раздел 9) | systemd на хосте панели, юниты из `deploy/systemd/`, ставит `install.sh`, когда хостом управляет systemd (с `--no-system` тоже); с `--project <имя>` имена юнитов с суффиксом `-<имя>` | `<PREFIX>/state/update-spool/`, `<PREFIX>/state/updater/` |
 | почтовый узел | mailcow и его скрипты хоста: `setup.sh`, таймер диапазонов EOP и файрвола, ночной бэкап узла | отдельный сервер; mailcow в `/opt/mailcow-dockerized`, копия репозитория MailExpert, копии скриптов в `/opt/mailexpert-node` | почта (vmail), mysql mailcow, `/etc/mailexpert-node/node.env` |
 
 Внешние зависимости: Cloudflare (DNS, туннель, Access), Google (вход и OAuth-приложения для Gmail),
