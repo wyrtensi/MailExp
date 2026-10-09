@@ -98,8 +98,9 @@ function requireSignInBeforeParsing(req, res, next) {
 // The identity gate may have just bound a new session (a Cloudflare Access token with no session
 // yet), which the store holds only once saved. Saving it now lets reloadSession tell a session
 // that ended during the upload from one that was never stored. The gate binds a new session only
-// through regenerate, which gives it a new id, so a session that kept the id it was read under
-// came from the store and is not written: that copy is already stale once read, and saving it
+// through bindSessionUser (services/auth/userIdentity.js), which calls regenerate whenever the
+// user or sign-in method differs, and regenerate gives the session a new id. So a session that
+// kept the id it was read under came from the store and is not written: that copy is already stale once read, and saving it
 // would undo a sign-out, lock or password reset that landed since.
 function saveSessionBeforeParsing(req, res, next) {
   if (req.sessionID === readBeforeBody.get(req).id) return next();

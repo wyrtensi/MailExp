@@ -1196,8 +1196,8 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
       // so one stored only after sending would survive it; a link sent to an address that is no
       // longer the recovery email is refused by /reset-password. A letter that fails to send takes
       // its token with it, and an earlier link still works until this one has gone out.
-      await query(
-        'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, sent_to) VALUES ($1, $2, $3, $4)',
+      const inserted = await query(
+        'INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, sent_to) VALUES ($1, $2, $3, $4) RETURNING seq',
         [user.id, tokenHash, expiresAt, trimmed]
       );
       try {
@@ -1206,7 +1206,14 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
         await query('DELETE FROM password_reset_tokens WHERE token_hash = $1', [tokenHash]);
         throw err;
       }
-      await query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND token_hash <> $2', [user.id, tokenHash]);
+      // Only links issued before this one go, so of two requests at once the later link stays.
+      // A link sent to an address that is no longer the recovery email removes nothing: a late
+      // request to the old address must not cancel a link already sent to the new one.
+      await query(
+        `DELETE FROM password_reset_tokens t USING users u
+         WHERE t.user_id = $1 AND t.seq < $2 AND u.id = t.user_id AND u.recovery_email = $3`,
+        [user.id, inserted.rows[0].seq, trimmed]
+      );
     }
   } catch (err) {
     console.error('forgot-password error:', err.message);

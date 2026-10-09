@@ -4,3 +4,7 @@
 -- this column existed have no address and are refused; they expire within an hour anyway.
 ALTER TABLE email_otp_tokens ADD COLUMN IF NOT EXISTS sent_to VARCHAR(255);
 ALTER TABLE password_reset_tokens ADD COLUMN IF NOT EXISTS sent_to VARCHAR(255);
+
+-- Reset links in the order they were issued, so a new link replaces only the ones issued before
+-- it: two requests at once must not delete each other's links. created_at can tie.
+ALTER TABLE password_reset_tokens ADD COLUMN IF NOT EXISTS seq BIGSERIAL;

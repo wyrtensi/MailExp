@@ -226,6 +226,37 @@ describe('password reset links sent to the recovery email', () => {
     expect((await resetPassword(earlier)).status).toBe(200);
   });
 
+  const tokenOfLetter = (i) => mocks.sendMail.mock.calls[i][0].text.match(/reset_token=([0-9a-f]+)/)[1];
+
+  it('of two requests at once, the later link stays', async () => {
+    // A stores its link and is held; B stores, sends and cleans up; then A sends and cleans up.
+    // Each removing every link but its own would leave none.
+    const reached = holdAfter('INSERT INTO password_reset_tokens');
+    const first = forgot();
+    const release = await reached;
+    expect((await forgot()).status).toBe(200);
+    release();
+    expect((await first).status).toBe(200);
+    expect(mocks.sendMail).toHaveBeenCalledTimes(2);
+    const [later, earlier] = [tokenOfLetter(0), tokenOfLetter(1)];
+    expect((await resetPassword(earlier)).status).toBe(400);
+    expect((await resetPassword(later)).status).toBe(200);
+  });
+
+  it('a late request to the old address does not cancel a link sent to the new one', async () => {
+    const reached = holdAfter('SELECT id, password_hash FROM users WHERE recovery_email');
+    const late = forgot(OLD);
+    const release = await reached;
+    await changeAddress(NEW);
+    expect((await forgot(NEW)).status).toBe(200);
+    const fresh = tokenOfLetter(0);
+    release();
+    expect((await late).status).toBe(200);
+    expect(mocks.sendMail.mock.calls[1][0].to).toBe(OLD);
+    expect((await resetPassword(tokenOfLetter(1))).status).toBe(400);
+    expect((await resetPassword(fresh)).status).toBe(200);
+  });
+
   it('a new link replaces the one sent before', async () => {
     expect((await forgot()).status).toBe(200);
     const earlier = mailedToken();
