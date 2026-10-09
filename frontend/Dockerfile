@@ -3,7 +3,7 @@
 # nginx:1.27-alpine via the NGINX_BASE build arg.
 ARG NGINX_BASE=nginx:alpine
 
-FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:24-alpine AS builder
 
 WORKDIR /app
 

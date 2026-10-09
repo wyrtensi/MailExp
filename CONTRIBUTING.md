@@ -34,7 +34,7 @@ is not obvious.
 
 ## Checks before a pull request
 
-Runtime: Node.js 22.19+ (see `backend/package.json`), PostgreSQL 16+, Redis 7+.
+Runtime: Node.js 24+ (see `backend/package.json`), PostgreSQL 16+, Redis 7+.
 
 ```bash
 cd backend
@@ -50,7 +50,7 @@ npm run lint
 npm run build
 ```
 
-CI runs the same steps on Node.js 22 together with `npm audit --omit=dev --audit-level=high`.
+CI runs the same steps on Node.js 24 together with `npm audit --omit=dev --audit-level=high`.
 
 ## Porting changes from upstream MailFlow
 

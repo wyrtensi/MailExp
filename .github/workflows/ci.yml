@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: backend/package-lock.json
 
@@ -56,7 +56,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
 
@@ -114,7 +114,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Unit tests of the fake EOP relay (needs openssl, which the runner has)
         run: node --test scripts/deploy/test/fake-eop/eop.test.mjs
@@ -128,7 +128,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       # The runner has openssl and pwsh: the whitelist, the handler and the dry-mode tests of the
       # real worker (R-35, R-36) run here without the image.
