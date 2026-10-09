@@ -284,7 +284,7 @@ run_logged() {
 
 do_update() {
   local id=$1 target=$2 logfile=$WORK_DIR/$1.log from=$CFG_VERSION reason verdict code=0 before after
-  local next auto=false edge
+  local next auto=false edge installed=0 units=''
   new_log "$logfile"
   set_result "$id" "id=$(json_str "$id")" "action=\"update\"" "target=$(json_str "$target")" \
     "state=\"checking\"" "from=$(json_str "$from")" "receivedAt=$(json_str "$(now)")" \
@@ -338,24 +338,39 @@ do_update() {
   log "update $id: rolling back to $from (no migration ran)"
   set_result "$id" "state=\"rolling_back\"" "exitCode=$code" \
     "message=$(json_str "$target did not become ready; no migration ran, going back to $from")"
+  # $from may predate the per-project unit names: its install.sh then writes the units of the
+  # default names, which may belong to another install on this host (the default project), for
+  # this prefix. They are saved first and put back after it, whatever its outcome.
+  if ! save_foreign_fixed_units >>"$logfile" 2>&1; then
+    warn "update $id: could not save the systemd units of another install on this host; not rolling back"
+    set_result "$id" "state=\"rollback_failed\"" "finishedAt=$(json_str "$(now)")" \
+      "message=$(json_str "$target did not become ready; going back to $from was not started: the systemd units of another install on this host could not be saved first (see the updater log); follow the runbook over SSH")"
+    return 0
+  fi
   edge=$(previous_edge_image "$from") || edge=''
   if [ -n "$edge" ]; then env_set "$EDGE_ENV" EDGE_IMAGE "$edge"; fi
   # A nightly backup that waited for update.sh may be dumping the database now (backup.sh holds
   # install.lock only for its dump): install.sh waits for it up to an hour, backup.sh's own bound,
   # instead of its default 10 minutes, so the dump of a large database does not fail the rollback.
   if run_logged "$id" "$logfile" env MAILEXPERT_LOCK_TIMEOUT=3600 bash "$APP_DIR/scripts/deploy/install.sh" --prefix "$OPT_PREFIX" --version "$from"; then
+    installed=1
+  fi
+  # The other install's units go back; the suffixed units of the kinds now under the default
+  # names must not run next to them. The service this run is in is not stopped, only its path
+  # unit and the files go.
+  if ! units_after_downgrade >>"$logfile" 2>&1; then
+    warn "update $id: the systemd units of another install on this host could not all be put back; see $logfile"
+    units="; the systemd units of another install on this host that install.sh of $from rewrote could not all be put back, so that install's updater, backup or health check may serve this one: see the updater log over SSH"
+  fi
+  if [ "$installed" = 1 ]; then
     record_rolled_back "$STATE_DIR" "$target"
     write_updater_status "$from"
     set_result "$id" "state=\"rolled_back\"" "finishedAt=$(json_str "$(now)")" \
-      "message=$(json_str "$target did not become ready; the panel went back to $from, nothing was lost")"
+      "message=$(json_str "$target did not become ready; the panel went back to $from, nothing was lost$units")"
   else
     set_result "$id" "state=\"rollback_failed\"" "finishedAt=$(json_str "$(now)")" \
-      "message=$(json_str "$target did not become ready and going back to $from failed: follow the runbook over SSH")"
+      "message=$(json_str "$target did not become ready and going back to $from failed: follow the runbook over SSH$units")"
   fi
-  # $from may predate the per-project unit names: its install.sh then put this install's units back
-  # under the default names, and the suffixed ones must not run next to them. The service this run
-  # is in is not stopped, only its path unit and the files go.
-  remove_project_units_after_downgrade >>"$logfile" 2>&1
 }
 
 # prune_results: keeps the KEEP_RESULTS newest results (and logs of the same requests).

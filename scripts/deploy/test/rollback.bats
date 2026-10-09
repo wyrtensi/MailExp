@@ -47,7 +47,17 @@ STUB_EOF
   P=$BATS_TEST_TMPDIR/p
   mkdir -p "$P/app/scripts/deploy" "$P/state" "$P/backups" "$P/edge"
   git -C "$P/app" init -q -b main
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$INSTALL_LOG"\nexit "${STUB_INSTALL:-0}"\n' >"$P/app/scripts/deploy/install.sh"
+  # STUB_OLD_UNITS=<unit templates>: like install.sh of a version older than the per-project unit
+  # names, the fake writes the units under the default names for its prefix and restarts the path unit.
+  cat >"$P/app/scripts/deploy/install.sh" <<'STUB_EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$INSTALL_LOG"
+if [ -n "${STUB_OLD_UNITS:-}" ]; then
+  for f in "$STUB_OLD_UNITS"/mailexpert-*; do sed "s#@PREFIX@#$2#g" "$f" >"$MAILEXPERT_SYSTEMD_DIR/${f##*/}"; done
+  systemctl restart mailexpert-updater.path
+fi
+exit "${STUB_INSTALL:-0}"
+STUB_EOF
   OLD=$(commit "$P/app" one)
   printf 'x\n' >"$P/app/README"
   NEW=$(commit "$P/app" two)
@@ -144,6 +154,110 @@ STUB_EOF
   grep -qx "disable --now mailexpert-updater-me-test.path" "$SYSTEMCTL_LOG"
   grep -qx "disable --now mailexpert-backup-me-test.timer" "$SYSTEMCTL_LOG"
   grep -qx "disable --now mailexpert-health-me-test.timer" "$SYSTEMCTL_LOG"
+  [ ! -e "$P/state/foreign-units" ]
+}
+
+# two_installs_host: one systemd host (a directory and a systemctl stub that logs; the command
+# named in STUB_SYSTEMCTL_FAIL fails) with the default project's units for ${P}2 under the
+# default names and this version's units of project me-test for $P; a copy in $BATS_TEST_TMPDIR/before.
+# The fake install.sh writes the default names for $P, like a version older than the per-project names.
+two_installs_host() {
+  local name kind unit
+  UNITS=$BATS_TEST_TMPDIR/systemd
+  mkdir -p "$UNITS" "$P/state"
+  cat >"$STUB/systemctl" <<'STUB_EOF'
+#!/usr/bin/env bash
+case $1 in is-active | is-enabled) exit 0 ;; esac
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+[ "$1" != "${STUB_SYSTEMCTL_FAIL:-}" ]
+STUB_EOF
+  chmod +x "$STUB/systemctl"
+  export MAILEXPERT_SYSTEMD_DIR=$UNITS SYSTEMCTL_LOG=$BATS_TEST_TMPDIR/systemctl.log STUB_OLD_UNITS=$REPO_DIR/deploy/systemd
+  printf '#!/bin/sh\n' >"$P/app/scripts/deploy/updater.sh"
+  chmod +x "$P/app/scripts/deploy/updater.sh"
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "${P}2" >"$UNITS/mailexpert-$name.$unit"
+      CFG_PROJECT=me-test render_project_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "$P" >"$UNITS/mailexpert-$name-me-test.$unit"
+    done
+  done
+  cp -r "$UNITS" "$BATS_TEST_TMPDIR/before"
+}
+
+@test "a rollback to a version with the default unit names puts another install's units under them back" {
+  stub_install
+  two_installs_host
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  # The old install.sh rewrote them for $P; now every unit is as before: the default names serve
+  # ${P}2, the suffixed ones $P.
+  grep -qx "restart mailexpert-updater.path" "$SYSTEMCTL_LOG"
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+  grep -qx "PathExistsGlob=${P}2/state/update-spool/request/\*.json" "$UNITS/mailexpert-updater.path"
+  grep -qx "ExecStart=${P}2/app/scripts/deploy/backup.sh --prefix ${P}2" "$UNITS/mailexpert-backup.service"
+  grep -qx "PathExistsGlob=$P/state/update-spool/request/\*.json" "$UNITS/mailexpert-updater-me-test.path"
+  grep -qx "ExecStart=$P/app/scripts/deploy/healthcheck.sh --prefix $P" "$UNITS/mailexpert-health-me-test.service"
+  [ "$(sed -n '/daemon-reload/,$p' "$SYSTEMCTL_LOG" | grep restart | paste -sd'|' -)" = "restart mailexpert-updater.path|restart mailexpert-backup.timer|restart mailexpert-health.timer" ]
+  run ! grep -qE "disable|service" "$SYSTEMCTL_LOG"
+  [ ! -e "$P/state/foreign-units" ]
+  [ ! -e "$P/state/rollback-in-progress" ]
+}
+
+@test "a rollback that cannot put another install's units back says so and exits 1" {
+  stub_install
+  two_installs_host
+  STUB_SYSTEMCTL_FAIL=daemon-reload run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 1 ]
+  [[ $output == *"saved copies are in $P/state/foreign-units"* ]]
+  [[ $output == *"error: rolled back to sha-${OLD:0:12}, but the systemd units of another install on this host"*"could not all be put back"* ]]
+  [ -d "$P/state/foreign-units/updater" ]
+  # This install's suffixed units are kept: nothing is disabled.
+  [ -e "$UNITS/mailexpert-updater-me-test.path" ] && [ -e "$UNITS/mailexpert-backup-me-test.timer" ]
+  run ! grep -q disable "$SYSTEMCTL_LOG"
+  [ ! -e "$P/state/rollback-in-progress" ]
+}
+
+@test "a rollback that cannot save another install's units stops before install.sh, and can be run again" {
+  stub_install
+  two_installs_host
+  # Nothing can be created under it.
+  : >"$P/state/foreign-units"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 1 ]
+  [[ $output == *"could not save the systemd units of another install on this host"*"install.sh was not run"* ]]
+  [ ! -e "$INSTALL_LOG" ]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+  # The database was swapped: a rerun goes on from there.
+  [ -e "$P/state/rollback-in-progress" ]
+  rm -f "$P/state/foreign-units"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  [[ $output == *"an earlier run already swapped the database"* ]]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+}
+
+@test "a rollback of the default project leaves the units under the default names to the old install.sh" {
+  stub_install
+  two_installs_host
+  sed -i 's/^PROJECT=me-test$/PROJECT=mailexpert/' "$P/install.conf"
+  # The default project of $P owns the default names; another project's units are suffixed.
+  rm -f "$UNITS"/*
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "$P" >"$UNITS/mailexpert-$name.$unit"
+      CFG_PROJECT=other render_project_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "${P}2" >"$UNITS/mailexpert-$name-other.$unit"
+    done
+  done
+  rm -rf "$BATS_TEST_TMPDIR/before"
+  cp -r "$UNITS" "$BATS_TEST_TMPDIR/before"
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+  # Only the old install.sh's own restart: nothing is saved, put back or removed.
+  [ "$(cat "$SYSTEMCTL_LOG")" = "restart mailexpert-updater.path" ]
+  [ ! -e "$P/state/foreign-units" ]
 }
 
 @test "not enough space for the restored copy next to the database: exit 2 before anything stops" {

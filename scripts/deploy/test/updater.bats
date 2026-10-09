@@ -259,7 +259,18 @@ STUB_EOF
   printf 'select 1;\n' >"$P/app/backend/migrations/0001_a.sql"
   printf 'services:\n  postgres:\n    image: postgres:16-alpine\n' >"$P/app/docker-compose.yml"
   # The checkout's own install.sh (the auto-rollback runs it): a fake that logs.
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$INSTALL_LOG"\necho "[mailexpert] install.sh $*" >&2\nexit "${STUB_INSTALL:-0}"\n' >"$P/app/scripts/deploy/install.sh"
+  # STUB_OLD_UNITS=<unit templates>: like install.sh of a version older than the per-project unit
+  # names, the fake writes the units under the default names for its prefix and restarts the path unit.
+  cat >"$P/app/scripts/deploy/install.sh" <<'STUB_EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$INSTALL_LOG"
+echo "[mailexpert] install.sh $*" >&2
+if [ -n "${STUB_OLD_UNITS:-}" ]; then
+  for f in "$STUB_OLD_UNITS"/mailexpert-*; do sed "s#@PREFIX@#$2#g" "$f" >"$MAILEXPERT_SYSTEMD_DIR/${f##*/}"; done
+  systemctl restart mailexpert-updater.path
+fi
+exit "${STUB_INSTALL:-0}"
+STUB_EOF
   OLD=$(commit "$P/app" one)
   printf 'x\n' >"$P/app/README"
   NEW=$(commit "$P/app" two)
@@ -576,6 +587,77 @@ id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }
   [ "$(cd "$units" && ls -1 | paste -sd' ' -)" = "mailexpert-backup.service mailexpert-backup.timer mailexpert-health.service mailexpert-health.timer mailexpert-updater.path mailexpert-updater.service" ]
   grep -qx "disable --now mailexpert-updater-me-test.path" "$SYSTEMCTL_LOG"
   run ! grep -q "service" "$SYSTEMCTL_LOG"
+}
+
+# two_installs_host: one systemd host (a directory and a systemctl stub that logs; the command
+# named in STUB_SYSTEMCTL_FAIL fails) with the default project's units for ${P}2 under the
+# default names and this version's units of project me-test for $P; a copy in $BATS_TEST_TMPDIR/before.
+# The fake install.sh writes the default names for $P, like a version older than the per-project names.
+two_installs_host() {
+  local name kind unit
+  UNITS=$BATS_TEST_TMPDIR/systemd
+  mkdir -p "$UNITS"
+  cat >"$STUB/systemctl" <<'STUB_EOF'
+#!/usr/bin/env bash
+case $1 in is-active | is-enabled) exit 0 ;; esac
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+[ "$1" != "${STUB_SYSTEMCTL_FAIL:-}" ]
+STUB_EOF
+  chmod +x "$STUB/systemctl"
+  export MAILEXPERT_SYSTEMD_DIR=$UNITS SYSTEMCTL_LOG=$BATS_TEST_TMPDIR/systemctl.log STUB_OLD_UNITS=$REPO_DIR/deploy/systemd
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "${P}2" >"$UNITS/mailexpert-$name.$unit"
+      CFG_PROJECT=me-test render_project_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "$P" >"$UNITS/mailexpert-$name-me-test.$unit"
+    done
+  done
+  cp -r "$UNITS" "$BATS_TEST_TMPDIR/before"
+}
+
+@test "an automatic rollback to a version with the default unit names puts another install's units under them back" {
+  stub_install
+  two_installs_host
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' STUB_UPDATE=1 run_updater
+  [ "$(result "$ID1" .state)" = rolled_back ]
+  [ "$(result "$ID1" .message)" = "sha-${MIG:0:12} did not become ready; the panel went back to sha-${NEW:0:12}, nothing was lost" ]
+  # The old install.sh rewrote them for $P; now every unit is as before: the default names serve
+  # ${P}2, the suffixed ones (the service this run is in among them) $P.
+  grep -qx "restart mailexpert-updater.path" "$SYSTEMCTL_LOG"
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
+  grep -qx "PathExistsGlob=${P}2/state/update-spool/request/\*.json" "$UNITS/mailexpert-updater.path"
+  grep -qx "ExecStart=$P/app/scripts/deploy/updater.sh --prefix $P" "$UNITS/mailexpert-updater-me-test.service"
+  [ "$(sed -n '/daemon-reload/,$p' "$SYSTEMCTL_LOG" | grep restart | paste -sd'|' -)" = "restart mailexpert-updater.path|restart mailexpert-backup.timer|restart mailexpert-health.timer" ]
+  run ! grep -qE "disable|service" "$SYSTEMCTL_LOG"
+  [ ! -e "$P/state/foreign-units" ]
+}
+
+@test "an automatic rollback that cannot put another install's units back says so in the result" {
+  stub_install
+  two_installs_host
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' STUB_UPDATE=1 STUB_SYSTEMCTL_FAIL=daemon-reload run_updater
+  [ "$(result "$ID1" .state)" = rolled_back ]
+  [[ $(result "$ID1" .message) == *"went back to sha-${NEW:0:12}, nothing was lost; the systemd units of another install on this host that install.sh of sha-${NEW:0:12} rewrote could not all be put back"* ]]
+  [[ $stderr == *"warning: update $ID1: the systemd units of another install on this host could not all be put back"* ]]
+  [ -d "$P/state/foreign-units/updater" ]
+  [ -e "$UNITS/mailexpert-updater-me-test.path" ] && [ -e "$UNITS/mailexpert-backup-me-test.timer" ]
+  run ! grep -q disable "$SYSTEMCTL_LOG"
+}
+
+@test "an automatic rollback that cannot save another install's units does not run install.sh" {
+  stub_install
+  two_installs_host
+  # Nothing can be created under it.
+  : >"$P/state/foreign-units"
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' STUB_UPDATE=1 run_updater
+  [ "$(result "$ID1" .state)" = rollback_failed ]
+  [[ $(result "$ID1" .message) == *"going back to sha-${NEW:0:12} was not started: the systemd units of another install on this host could not be saved first"* ]]
+  [[ $stderr == *"could not save the systemd units of another install on this host; not rolling back"* ]]
+  [ ! -e "$INSTALL_LOG" ]
+  diff -r "$BATS_TEST_TMPDIR/before" "$UNITS"
 }
 
 # hold_updater_lock <seconds>: another updater.sh holds the lock that long, from now.
