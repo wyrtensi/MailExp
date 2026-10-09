@@ -100,9 +100,17 @@ const googleGate = createIdentityGate({
   getSettings: () => ({ mode: 'google' }),
   loadUser: async (id) => (id === 'u1' ? { id, email: 'u1@example.com', is_admin: false } : null),
 });
+// Google mode behind Cloudflare Access: a valid Access token signs the request in by itself,
+// binding a fresh session that the store does not hold yet.
+const cloudflareGate = createIdentityGate({
+  getSettings: () => ({ mode: 'google', cloudflare: { teamDomain: 'team.example.com' } }),
+  verifyToken: async (token) => (token === 'good-token' ? 'u1@example.com' : null),
+  resolveUser: async () => ({ user: { id: 'u1', username: 'u1', is_admin: false } }),
+});
 
 let local;
 let google;
+let cloudflare;
 let base;
 let cookie;
 // One per path, because requireAuth ends a deleted account's session when it turns it away.
@@ -122,13 +130,14 @@ const signIn = async (userId, at = base) => cookieFrom(await fetchFully(`/login/
 beforeAll(async () => {
   local = await listen(buildApp({ identityGate: localGate }));
   google = await listen(buildApp({ identityGate: googleGate }));
+  cloudflare = await listen(buildApp({ identityGate: cloudflareGate }));
   base = local.base;
   cookie = await signIn('u1');
   for (const path of LARGE_BODY_PATHS) deletedAccountCookies[path] = await signIn('deleted');
 });
 
 afterAll(async () => {
-  for (const { server } of [local, google]) await new Promise((resolve) => server.close(resolve));
+  for (const { server } of [local, google, cloudflare]) await new Promise((resolve) => server.close(resolve));
 });
 
 beforeEach(() => {
@@ -207,6 +216,18 @@ describe('JSON body limits and sign-in', () => {
 
     const signedIn = await post(path, OVER_1MB, { cookie: await signIn('u1', google.base) }, google.base);
     expect(signedIn.status).toBe(200);
+  });
+
+  it.each(LARGE_BODY_PATHS)('accepts a body at %s signed in by a Cloudflare Access token alone', async (path) => {
+    // The identity gate binds a new session for the token before the body is read; it is not in
+    // the store until saved, and re-reading it after the upload must not turn that into a 401.
+    const res = await post(path, OVER_1MB, { 'cf-access-jwt-assertion': 'good-token' }, cloudflare.base);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ received: TWO_MB });
+
+    const refused = await post(path, OVER_1MB, { 'cf-access-jwt-assertion': 'bad-token' }, cloudflare.base);
+    expect(refused.status).toBe(401);
+    expect(parsed).toEqual([path]);
   });
 
   it.each(LARGE_BODY_PATHS)('still accepts a signed-in body over 1 MB at %s', async (path) => {

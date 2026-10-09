@@ -26,6 +26,7 @@ export function mountBodyParsers(app, { sessionMiddleware, identityGate, csrf })
     answerAfterBody(identityGate),
     answerAfterBody(csrf),
     requireSignInBeforeParsing,
+    saveSessionBeforeParsing,
   ];
   for (const [path, parser] of Object.entries(LARGE_BODY_PARSERS)) {
     app.use(path, beforeParsing, parser(), reloadSession);
@@ -71,6 +72,13 @@ function loadSessionBeforeParsing(sessionMiddleware) {
 function requireSignInBeforeParsing(req, res, next) {
   if (req.session?.userId) return next();
   discardBody(req, () => requireAuth(req, res, next));
+}
+
+// The identity gate may have just bound a new session (a Cloudflare Access token with no session
+// yet), which the store holds only once saved. Saving it now lets reloadSession tell a session
+// that ended during the upload from one that was never stored.
+function saveSessionBeforeParsing(req, res, next) {
+  req.session.save((err) => (err ? discardBody(req, () => next(err)) : next()));
 }
 
 // The session was read before the upload, so it is read again now that the body is in: a
