@@ -142,13 +142,22 @@ function receivedLoopTokens(parsedHeaders) {
   return typeof value === 'string' ? value.match(/\b[0-9a-f]{16}\b/g) || [] : [];
 }
 
-// A message from a manual sweep (run rules now) is a DB row with no headers. Read them only for a
-// message a forward rule matched, not for the whole sweep. Unreadable headers fail the forward
-// (the rule engine leaves the source in place and a later sweep retries it): forwarding without
+// The headers the loop check reads, or null when the message has none: a manual sweep (run rules
+// now) hands over DB rows, and sync stores {} when the server returned no headers.
+function knownHeaders(message) {
+  const headers = message.parsedHeaders;
+  return headers && typeof headers === 'object' && Object.keys(headers).length ? headers : null;
+}
+
+// Read the headers of a message that has none, only once a forward would really be sent (not for
+// the whole sweep, nor for a message already forwarded). Kept on the message, so a second forward
+// rule and the rule engine's header conditions reuse them. Unreadable headers fail the forward
+// (the rule engine leaves the source in place and a later run retries it): forwarding without
 // the loop check could send a copy that has already been round this mailbox once more.
 async function fetchLoopTokens(message, account, imapManager) {
   const headers = parseHeadersInput(await imapManager.fetchHeaders(account, message.uid, message.folder));
   if (!Object.keys(headers).length) throw new Error('Forward source headers unavailable');
+  message.parsedHeaders = headers;
   return receivedLoopTokens(headers);
 }
 
@@ -307,8 +316,10 @@ export async function forwardRuleMessage({
   recipient,
 }) {
   // An arrival carries its headers: checked first, it needs no database, and a looping copy must
-  // not reserve anything. A swept row is checked once the mailbox is known to send at all.
-  let loopTokens = message.parsedHeaders ? receivedLoopTokens(message.parsedHeaders) : null;
+  // not reserve anything. A message without headers is checked once the reservation shows a
+  // forward would really be sent (see fetchLoopTokens).
+  const headers = knownHeaders(message);
+  let loopTokens = headers ? receivedLoopTokens(headers) : null;
   if (loopTokens && isForwardLoop(loopTokens, account, ruleId, message)) return 'loop';
   // A turned-off mailbox, or a read-only mail node mailbox (EOP seats design), does not forward. Read
   // fresh: the account object a rule runs with may predate the change.
@@ -322,10 +333,6 @@ export async function forwardRuleMessage({
   if (isReadOnlyNodeMailbox(state)) {
     console.warn(`ruleForwarder: rule ${ruleId} not forwarded: the mailbox is read-only`);
     return 'read_only';
-  }
-  if (!loopTokens) {
-    loopTokens = await fetchLoopTokens(message, account, imapManager);
-    if (isForwardLoop(loopTokens, account, ruleId, message)) return 'loop';
   }
   const reserved = await query(
     `INSERT INTO inbox_rule_forwards (rule_id, message_id)
@@ -348,6 +355,16 @@ export async function forwardRuleMessage({
   const reservationId = reserved.rows[0].id;
   let delivered = false;
   try {
+    if (!loopTokens) {
+      // A failed fetch throws into the catch below, which releases the reservation.
+      loopTokens = await fetchLoopTokens(message, account, imapManager);
+      if (isForwardLoop(loopTokens, account, ruleId, message)) {
+        // Released, not left pending: a pending row reads as a forward in flight and would block
+        // the message's destination actions on every later run.
+        await query(`DELETE FROM inbox_rule_forwards WHERE id = $1 AND status = 'pending'`, [reservationId]);
+        return 'loop';
+      }
+    }
     const rowResult = await query(
       `SELECT id, account_id, uid, folder, subject, from_name, from_email,
               to_addresses, cc_addresses, date, body_text, body_html, attachments

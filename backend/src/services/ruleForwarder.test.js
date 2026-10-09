@@ -908,19 +908,45 @@ describe('forwardRuleMessage', () => {
       imapManager.fetchHeaders.mockResolvedValueOnce(`Subject: Fwd: Quarterly review\r\nX-MailExpert-Loop: ${ownToken}`);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        await expect(forwardRuleMessage({ ...input, message: swept })).resolves.toBe('loop');
+        await expect(forwardRuleMessage({ ...input, message: { ...swept } })).resolves.toBe('loop');
       } finally {
         warn.mockRestore();
       }
       expect(imapManager.fetchHeaders).toHaveBeenLastCalledWith(account, 42, 'INBOX');
       expect(transport.sendMail).toHaveBeenCalledTimes(1);
-      expect(query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO inbox_rule_forwards'))).toHaveLength(1);
+      // The reservation taken before the fetch is released: a pending row would block the
+      // message's destination actions on every later run.
+      expect(query.mock.calls.at(-1)[0]).toContain('DELETE FROM inbox_rule_forwards');
+    });
+
+    it('an already-forwarded message is a duplicate, with no header fetch', async () => {
+      query
+        .mockResolvedValueOnce(SENDABLE)
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ status: 'sent' }] });
+      await expect(forwardRuleMessage({ ...input, message: { ...swept } })).resolves.toBe('duplicate');
+      expect(imapManager.fetchHeaders).not.toHaveBeenCalled();
+    });
+
+    it('fetches once for two forward rules: the headers are kept on the message', async () => {
+      reserveEveryForward();
+      const message = { ...swept };
+      await expect(forwardRuleMessage({ ...input, message })).resolves.toBe('sent');
+      await expect(forwardRuleMessage({ ...input, ruleId: 'rule-2', message, recipient: 'second@example.org' })).resolves.toBe('sent');
+      expect(imapManager.fetchHeaders).toHaveBeenCalledTimes(1);
+      expect(message.parsedHeaders.subject).toBe('Quarterly review');
+    });
+
+    it('an arrival whose headers came back empty is checked the same way', async () => {
+      reserveEveryForward();
+      await expect(forwardRuleMessage({ ...input, message: { ...swept, parsedHeaders: {} } })).resolves.toBe('sent');
+      expect(imapManager.fetchHeaders).toHaveBeenCalledTimes(1);
     });
 
     it('passes the received tokens on when it is not a loop', async () => {
       reserveEveryForward();
       imapManager.fetchHeaders.mockResolvedValueOnce(`X-MailExpert-Loop: ${'cd'.repeat(8)}`);
-      await expect(forwardRuleMessage({ ...input, message: swept })).resolves.toBe('sent');
+      await expect(forwardRuleMessage({ ...input, message: { ...swept } })).resolves.toBe('sent');
       const delivered = await deliveredHeaders(transport.sendMail.mock.calls[0][0]);
       expect(delivered['x-mailexpert-loop']).toMatch(new RegExp(`^${'cd'.repeat(8)}, [0-9a-f]{16}$`));
     });
@@ -929,9 +955,10 @@ describe('forwardRuleMessage', () => {
       reserveEveryForward();
       for (const failure of [async () => { throw new Error('pool busy'); }, async () => '']) {
         imapManager.fetchHeaders.mockImplementationOnce(failure);
-        await expect(forwardRuleMessage({ ...input, message: swept })).rejects.toThrow();
+        await expect(forwardRuleMessage({ ...input, message: { ...swept } })).rejects.toThrow();
       }
-      expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO inbox_rule_forwards'))).toBe(false);
+      // Each attempt releases its reservation, so a later run retries it.
+      expect(query.mock.calls.filter(([sql]) => sql.includes('DELETE FROM inbox_rule_forwards'))).toHaveLength(2);
       expect(transport.sendMail).not.toHaveBeenCalled();
     });
 
@@ -939,7 +966,7 @@ describe('forwardRuleMessage', () => {
       query.mockResolvedValueOnce({ rows: [{ enabled: false, mail_node: false, delete_after: null, deactivated_at: null }] });
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        await expect(forwardRuleMessage({ ...input, message: swept })).resolves.toBe('disabled');
+        await expect(forwardRuleMessage({ ...input, message: { ...swept } })).resolves.toBe('disabled');
       } finally {
         warn.mockRestore();
       }
@@ -948,7 +975,9 @@ describe('forwardRuleMessage', () => {
 
     it('arrival messages already carry headers: nothing is fetched', async () => {
       reserveEveryForward();
-      await expect(forwardRuleMessage({ ...input, message: { ...swept, parsedHeaders: {} } })).resolves.toBe('sent');
+      await expect(forwardRuleMessage({
+        ...input, message: { ...swept, parsedHeaders: parseRawHeaders('Subject: Quarterly review') },
+      })).resolves.toBe('sent');
       expect(imapManager.fetchHeaders).not.toHaveBeenCalled();
     });
   });
