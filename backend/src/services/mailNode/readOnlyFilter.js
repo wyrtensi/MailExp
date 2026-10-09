@@ -1,6 +1,7 @@
 import { query, withTransaction } from '../db.js';
 import {
-  addMailboxFilter, deleteMailboxFilters, editMailboxFilter, listAllMailboxFilters, listMailboxFilters,
+  MailNodeError, addMailboxFilter, deleteMailboxFilters, editMailboxFilter, getMailbox, listAllMailboxFilters,
+  listMailboxFilters,
 } from './mailcow.js';
 
 // The read-only filter of a deactivated mail node mailbox or one pending deletion (EOP seats design):
@@ -30,7 +31,10 @@ const RESTORE = /\brestore=(\d+(?:,\d+)*)/;
 const isOurs = (filter) => filter.type === 'prefilter' && filter.desc.startsWith(READ_ONLY_FILTER_DESC);
 const restoreOf = (filter) => (RESTORE.exec(filter.desc)?.[1] ?? '').split(',').filter(Boolean).map(Number);
 
-// Makes local delivery refuse mail. Answers at once when our filter is active already.
+// Makes local delivery refuse mail. Answers at once when our filter is active already. A mailbox the
+// node no longer has (removed by hand) takes no mail and no filter (mailcow refuses one for it,
+// access_denied): it counts as closed, as the deletion job counts it deleted
+// (mailboxDeletion.js deleteOnNode), and the answer is 'absent'.
 export async function closeLocalDelivery(cfg, email) {
   const filters = await listMailboxFilters(cfg, email);
   if (filters.some((f) => isOurs(f) && f.active)) return;
@@ -43,7 +47,14 @@ export async function closeLocalDelivery(cfg, email) {
     ...ours.flatMap(restoreOf).filter((id) => existing.has(id)),
   ])].sort((a, b) => a - b);
   const desc = restore.length ? `${READ_ONLY_FILTER_DESC} restore=${restore.join(',')}` : READ_ONLY_FILTER_DESC;
-  await addMailboxFilter(cfg, { email, type: 'prefilter', desc, script: READ_ONLY_SCRIPT });
+  try {
+    await addMailboxFilter(cfg, { email, type: 'prefilter', desc, script: READ_ONLY_SCRIPT });
+  } catch (err) {
+    if (!(err instanceof MailNodeError) || err.code !== 'mail_node_refused') throw err;
+    const gone = await getMailbox(cfg, email).then((m) => m === null, () => false);
+    if (!gone) throw err;
+    return 'absent';
+  }
   await deleteMailboxFilters(cfg, ours.map((f) => f.id));
 }
 
@@ -98,8 +109,9 @@ export async function reconcileLocalDelivery(cfg) {
         if (!now.length) return null;
         // Both steps are idempotent and read the mailbox's filters again.
         if (now.every((r) => r.read_only)) {
-          await closeLocalDelivery(cfg, email);
-          return closed ? 'closed' : null;
+          // A mailbox gone from the node stays without a filter: nothing to count.
+          const absent = await closeLocalDelivery(cfg, email) === 'absent';
+          return closed && !absent ? 'closed' : null;
         }
         await openLocalDelivery(cfg, email);
         return closed ? null : 'opened';

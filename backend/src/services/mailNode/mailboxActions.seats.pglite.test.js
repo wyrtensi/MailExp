@@ -23,13 +23,15 @@ vi.mock('./mailcow.js', async (importActual) => ({
   addMailboxFilter: vi.fn(async () => {}),
   deleteMailboxFilters: vi.fn(async () => {}),
   editMailboxFilter: vi.fn(async () => {}),
+  getMailbox: vi.fn(async (_cfg, email) => ({ username: email })),
 }));
 vi.mock('./domains.js', async (importActual) => ({ ...(await importActual()), getDomainRow: vi.fn(async () => ({ state: 'ready' })) }));
 vi.mock('./nodeApply.js', () => ({ newMailboxRateLimit: vi.fn(async () => ({ value: 50, frame: 'h' })), defaultRateLimit: vi.fn() }));
 vi.mock('../tenant/tenantDomains.js', async (importActual) => ({ ...(await importActual()), kickDomainSync: vi.fn(async () => null) }));
 
 const {
-  MailNodeError, addMailboxFilter, deleteMailbox, deleteMailboxFilters, editMailboxFilter, listMailboxFilters, provisionMailbox,
+  MailNodeError, addMailboxFilter, deleteMailbox, deleteMailboxFilters, editMailboxFilter, getMailbox, listMailboxFilters,
+  provisionMailbox,
 } = await import('./mailcow.js');
 const { saveEopSettings } = await import('./eopSettings.js');
 const { setTenantDriver } = await import('../tenant/driver.js');
@@ -189,6 +191,29 @@ describe('the read-only filter on the node', () => {
     addMailboxFilter.mockClear();
     await requestMailboxDeletion({ accountId: account.id, email: 'a@example.com', reason: 'r' }, ACTOR);
     expect(addMailboxFilter).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes and deactivates a mailbox the node no longer has: no filter to put in, the seat goes on hold', async () => {
+    await saveEopSettings({ licenses: 2 });
+    const { account: a } = await create('a');
+    const { account: b } = await create('b');
+    const refused = () => new MailNodeError('mail_node_refused', 'The mail node refused: access_denied');
+    addMailboxFilter.mockRejectedValueOnce(refused()).mockRejectedValueOnce(refused());
+    getMailbox.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    const asked = await requestMailboxDeletion({ accountId: a.id, email: 'a@example.com', reason: 'r' }, ACTOR);
+    expect(asked.account.delete_after).not.toBeNull();
+    const off = await deactivateNodeMailbox({ accountId: b.id, reason: 'r' }, ACTOR);
+    expect(off.account.deactivated_at).not.toBeNull();
+    expect(await seatCounts()).toEqual({ used: 0, held: 2 });
+    expect(deleteMailboxFilters).not.toHaveBeenCalled();
+  });
+
+  it('still refuses when the node refuses the filter for a mailbox it has', async () => {
+    const { account } = await create('a');
+    addMailboxFilter.mockRejectedValueOnce(new MailNodeError('mail_node_refused', 'The mail node refused: busy'));
+    await expect(deactivateNodeMailbox({ accountId: account.id, reason: 'r' }, ACTOR)).rejects.toThrow('busy');
+    expect(getMailbox).toHaveBeenCalledWith(CFG, 'a@example.com');
+    expect((await db.query('SELECT deactivated_at FROM email_accounts WHERE id = $1', [account.id])).rows[0].deactivated_at).toBeNull();
   });
 
   it('changes nothing in the database when the node cannot take the filter', async () => {

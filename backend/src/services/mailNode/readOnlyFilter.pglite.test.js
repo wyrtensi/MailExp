@@ -30,6 +30,7 @@ afterAll(async () => { await db?.close(); });
 beforeEach(async () => {
   mc = createFakeMailcow();
   fake.current = mc;
+  for (const local of ['a', 'b', 'off', 'pending', 'works']) mc.node.mailboxes.push({ username: `${local}@example.com`, rl: null });
   await db.exec('DELETE FROM email_accounts');
 });
 
@@ -44,6 +45,11 @@ const addAccount = (email, { host = 'mail.example.com', deleteAfter = false, dea
 const filtersOf = (email) => mc.node.filters.filter((f) => f.username === email);
 
 describe('closing and opening', () => {
+  it('answers absent for a mailbox the node no longer has, and puts no filter in', async () => {
+    expect(await closeLocalDelivery(CFG, 'gone@example.com')).toBe('absent');
+    expect(filtersOf('gone@example.com')).toHaveLength(0);
+  });
+
   it('adds one filter, however often it is asked', async () => {
     await closeLocalDelivery(CFG, 'a@example.com');
     await closeLocalDelivery(CFG, 'a@example.com');
@@ -105,6 +111,12 @@ describe('reconcileLocalDelivery', () => {
     expect(filtersOf('off@example.com')).toHaveLength(1);
     expect(filtersOf('works@example.com')).toEqual([]);
     expect(filtersOf('other@elsewhere.example')).toEqual([]);
+  });
+
+  it('neither counts nor fails a read-only mailbox the node no longer has', async () => {
+    await addAccount('gone@example.com', { deleteAfter: true });
+    expect(await reconcileLocalDelivery(CFG)).toEqual({ closed: 0, opened: 0, failed: 0 });
+    expect(filtersOf('gone@example.com')).toEqual([]);
   });
 
   it('changes nothing when the node already matches, and puts back a filter that was switched off', async () => {
