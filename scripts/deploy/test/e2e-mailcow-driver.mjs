@@ -207,15 +207,17 @@ r = await panel('POST', '/mail/send', { accountId: support.id, to: [`sales@${DOM
 assert.equal(r.status, 409, JSON.stringify(r.data));
 assert.equal(r.data.code, 'mailbox_read_only');
 const pendingLetter = `e2e while pending ${Date.now()}`;
+const salesBefore = new Set((await inbox(sales.id)).map((m) => m.id));
 r = await panel('POST', '/mail/send', { accountId: sales.id, to: [`support@${DOMAIN}`], subject: pendingLetter, body: 'Refused by the node.' });
 assert.equal(r.status, 200, JSON.stringify(r.data));
 // The panel sends after its undo window; the node's refusal comes back to sales as a rejection
 // notice that names the letter. Waited for before the cancel, which would open delivery again.
 await until('the rejection of the letter sent while pending', async () => {
   await panel('POST', '/mail/sync', { accountId: sales.id });
-  // Sieve's notice is "Rejected: <subject>"; a bounce from Postfix would carry its own subject.
-  return (await inbox(sales.id)).find((m) => String(m.subject ?? '').includes(pendingLetter)
-    || /undelivered mail returned/i.test(String(m.subject ?? '')));
+  // Only a letter that arrived after the send counts: a notice naming the letter, or a bounce,
+  // whose subject is the server's own.
+  return (await inbox(sales.id)).find((m) => !salesBefore.has(m.id)
+    && (String(m.subject ?? '').includes(pendingLetter) || /undelivered mail returned/i.test(String(m.subject ?? ''))));
 }, 180000);
 r = await panel('POST', '/accounts', { kind: 'domain', localPart: 'support', domain: DOMAIN, name: 'support again' });
 assert.equal(r.status, 409, JSON.stringify(r.data));

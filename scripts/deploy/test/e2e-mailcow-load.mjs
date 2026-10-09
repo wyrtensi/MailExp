@@ -161,7 +161,7 @@ if (PHASE === 'setup') {
   assert.equal(r.status, 200, JSON.stringify(r.data));
   r = await s.call('GET', '/mail-node/seats');
   assert.equal(r.status, 200, JSON.stringify(r.data));
-  assert.ok(r.data.mode === 'manual' && r.data.free >= MAILBOXES, `EOP seats: ${JSON.stringify(r.data)}`);
+  assert.ok(r.data.mode === 'manual' && r.data.free === MAILBOXES + 10, `EOP seats: ${JSON.stringify(r.data)}`);
 
   const since = Date.now();
   const createMs = [];
