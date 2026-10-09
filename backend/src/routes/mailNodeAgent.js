@@ -9,6 +9,7 @@ import {
   bearerToken,
   failOrphanedJobs,
   listJobs,
+  mayBeAgentToken,
   recordStatus,
   reportJob,
   waitForJob,
@@ -74,24 +75,33 @@ export default router;
 
 export const agentRouter = Router();
 
-// Refused tokens per client address: this many per window, then 429 until it ends.
+// Refused tokens: this many per client address per window, and ten times as many from all
+// addresses, then refusals answer 429 until the window ends. Only refusals count, and the limit
+// never refuses the agent's own token: a client address may be shared (a NAT, or a proxy chain that
+// TRUST_PROXY does not match, utils/trustProxy.js), and someone else's wrong tokens must not lock
+// the agent out. While the limit holds, a refused token costs no database read
+// (mayBeAgentToken); the cap on all addresses bounds those reads when the refusals come from many.
 export const AGENT_AUTH_FAILURES = 20;
+export const AGENT_AUTH_GLOBAL_FAILURES = 10 * AGENT_AUTH_FAILURES;
 const AGENT_AUTH_WINDOW_MS = 10 * 60 * 1000;
+export const AGENT_AUTH_GLOBAL_KEY = 'node-agent-auth-all';
 
 // Only the bearer token counts here: no session, no cookie. A refusal says nothing about why.
 agentRouter.use(async (req, res, next) => {
   res.set('Cache-Control', 'no-store');
   const key = `node-agent-auth:${req.ip}`;
   try {
-    if ((await rlPeek(key, AGENT_AUTH_FAILURES, AGENT_AUTH_WINDOW_MS)).limited) {
-      return res.status(429).json({ error: 'Too many requests', code: 'agent_rate_limited' });
-    }
-    const hash = await authenticateAgent(bearerToken(req.get('authorization')));
+    const token = bearerToken(req.get('authorization'));
+    const limited = (await rlPeek(key, AGENT_AUTH_FAILURES, AGENT_AUTH_WINDOW_MS)).limited
+      || (await rlPeek(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES, AGENT_AUTH_WINDOW_MS)).limited;
+    const hash = !limited || await mayBeAgentToken(token) ? await authenticateAgent(token) : null;
     if (hash) {
       req.agentTokenHash = hash;
       return next();
     }
+    if (limited) return res.status(429).json({ error: 'Too many requests', code: 'agent_rate_limited' });
     await rlConsume(key, AGENT_AUTH_FAILURES, AGENT_AUTH_WINDOW_MS);
+    await rlConsume(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES, AGENT_AUTH_WINDOW_MS);
     return res.status(401).json({ error: 'Unauthorized', code: 'agent_unauthorized' });
   } catch (err) {
     return next(err);

@@ -4,9 +4,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 // revocation), the agent's bearer authentication, the long poll, a job's life and the caps on what
 // the agent reports, and the administrators' routes.
 
-const dbState = vi.hoisted(() => ({ db: null }));
+const dbState = vi.hoisted(() => ({ db: null, hashReads: 0 }));
 vi.mock('../services/db.js', () => ({
-  query: (sql, params) => dbState.db.query(sql, params),
+  query: (sql, params) => {
+    if (/SELECT token_hash FROM node_agent WHERE id = 1/.test(sql)) dbState.hashReads += 1;
+    return dbState.db.query(sql, params);
+  },
   withTransaction: (fn) => dbState.db.transaction((tx) => fn({ query: (sql, params) => tx.query(sql, params) })),
 }));
 // The limiter in memory, as it falls back without Redis.
@@ -31,10 +34,10 @@ const { default: adminRoutes, agentRouter } = await import('./mailNodeAgent.js')
 const { recordAudit } = await import('../services/auditLog.js');
 const {
   hashToken, MAX_LOG_TAIL, MAX_STEP, resetExpiryThrottle, queueNodeUpdateIfBehind, getNodeUpdateState,
-  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS, pinnedMailcow,
+  RUNNING_TIMEOUT_MS, UPDATE_CEILING_MS, UPDATE_STEP_BOUNDS_MS, pinnedMailcow, resetStoredHashCopy,
 } = await import('../services/mailNode/nodeAgent.js');
 const { updateNodeAfterPanel } = await import('../services/panelUpdate/reconcile.js');
-const { AGENT_AUTH_FAILURES } = await import('./mailNodeAgent.js');
+const { AGENT_AUTH_FAILURES, AGENT_AUTH_GLOBAL_FAILURES, AGENT_AUTH_GLOBAL_KEY } = await import('./mailNodeAgent.js');
 
 const ADMIN = '60000000-0000-4000-8000-000000000001';
 // The commit the panel runs (BUILD_SHA) and an older one the node reports.
@@ -67,6 +70,7 @@ beforeEach(async () => {
   recordAudit.mockClear();
   limits.clear();
   resetExpiryThrottle();
+  resetStoredHashCopy();
 });
 
 async function call(method, path, body, headers = {}) {
@@ -301,13 +305,54 @@ describe('restarts, rotations and polls', () => {
     expect(body.jobs[0].state).toBe('queued');
   });
 
-  it('too many refused tokens from one address answer 429, even a valid token then', async () => {
+  it('too many refused tokens from one address answer 429, but never to the valid token', async () => {
     const token = await issue();
+    const wrong = 'mxna_wrongwrongwrongwrongwrongwrong';
     for (let i = 0; i < AGENT_AUTH_FAILURES; i += 1) {
-      expect((await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0')).status).toBe(401);
+      expect((await agent(wrong, 'GET', '/next?wait=0')).status).toBe(401);
     }
+    const limited = await agent(wrong, 'GET', '/next?wait=0');
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ error: 'Too many requests', code: 'agent_rate_limited' });
+    expect((await agent(null, 'GET', '/next?wait=0')).status).toBe(429);
+    expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(204);
+    expect((await agent(token, 'POST', '/status', {})).status).toBe(200);
+    // Still limited for the wrong token after the valid one went through.
+    expect((await agent(wrong, 'GET', '/next?wait=0')).status).toBe(429);
+  });
+
+  it('counts refusals only, per address and from all addresses', async () => {
+    const token = await issue();
+    await agent(token, 'GET', '/next?wait=0');
+    expect([...limits.values()].every((count) => count === 0)).toBe(true);
+    await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0');
+    expect(limits.get(AGENT_AUTH_GLOBAL_KEY)).toBe(1);
+    expect([...limits.entries()].filter(([key]) => key.startsWith('node-agent-auth:'))).toEqual([
+      [expect.stringMatching(/^node-agent-auth:.+/), 1],
+    ]);
+  });
+
+  it('the cap on all addresses answers 429 to refusals, not to the valid token', async () => {
+    const token = await issue();
+    limits.set(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES);
     expect((await agent('mxna_wrongwrongwrongwrongwrongwrong', 'GET', '/next?wait=0')).status).toBe(429);
+    expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(204);
+  });
+
+  it('while limited, refusals read the stored hash at most once a second, and a revoked token stays refused', async () => {
+    const token = await issue();
+    limits.set(AGENT_AUTH_GLOBAL_KEY, AGENT_AUTH_GLOBAL_FAILURES);
+    dbState.hashReads = 0;
+    for (let i = 0; i < 10; i += 1) {
+      expect((await agent(`mxna_wrong${String(i).padStart(30, 'x')}`, 'GET', '/next?wait=0')).status).toBe(429);
+    }
+    expect(dbState.hashReads).toBe(1);
+    expect((await admin('DELETE', '/agent/token')).status).toBe(200);
+    // The copy still holds the revoked hash; authenticateAgent reads it afresh and refuses.
     expect((await agent(token, 'GET', '/next?wait=0')).status).toBe(429);
+    resetStoredHashCopy();
+    const fresh = await issue();
+    expect((await agent(fresh, 'GET', '/next?wait=0')).status).toBe(204);
   });
 });
 

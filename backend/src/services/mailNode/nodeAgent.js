@@ -140,13 +140,48 @@ export async function revokeToken() {
 // current one, so a poll or report already under way ends with a rotation or revocation.
 export async function authenticateAgent(token) {
   if (!token || !TOKEN_PATTERN.test(token)) return null;
-  const { rows } = await query('SELECT token_hash FROM node_agent WHERE id = 1');
-  const stored = rows[0]?.token_hash;
-  if (!stored || !/^[0-9a-f]{64}$/.test(stored)) return null;
-  const given = Buffer.from(hashToken(token), 'hex');
-  if (!timingSafeEqual(given, Buffer.from(stored, 'hex'))) return null;
+  const stored = await readStoredHash();
+  if (!matchesHash(token, stored)) return null;
   await query('UPDATE node_agent SET last_seen_at = now() WHERE id = 1');
   return stored;
+}
+
+async function readStoredHash() {
+  const { rows } = await query('SELECT token_hash FROM node_agent WHERE id = 1');
+  const stored = rows[0]?.token_hash;
+  return stored && /^[0-9a-f]{64}$/.test(stored) ? stored : null;
+}
+
+function matchesHash(token, stored) {
+  if (!stored) return false;
+  return timingSafeEqual(Buffer.from(hashToken(token), 'hex'), Buffer.from(stored, 'hex'));
+}
+
+// Whether a token may be the agent's, against a copy of the stored hash this process reads at most
+// once per STORED_HASH_TTL_MS: the refusal limit (routes/mailNodeAgent.js) asks it while refused
+// tokens are answered 429, so they cost no database read, and only a match goes on to
+// authenticateAgent (which reads the hash afresh and refuses a revoked token). The copy may lag a
+// rotation, in this process or another (the panel CLI), by up to the TTL: a new token can be
+// answered 429 that long while the limit holds, and the agent retries after its backoff.
+const STORED_HASH_TTL_MS = 1000;
+let storedHashCopy = { hash: null, at: -Infinity };
+// One read at a time: concurrent requests share it.
+let storedHashRead = null;
+
+export async function mayBeAgentToken(token) {
+  if (!token || !TOKEN_PATTERN.test(token)) return false;
+  if (Date.now() - storedHashCopy.at >= STORED_HASH_TTL_MS) {
+    storedHashRead ??= readStoredHash()
+      .then((hash) => { storedHashCopy = { hash, at: Date.now() }; })
+      .finally(() => { storedHashRead = null; });
+    await storedHashRead;
+  }
+  return matchesHash(token, storedHashCopy.hash);
+}
+
+// Tests: the next mayBeAgentToken reads the stored hash.
+export function resetStoredHashCopy() {
+  storedHashCopy = { hash: null, at: -Infinity };
 }
 
 const TOKEN_CURRENT = 'EXISTS (SELECT 1 FROM node_agent WHERE id = 1 AND token_hash = $1)';
