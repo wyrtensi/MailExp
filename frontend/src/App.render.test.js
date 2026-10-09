@@ -71,6 +71,7 @@ globalThis.__VITE_ENV__ = { MODE: 'test', DEV: false, PROD: true };
 // /auth/me answers come from this queue (the last one repeats); other calls get {}.
 let meAnswers = [];
 let meCalls = 0;
+let authConfigBody = { mode: 'google', googleSignIn: true };
 const requested = [];
 const jsonResponse = (status, body) => ({
   ok: status < 400, status, headers: { get: () => 'application/json' },
@@ -82,9 +83,10 @@ globalThis.fetch = async (url) => {
   if (path.endsWith('/auth/me')) {
     meCalls += 1;
     const answer = meAnswers[Math.min(meCalls - 1, meAnswers.length - 1)];
+    if (answer.networkError) throw new TypeError('Failed to fetch');
     return jsonResponse(answer.status, answer.body);
   }
-  if (path.endsWith('/auth/config')) return jsonResponse(200, { mode: 'google', googleSignIn: true });
+  if (path.endsWith('/auth/config')) return jsonResponse(200, authConfigBody);
   if (path.endsWith('/auth/logout')) return jsonResponse(200, { ok: true, endSessionUrl: `${ORIGIN}/#signed-out` });
   return jsonResponse(200, {});
 };
@@ -98,11 +100,14 @@ const App = (await import('./App.jsx')).default;
 
 const ALLOWED = { status: 200, body: { user: { id: 'u1', username: 'alice', locked: false } } };
 const REFUSED = (code) => ({ status: 403, body: { error: 'No access', code } });
+const SERVER_ERROR = { status: 500, body: { error: 'Internal error' } };
+const OFFLINE = { networkError: true };
 const UNAUTH = { status: 401, body: { error: 'Unauthorized' } };
 
 const doc = dom.window.document;
 const screen = () => doc.querySelector('[data-screen]')?.getAttribute('data-screen') ?? null;
 const hasDeniedScreen = () => [...doc.querySelectorAll('h2')].some((h) => h.textContent === 'login.google.noAccessTitle');
+const hasRetryNote = () => [...doc.querySelectorAll('[role="alert"]')].some((n) => n.textContent === 'login.google.retryFailed');
 const button = (key) => [...doc.querySelectorAll('button')].find((b) => b.textContent === key);
 const settle = () => React.act(async () => { await new Promise((r) => setTimeout(r, 20)); });
 const click = (key) => React.act(async () => {
@@ -113,7 +118,8 @@ const click = (key) => React.act(async () => {
 });
 
 let root;
-async function mountApp(answers) {
+async function mountApp(answers, config = { mode: 'google', googleSignIn: true }) {
+  authConfigBody = config;
   if (root) await React.act(async () => root.unmount());
   meAnswers = answers;
   meCalls = 0;
@@ -160,6 +166,38 @@ describe('App - no-access screen recovery', () => {
     await click('login.google.retry');
     assert.equal(hasDeniedScreen(), false);
     assert.equal(screen(), 'google-login-form');
+  });
+
+  test('"Try again" keeps the screen and says so when the check fails on the network', async () => {
+    await mountApp([REFUSED('not_allowed'), OFFLINE, ALLOWED]);
+    assert.equal(hasRetryNote(), false);
+    await click('login.google.retry');
+    assert.ok(hasDeniedScreen());
+    assert.ok(hasRetryNote());
+    await click('login.google.retry');
+    assert.equal(hasRetryNote(), false, 'the note goes away once a check succeeds');
+    assert.equal(screen(), 'mail-app');
+  });
+
+  test('"Try again" keeps the screen and says so on a server error', async () => {
+    await mountApp([REFUSED('not_allowed'), SERVER_ERROR]);
+    await click('login.google.retry');
+    assert.ok(hasDeniedScreen());
+    assert.ok(hasRetryNote());
+  });
+
+  test('"Try again" keeps the screen on a 403 that is not an access refusal', async () => {
+    await mountApp([REFUSED('not_allowed'), { status: 403, body: { error: 'CSRF', code: 'csrf' } }]);
+    await click('login.google.retry');
+    assert.ok(hasDeniedScreen());
+    assert.ok(hasRetryNote());
+  });
+
+  test('behind Cloudflare Access only, a missing session does not fall back to the sign-in form', async () => {
+    await mountApp([REFUSED('not_allowed'), UNAUTH], { mode: 'google', googleSignIn: false });
+    await click('login.google.retry');
+    assert.ok(hasDeniedScreen());
+    assert.ok(hasRetryNote());
   });
 
   test('a user loaded by any other path clears the refusal', async () => {

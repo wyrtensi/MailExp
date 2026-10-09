@@ -73,6 +73,7 @@
       "noAccessTitle": "No access to MailExpert",
       "retry": "Try again",
       "retrying": "Checking…",
+      "retryFailed": "Could not check your access. Please try again.",
       "switchAccount": "Sign out and use another account",
       "errorGeneric": "Google sign-in failed. Try again."
     },

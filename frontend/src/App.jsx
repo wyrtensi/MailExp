@@ -8,7 +8,7 @@ import { applyLayout } from './layouts.js';
 import LoginPage from './components/LoginPage.jsx';
 import GoogleLoginPage from './components/GoogleLoginPage.jsx';
 import AccessDeniedPage from './components/AccessDeniedPage.jsx';
-import { accessRefusalCode, isGoogleAuthMode } from './utils/authMode.js';
+import { accessRefusalCode, isCloudflareOnlyMode, isGoogleAuthMode } from './utils/authMode.js';
 import { signOut } from './utils/signOut.js';
 import { isDemoMode } from './demo/mode.js';
 import { demoRole } from './utils/demoRole.js';
@@ -38,6 +38,7 @@ export default function App() {
   const [authConfig, setAuthConfig] = useState(null);
   const [accessDenied, setAccessDenied] = useState(null);
   const [retrying, setRetrying] = useState(false);
+  const [retryFailed, setRetryFailed] = useState(false);
 
   // A signed-in user means the refusal no longer applies (access restored, another account
   // signed in): drop the no-access screen so it cannot outlive the state it describes.
@@ -48,6 +49,7 @@ export default function App() {
   // sign-in form.
   const retryAccess = useCallback(async () => {
     setRetrying(true);
+    setRetryFailed(false);
     try {
       const data = await api.me();
       setUser(data.user);
@@ -58,11 +60,14 @@ export default function App() {
         await loadPreferences();
       }
     } catch (err) {
-      setAccessDenied(accessRefusalCode(err));
+      const refusal = accessRefusalCode(err);
+      if (refusal) setAccessDenied(refusal);
+      else if (err?.status === 401 && !isCloudflareOnlyMode(authConfig)) setAccessDenied(null);
+      else setRetryFailed(true); // network error, 5xx, another 403: the check did not happen
     } finally {
       setRetrying(false);
     }
-  }, [loadPreferences, setUser, setLocked]);
+  }, [authConfig, loadPreferences, setUser, setLocked]);
 
   // "Use another account": the regular sign-out, which also ends a Cloudflare Access / SSO
   // session when the server returns an end-session URL, then lands on the sign-in screen.
@@ -202,8 +207,8 @@ export default function App() {
     );
   }
 
-  if (accessDenied) {
-    return <AccessDeniedPage code={accessDenied} retrying={retrying} onRetry={retryAccess} onSwitchAccount={switchAccount} />;
+  if (accessDenied && !user) {
+    return <AccessDeniedPage code={accessDenied} retrying={retrying} retryFailed={retryFailed} onRetry={retryAccess} onSwitchAccount={switchAccount} />;
   }
 
   const loginPage = isGoogleAuthMode(authConfig) ? <GoogleLoginPage config={authConfig} /> : <LoginPage />;
