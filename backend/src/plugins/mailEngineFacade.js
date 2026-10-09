@@ -41,5 +41,9 @@ export function createPluginMailFacade(engine) {
 
     // Remove a message's copy from a label folder (GTD transition strips).
     removeMessageCopy: (accountId, uid, folder, opts) => engine.removeMessageCopy(accountId, uid, folder, opts),
+    // Before a strip: does another copy really survive on the server, and is the account a label
+    // store (Gmail), where a strip only drops a label and the message stays in All Mail?
+    hasMessageCopy: (account, uid, folder, messageId, opts) => engine.hasMessageCopy(account, uid, folder, messageId, opts),
+    isLabelStore: (account) => engine.isLabelStore(account),
   });
 }
