@@ -87,6 +87,8 @@ function connectionTo(server) {
     state: 2,
     usable: true,
     mailbox: false,
+    // The pool NOOPs a reused session through run('NOOP'), which reports the server's answer.
+    run: vi.fn(async command => command === 'NOOP'),
     connect: vi.fn(async () => {}),
     close: vi.fn(),
     logout: vi.fn(async () => {}),

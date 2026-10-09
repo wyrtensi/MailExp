@@ -1877,6 +1877,47 @@ function markPooledFree(pool, client) {
   pool.bgInUse.delete(client);
 }
 
+// How long a reused pooled session gets to answer the NOOP that brings its view current. Short:
+// it is spent inside a caller's acquire (a click waits on it), a live server answers NOOP at
+// once, and a session that cannot is better closed and replaced than waited on.
+export const POOL_REFRESH_TIMEOUT_MS = 5000;
+
+// A reused pooled session keeps the view of its selected mailbox it had when the last caller
+// released it, and a server only has to report changes to the selected mailbox in response to a
+// command. Yahoo reports none otherwise (measured upstream on a live account, dbe04838): a
+// session holding INBOX kept its SELECT-time message and unread counts through new mail and
+// through read-state changes made elsewhere, STATUS of that mailbox returned the frozen numbers
+// (the folder status monitor runs over the pool, so the unread badge froze), and a UID STORE
+// naming mail delivered since answered OK and changed nothing (a mark-read that never reached
+// the server). One NOOP delivers the pending EXISTS and FETCH responses.
+//
+// So a reused session with a mailbox selected is NOOPed before it is handed out. A new session,
+// or one with nothing selected, needs nothing: its next SELECT reads current state. The NOOP goes
+// through run('NOOP'), not noop(): imapflow's noop() discards the result, so a NO, a BAD or a
+// broken connection would resolve exactly like an OK. A session that fails or does not answer
+// in time is taken out of the pool and closed (a NOOP still in flight must not be handed to the
+// next caller), the freed slot goes to the queue, and this caller gets the error.
+async function refreshReusedPooled(pool, client, account) {
+  if (!client.mailbox) return client;
+  try {
+    await raceTimeout((async () => {
+      let ok;
+      try { ok = await client.run('NOOP'); } catch { ok = false; }
+      if (ok !== true) throw new Error('Pooled session refresh (NOOP) failed');
+    })(), POOL_REFRESH_TIMEOUT_MS, 'Pooled session refresh');
+    return client;
+  } catch (err) {
+    disarmPoolIdleClose(pool, client);
+    markPooledFree(pool, client);
+    pool.clients = pool.clients.filter(c => c !== client);
+    try { client.close(); } catch { /* already closed */ }
+    recordImapEvent(account.imap_host, 'pool_refresh_failed');
+    console.warn(`IMAP pooled session for ${logAccount(account)} closed: ${err.message}`);
+    drainWaiters(pool);
+    throw err;
+  }
+}
+
 // True while background callers hold (or are opening) every session backgroundPoolCap allows them.
 function backgroundPoolFull(pool, account) {
   return pool.bgInUse.size + pool.bgConnecting >= backgroundPoolCap(account);
@@ -1904,7 +1945,7 @@ function drainWaiters(pool) {
     if (free) {
       pool.waiters.shift();
       clearTimeout(head.timer);
-      head.resolve(handOutPooled(pool, free, head.background));
+      head.resolve(refreshReusedPooled(pool, handOutPooled(pool, free, head.background), head.account));
       continue;
     }
     if (pool.clients.length + (pool.connecting || 0) >= poolSizeFor(head.account)) break;
@@ -2026,14 +2067,14 @@ export async function acquirePooledClient(account, { background = false, noNewLo
 
   if (loginHeld && (background || failFastWhenHeld)) {
     const idle = !backgroundFull && pool.waiters.length === 0 && pool.clients.find(c => !pool.inUse.has(c));
-    if (idle) return handOutPooled(pool, idle, background);
+    if (idle) return refreshReusedPooled(pool, handOutPooled(pool, idle, background), account);
     throw providerRefusingError({ authRejected: authHeld });
   }
 
   // Nobody queued: take an idle client, or grow the pool if it is under its size.
   if (pool.waiters.length === 0 && !backgroundFull) {
     const idle = pool.clients.find(c => !pool.inUse.has(c));
-    if (idle) return handOutPooled(pool, idle, background);
+    if (idle) return refreshReusedPooled(pool, handOutPooled(pool, idle, background), account);
     if (!loginHeld && pool.clients.length + (pool.connecting || 0) < poolSizeFor(account)) {
       return growPool(pool, account, { background });
     }

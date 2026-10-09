@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // forwardRuleMessage must go through the shared createAccountSendTransport (services/
 // mailSendTransport.js) rather than talking to SMTP directly — that is what makes a rule forward
@@ -12,6 +12,12 @@ vi.mock('./mailSendTransport.js', () => ({ createAccountSendTransport: vi.fn() }
 import { query } from './db.js';
 import { createAccountSendTransport } from './mailSendTransport.js';
 import { forwardRuleMessage } from './ruleForwarder.js';
+import { buildRawMessage } from './gmailApiSender.js';
+import { parseRawHeaders } from './messageParser.js';
+
+// The loop token is keyed with a key derived from ENCRYPTION_KEY, which index.js requires.
+beforeEach(() => { vi.stubEnv('ENCRYPTION_KEY', 'a1'.repeat(32)); });
+afterEach(() => { vi.unstubAllEnvs(); });
 
 const account = {
   id: 'account-1', sender_name: 'Mailbox', email_address: 'mailbox@example.com', oauth_provider: 'google',
@@ -30,6 +36,7 @@ describe('forwardRuleMessage on a Gmail mailbox', () => {
     transport = { sendMail: vi.fn().mockResolvedValue({ via: 'api', messageId: '<fwd@gmail.com>' }) };
     createAccountSendTransport.mockResolvedValue({ account, transport });
     imapManager = {
+      fetchHeaders: vi.fn(async () => 'Subject: Quarterly review'),
       fetchMessageBody: vi.fn(),
       fetchMultipleAttachments: vi.fn().mockResolvedValue(new Map()),
       moveQueue: { serverLocation: vi.fn(async (row) => ({ folder: row.folder, uid: Number(row.uid) })) },
@@ -47,5 +54,31 @@ describe('forwardRuleMessage on a Gmail mailbox', () => {
     await expect(forwardRuleMessage(input)).resolves.toBe('sent');
     expect(createAccountSendTransport).toHaveBeenCalledWith(account);
     expect(transport.sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  // The Gmail API path builds the raw message from the same mailOptions with MailComposer, so the
+  // loop header must survive that build too, or a loop through a Gmail mailbox never stops.
+  it('carries the loop header in the raw message the Gmail API sends', async () => {
+    await expect(forwardRuleMessage(input)).resolves.toBe('sent');
+    const mailOptions = transport.sendMail.mock.calls[0][0];
+    expect(mailOptions.headers['X-MailExpert-Loop']).toMatch(/^[0-9a-f]{16}$/);
+
+    const raw = (await buildRawMessage(mailOptions)).toString();
+    const headerBlock = raw.slice(0, raw.indexOf('\r\n\r\n'));
+    expect(parseRawHeaders(headerBlock)['x-mailexpert-loop']).toBe(mailOptions.headers['X-MailExpert-Loop']);
+  });
+
+  it('a forward from a Gmail mailbox that comes back is stopped like any other', async () => {
+    await forwardRuleMessage(input);
+    const token = transport.sendMail.mock.calls[0][0].headers['X-MailExpert-Loop'];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(forwardRuleMessage({
+        ...input, message: { id: 'message-2', parsedHeaders: parseRawHeaders(`X-MailExpert-Loop: ${token}`) },
+      })).resolves.toBe('loop');
+      expect(transport.sendMail).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
