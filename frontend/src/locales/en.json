@@ -71,6 +71,9 @@
       "errorEmailNotVerified": "Google has not verified this email address. Verify it with Google and try again.",
       "errorLocked": "MailExpert is locked. Unlock it, then sign in again.",
       "noAccessTitle": "No access to MailExpert",
+      "retry": "Try again",
+      "retrying": "Checking…",
+      "switchAccount": "Sign out and use another account",
       "errorGeneric": "Google sign-in failed. Try again."
     },
     "tagline": "Your unified inbox",
