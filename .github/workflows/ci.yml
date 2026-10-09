@@ -102,8 +102,10 @@ jobs:
 
       # jq: the mail node scripts parse the Microsoft 365 endpoints answers with it (the image has none).
       # git: status.bats runs status.sh against a throwaway checkout.
+      # bats/bats from Google's pull-through cache of Docker Hub: Docker Hub's unauthenticated pull
+      # limit and token timeouts on the shared runners failed this job.
       - name: Deploy script unit tests
-        run: docker run --rm -v "$PWD:/code:ro" -w /code --entrypoint bash bats/bats:1.14.0 -c 'apk add --no-cache -q jq git && bats scripts/deploy/test'
+        run: docker run --rm -v "$PWD:/code:ro" -w /code --entrypoint bash mirror.gcr.io/bats/bats:1.14.0 -c 'apk add --no-cache -q jq git && bats scripts/deploy/test'
 
   fake-eop:
     name: Stand fake-EOP
@@ -136,6 +138,9 @@ jobs:
         run: node --test deploy/tenant-worker/worker.test.mjs
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config: .github/buildkitd.toml
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Image
         uses: docker/build-push-action@v6
@@ -165,6 +170,9 @@ jobs:
           fetch-depth: 0
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config: .github/buildkitd.toml
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Image tag
         id: image
@@ -227,6 +235,9 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config: .github/buildkitd.toml
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Image tag
         id: image
