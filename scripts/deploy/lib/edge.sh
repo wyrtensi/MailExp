@@ -43,6 +43,7 @@ write_edge_files() {
   new=$(edge_profiles)
   env_set "$env" COMPOSE_PROFILES "$new"
   env_set "$env" EDGE_IMAGE "$image"
+  env_set "$env" MAILEXPERT_INSTALL_ID "$CFG_INSTALL_ID"
   if edge_services | grep -qx caddy; then
     new=$(render_caddyfile "$app_dir/deploy/edge/Caddyfile.tmpl")
     if [ ! -f "$edge_dir/Caddyfile" ] || [ "$new" != "$(<"$edge_dir/Caddyfile")" ]; then

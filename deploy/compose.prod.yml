@@ -17,15 +17,25 @@
 # - CPU caps are optional: BACKEND_CPUS, TENANT_WORKER_CPUS and POSTGRES_CPUS in .env (for example
 #   1.5) limit a host shared with other projects. 0, the default, means no cap; Docker refuses a
 #   value above the host's CPU count, so the default must stay 0.
+# - Labels of every container of the panel (docs/operations/deployment.md, "Имена на общем
+#   сервере"): MAILEXPERT_INSTALL_ID is install.conf's INSTALL_ID, written to .env by install.sh.
+#   Containers only: a changed label on a volume makes compose offer to recreate it, with its data.
+
+x-labels: &labels
+  io.mailexpert.managed: "true"
+  io.mailexpert.install: ${MAILEXPERT_INSTALL_ID:-}
+  io.mailexpert.component: panel
 
 services:
   frontend:
+    labels: *labels
     image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-frontend:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
     build: !reset null
     ports: !override
       - "127.0.0.1:${APP_HTTP_PORT:-8080}:80"
 
   backend:
+    labels: *labels
     image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-backend:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
     build: !reset null
     mem_limit: 1536m
@@ -47,12 +57,14 @@ services:
   # Optional (profile "tenant", docker-compose.yml): pulled and started only with
   # COMPOSE_PROFILES=tenant.
   tenant-worker:
+    labels: *labels
     image: ${MAILEXPERT_IMAGE_PREFIX:-ghcr.io/wyrtensi}/mailexpert-tenant-worker:${MAILEXPERT_VERSION:?set MAILEXPERT_VERSION to the sha-<commit> image tag}
     build: !reset null
     mem_limit: 768m
     cpus: ${TENANT_WORKER_CPUS:-0}
 
   postgres:
+    labels: *labels
     mem_limit: 2g
     cpus: ${POSTGRES_CPUS:-0}
     command:
@@ -65,6 +77,7 @@ services:
       - random_page_cost=1.1
 
   redis:
+    labels: *labels
     # The base command plus a memory cap. noeviction: sessions must never be dropped silently;
     # at the cap Redis refuses writes instead.
     command: redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy noeviction

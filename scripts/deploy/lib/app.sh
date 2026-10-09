@@ -81,30 +81,36 @@ project_containers() {
 #
 # The panel and the edge are compose projects addressed by name (-p). On a shared host another
 # project may use the same name, and `up --remove-orphans`, `rm --stop --force` or `stop` would act
-# on its containers. Compose labels each container with the directory it ran from
-# (com.docker.compose.project.working_dir): this install's are <prefix>/app (the panel) and
-# <prefix>/edge (the edge), the --project-directory of set_install_paths. Volumes and networks
-# carry only the project label.
+# on its containers. A container is this install's when it carries the label
+# io.mailexpert.install=<install.conf INSTALL_ID> (compose.prod.yml, edge/compose.yml, every
+# docker run of the scripts), or, for containers made before the label existed or before an ID
+# change, when compose made it from this install's directory (com.docker.compose.project.working_dir:
+# <prefix>/app for the panel, <prefix>/edge for the edge, the --project-directory of
+# set_install_paths). io.mailexpert.managed=true alone proves nothing: every install has it.
+# Volumes and networks carry only the project label: a changed label on a volume makes compose
+# offer to recreate it, with its data, so they get none of ours.
 
-# foreign_containers <project directory>: reads "<name>\t<working_dir label>" lines on stdin and
-# prints "<name> (<working dir>)" for each container that did not run from <project directory>. A
-# container without the label was not made by compose: it is foreign too.
+# foreign_containers <project directory> [install ID]: reads "<name>\x1f<working_dir label>\x1f
+# <io.mailexpert.install label>" lines on stdin and prints "<name> (<working dir>)" for each
+# container that is not this install's: neither its install label is the ID nor its directory the
+# project directory. A container without either label was not made by this install's compose.
 foreign_containers() {
-  local want name dir
+  local want id=${2:-} name dir owner
   want=$(clean_path "$1")
-  while IFS=$'\t' read -r name dir; do
+  while IFS=$'\x1f' read -r name dir owner; do
     [ -n "$name" ] || continue
+    if [ -n "$id" ] && [ "$owner" = "$id" ]; then continue; fi
     if [ -n "$dir" ] && [ "$(clean_path "$dir")" = "$want" ]; then continue; fi
-    printf '%s (%s)\n' "$name" "${dir:-no compose working directory}"
+    printf '%s (%s)\n' "$name" "${dir:-no compose working directory}${owner:+, install $owner}"
   done
 }
 
-COMPOSE_DIR_FORMAT=$'{{.Names}}\t{{.Label "com.docker.compose.project.working_dir"}}'
+COMPOSE_DIR_FORMAT=$'{{.Names}}\x1f{{.Label "com.docker.compose.project.working_dir"}}\x1f{{.Label "io.mailexpert.install"}}'
 COMPOSE_PROJECT_FORMAT=$'{{.Name}}\t{{.Label "com.docker.compose.project"}}'
 
 # compose_foreign_objects <project> <project directory> [<volume|network>:<name>...]: one line per
 # Docker object that compose -p <project> would act on or reuse and that is not this install's:
-# containers of the project that ran from another directory; the named volumes and networks (the
+# containers of the project that are not this install's (foreign_containers); the named volumes and networks (the
 # ones the compose files declare) and every volume of the project when they exist with another
 # project's label or none, or when a foreign container uses the volume.
 compose_foreign_objects() {
@@ -113,7 +119,7 @@ compose_foreign_objects() {
   # Every docker call returns 1 on failure: callers often run this where -e is off.
   containers=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format "$COMPOSE_DIR_FORMAT" </dev/null) ||
     return 1
-  foreign_containers "$dir" <<<"$containers" | sed 's/^/container /'
+  foreign_containers "$dir" "${CFG_INSTALL_ID:-}" <<<"$containers" | sed 's/^/container /'
   volumes=$(docker volume ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   networks=$(docker network ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   {
@@ -132,7 +138,7 @@ compose_foreign_objects() {
     fi
     [ "$kind" = volume ] || continue
     users=$(docker ps -a --filter "volume=$name" --format "$COMPOSE_DIR_FORMAT" </dev/null) || return 1
-    users=$(foreign_containers "$dir" <<<"$users" | paste -sd, -)
+    users=$(foreign_containers "$dir" "${CFG_INSTALL_ID:-}" <<<"$users" | paste -sd, -)
     if [ -n "$users" ]; then printf 'volume %s (used by %s)\n' "$name" "$users"; fi
   done
 }

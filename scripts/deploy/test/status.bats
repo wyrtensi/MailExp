@@ -204,7 +204,7 @@ if [ "${STUB_DOCKER_DOWN:-0}" = 1 ]; then echo "Cannot connect to the Docker dae
 case " $* " in
   *" ps -a --filter label=com.docker.compose.project=me-test --format "*)
     # STUB_FOREIGN: a container of the panel's project that another directory's compose made.
-    if [ -n "${STUB_FOREIGN:-}" ]; then printf '%s\t%s\n' "$STUB_FOREIGN" /srv/neighbour; fi ;;
+    if [ -n "${STUB_FOREIGN:-}" ]; then printf '%s\037%s\037\n' "$STUB_FOREIGN" /srv/neighbour; fi ;;
   *" ps "*"{{.Service}} {{.State}} {{.Health}}"*)
     printf '%s\n' "frontend running healthy" "backend running healthy" "postgres running healthy" "redis running healthy" "cloudflared running " ;;
   *" ps "*"{{.Service}} {{.Image}}"*)

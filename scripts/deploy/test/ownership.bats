@@ -53,7 +53,14 @@ STUB_EOF
   export FAKE_SS=''
 }
 
-fake() { printf "$2\n" "${@:3}" >>"$FAKE_DOCKER/$1"; }
+# fake <file> <printf format> <values...>: appends lines to a fake answer. The container listings
+# (ps-*) are \x1f-separated like COMPOSE_DIR_FORMAT: a \t in their format becomes \037.
+fake() {
+  local format=$2
+  if [[ $1 == ps-* ]]; then format=${format//\\t/\\037}; fi
+  # shellcheck disable=SC2059 # the format is the test's
+  printf "$format\n" "${@:3}" >>"$FAKE_DOCKER/$1"
+}
 compose_calls() { grep -c '^compose' "$FAKE_DOCKER/calls" || true; }
 
 # --- the guard -----------------------------------------------------------------------------------
@@ -85,8 +92,35 @@ compose_calls() { grep -c '^compose' "$FAKE_DOCKER/calls" || true; }
   [ "$(clean_path /opt//mailexpert/./app/)" = /opt/mailexpert/app ]
   [ "$(clean_path /opt/me/edge/.)" = /opt/me/edge ]
   [ "$(clean_path /)" = / ]
-  out=$(printf 'a\t/opt/me/app\nb\t/opt/me//app/\nc\t/srv/other\nd\t\n' | foreign_containers /opt/me/app)
+  out=$(printf 'a\037/opt/me/app\037\nb\037/opt/me//app/\nc\037/srv/other\037\nd\037\037\n' | foreign_containers /opt/me/app)
   [ "$out" = $'c (/srv/other)\nd (no compose working directory)' ]
+}
+
+@test "foreign_containers: the install label proves ownership; the directory adopts containers without it" {
+  local id=0123456789abcdef
+  # name, working_dir, io.mailexpert.install
+  out=$(printf '%s\037%s\037%s\n' \
+    ours-by-id /srv/elsewhere "$id" \
+    ours-by-dir /opt/me/app '' \
+    ours-old-id /opt/me/app fedcba9876543210 \
+    other-install /srv/neighbour fedcba9876543210 \
+    no-labels '' '' \
+    other-id-no-dir '' fedcba9876543210 | foreign_containers /opt/me/app "$id")
+  [ "$out" = $'other-install (/srv/neighbour, install fedcba9876543210)\nno-labels (no compose working directory)\nother-id-no-dir (no compose working directory, install fedcba9876543210)' ]
+  # Without an ID yet (an install made before the IDs), only the directory counts.
+  out=$(printf '%s\037%s\037%s\n' ours-by-id /srv/elsewhere "$id" | foreign_containers /opt/me/app '')
+  [ "$out" = "ours-by-id (/srv/elsewhere, install $id)" ]
+}
+
+@test "guard: a container labelled with this install's ID is ours from any directory" {
+  CFG_INSTALL_ID=0123456789abcdef
+  fake ps-me-test '%s\t%s\t%s' me-test-backend /moved/app 0123456789abcdef
+  guard_projects
+  fake ps-me-test '%s\t%s\t%s' me-test-web /srv/neighbour fedcba9876543210
+  run guard_projects
+  [ "$status" -eq 2 ]
+  [[ $output == *"container me-test-web (/srv/neighbour, install fedcba9876543210)"* ]]
+  [[ $output != *me-test-backend* ]]
 }
 
 @test "guard: empty projects (a new install) proceed" {

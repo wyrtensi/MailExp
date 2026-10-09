@@ -186,7 +186,8 @@ load_restic_env() {
 # with its cache in state/restic-cache. -t: the image's BusyBox timeout sends restic SIGTERM after
 # <seconds>; restic cancels its requests and exits non-zero, and --rm removes the container.
 restic_run() {
-  local -a mounts=() run=("$RESTIC_IMAGE")
+  local -a mounts=() run=("$RESTIC_IMAGE") labels
+  managed_label_args labels "${RESTIC_COMPONENT:-restic}" "${CFG_INSTALL_ID:-}"
   while :; do
     case ${1:-} in
       -v) mounts+=(-v "$2") ;;
@@ -198,7 +199,7 @@ restic_run() {
   [ "${1:-}" = -- ] || die "restic_run: -- expected before the restic arguments"
   shift
   mkdir -p "$STATE_DIR/restic-cache"
-  docker run --rm --network host "${RESTIC_DOCKER_ARGS[@]}" \
+  docker run --rm --network host "${labels[@]}" "${RESTIC_DOCKER_ARGS[@]}" \
     -e RESTIC_REPOSITORY -e RESTIC_PASSWORD -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION \
     -e RESTIC_CACHE_DIR=/cache -v "$STATE_DIR/restic-cache:/cache" "${mounts[@]}" "${run[@]}" "$@"
 }

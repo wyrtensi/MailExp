@@ -18,12 +18,21 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
+# Labels of every container of the edge (docs/operations/deployment.md, "Имена на общем сервере"):
+# MAILEXPERT_INSTALL_ID comes from <prefix>/edge/.env (install.conf INSTALL_ID). Containers only:
+# a changed label on a volume makes compose offer to recreate it, with its data.
+x-labels: &labels
+  io.mailexpert.managed: "true"
+  io.mailexpert.install: ${MAILEXPERT_INSTALL_ID:-}
+  io.mailexpert.component: edge
+
 services:
   caddy:
     profiles: ["caddy"]
     image: ${EDGE_IMAGE:?set EDGE_IMAGE; install.sh pins it}
     restart: unless-stopped
     logging: *logging
+    labels: *labels
     network_mode: host
     environment:
       DNS_API_TOKEN: ${DNS_API_TOKEN:-}
@@ -37,6 +46,7 @@ services:
     image: cloudflare/cloudflared:2026.9.1
     restart: unless-stopped
     logging: *logging
+    labels: *labels
     network_mode: host
     command: ["tunnel", "--no-autoupdate", "run"]
     environment:

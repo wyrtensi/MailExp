@@ -122,7 +122,9 @@ env_missing() {
 # gen_vapid_pair: "<public> <private>" from web-push inside the backend image ($BACKEND_IMAGE),
 # without network access. Tests replace this function.
 gen_vapid_pair() {
-  docker run --rm --network none --entrypoint node "$BACKEND_IMAGE" -e \
+  local -a labels
+  managed_label_args labels helper "${CFG_INSTALL_ID:-}"
+  docker run --rm --network none "${labels[@]}" --entrypoint node "$BACKEND_IMAGE" -e \
     "const k = require('web-push').generateVAPIDKeys(); console.log(k.publicKey + ' ' + k.privateKey)"
 }
 

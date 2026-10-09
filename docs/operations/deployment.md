@@ -227,12 +227,54 @@ mailcow (`mailcowdockerized`, `br-mailcow`, `mailcow-backup`) принадлеж
 Хостовые пути без `--no-system` (`/swapfile`, `/etc/apt/...docker.*`, `20auto-upgrades`) — общепринятые
 пути Ubuntu и Docker, на общем сервере с `--no-system` их нет.
 
+**ID установки и метки.** `install.sh` один раз создаёт ID установки (16 hex-символов) и хранит его в
+`install.conf` (`INSTALL_ID`); обновления и откаты его сохраняют, установка, сделанная раньше, получает
+ID при следующем `install.sh` или `update.sh`. При переезде ([раздел 6](#6-переезд-панели-на-другой-сервер))
+новый сервер получает свой ID от своего `install.sh --no-start`: `restore.sh` оставляет `install.conf`
+нового сервера. ID можно сменить правкой `INSTALL_ID` в `install.conf`; контейнеры получат новый при
+следующем `install.sh`. `status.sh` показывает ID (`install_id`). Каждый
+контейнер, который запускает установка, несёт три метки:
+
+| Метка | Значение |
+|---|---|
+| `io.mailexpert.managed` | `true` — у всех контейнеров MailExpert на хосте, любой установки |
+| `io.mailexpert.install` | ID установки (`INSTALL_ID`) |
+| `io.mailexpert.component` | `panel` (сервисы панели и `docker compose run`), `edge`, `verify` (проверка восстановлением), `restic`, `helper` (разовые контейнеры `install.sh`); на почтовом узле — `node-restic`, `node-backup-check` |
+
+Это сервисы `deploy/compose.prod.yml` и `deploy/edge/compose.yml` (ID приходит из `<PREFIX>/.env` и
+`<PREFIX>/edge/.env`, их пишет `install.sh`) и каждый `docker run` скриптов. Тома и сети меток
+MailExpert не получают: смену метки тома compose считает изменением конфигурации и предлагает
+пересоздать том вместе с данными. У них остаётся только метка проекта compose. На почтовом узле у
+вспомогательных контейнеров нет ID (узел на хосте один, его контейнеры — контейнеры mailcow): только
+`managed` и `component`. Контейнер, созданный до появления меток, получает их, когда compose его
+пересоздаёт (обычно при ближайшем обновлении).
+
+`io.mailexpert.managed=true` только находит контейнеры MailExpert, владельца он не доказывает. Список
+и удаление своих объектов (`<INSTALL_ID>` — из `install.conf` или `status.sh`, `<проект>` — `PROJECT`
+или `EDGE_PROJECT` оттуда же):
+
+```bash
+docker ps -a --filter label=io.mailexpert.managed=true \
+  --format '{{.Names}} {{.Label "io.mailexpert.install"}} {{.Label "io.mailexpert.component"}}'
+docker ps -aq --filter label=io.mailexpert.install=<INSTALL_ID>                   # контейнеры установки
+docker ps -aq --filter label=io.mailexpert.install=<INSTALL_ID> | xargs -r docker rm -f
+docker volume ls --filter label=com.docker.compose.project=<проект>              # тома проекта
+docker network ls --filter label=com.docker.compose.project=<проект>             # сети проекта
+```
+
+Удаление тома панели удаляет её базу (`<проект>_postgres_data`), тома края — сертификаты Caddy.
+Перед `docker volume rm` убедитесь, что тома не соседские (метка проекта общая, если сосед взял то же
+имя проекта; см. «Проверка владельца») и что ключ восстановления и бэкап restic вне сервера.
+
 **Проверка владельца.** Перед первой командой compose `install.sh`, `update.sh`, `rollback.sh` и
 `restore.sh` смотрят, что лежит в проектах панели и края:
 
-- контейнеры с меткой `com.docker.compose.project=<проект>`: своим считается только контейнер, у
-  которого `com.docker.compose.project.working_dir` — `<PREFIX>/app` (панель) или `<PREFIX>/edge`
-  (край); контейнер без этой метки или из другого каталога — чужой;
+- контейнеры с меткой `com.docker.compose.project=<проект>`: своим считается контейнер с меткой
+  `io.mailexpert.install=<INSTALL_ID>`, а без неё или с другим ID — только если его
+  `com.docker.compose.project.working_dir` — `<PREFIX>/app` (панель) или `<PREFIX>/edge` (край):
+  так остаются своими контейнеры, созданные до меток, и контейнеры после смены `INSTALL_ID` (при
+  пересоздании compose даёт им новый ID). Без обеих примет или из другого каталога с чужим ID — чужой;
+  ни `io.mailexpert.managed`, ни ответ на порту владельца не доказывают;
 - тома и сети, которые compose переиспользует (`<проект>_postgres_data`, `<проект>_redis_data`,
   `<проект>_mailexpert`, `<край>_caddy_data`, `<край>_caddy_config`), и все тома с меткой проекта:
   чужие, если их метка проекта другая или её нет, или если том подключён к чужому контейнеру.
@@ -260,7 +302,9 @@ mailcow (`mailcowdockerized`, `br-mailcow`, `mailcow-backup`) принадлеж
 docker ps -a --filter label=com.docker.compose.project=edge \
   --format '{{.Names}} {{.Label "com.docker.compose.project.working_dir"}}'
 # 2. удалить только свои контейнеры старого края (тома остаются). Не `docker compose -p edge down`:
-#    он удалит и контейнеры соседа из проекта с тем же именем.
+#    он удалит и контейнеры соседа из проекта с тем же именем. Фильтр по каталогу работает и для
+#    контейнеров, созданных до меток; если у них уже есть метка установки, то же даёт
+#    --filter label=io.mailexpert.install=<INSTALL_ID> вместо фильтра по каталогу.
 docker ps -aq --filter label=com.docker.compose.project=edge \
   --filter label=com.docker.compose.project.working_dir=<PREFIX>/edge | xargs -r docker rm -f
 # 3. поднять край под новым именем (install.conf запомнит его):

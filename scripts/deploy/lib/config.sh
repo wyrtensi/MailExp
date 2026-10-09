@@ -3,8 +3,10 @@
 # sign-in mode. Pure functions: no Docker, no network, no writes except the file passed in.
 
 # install.conf keys, in the order they are written. --prefix and --no-start are per run.
+# INSTALL_ID is no flag: install.sh generates it once (ensure_install_id); every container this
+# install starts carries it as the label io.mailexpert.install.
 INSTALL_CONF_KEYS=(VERSION SIGNIN CF_HOST DIRECT_HOST ADMIN_EMAILS LOCAL_AUTH EDGE EDGE_TLS
-  ACME_EMAIL PROJECT EDGE_PROJECT HTTP_PORT IMAGE_PREFIX REPO_URL SYSTEM)
+  ACME_EMAIL PROJECT EDGE_PROJECT HTTP_PORT IMAGE_PREFIX REPO_URL SYSTEM INSTALL_ID)
 declare -gA INSTALL_ARGS=()
 # The edge's compose project name before new installs got mailexpert-edge: an install keeps the
 # name its install.conf records.
@@ -12,7 +14,7 @@ LEGACY_EDGE_PROJECT=edge
 
 # shellcheck disable=SC2034 # the CFG_* and OPT_* globals are read by install.sh and edge.sh
 install_defaults() {
-  CFG_VERSION='' CFG_SIGNIN='' CFG_CF_HOST='' CFG_DIRECT_HOST='' CFG_ADMIN_EMAILS='' CFG_ACME_EMAIL=''
+  CFG_VERSION='' CFG_INSTALL_ID='' CFG_SIGNIN='' CFG_CF_HOST='' CFG_DIRECT_HOST='' CFG_ADMIN_EMAILS='' CFG_ACME_EMAIL=''
   CFG_LOCAL_AUTH=0 CFG_EDGE=1 CFG_EDGE_TLS=acme CFG_SYSTEM=1
   CFG_PROJECT=mailexpert CFG_EDGE_PROJECT=mailexpert-edge CFG_HTTP_PORT=8080
   CFG_IMAGE_PREFIX=ghcr.io/wyrtensi CFG_REPO_URL=https://github.com/wyrtensi/MailExpert.git
@@ -119,6 +121,8 @@ validate_install_config() {
   esac
   [[ $CFG_LOCAL_AUTH =~ ^[01]$ && $CFG_EDGE =~ ^[01]$ && $CFG_SYSTEM =~ ^[01]$ ]] ||
     errors+=("install.conf: LOCAL_AUTH, EDGE and SYSTEM must be 0 or 1")
+  is_install_id "$CFG_INSTALL_ID" || [ -z "$CFG_INSTALL_ID" ] ||
+    errors+=("install.conf: INSTALL_ID must be 16 lowercase hex characters (remove the line and run install.sh for a new one)")
   is_name "$CFG_PROJECT" || errors+=("--project must be lowercase letters, digits, '-' or '_'")
   is_name "$CFG_EDGE_PROJECT" || errors+=("--edge-project must be lowercase letters, digits, '-' or '_'")
   [ "$CFG_PROJECT" != "$CFG_EDGE_PROJECT" ] || errors+=("--project and --edge-project must differ")
@@ -152,7 +156,8 @@ app_settings() {
     "AUTH_MODE=$auth" \
     "BOOTSTRAP_ADMIN_EMAILS=$CFG_ADMIN_EMAILS" \
     "GOOGLE_REDIRECT_URI=$url/oauth/google/callback" \
-    "UPDATE_SPOOL_HOST_DIR=$OPT_PREFIX/state/update-spool"
+    "UPDATE_SPOOL_HOST_DIR=$OPT_PREFIX/state/update-spool" \
+    "MAILEXPERT_INSTALL_ID=$CFG_INSTALL_ID"
 }
 
 # edge_services: the edge services this install runs, one per line.

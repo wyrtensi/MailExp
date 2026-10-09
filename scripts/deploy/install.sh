@@ -108,6 +108,15 @@ check_docker() {
   version_ge "$version" 2.24.4 || die "docker compose $version is too old, 2.24.4 or newer is needed"
 }
 
+# ensure_install_id: an install without INSTALL_ID (a new one, or one made before the IDs) gets one
+# now, before any container starts; write_install_conf keeps it from then on, through updates and
+# rollbacks. A restore keeps this server's install.conf: a moved install has the new server's ID.
+ensure_install_id() {
+  [ -z "$CFG_INSTALL_ID" ] || return 0
+  CFG_INSTALL_ID=$(gen_hex 8)
+  log "install ID $CFG_INSTALL_ID (install.conf INSTALL_ID; the label io.mailexpert.install on this install's containers)"
+}
+
 # guard_projects: neither compose project may hold another project's containers, volumes or
 # networks (lib/app.sh guard_compose_projects); runs before any compose command of this run.
 guard_projects() {
@@ -212,7 +221,9 @@ ensure_app_images() {
 # (1000, `USER node`) stays.
 record_spool_uid() {
   local uid
-  uid=$(docker run --rm --network none --entrypoint id "$BACKEND_IMAGE" -u 2>/dev/null | tr -d '[:space:]') || uid=''
+  local -a labels
+  managed_label_args labels helper "$CFG_INSTALL_ID"
+  uid=$(docker run --rm --network none "${labels[@]}" --entrypoint id "$BACKEND_IMAGE" -u 2>/dev/null | tr -d '[:space:]') || uid=''
   if [[ $uid =~ ^[1-9][0-9]{0,9}$ ]]; then
     printf '%s\n' "$uid" >"$STATE_DIR/spool-uid"
   else
@@ -419,6 +430,7 @@ main() {
   resolve_install_config "${INSTALL_ARGS[PREFIX]:-/opt/mailexpert}/install.conf"
   validate_install_config || exit 2
   [[ $READY_TIMEOUT =~ ^[0-9]+$ ]] || die "MAILEXPERT_READY_TIMEOUT must be a number of seconds" 2
+  ensure_install_id
   set_install_paths
 
   [ "$(id -u)" = 0 ] || die "run install.sh as root"
