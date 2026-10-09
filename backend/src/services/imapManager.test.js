@@ -18,7 +18,7 @@ vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn(), createPin
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 vi.mock('./deliveryReport.js', async (importOriginal) => ({ ...(await importOriginal()), readDeliveryReports: vi.fn(async () => 0) }));
 
-import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, skipsDuplicateView, folderSpecialUse, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
+import { ImapManager, MIN_SYNC_INTERVAL_MS, AUTO_IDLE_DELAY_MS, countMissingInboxCopies, fetchBackfillBatch, providerProfile, skipsDuplicateView, folderSpecialUse, makeClientCfg, relocateExemptGuard, insertCopiedSibling, deleteMessageCopyRow, emitSectionsChanged, ensureMailbox, createKeyedSemaphore, isConnectionRefusal, extractImapError, isImapAuthFailure, AUTH_FAILURE_COOLDOWN_MS, AUTH_FAILURE_COOLDOWN_MAX_MS, authCooldownMs, connectCooldownMs, effectiveSyncIntervalMs, folderSyncDue, planModseqSync, connectStaggerFor, startupStaggerFor, NODE_CONNECT_STAGGER_MS, walkStructure, planBodyParts, extractBodyFromMsg, bodyFallbackApplies, poolSizeFor, backgroundPoolCap, rerootThreadChildren, parsePersistentCap, resolvePersistentCap, persistentEligible, shouldRetryIPv4, classifyMoveBySearch, PERSISTENT_FLAG_STORE_TIMEOUT_MS, PERSISTENT_FLAG_LATE_STORE_WAIT_MS, PERSISTENT_FLAG_LOCK_WAIT_MS, FLAG_STORE_UID_CHUNK, FLAG_PUSH_MAX_ATTEMPTS, wrapImapError, acquirePooledClient, releasePooledClient, evictPool, ACQUIRE_TIMEOUT_MS, BACKGROUND_ACQUIRE_TIMEOUT_MS, PREFETCH_MAX_CONSECUTIVE_ERRORS, INLINE_IMAGE_REPEAT_BUDGET, PREFETCH_STOP_PAUSE_MS, PREFETCH_MAX_BUSY_WAITS, newBodyPrefetchCount, newBodyQueueMax, NODE_NEW_BODY_PREFETCH_MAX, NODE_PREFETCH_PER_HOST } from './imapManager.js';
 import { pluginRegistry } from '../plugins/registry.js';
 import { EventEmitter } from 'node:events';
 import { ImapFlow } from 'imapflow';
@@ -1224,6 +1224,12 @@ describe('connectStaggerFor', () => {
     const pm = providerProfile(account('imap.purelymail.com'));
     expect(connectStaggerFor(pm, 0)).toBe(1200);
   });
+
+  it('spaces the startup connects of mail node mailboxes by the node gap, others by their provider', () => {
+    expect(startupStaggerFor({ imap_host: 'mail.example.com', mail_node: true }, 100)).toBe(NODE_CONNECT_STAGGER_MS * 2);
+    expect(startupStaggerFor({ imap_host: 'mail.example.com', mail_node: false }, 100)).toBe(1000);
+    expect(startupStaggerFor({ imap_host: 'imap.purelymail.com' }, 100)).toBe(2400);
+  });
 });
 
 // ── planModseqSync — CONDSTORE delta-sync strategy decision ────────────────────
@@ -2040,6 +2046,13 @@ describe('_shouldAutoBackfillOnConnect (#354)', () => {
   it('skips backfill for a PurelyMail account that already has cached messages', async () => {
     query.mockResolvedValueOnce({ rows: [{ exists: 1 }] });
     await expect(gate({ imap_host: 'imap.purelymail.com', id: 'a1' })).resolves.toBe(false);
+  });
+
+  it('backfills a mail node mailbox only while it is empty', async () => {
+    query.mockResolvedValueOnce({ rows: [{ exists: 1 }] });
+    await expect(gate({ imap_host: 'mail.example.com', mail_node: true, id: 'a1' })).resolves.toBe(false);
+    query.mockResolvedValueOnce({ rows: [] });
+    await expect(gate({ imap_host: 'mail.example.com', mail_node: true, id: 'a1' })).resolves.toBe(true);
   });
 });
 

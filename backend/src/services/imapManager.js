@@ -1433,6 +1433,18 @@ export function connectStaggerFor(profile, accountCount) {
   return Math.round(base * factor);
 }
 
+// Base gap between startup connects of mailboxes on our own mail node (account.mail_node). The node
+// is ours: no per-IP connection rate limit to stay under (the panel's address is on its fail2ban
+// whitelist), and the per-host handshake cap (CONNECT_CONCURRENCY_PER_HOST) still bounds the burst.
+// The generic profile's 500 ms (1 s at 25+ mailboxes) made 100 node mailboxes reconnect over minutes.
+export const NODE_CONNECT_STAGGER_MS = 100;
+
+// The startup gap after launching this account's connect (connectAllEnabled).
+export function startupStaggerFor(account, accountCount) {
+  const profile = account?.mail_node ? { connectStaggerMs: NODE_CONNECT_STAGGER_MS } : providerProfile(account);
+  return connectStaggerFor(profile, accountCount);
+}
+
 // Per-account connection pool for body fetches — avoids TLS handshake on every click
 const connectionPools = new Map(); // accountId -> { clients: [], waiting: [] }
 
@@ -3894,9 +3906,13 @@ export class ImapManager {
     }
   }
 
+  // A mailbox on our own mail node backfills on connect only while it is empty too: its letters come
+  // only through the node, the sync and the integrity pass keep the cache whole, and a full backfill
+  // of every folder on each reconnect of every node mailbox (a backend restart reconnects them all)
+  // crowded the node's logins and slowed the reconnect to minutes.
   async _shouldAutoBackfillOnConnect(account) {
     const profile = providerProfile(account);
-    if (profile.autoBackfillExistingOnConnect !== false) return true;
+    if (profile.autoBackfillExistingOnConnect !== false && !account.mail_node) return true;
     const existing = await query('SELECT 1 FROM messages WHERE account_id = $1 LIMIT 1', [account.id]);
     return existing.rows.length === 0;
   }
@@ -8812,7 +8828,7 @@ export class ImapManager {
       while (queue.length) {
         const queued = queue.shift();
         const launchAt = Math.max(nextLaunchAt, Date.now());
-        nextLaunchAt = launchAt + connectStaggerFor(providerProfile(queued), total);
+        nextLaunchAt = launchAt + startupStaggerFor(queued, total);
         const wait = launchAt - Date.now();
         if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
         this._startupQueued.delete(queued.id);
