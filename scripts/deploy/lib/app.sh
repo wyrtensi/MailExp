@@ -128,7 +128,7 @@ compose_foreign_objects() {
   shift 2
   # Every docker call returns 1 on failure: callers often run this where -e is off.
   containers=$(compose_foreign_containers "$project" "$dir") || return 1
-  if [ -n "$containers" ]; then sed 's/^/container /' <<<"$containers"; fi
+  if [ -n "$containers" ]; then awk '{print "container " $0}' <<<"$containers"; fi
   volumes=$(docker volume ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   networks=$(docker network ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   {
@@ -196,7 +196,7 @@ panel_exec_problem() {
     return 1
   fi
   [ -n "$foreign" ] || return 0
-  printf '%s\n' "compose project $CFG_PROJECT is not only this install's (its directory is $APP_DIR): $(sed 's/^/container /' <<<"$foreign" | paste -sd';' -); nothing was run in it: find out whose they are (docker inspect <name>); this install does not exec or run anything in that project while they are there"
+  printf '%s\n' "compose project $CFG_PROJECT is not only this install's (its directory is $APP_DIR): $(awk '{print "container " $0}' <<<"$foreign" | paste -sd';' -); nothing was run in it: find out whose they are (docker inspect <name>); this install does not exec or run anything in that project while they are there"
   return 2
 }
 
