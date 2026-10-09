@@ -120,6 +120,32 @@ STUB_EOF
   [ ! -e "$P/state/rollback-in-progress" ]
 }
 
+@test "a rollback to a version with the default unit names removes this project's suffixed units" {
+  stub_install
+  local units=$BATS_TEST_TMPDIR/systemd name kind unit
+  mkdir -p "$units"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$SYSTEMCTL_LOG"\n' >"$STUB/systemctl"
+  chmod +x "$STUB/systemctl"
+  export MAILEXPERT_SYSTEMD_DIR=$units SYSTEMCTL_LOG=$BATS_TEST_TMPDIR/systemctl.log
+  # The version gone back to has updater.sh and wrote its units under the default names for $P;
+  # this version's units of project me-test are still there.
+  printf '#!/bin/sh\n' >"$P/app/scripts/deploy/updater.sh"
+  chmod +x "$P/app/scripts/deploy/updater.sh"
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "$P" >"$units/mailexpert-$name.$unit"
+      : >"$units/mailexpert-$name-me-test.$unit"
+    done
+  done
+  run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"
+  [ "$status" -eq 0 ]
+  [ "$(cd "$units" && ls -1 | paste -sd' ' -)" = "mailexpert-backup.service mailexpert-backup.timer mailexpert-health.service mailexpert-health.timer mailexpert-updater.path mailexpert-updater.service" ]
+  grep -qx "disable --now mailexpert-updater-me-test.path" "$SYSTEMCTL_LOG"
+  grep -qx "disable --now mailexpert-backup-me-test.timer" "$SYSTEMCTL_LOG"
+  grep -qx "disable --now mailexpert-health-me-test.timer" "$SYSTEMCTL_LOG"
+}
+
 @test "not enough space for the restored copy next to the database: exit 2 before anything stops" {
   stub_install
   STUB_DB_BYTES=999999999999999 run bash "$SCRIPT" --prefix "$P" --to "sha-${OLD:0:12}" --confirm "sha-${OLD:0:12}"

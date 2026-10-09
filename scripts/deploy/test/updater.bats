@@ -554,6 +554,64 @@ id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }
   [ "$(result "$ID1" .state)" = rollback_failed ]
 }
 
+@test "an automatic rollback to a version with the default unit names removes this project's suffixed units" {
+  stub_install
+  local units=$BATS_TEST_TMPDIR/systemd name kind unit
+  mkdir -p "$units"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"$SYSTEMCTL_LOG"\n' >"$STUB/systemctl"
+  chmod +x "$STUB/systemctl"
+  export MAILEXPERT_SYSTEMD_DIR=$units SYSTEMCTL_LOG=$BATS_TEST_TMPDIR/systemctl.log
+  # What install.sh of the old version leaves: its units under the default names for $P, next to
+  # this version's units of project me-test (the service this run is in among them).
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$REPO_DIR/deploy/systemd/mailexpert-$name.$unit" "$P" >"$units/mailexpert-$name.$unit"
+      : >"$units/mailexpert-$name-me-test.$unit"
+    done
+  done
+  put_request "$ID1" update "sha-${MIG:0:12}"
+  STUB_APPLIED=$'0001_a\n0002_b' STUB_UPDATE=1 run_updater
+  [ "$(result "$ID1" .state)" = rolled_back ]
+  [ "$(cd "$units" && ls -1 | paste -sd' ' -)" = "mailexpert-backup.service mailexpert-backup.timer mailexpert-health.service mailexpert-health.timer mailexpert-updater.path mailexpert-updater.service" ]
+  grep -qx "disable --now mailexpert-updater-me-test.path" "$SYSTEMCTL_LOG"
+  run ! grep -q "service" "$SYSTEMCTL_LOG"
+}
+
+# hold_updater_lock <seconds>: another updater.sh holds the lock that long, from now.
+hold_updater_lock() {
+  mkdir -p "$P/state/updater"
+  flock "$P/state/updater/updater.lock" sleep "$1" &
+  HOLDER=$!
+  until [ -e "$P/state/updater/updater.lock" ] && ! flock -n "$P/state/updater/updater.lock" true; do sleep 0.1; done
+}
+
+@test "a run that finds another updater.sh waits for it, then handles the spool" {
+  stub_install
+  put_request "$ID1" check "sha-${MIG:0:12}"
+  hold_updater_lock 2
+  run_updater
+  wait "$HOLDER"
+  [ "$status" -eq 0 ]
+  [[ $stderr == *"another updater.sh runs; waiting up to 3600s for it to finish"* ]]
+  [ -z "$(ls -A "$REQ")" ]
+  [ "$(result "$ID1" .state)" = ready ]
+}
+
+@test "a run gives up waiting after MAILEXPERT_UPDATER_LOCK_WAIT and leaves the spool" {
+  stub_install
+  put_request "$ID1" check "sha-${MIG:0:12}"
+  hold_updater_lock 5
+  MAILEXPERT_UPDATER_LOCK_WAIT=1 run_updater
+  wait "$HOLDER"
+  [ "$status" -eq 0 ]
+  [[ $stderr == *"another updater.sh still runs after 1s; leaving the spool to it"* ]]
+  [ -e "$REQ/$ID1.json" ]
+  [ ! -e "$RES/$ID1.json" ]
+  MAILEXPERT_UPDATER_LOCK_WAIT=x run_updater
+  [ "$status" -eq 2 ]
+}
+
 @test "results beyond the newest 20 are pruned" {
   stub_install
   for i in $(seq 1 25); do

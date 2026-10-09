@@ -122,3 +122,45 @@ units() { (cd "$SYSTEMD_DIR" && ls -1) | paste -sd' ' -; }
   [ ! -e "$STATE_DIR/update-spool/result/updater.json" ]
   grep -qx "disable --now mailexpert-updater-p2.path" "$SYSTEMCTL_LOG"
 }
+
+# old_units <prefix> <name...>: the default-name units an install.sh older than the per-project
+# names writes for <prefix>.
+old_units() {
+  local prefix=$1 name kind unit
+  shift
+  for name in "$@"; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    for unit in service "$kind"; do
+      render_unit "$APP_DIR/deploy/systemd/mailexpert-$name.$unit" "$prefix" >"$SYSTEMD_DIR/mailexpert-$name.$unit"
+    done
+  done
+}
+
+@test "remove_project_units_after_downgrade: an older version's default-name units of this prefix replace the suffixed ones" {
+  CFG_PROJECT=p2
+  install_units 2>/dev/null
+  old_units "$OPT_PREFIX" updater backup
+  : >"$SYSTEMCTL_LOG"
+  run remove_project_units_after_downgrade
+  [ "$status" -eq 0 ]
+  [ "$(units)" = "mailexpert-backup.service mailexpert-backup.timer mailexpert-health-p2.service mailexpert-health-p2.timer mailexpert-updater.path mailexpert-updater.service" ]
+  # Only the path unit and the timer are disabled: a running service (the updater itself) is not stopped.
+  [ "$(paste -sd'|' "$SYSTEMCTL_LOG")" = "disable --now mailexpert-updater-p2.path|disable --now mailexpert-backup-p2.timer|daemon-reload" ]
+  [[ $output == *"systemd units: removed mailexpert-updater-p2.path, the installed version uses mailexpert-updater.path"* ]]
+}
+
+@test "remove_project_units_after_downgrade: default-name units of another prefix, or the default project, change nothing" {
+  CFG_PROJECT=p2
+  install_units 2>/dev/null
+  old_units "${OPT_PREFIX}2" updater backup health
+  : >"$SYSTEMCTL_LOG"
+  remove_project_units_after_downgrade
+  [ -e "$SYSTEMD_DIR/mailexpert-updater-p2.path" ] && [ -e "$SYSTEMD_DIR/mailexpert-backup-p2.timer" ]
+  [ -e "$SYSTEMD_DIR/mailexpert-health-p2.timer" ]
+  [ ! -s "$SYSTEMCTL_LOG" ]
+  CFG_PROJECT=mailexpert
+  old_units "$OPT_PREFIX" updater
+  remove_project_units_after_downgrade
+  [ -e "$SYSTEMD_DIR/mailexpert-updater.path" ]
+  [ ! -s "$SYSTEMCTL_LOG" ]
+}

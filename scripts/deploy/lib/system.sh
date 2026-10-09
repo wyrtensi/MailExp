@@ -168,6 +168,29 @@ remove_stale_fixed_units() {
   if [ "$removed" = 1 ]; then systemctl daemon-reload; fi
 }
 
+# remove_project_units_after_downgrade: after install.sh of a version older than the per-project
+# names ran (rollback.sh, the updater's automatic rollback), it has put this install's units back
+# under the default names; this install's suffixed units, left enabled, would watch the spool and
+# run the timers a second time. For another project, each unit kind whose default-name unit now
+# serves this prefix loses its suffixed units: the path unit or timer is disabled and both files
+# are removed. A running service is never stopped (the updater may be running inside it).
+remove_project_units_after_downgrade() {
+  local name kind removed=0 suffixed
+  [ "$CFG_PROJECT" != mailexpert ] || return 0
+  for name in updater backup health; do
+    if [ "$name" = updater ]; then kind=path; else kind=timer; fi
+    unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.service" "$OPT_PREFIX" ||
+      unit_runs_prefix "$SYSTEMD_DIR/mailexpert-$name.$kind" "$OPT_PREFIX" || continue
+    suffixed=$(unit_name "$name" "$kind")
+    [ -e "$SYSTEMD_DIR/$suffixed" ] || [ -e "$SYSTEMD_DIR/$(unit_name "$name" service)" ] || continue
+    systemctl disable --now "$suffixed" >/dev/null 2>&1 || true
+    rm -f "$SYSTEMD_DIR/$suffixed" "$SYSTEMD_DIR/$(unit_name "$name" service)"
+    log "systemd units: removed $suffixed, the installed version uses mailexpert-$name.$kind"
+    removed=1
+  done
+  if [ "$removed" = 1 ]; then systemctl daemon-reload || true; fi
+}
+
 # install_updater: the host side of "update from the panel" (updater.sh): the updater path unit
 # (mailexpert-updater.path, see unit_name) watches the spool's request directory and starts the
 # updater service. Installed only when the checked-out commit has updater.sh; reruns rewrite the

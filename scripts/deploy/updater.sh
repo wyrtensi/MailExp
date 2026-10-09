@@ -52,10 +52,16 @@ LIB_DIR=$SCRIPT_DIR/lib
 . "$LIB_DIR/channel.sh"
 # shellcheck source=lib/updater.sh
 . "$LIB_DIR/updater.sh"
+# shellcheck source=lib/system.sh
+. "$LIB_DIR/system.sh"
 exit_on_unexpected_failure
 
 # How often a running update's result is rewritten (updatedAt and the log tail), in seconds.
 PROGRESS_INTERVAL=${MAILEXPERT_UPDATER_INTERVAL:-5}
+# How long a run waits for another updater.sh to finish, in seconds (well inside the service's
+# TimeoutStartSec of 4 hours). Waiting instead of leaving at once: a request left in the spool would
+# make the path unit start this service again and again until its start limit.
+LOCK_WAIT=${MAILEXPERT_UPDATER_LOCK_WAIT:-3600}
 # A *.tmp the backend is still writing is left alone this long; older ones are removed.
 TMP_GRACE_MIN=5
 
@@ -346,6 +352,10 @@ do_update() {
     set_result "$id" "state=\"rollback_failed\"" "finishedAt=$(json_str "$(now)")" \
       "message=$(json_str "$target did not become ready and going back to $from failed: follow the runbook over SSH")"
   fi
+  # $from may predate the per-project unit names: its install.sh then put this install's units back
+  # under the default names, and the suffixed ones must not run next to them. The service this run
+  # is in is not stopped, only its path unit and the files go.
+  remove_project_units_after_downgrade >>"$logfile" 2>&1
 }
 
 # prune_results: keeps the KEEP_RESULTS newest results (and logs of the same requests).
@@ -408,7 +418,7 @@ finish_on_exit() {
 }
 
 main() {
-  local prefix=/opt/mailexpert name fd
+  local prefix=/opt/mailexpert name fd waited
   while [ $# -gt 0 ]; do
     case $1 in
       --prefix)
@@ -422,16 +432,27 @@ main() {
   done
   [[ $prefix =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--prefix must be an absolute path without spaces" 2
   [[ $PROGRESS_INTERVAL =~ ^[1-9][0-9]*$ ]] || die "MAILEXPERT_UPDATER_INTERVAL must be a number of seconds" 2
+  [[ $LOCK_WAIT =~ ^[0-9]+$ ]] || die "MAILEXPERT_UPDATER_LOCK_WAIT must be a number of seconds" 2
   [ "$(id -u)" = 0 ] || die "run updater.sh as root" 2
   SPOOL=$prefix/state/update-spool REQUEST_DIR=$SPOOL/request RESULT_DIR=$SPOOL/result
   WORK_DIR=$prefix/state/updater STAGE_DIR=$WORK_DIR/incoming
   SPOOL_UID=$(spool_uid "$prefix/state")
   prepare_spool
+  # One run at a time. A second run (the path unit fired again, for example the updater units of
+  # a newly installed version while the old service still runs the update) waits for the first
+  # and then handles what is left in the spool. Nothing the first run starts (update.sh, install.sh)
+  # runs updater.sh, so it never waits for itself.
   exec {fd}>"$WORK_DIR/updater.lock"
-  if ! flock -n "$fd"; then
-    log "another updater.sh runs; it handles the spool"
-    return 0
-  fi
+  waited=0
+  until flock -n "$fd"; do
+    if [ "$waited" -eq 0 ]; then log "another updater.sh runs; waiting up to ${LOCK_WAIT}s for it to finish"; fi
+    if [ "$waited" -ge "$LOCK_WAIT" ]; then
+      log "another updater.sh still runs after ${LOCK_WAIT}s; leaving the spool to it"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
   # Drained before anything that can fail, so a broken installation cannot make the path unit
   # retrigger in a loop.
   stage_requests
