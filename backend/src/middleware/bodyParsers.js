@@ -110,7 +110,10 @@ function saveSessionBeforeParsing(req, res, next) {
 // The session was read before the upload, so it is read again now that the body is in: a
 // sign-out, a screen lock or a password reset during a long upload still stops the request, as it
 // did when these paths read the session after parsing. This is what req.session.reload() does,
-// except that a session which has ended is told apart from a store error.
+// except that a session which has ended is told apart from a store error. express-session still
+// compares the copy read now with the one read before the body and saves it at the end when they
+// differ; the session store writes only what the request changed since this read
+// (utils/sessionStore.js), so a lock or sign-out during the handler stays.
 function reloadSession(req, res, next) {
   req.sessionStore.get(req.sessionID, (err, sess) => {
     if (err) return next(err);
