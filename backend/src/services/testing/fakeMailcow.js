@@ -233,6 +233,8 @@ export function createFakeMailcow(initial = {}) {
         if (!body.script_data || !body.script_desc) return [danger('value_missing')];
         if (body.filter_type !== 'prefilter' && body.filter_type !== 'postfilter') return [danger('filter_type')];
         const username = String(body.username).toLowerCase();
+        // mailcow refuses a filter for an address it has no mailbox for (access_denied).
+        if (!node.mailboxes.some((m) => m.username === username)) return [danger('access_denied')];
         const active = Number(body.active) ? 1 : 0;
         if (active) for (const f of node.filters) if (f.username === username && f.filter_type === body.filter_type) f.active = 0;
         node.filters.push({
