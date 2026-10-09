@@ -102,10 +102,10 @@ jobs:
 
       # jq: the mail node scripts parse the Microsoft 365 endpoints answers with it (the image has none).
       # git: status.bats runs status.sh against a throwaway checkout.
-      - uses: ./.github/actions/docker-hub-mirror
-
+      # bats/bats from Google's pull-through cache of Docker Hub: Docker Hub's unauthenticated pull
+      # limit and token timeouts on the shared runners failed this job.
       - name: Deploy script unit tests
-        run: docker run --rm -v "$PWD:/code:ro" -w /code --entrypoint bash bats/bats:1.14.0 -c 'apk add --no-cache -q jq git && bats scripts/deploy/test'
+        run: docker run --rm -v "$PWD:/code:ro" -w /code --entrypoint bash mirror.gcr.io/bats/bats:1.14.0 -c 'apk add --no-cache -q jq git && bats scripts/deploy/test'
 
   fake-eop:
     name: Stand fake-EOP
@@ -137,8 +137,6 @@ jobs:
       - name: Unit and dry-mode tests
         run: node --test deploy/tenant-worker/worker.test.mjs
 
-      - uses: ./.github/actions/docker-hub-mirror
-
       - uses: docker/setup-buildx-action@v3
         with:
           buildkitd-config: .github/buildkitd.toml
@@ -169,8 +167,6 @@ jobs:
         with:
           # e2e.sh installs HEAD from a git bundle, which needs the history.
           fetch-depth: 0
-
-      - uses: ./.github/actions/docker-hub-mirror
 
       - uses: docker/setup-buildx-action@v3
         with:
@@ -235,8 +231,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/docker-hub-mirror
 
       - uses: docker/setup-buildx-action@v3
         with:
