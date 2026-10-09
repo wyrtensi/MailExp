@@ -38,7 +38,7 @@
 | `backend/src/services/accounts/manualAccounts.js` | ящики, настроенные вручную: поиск по адресу или ID, список, создание (`POST /api/accounts`), смена серверов, сброс привязки OAuth |
 | `backend/src/services/accounts/connection.js` | поля подключения ящика, проверки хостов и портов по политике, хранение значений, переподключение (`reconnectAccount`) — общие для `routes/accounts.js` и `manualAccounts.js` |
 | `backend/src/services/rules/ruleActions.js` | правила: проверки, список, создание, замена, удаление, журнал, прогон по входящим (бывшие обработчики `/api/rules`) |
-| `scripts/deploy/mailexpert-cli.sh` | обёртка на хосте: `docker compose exec backend node src/cli/mailexpert.js` |
+| `scripts/deploy/mailexpert-cli.sh` | обёртка на хосте: `docker compose exec backend node src/cli/mailexpert.js`; перед этим одним `docker ps` проверяет, что в compose-проекте панели нет чужих контейнеров (`lib/app.sh` `guard_panel_exec`) |
 | `backend/src/cli/googleApp.js`, `scripts/deploy/google-app.sh` | отдельная команда для Google-приложений (добавить из JSON клиента, список, show, enable/close/disable, delete, set-limit, set-label, replace-secret); не группа `mailexpert` ([google-oauth.md](../operations/google-oauth.md)) |
 
 ## Один путь для экрана и CLI

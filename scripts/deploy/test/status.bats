@@ -272,11 +272,18 @@ STUB_EOF
   [[ $output != *"do-not-print-me"* ]]
 }
 
-@test "a container of another owner in the panel's project is a problem" {
+@test "a container of another owner in the panel's project is a problem, and psql is not run in the project" {
   stub_install
   STUB_FOREIGN=neighbour-web run bash "$SCRIPT" --prefix "$P"
   [ "$status" -eq 1 ]
-  [[ $output == *"problem: ownership: compose project me-test: container neighbour-web (/srv/neighbour) is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone"* ]]
+  [[ $output == *"problem: ownership: compose project me-test: container neighbour-web (/srv/neighbour) is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone; backup.sh, mailexpert-cli.sh and google-app.sh run nothing in the project either"* ]]
+  [[ $output == *"warning: database: not read: compose project me-test has a container of another owner"* ]]
+  ! grep -q " exec " "$DOCKER_LOG"
+  # Ours only: the database is read.
+  rm -f "$DOCKER_LOG"
+  run bash "$SCRIPT" --prefix "$P"
+  [ "$status" -eq 0 ]
+  grep -q " exec -T postgres " "$DOCKER_LOG"
 }
 
 # cf_install: the panel of stub_install behind the tunnel on cf.example.com.

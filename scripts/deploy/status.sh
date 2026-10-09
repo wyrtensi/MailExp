@@ -77,6 +77,9 @@ TARGET_PENDING='' TARGET_UNKNOWN='' TARGET_IMAGES=''
 # 1 once schema_migrations was read: until then pending and unknown migrations are unknown (null),
 # never "none".
 SCHEMA_READ=0
+# 1 when the panel's compose project has a container of another owner (collect_names): the database
+# is not read then, exec would reach that container (lib/app.sh panel_exec_problem).
+PANEL_FOREIGN_CONTAINER=0
 JSON=0 REPORTED=0
 
 # lines_into <array name>: appends the non-empty lines on stdin to the array.
@@ -153,10 +156,11 @@ collect_containers() {
 }
 
 # collect_names: Docker objects of another owner in this install's compose projects (install.sh,
-# update.sh, rollback.sh and restore.sh refuse to run then: lib/app.sh guard_compose_projects), and
-# a note for each project name without the mailexpert prefix.
+# update.sh, rollback.sh and restore.sh refuse to run then: lib/app.sh guard_compose_projects; a
+# container in the panel's project also stops backup.sh and the CLI wrappers: panel_exec_problem),
+# and a note for each project name without the mailexpert prefix.
 collect_names() {
-  local line project foreign
+  local line project foreign also
   for project in panel edge; do
     # Inside ||: a Docker that does not answer is a warning here, not the end of the report.
     if ! foreign=$("${project}_foreign_objects" 2>/dev/null); then
@@ -165,8 +169,13 @@ collect_names() {
     fi
     while IFS= read -r line; do
       if [ -z "$line" ]; then continue; fi
+      also=''
+      if [ "$project" = panel ] && [[ $line == container\ * ]]; then
+        PANEL_FOREIGN_CONTAINER=1
+        also='; backup.sh, mailexpert-cli.sh and google-app.sh run nothing in the project either'
+      fi
       if [ "$project" = panel ]; then line="$CFG_PROJECT: $line"; else line="$CFG_EDGE_PROJECT: $line"; fi
-      problem "ownership: compose project $line is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone"
+      problem "ownership: compose project $line is not this install's; install.sh, update.sh, rollback.sh and restore.sh refuse to run until it is gone$also"
     done <<<"$foreign"
   done
   lines_into INFO < <(generic_name_notes)
@@ -248,6 +257,10 @@ collect_database() {
   local state
   FACT[migrations_applied]='' FACT[spam_rule]=''
   is_standby && return 0
+  if [ "$PANEL_FOREIGN_CONTAINER" = 1 ]; then
+    warning "database: not read: compose project $CFG_PROJECT has a container of another owner (the ownership problem above), and psql would run in it"
+    return 0
+  fi
   if APPLIED=$(printf 'SELECT version FROM schema_migrations ORDER BY version;\n' | app_psql 2>/dev/null); then
     SCHEMA_READ=1
     APPLIED=$(LC_ALL=C sort -u <<<"$APPLIED" | sed '/^$/d')

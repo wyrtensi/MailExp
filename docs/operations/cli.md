@@ -32,7 +32,9 @@ sudo <PREFIX>/app/scripts/deploy/mailexpert-cli.sh [--prefix <PREFIX>] [--] <г�
 ```
 
 Обёртка `scripts/deploy/mailexpert-cli.sh` находит установленную панель так же, как остальные скрипты
-развёртывания (`install.conf` в `<PREFIX>`), проверяет, что контейнер `backend` работает и что в его
+развёртывания (`install.conf` в `<PREFIX>`), проверяет, что в compose-проекте панели нет чужих
+контейнеров (иначе код 2, ничего не выполняется; [deployment.md, «Проверка
+владельца»](deployment.md#имена-на-общем-сервере)), что контейнер `backend` работает и что в его
 образе есть `src/cli/mailexpert.js`, и выполняет `docker compose exec backend node
 src/cli/mailexpert.js ...`, передавая все остальные аргументы без изменений.
 

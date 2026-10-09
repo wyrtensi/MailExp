@@ -160,6 +160,15 @@ stub_docker() {
   printf '#!/usr/bin/env bash\n[ "$1" = -u ] && echo 0 || command -p id "$@"\n' >"$STUB/id"
   cat >"$STUB/docker" <<'STUB_EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CALLS_LOG"
+# docker ps: the ownership check (lib/app.sh panel_exec_problem). STUB_CONTAINERS: the panel
+# project's containers ("<name>\037<working dir>\037<install ID>" lines; none by default);
+# STUB_DOCKER_PS_STATUS: the daemon does not answer.
+if [ "$1" = ps ]; then
+  if [ -n "${STUB_DOCKER_PS_STATUS:-}" ]; then echo "Cannot connect to the Docker daemon" >&2; exit "$STUB_DOCKER_PS_STATUS"; fi
+  if [ -n "${STUB_CONTAINERS:-}" ]; then printf "$STUB_CONTAINERS\n"; fi
+  exit 0
+fi
 case " $* " in
   *" node "*)
     printf '%s\n' "$*" >>"$DOCKER_LOG"
@@ -170,7 +179,8 @@ esac
 exit 0
 STUB_EOF
   chmod +x "$STUB/id" "$STUB/docker"
-  export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log STDIN_LOG=$BATS_TEST_TMPDIR/stdin.log
+  export PATH="$STUB:$PATH" DOCKER_LOG=$BATS_TEST_TMPDIR/docker.log STDIN_LOG=$BATS_TEST_TMPDIR/stdin.log \
+    CALLS_LOG=$BATS_TEST_TMPDIR/calls.log
   : >"$DOCKER_LOG"
   : >"$STDIN_LOG"
   P=$BATS_TEST_TMPDIR/p
@@ -221,6 +231,33 @@ STUB_EOF
   # Without --, the wrapper forwards the word and the CLI refuses it as an option (backend tests).
   run bash "$SCRIPT" set-label an-id -draft --prefix "$P"
   grep -q -- "googleApp.js set-label an-id -draft" "$DOCKER_LOG"
+}
+
+@test "a container of another owner in the panel's project: exit 2 naming it, the secret goes nowhere" {
+  stub_docker
+  printf '%s' 'GOCSPX-from-file' >"$BATS_TEST_TMPDIR/secret.txt"
+  STUB_CONTAINERS='me-test-backend-1\037/srv/neighbour/app\037' run bash "$SCRIPT" replace-secret an-id "$BATS_TEST_TMPDIR/secret.txt" --prefix "$P"
+  [ "$status" -eq 2 ]
+  [[ $output == *"compose project me-test is not only this install's (its directory is $P/app): container me-test-backend-1 (/srv/neighbour/app); nothing was run in it"* ]]
+  grep -q -- "ps -a --filter label=com.docker.compose.project=me-test" "$CALLS_LOG"
+  ! grep -q '^compose' "$CALLS_LOG"
+  [ ! -s "$STDIN_LOG" ]
+}
+
+@test "this install's containers pass the ownership check and the CLI runs" {
+  stub_docker
+  printf 'INSTALL_ID=0123456789abcdef\n' >>"$P/install.conf"
+  STUB_CONTAINERS="me-test-backend-1\037$P/app\037\nme-test-redis-1\037/moved/app\0370123456789abcdef" run bash "$SCRIPT" list --prefix "$P"
+  [ "$status" -eq 0 ]
+  grep -q -- "exec -T backend node src/cli/googleApp.js list" "$DOCKER_LOG"
+}
+
+@test "docker that does not answer the ownership check: exit 3, nothing is exec'd" {
+  stub_docker
+  STUB_DOCKER_PS_STATUS=1 run bash "$SCRIPT" list --prefix "$P"
+  [ "$status" -eq 3 ]
+  [[ $output == *"cannot list Docker's containers to check compose project me-test"* ]]
+  ! grep -q '^compose' "$CALLS_LOG"
 }
 
 @test "the CLI's exit codes 1, 2 and 3 pass through" {

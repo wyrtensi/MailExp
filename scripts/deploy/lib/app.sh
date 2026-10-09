@@ -108,6 +108,16 @@ foreign_containers() {
 COMPOSE_DIR_FORMAT=$'{{.Names}}\x1f{{.Label "com.docker.compose.project.working_dir"}}\x1f{{.Label "io.mailexpert.install"}}'
 COMPOSE_PROJECT_FORMAT=$'{{.Name}}\t{{.Label "com.docker.compose.project"}}'
 
+# compose_foreign_containers <project> <project directory>: "<name> (<working dir>)" for each
+# container of the project, running or not, that is not this install's (foreign_containers). One
+# docker ps; status 1 when Docker does not answer.
+compose_foreign_containers() {
+  local containers
+  containers=$(docker ps -a --filter "label=com.docker.compose.project=$1" --format "$COMPOSE_DIR_FORMAT" </dev/null) ||
+    return 1
+  foreign_containers "$2" "${CFG_INSTALL_ID:-}" <<<"$containers"
+}
+
 # compose_foreign_objects <project> <project directory> [<volume|network>:<name>...]: one line per
 # Docker object that compose -p <project> would act on or reuse and that is not this install's:
 # containers of the project that are not this install's (foreign_containers); the named volumes and networks (the
@@ -117,9 +127,8 @@ compose_foreign_objects() {
   local project=$1 dir=$2 containers volumes networks kind name list line label users
   shift 2
   # Every docker call returns 1 on failure: callers often run this where -e is off.
-  containers=$(docker ps -a --filter "label=com.docker.compose.project=$project" --format "$COMPOSE_DIR_FORMAT" </dev/null) ||
-    return 1
-  foreign_containers "$dir" "${CFG_INSTALL_ID:-}" <<<"$containers" | sed 's/^/container /'
+  containers=$(compose_foreign_containers "$project" "$dir") || return 1
+  if [ -n "$containers" ]; then awk '{print "container " $0}' <<<"$containers"; fi
   volumes=$(docker volume ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   networks=$(docker network ls --format "$COMPOSE_PROJECT_FORMAT" </dev/null) || return 1
   {
@@ -172,6 +181,36 @@ guard_compose_projects() {
   fi
   [ -z "$foreign" ] ||
     die "compose project $CFG_EDGE_PROJECT is not only this install's (its directory is $EDGE_DIR): $(paste -sd';' - <<<"$foreign"); nothing was run against them; $edge_next" 2
+}
+
+# panel_exec_problem: why nothing may be exec'd or run in the panel's compose project, on stdout;
+# nothing and status 0 when every container of the project is this install's. `compose exec` and
+# `compose run` find the service's container by project and service name: in a neighbour's project
+# of the same name they would reach its containers (with the secrets piped into them). One docker
+# ps, containers only, to keep the CLI fast: install.sh and update.sh check the volumes and
+# networks. Status 2 when a container is not this install's, 1 when Docker does not answer.
+panel_exec_problem() {
+  local foreign
+  if ! foreign=$(compose_foreign_containers "$CFG_PROJECT" "$APP_DIR"); then
+    printf '%s\n' "cannot list Docker's containers to check compose project $CFG_PROJECT (the error is above); nothing was run in it"
+    return 1
+  fi
+  [ -n "$foreign" ] || return 0
+  printf '%s\n' "compose project $CFG_PROJECT is not only this install's (its directory is $APP_DIR): $(awk '{print "container " $0}' <<<"$foreign" | paste -sd';' -); nothing was run in it: find out whose they are (docker inspect <name>); this install does not exec or run anything in that project while they are there"
+  return 2
+}
+
+# guard_panel_exec <exit code when a container is not this install's> <exit code when Docker does
+# not answer>: panel_exec_problem before a compose exec in the panel's project (the CLI wrappers);
+# stops the script with the code for the case.
+guard_panel_exec() {
+  local problem code=0
+  problem=$(panel_exec_problem) || code=$?
+  case $code in
+    0) return 0 ;;
+    2) die "$problem" "$1" ;;
+    *) die "$problem" "$2" ;;
+  esac
 }
 
 # guard_existing_projects <exit code when Docker does not answer>: guard_compose_projects for the

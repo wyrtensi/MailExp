@@ -287,14 +287,14 @@ $D/backup.sh --prefix <PREFIX> --tag manual --verify; echo "exit $?"   # 0
 | Сообщение | Код | Что значит и что делать |
 |---|---|---|
 | `waiting for secrets: ...` | 3 | ожидаемо при первой установке: шаг 5, затем шаг 6 |
-| `compose project <имя> is not only this install's ...` | 2 | в проекте есть контейнеры, тома или сети другого владельца (перечислены в сообщении); ничего не запущено. Новая установка — другое имя: `--project <имя>` или `--edge-project <имя>`. Существующая — выяснить, чьи это объекты (`docker inspect <имя>`), и убрать их из проекта; край со старым именем `edge` — [переезд края](deployment.md#имена-на-общем-сервере) |
-| `cannot list Docker's containers, volumes and networks ...` | 1 (`install.sh`, `restore.sh`), 3 (`update.sh`, `rollback.sh`) | Docker не ответил на проверке владельца; ничего не изменено. Проверить `docker info` и повторить |
+| `compose project <имя> is not only this install's ...` | 2 (`backup.sh` — 1 и пинг `/fail`) | в проекте есть контейнеры, тома или сети другого владельца (перечислены в сообщении); ничего не запущено. `backup.sh`, `mailexpert-cli.sh` и `google-app.sh` проверяют только контейнеры проекта панели: с чужим контейнером они ничего в нём не выполняют, бэкапа нет. Новая установка — другое имя: `--project <имя>` или `--edge-project <имя>`. Существующая — выяснить, чьи это объекты (`docker inspect <имя>`), и убрать их из проекта; край со старым именем `edge` — [переезд края](deployment.md#имена-на-общем-сервере) |
+| `cannot list Docker's containers, volumes and networks ...`, `cannot list Docker's containers to check ...` | 1 (`install.sh`, `restore.sh`, `backup.sh`), 3 (`update.sh`, `rollback.sh`, `mailexpert-cli.sh`, `google-app.sh`) | Docker не ответил на проверке владельца; ничего не изменено. Проверить `docker info` и повторить |
 | `ports for the edge are taken: ...` | 1 | 80/443 занимает другой процесс, контейнер или чужой Caddy. На общем сервере — туннель (`--signin cf`) или `--no-edge` за прокси соседа |
 | `--http-port <порт> is taken on 127.0.0.1 ...` | 1 | порт панели занят не этой панелью: другой `--http-port`. С `--no-start` — только предупреждение |
 | `docker compose ... is too old` / `the docker daemon is not reachable` | 1 | сценарий Б: обновить или запустить Docker самим; сценарий А ставит его сам |
 | `<утилита> is required` (например, `flock is required`) | 1 | поставить утилиту (`flock` — пакет util-linux) |
 | `--prefix must be an absolute path without spaces or .. segments` | 2 | исправить `--prefix` |
-| `status.sh`: `problem: ownership: compose project ...` | — | то же, что код 2 выше: пока объект соседа в проекте, `install.sh`, `update.sh`, `rollback.sh` и `restore.sh` откажут |
+| `status.sh`: `problem: ownership: compose project ...` | — | то же, что код 2 выше: пока объект соседа в проекте, `install.sh`, `update.sh`, `rollback.sh` и `restore.sh` откажут; чужой контейнер в проекте панели останавливает и `backup.sh`, `mailexpert-cli.sh`, `google-app.sh`, а `status.sh` не читает базу (`warning: database: not read ...`) |
 | `status.sh`: `info: names: ...` | — | справка: проект без префикса `mailexpert` (установка, сделанная до этого умолчания) или ещё нет `INSTALL_ID` (появится при следующем `install.sh` или `update.sh`). Строка называет команду переезда края |
 | `status.sh`: `warning: updater: ...` | — | юнитов исполнителя нет или `.path` не активен: `install.sh --prefix <PREFIX>` ([раздел 5.1](deployment.md#51-включить-обновления-на-боевом-сервере)) |
 

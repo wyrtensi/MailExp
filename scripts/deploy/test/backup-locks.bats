@@ -22,6 +22,14 @@ probe() {
   done
   printf '%s\n' "$line" >>"$PROBE_LOG"
 }
+# docker ps: the ownership check (lib/app.sh panel_exec_problem); STUB_CONTAINERS lists the panel
+# project's containers ("<name>\037<working dir>\037<install ID>" lines; none by default).
+if [ "$1" = ps ]; then
+  printf '%s\n' "$*" >>"$P/ps.log"
+  if [ -n "${STUB_DOCKER_PS_STATUS:-}" ]; then echo "Cannot connect to the Docker daemon" >&2; exit "$STUB_DOCKER_PS_STATUS"; fi
+  if [ -n "${STUB_CONTAINERS:-}" ]; then printf "$STUB_CONTAINERS\n"; fi
+  exit 0
+fi
 case " $* " in
   *" backup --json "*)
     probe upload
@@ -216,4 +224,48 @@ wait_for() {
   wait "$installer"
   wait "$backup"
   [[ $(cat "$DUMP_LOG") == *'-p me-lock-new '* ]]
+  # The ownership check asks about the project the dump goes to: the reloaded one.
+  grep -q -- "label=com.docker.compose.project=me-lock-new " "$P/ps.log"
+}
+
+@test "a container of another owner in the panel's project: no dump, exit 1, fail ping" {
+  configure_restic
+  STUB_CONTAINERS='me-lock-test-postgres-1\037/srv/neighbour/app\037fedcba9876543210' run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --with-redis
+  [ "$status" -eq 1 ]
+  [[ $output == *"compose project me-lock-test is not only this install's (its directory is $P/app): container me-lock-test-postgres-1 (/srv/neighbour/app, install fedcba9876543210); nothing was run in it"* ]]
+  [ ! -e "$DUMP_LOG" ]
+  [ ! -e "$PROBE_LOG" ]
+  grep -qx 'url = "https://hc.example.com/ping/backup/start"' "$PING_LOG"
+  grep -qx 'url = "https://hc.example.com/ping/backup/fail"' "$PING_LOG"
+  # A local dump only (update.sh without restic keys): refused the same way, no ping to send.
+  rm -f "$PING_LOG"
+  printf 'COMPOSE_PROFILES=\n' >"$P/.env"
+  STUB_CONTAINERS='x\037\037' run bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --keep-dump "$P/kept.dump"
+  [ "$status" -eq 1 ]
+  [[ $output == *"container x (no compose working directory)"* ]]
+  [ ! -e "$DUMP_LOG" ]
+  [ ! -e "$P/kept.dump" ]
+  [ ! -e "$PING_LOG" ]
+}
+
+@test "docker that does not answer the ownership check: no dump, exit 1, fail ping" {
+  configure_restic
+  STUB_DOCKER_PS_STATUS=1 run bash "$DEPLOY_DIR/backup.sh" --prefix "$P"
+  [ "$status" -eq 1 ]
+  [[ $output == *"cannot list Docker's containers to check compose project me-lock-test"* ]]
+  [ ! -e "$DUMP_LOG" ]
+  grep -qx 'url = "https://hc.example.com/ping/backup/fail"' "$PING_LOG"
+}
+
+# --tag manual: the same path as the nightly run up to the checks (a Sunday's verify needs a
+# repository the stub does not have).
+@test "a backup of this install's own containers passes the check: by directory or install ID" {
+  configure_restic
+  printf 'INSTALL_ID=0123456789abcdef\n' >>"$P/install.conf"
+  STUB_CONTAINERS="me-lock-test-postgres-1\037$P/app\037\nme-lock-test-backend-1\037/moved/app\0370123456789abcdef\nme-lock-test-postgres-run-1\037$P/app/\0370123456789abcdef" \
+    run timeout 5 bash "$DEPLOY_DIR/backup.sh" --prefix "$P" --tag manual
+  [ "$status" -eq 0 ]
+  [ -s "$DUMP_LOG" ]
+  grep -q -- "ps -a --filter label=com.docker.compose.project=me-lock-test " "$P/ps.log"
+  run ! grep -q 'ping/backup/fail' "$PING_LOG"
 }
