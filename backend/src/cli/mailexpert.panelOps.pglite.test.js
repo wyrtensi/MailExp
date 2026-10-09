@@ -21,7 +21,8 @@ vi.mock('../services/hostValidation.js', async (importOriginal) => ({
   resolveForConnection: vi.fn(async (host) => ({ host: '192.0.2.10', servername: host })),
 }));
 const smtp = vi.hoisted(() => ({ verify: null, sendMail: null }));
-vi.mock('../services/smtpTransport.js', () => ({
+vi.mock('../services/smtpTransport.js', async (importOriginal) => ({
+  ...(await importOriginal()),
   createSmtpTransport: vi.fn(() => ({ verify: smtp.verify, sendMail: smtp.sendMail })),
   createAccountSmtpTransport: vi.fn(),
 }));

@@ -7,7 +7,7 @@ import { loadSyncSettings } from '../services/syncSettings.js';
 import { decrypt, encrypt } from '../services/encryption.js';
 import { pushConfigured } from '../services/pushNotifications.js';
 import { validateHost, resolveForConnection } from '../services/hostValidation.js';
-import { createSmtpTransport } from '../services/smtpTransport.js';
+import { createSmtpTransport, systemSmtpOptions } from '../services/smtpTransport.js';
 import { getConnectionPolicy } from '../services/connectionPolicy.js';
 import { authLimiterConfig, createAuthRateLimit, createLoginLimit, limitedIdentity } from '../services/authLimiter.js';
 import { logAuthEvent } from '../services/authEvents.js';
@@ -1172,13 +1172,9 @@ router.post('/forgot-password', forgotLimiter, async (req, res) => {
           if (cfg.host && cfg.user && pass) {
             const policy = await getConnectionPolicy();
             const sysResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
-            const sysTls = { rejectUnauthorized: true };
-            if (sysResolved.servername) sysTls.servername = sysResolved.servername;
-            transport = createSmtpTransport(sysResolved, {
-              port: cfg.port || 587,
-              secure: (cfg.port || 587) === 465,
-              auth: { user: cfg.user, pass }, tls: sysTls,
-            });
+            transport = createSmtpTransport(sysResolved, systemSmtpOptions({
+              port: cfg.port || 587, user: cfg.user, pass, resolved: sysResolved, policy,
+            }));
             fromHeader = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
           }
         }

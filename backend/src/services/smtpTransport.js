@@ -82,6 +82,25 @@ async function runWithAddressFallback({
   throw lastError;
 }
 
+// Transport options for the system SMTP (system_settings.system_email_config): invites, sign-in
+// codes, password resets and its connection test. Port 465 is implicit TLS; any other port must
+// upgrade with STARTTLS, because nodemailer only upgrades when EHLO advertises it, so a server
+// that leaves it out, or anyone on the path who strips it, would get AUTH and the letter in
+// cleartext. Fail instead, as mailbox sending does (createAccountSmtpTransport), unless the admin
+// allows insecure connections. The certificate is always verified.
+export function systemSmtpOptions({ port, user, pass, resolved, policy }) {
+  const secure = port === 465;
+  const tls = { rejectUnauthorized: true };
+  if (resolved?.servername) tls.servername = resolved.servername;
+  return {
+    port,
+    secure,
+    requireTLS: !secure && !policy?.allowInsecureTls,
+    auth: { user, pass },
+    tls,
+  };
+}
+
 // Every SMTP transport in the app (account send, rule forwards, system email) is built here, so
 // the EHLO name is set here for all of them: after the spread, so nothing falls back to
 // nodemailer's os.hostname().

@@ -1,7 +1,7 @@
 import { query } from '../db.js';
 import { decrypt, encrypt } from '../encryption.js';
 import { validateHost, resolveForConnection } from '../hostValidation.js';
-import { createSmtpTransport } from '../smtpTransport.js';
+import { createSmtpTransport, systemSmtpOptions } from '../smtpTransport.js';
 import { getConnectionPolicy } from '../connectionPolicy.js';
 
 // The system SMTP (system_settings.system_email_config) that sends invites, sign-in codes and other
@@ -92,14 +92,9 @@ export async function testSystemEmail() {
   try {
     const policy = await getConnectionPolicy();
     const testResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
-    const testTls = { rejectUnauthorized: true };
-    if (testResolved.servername) testTls.servername = testResolved.servername;
-    const transport = createSmtpTransport(testResolved, {
-      port: cfg.port,
-      secure: cfg.port === 465,
-      auth: { user: cfg.user, pass },
-      tls: testTls,
-    });
+    const transport = createSmtpTransport(testResolved, systemSmtpOptions({
+      port: cfg.port, user: cfg.user, pass, resolved: testResolved, policy,
+    }));
     await transport.verify(cfg.fromEmail || cfg.user);
     return { ok: true };
   } catch (err) {

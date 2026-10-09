@@ -1,7 +1,7 @@
 import { query } from './db.js';
 import { decrypt } from './encryption.js';
 import { resolveForConnection } from './hostValidation.js';
-import { createSmtpTransport } from './smtpTransport.js';
+import { createSmtpTransport, systemSmtpOptions } from './smtpTransport.js';
 import { getConnectionPolicy } from './connectionPolicy.js';
 
 export async function sendSystemEmail({ to, subject, text, html }) {
@@ -16,14 +16,9 @@ export async function sendSystemEmail({ to, subject, text, html }) {
   // private IP can send verification/2FA codes and invites (#358); off by default.
   const policy = await getConnectionPolicy();
   const resolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
-  const tls = { rejectUnauthorized: true };
-  if (resolved.servername) tls.servername = resolved.servername;
-  const transport = createSmtpTransport(resolved, {
-    port: cfg.port || 587,
-    secure: (cfg.port || 587) === 465,
-    auth: { user: cfg.user, pass },
-    tls,
-  });
+  const transport = createSmtpTransport(resolved, systemSmtpOptions({
+    port: cfg.port || 587, user: cfg.user, pass, resolved, policy,
+  }));
   const from = `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>`;
   await transport.sendMail({ from, to, subject, text, html });
 }

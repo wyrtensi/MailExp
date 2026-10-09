@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { query } from '../db.js';
 import { decrypt } from '../encryption.js';
 import { resolveForConnection } from '../hostValidation.js';
-import { createSmtpTransport } from '../smtpTransport.js';
+import { createSmtpTransport, systemSmtpOptions } from '../smtpTransport.js';
 import { getConnectionPolicy } from '../connectionPolicy.js';
 
 // Registration invites, shared by the admin API (routes/admin.js, /api/admin/invites) and the
@@ -47,14 +47,9 @@ async function systemTransport() {
     if (!(cfg.host && cfg.user && pass)) return null;
     const policy = await getConnectionPolicy();
     const sysResolved = await resolveForConnection(cfg.host, { allowPrivate: policy.allowPrivateHosts });
-    const sysTls = { rejectUnauthorized: true };
-    if (sysResolved.servername) sysTls.servername = sysResolved.servername;
-    const transport = createSmtpTransport(sysResolved, {
-      port: cfg.port || 587,
-      secure: (cfg.port || 587) === 465,
-      auth: { user: cfg.user, pass },
-      tls: sysTls,
-    });
+    const transport = createSmtpTransport(sysResolved, systemSmtpOptions({
+      port: cfg.port || 587, user: cfg.user, pass, resolved: sysResolved, policy,
+    }));
     return { transport, fromHeader: `${cfg.fromName || 'MailExpert'} <${cfg.fromEmail || cfg.user}>` };
   } catch {
     return null; // no usable system SMTP

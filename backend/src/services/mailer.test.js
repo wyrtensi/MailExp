@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('./db.js', () => ({ query: vi.fn() }));
 vi.mock('./encryption.js', () => ({ decrypt: vi.fn() }));
 vi.mock('./hostValidation.js', () => ({ resolveForConnection: vi.fn() }));
-vi.mock('./smtpTransport.js', () => ({ createSmtpTransport: vi.fn() }));
+vi.mock('./smtpTransport.js', async (importOriginal) => ({ ...(await importOriginal()), createSmtpTransport: vi.fn() }));
 vi.mock('./connectionPolicy.js', () => ({ getConnectionPolicy: vi.fn() }));
 
 import { sendSystemEmail } from './mailer.js';
