@@ -43,6 +43,8 @@ if (!version) {
 
 updateJsonVersion(path.join(root, 'package.json'), version);
 updateJsonVersion(path.join(root, 'package-lock.json'), version);
+// All shipped packages carry one version (scripts/ci/release-version.sh).
+updateJsonVersion(path.join(root, 'packages', 'package.json'), version);
 
 const buildGradlePath = path.join(root, 'packages', 'android', 'app', 'build.gradle');
 let buildGradle = fs.readFileSync(buildGradlePath, 'utf8');
