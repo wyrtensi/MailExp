@@ -7,7 +7,7 @@ import {
   POLL_GRACE_MS, POLL_INTERVAL_MS,
   canCheck, checkErrorKey, isRestartingError, isRolledBack, logTail, migrationsInfo, needsAutoCheck, needsPolling, needsRunbook,
   requestErrorKey, rollbackCommand, rollbackInfo, safeGithubUrl, shouldOfferReload, stateInfo, textList,
-  updateBlockReason, updateStatus, updateTarget,
+  updateBlockReason, updateStatus, updateTarget, versionLabel,
 } from '../utils/panelUpdate.js';
 import { JOB_ERROR_KEYS, mailcowName, nodeUpdatePart } from '../utils/nodeAgent.js';
 
@@ -167,7 +167,11 @@ function RunResult({ run, t }) {
       <h4 style={subTitleStyle}>{t('admin.panelUpdate.runTitle')}</h4>
       <div style={rowStyle}>
         <strong data-run-state style={{ color: TONE_COLORS[info.tone] }}>{t(info.key)}</strong>
-        {run.from && run.target && <span style={noteStyle}>{t('admin.panelUpdate.runFromTo', { from: run.from, target: run.target })}</span>}
+        {run.from && run.target && (
+          <span data-run-from-to style={noteStyle}>
+            {t('admin.panelUpdate.runFromTo', { from: versionLabel(run.from, run.fromRelease), target: versionLabel(run.target, run.targetRelease) })}
+          </span>
+        )}
       </div>
       {(run.startedAt || run.finishedAt) && (
         <div style={noteStyle}>
@@ -326,8 +330,8 @@ export default function PanelUpdateSection() {
         : migrations.kind === 'none' ? 'admin.panelUpdate.confirmNoteManual'
           : 'admin.panelUpdate.confirmNoteUnknown';
     setDialog({
-      title: t('admin.panelUpdate.confirmTitle', { target }),
-      message: t('admin.panelUpdate.confirmMessage', { from: data.current?.version ?? '—', target }),
+      title: t('admin.panelUpdate.confirmTitle', { target: versionLabel(target, data.latest?.release) }),
+      message: t('admin.panelUpdate.confirmMessage', { from: versionLabel(data.current?.version, data.current?.release) ?? '—' }),
       note: migrations.kind === 'pending'
         ? `${t(noteKey)} ${migrations.list.join(', ')}`
         : t(noteKey),
@@ -361,11 +365,11 @@ export default function PanelUpdateSection() {
         <>
           <div style={rowStyle}>
             <span style={labelStyle}>{t('admin.panelUpdate.currentVersion')}</span>
-            <Copyable data-current-version>{data.current?.version ?? t('admin.panelUpdate.versionUnknown')}</Copyable>
+            <Copyable data-current-version>{versionLabel(data.current?.version, data.current?.release) ?? t('admin.panelUpdate.versionUnknown')}</Copyable>
           </div>
           <div style={rowStyle}>
             <span style={labelStyle}>{t('admin.panelUpdate.latestVersion')}</span>
-            <Copyable data-latest-version>{data.latest?.version ?? t('admin.panelUpdate.versionUnknown')}</Copyable>
+            <Copyable data-latest-version>{versionLabel(data.latest?.version, data.latest?.release) ?? t('admin.panelUpdate.versionUnknown')}</Copyable>
             {data.latest?.checkedAt && <span style={noteStyle}>{t('admin.panelUpdate.latestChecked', { at: when(data.latest.checkedAt) })}</span>}
           </div>
 
@@ -401,7 +405,7 @@ export default function PanelUpdateSection() {
             </div>
           )}
 
-          {data.updateAvailable && target && !isRolledBack(data) && <CheckResult check={check} target={target} t={t} />}
+          {data.updateAvailable && target && !isRolledBack(data) && <CheckResult check={check} target={versionLabel(target, data.latest?.release)} t={t} />}
 
           {actionError && (
             <div role="alert" data-panel-update-error style={{ marginTop: 10, fontSize: 12, color: 'var(--red)' }}>

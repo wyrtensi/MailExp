@@ -10,6 +10,7 @@ import { manualMoveNeighbour, movePinnedId, prunePinnedIds } from '../utils/acco
 import { HEALTH_LABEL_KEYS, canReconnectOAuth, computeAccountHealth, reconnectMenuAction, reconnectUrlFor } from '../utils/accountHealth.js';
 import { openOAuthWindow } from '../utils/oauthWindow.js';
 import { api } from '../utils/api.js';
+import { noticeVersion } from '../utils/panelUpdate.js';
 import { mailboxBusyOr } from '../utils/mailboxBusy.js';
 import { resolveThreadMessages } from '../utils/threadActions.js';
 import {
@@ -2154,7 +2155,7 @@ export default function Sidebar() {
               <span style={{ color: 'var(--accent)', display: 'flex', flexShrink: 0 }}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               </span>
-              <span style={{ flex: 1, fontSize: 13, color: 'var(--accent)' }}>{t('sidebar.updateAvailable', { version: updateInfo.latest })}</span>
+              <span style={{ flex: 1, fontSize: 13, color: 'var(--accent)' }}>{t('sidebar.updateAvailable', { version: noticeVersion(updateInfo.latest) ?? '' })}</span>
             </div>
           )}
 
@@ -2362,7 +2363,7 @@ export default function Sidebar() {
             <>
               <CtxMenuItem
                 icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>}
-                label={t('sidebar.updateAvailable', { version: updateInfo.latest })}
+                label={t('sidebar.updateAvailable', { version: noticeVersion(updateInfo.latest) ?? '' })}
                 onClick={() => { setUserMenuOpen(false); openPanelUpdate(); }}
               />
               <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0' }} />

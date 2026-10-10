@@ -2888,8 +2888,8 @@ export async function demoRequest(method, path, body = {}) {
   // without an update mechanism and refuses to start anything.
   if (verb === 'GET' && pathname === '/admin/update') {
     return {
-      current: { sha: 'd'.repeat(40), version: 'sha-dddddddddddd' },
-      latest: { version: 'sha-dddddddddddd', sha: 'd'.repeat(40), checkedAt: new Date().toISOString() },
+      current: { sha: 'd'.repeat(40), version: 'sha-dddddddddddd', release: '1.0.0' },
+      latest: { version: 'sha-dddddddddddd', sha: 'd'.repeat(40), release: '1.0.0', checkedAt: new Date().toISOString() },
       compare: { status: 'identical', aheadBy: 0, url: null },
       updateAvailable: false,
       disabled: false,

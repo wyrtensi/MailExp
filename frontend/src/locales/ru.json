@@ -867,7 +867,7 @@
     "emptied": "Папка очищена",
     "backToAccounts": "Назад к аккаунтам",
     "pinned": "Закреплён",
-    "updateAvailable": "Доступно обновление: v{{version}}",
+    "updateAvailable": "Доступно обновление: {{version}}",
     "pendingDeletion": "Будет удалён {{date}}",
     "tenantPending": "Ждёт тенант: почта на него пока отклоняется",
     "unreadTitle": "Непрочитанные письма",

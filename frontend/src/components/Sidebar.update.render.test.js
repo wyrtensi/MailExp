@@ -61,7 +61,9 @@ const { useStore } = await import('../store/index.js');
 const { api } = await import('../utils/api.js');
 const { default: Sidebar } = await import('./Sidebar.jsx');
 
-const UPDATE = { current: '1.0.0', latest: '1.0.1', url: 'https://github.com/example/releases/tag/v1.0.1', updateAvailable: true, disabled: false };
+// /api/update: the same check as Administration -> Panel update (backend updateNotice).
+let UPDATE;
+const NOTICE = { current: '1.0.0', latest: '1.0.1', updateAvailable: true, disabled: false };
 
 describe('Sidebar update item', () => {
   let host, root, updateCalls, opened;
@@ -83,8 +85,9 @@ describe('Sidebar update item', () => {
     host.remove();
   });
 
-  const render = async (user) => {
+  const render = async (user, notice = NOTICE) => {
     await React.act(async () => root.render(null));
+    UPDATE = notice;
     updateCalls = 0;
     opened = [];
     useStore.setState({
@@ -106,7 +109,20 @@ describe('Sidebar update item', () => {
     await openUserMenu();
     const item = updateItem();
     assert.ok(item, 'the update item is offered');
-    assert.ok(item.textContent.includes('sidebar.updateAvailable 1.0.1'), 'it names the newer version');
+    assert.ok(item.textContent.includes('sidebar.updateAvailable v1.0.1'), 'it names the newer release');
+  });
+
+  test('a promoted build without a release is named by its sha', async () => {
+    await render({ id: 'u1', isAdmin: true }, { ...NOTICE, latest: 'sha-0123456789ab' });
+    await openUserMenu();
+    assert.ok(updateItem().textContent.includes('sidebar.updateAvailable sha-0123456789ab'));
+  });
+
+  test('nothing is shown when the card offers no update', async () => {
+    await render({ id: 'u1', isAdmin: true }, { ...NOTICE, latest: '1.0.0', updateAvailable: false });
+    await openUserMenu();
+    assert.ok(host.querySelector('[role="menuitem"]'), 'the user menu is open');
+    assert.ok(!updateItem(), 'no update item');
   });
 
   test('choosing it opens Administration -> Panel update, not the releases page', async () => {

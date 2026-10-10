@@ -3,8 +3,25 @@ import assert from 'node:assert/strict';
 import {
   canCheck, installPrefix, isActiveResult, isRestartingError, isRolledBack, isTerminalState, logTail, migrationsInfo,
   needsAutoCheck, needsPolling, needsRunbook, requestErrorKey, rollbackCommand, rollbackInfo, safeGithubUrl,
-  shouldOfferReload, stateInfo, updateBlockReason, updateStatus, updateTarget,
+  shouldOfferReload, stateInfo, updateBlockReason, updateStatus, updateTarget, versionLabel, noticeVersion,
 } from './panelUpdate.js';
+
+describe('versionLabel and noticeVersion', () => {
+  it('names a build by its release and its sha, either alone when the other is unknown', () => {
+    assert.equal(versionLabel('sha-0123456789ab', '1.0.1'), '1.0.1 (sha-0123456789ab)');
+    assert.equal(versionLabel('sha-0123456789ab', null), 'sha-0123456789ab');
+    assert.equal(versionLabel('sha-0123456789ab', 'v1.0.1'), 'sha-0123456789ab', 'only a plain x.y.z is a release');
+    assert.equal(versionLabel(null, '1.0.1'), '1.0.1');
+    assert.equal(versionLabel(null, undefined), null);
+  });
+
+  it('the notice names a release with a v, a sha as it is', () => {
+    assert.equal(noticeVersion('1.0.1'), 'v1.0.1');
+    assert.equal(noticeVersion('sha-0123456789ab'), 'sha-0123456789ab');
+    assert.equal(noticeVersion(null), null);
+    assert.equal(noticeVersion(''), null);
+  });
+});
 
 const NOW = Date.parse('2026-10-05T12:00:00Z');
 const ago = (ms) => new Date(NOW - ms).toISOString();
