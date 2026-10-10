@@ -31,7 +31,8 @@ hand-rolled docker commands), verify, report what the commands printed.
 - `<PANEL_HOST>`: SSH target of the panel server, and `<PREFIX>` (default `/opt/mailexpert`).
 - The target version `sha-<12>`. The production channel is `latest`: the build the owner promoted
   as ready for production with the `promote.yml` workflow (git tag `latest` plus image tags
-  `latest` on the same digests; deployment-system.md, section 9). Default to `latest` when the
+  `latest` on the same digests; a new version also becomes the release `v<x.y.z>`;
+  deployment-system.md, sections 5 and 9). Default to `latest` when the
   human says "update"; another `sha-<12>` only when the human names it, the latest green `main`
   (below) only when the human agrees to it. A channel is always resolved to its `sha-<12>` first
   (`update.sh latest` and `status.sh --target latest` do it): servers only ever run `sha-<12>`
