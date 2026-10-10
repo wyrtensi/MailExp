@@ -87,7 +87,17 @@ STUB_EOF
   cat >"$STUB/gh" <<'STUB_EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$GH_LOG"
-if [ -n "${GH_FAIL:-}" ]; then echo "HTTP 403" >&2; exit 1; fi
+case "$1 $2" in
+  # GH_RELEASES: the tags that have a GitHub release; GH_VIEW_FAIL: GitHub does not answer.
+  "release view")
+    if [ -n "${GH_VIEW_FAIL:-}" ]; then echo "HTTP 502: Bad Gateway" >&2; exit 1; fi
+    case " ${GH_RELEASES:-} " in
+      *" $3 "*) echo '{"tagName":"'"$3"'"}' ;;
+      *) echo "release not found" >&2; exit 1 ;;
+    esac ;;
+  "release create")
+    if [ -n "${GH_FAIL:-}" ]; then echo "HTTP 403" >&2; exit 1; fi ;;
+esac
 STUB_EOF
   chmod +x "$STUB/crane" "$STUB/gh"
   export CRANE=$STUB/crane GH=$STUB/gh CRANE_LOG=$BATS_TEST_TMPDIR/crane.log CRANE_TAGGED=$BATS_TEST_TMPDIR/tagged \
@@ -125,13 +135,58 @@ STUB_EOF
   release_tag "$ONE" v1.0.0
   release_tag "$TWO" v1.0.1
   cd "$W"
-  run bash "$SCRIPT" "$ONE"
+  GH_RELEASES="v1.0.0 v1.0.1" run bash "$SCRIPT" "$ONE"
   [ "$status" -eq 0 ]
   [[ $output == *"v1.0.0 is already the release of this commit"* ]]
   [ "$(git -C "$R" rev-parse refs/tags/latest)" = "$ONE" ]
   [ "$(grep -c '^tag .* latest$' "$CRANE_LOG")" -eq 4 ]
   [ "$(grep -c '^tag .* 1\.0\.0$' "$CRANE_LOG")" -eq 0 ]
-  [ ! -e "$GH_LOG" ]
+  [ "$(cat "$GH_LOG")" = "release view v1.0.0 --json tagName" ]
+}
+
+@test "the tag on this commit without its GitHub release: latest moves and the release is created" {
+  setup_repo
+  release_tag "$ONE" v1.0.0
+  release_tag "$TWO" v1.0.1
+  cd "$W"
+  # The newest release tag: marked latest, notes since the release before it.
+  GH_RELEASES=v1.0.0 run bash "$SCRIPT" "$TWO"
+  [ "$status" -eq 0 ]
+  [[ $output == *"its GitHub release is missing"* ]]
+  [ "$(git -C "$R" rev-parse refs/tags/latest)" = "$TWO" ]
+  [ "$(grep -c '^tag .* 1\.0\.1$' "$CRANE_LOG")" -eq 0 ]
+  [ "$(sed -n 2p "$GH_LOG")" = "release create v1.0.1 --verify-tag --title v1.0.1 --latest --generate-notes --notes-start-tag v1.0.0" ]
+  # An older one (a rollback): created, but not marked latest; nothing before it.
+  : >"$GH_LOG"
+  GH_RELEASES=v1.0.1 run bash "$SCRIPT" "$ONE"
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$R" rev-parse refs/tags/latest)" = "$ONE" ]
+  [ "$(sed -n 2p "$GH_LOG")" = "release create v1.0.0 --verify-tag --title v1.0.0 --latest=false --generate-notes" ]
+}
+
+@test "GitHub not answering whether the release exists stops before anything moves" {
+  setup_repo
+  release_tag "$TWO" v1.0.1
+  cd "$W"
+  GH_VIEW_FAIL=1 run bash "$SCRIPT" "$TWO"
+  [ "$status" -eq 1 ]
+  [[ $output == *"cannot ask GitHub whether the release v1.0.1 exists: HTTP 502"* ]]
+  [ ! -e "$CRANE_TAGGED" ]
+  run git -C "$R" rev-parse --verify --quiet refs/tags/latest
+  [ "$status" -ne 0 ]
+  ! grep -q '^release create' "$GH_LOG"
+}
+
+@test "a rerun after a failed GitHub release creates it" {
+  setup_repo
+  cd "$W"
+  GH_FAIL=1 run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  : >"$GH_LOG"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$GH_LOG")" = "release view v1.0.1 --json tagName
+release create v1.0.1 --verify-tag --title v1.0.1 --latest --generate-notes" ]
 }
 
 @test "a version tagged on another commit is refused and nothing moves" {
@@ -180,7 +235,7 @@ STUB_EOF
   cd "$W"
   GH_FAIL=1 run bash "$SCRIPT"
   [ "$status" -eq 1 ]
-  [[ $output == *"the GitHub release was not created; create it by hand: gh release create v1.0.1 --verify-tag"* ]]
+  [[ $output == *"the GitHub release was not created; promote this commit again, or create it by hand: gh release create v1.0.1 --verify-tag"* ]]
   [ "$(git -C "$R" rev-parse 'refs/tags/v1.0.1^{commit}')" = "$TWO" ]
   [ "$(git -C "$R" rev-parse refs/tags/latest)" = "$TWO" ]
 }

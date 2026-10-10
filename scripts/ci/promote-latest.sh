@@ -7,8 +7,9 @@
 #      only after every other job passed;
 #   3. its version: the x.y.z every package carries at that commit (release-version.sh). A version
 #      already tagged v<x.y.z> on this commit is released (a re-promotion or a rollback: only
-#      `latest` moves); a tag v<x.y.z> on another commit, or a version not above the newest v*
-#      tag, is refused: the version is bumped in a chore(release) PR first;
+#      `latest` moves, and a GitHub release missing for that tag, say after a failed run, is
+#      created); a tag v<x.y.z> on another commit, or a version not above the newest v* tag, is
+#      refused: the version is bumped in a chore(release) PR first;
 #   4. each image gets the tag <x.y.z> (a new release) and `latest` on the same manifest (crane tag:
 #      the same bytes, the same digest), checked afterwards;
 #   5. the git tag `latest` moves to the commit and the annotated tag v<x.y.z> is created, both
@@ -66,11 +67,13 @@ commit_version() {
   return "$status"
 }
 
-# newest_release_tag: the highest v<x.y.z> tag, empty when there is none.
+# newest_release_tag [<x.y.z>]: the highest v<x.y.z> tag (below <x.y.z> when given), empty when
+# there is none.
 newest_release_tag() {
-  local tag newest=""
+  local tag newest="" below=${1:-}
   while read -r tag; do
     is_version "${tag#v}" || continue
+    if [ -n "$below" ] && ! version_gt "$below" "${tag#v}"; then continue; fi
     if [ -z "$newest" ] || version_gt "${tag#v}" "${newest#v}"; then newest=$tag; fi
   done < <(git tag -l 'v*')
   printf '%s\n' "$newest"
@@ -85,7 +88,7 @@ retag() {
 }
 
 main() {
-  local input=${1:-} ref full tag image digest version vtag previous release existing
+  local input=${1:-} ref full tag image digest version vtag previous release existing out start latest_flag
   local crane=${CRANE:-crane} gh=${GH:-gh} prefix=${IMAGE_PREFIX:-} remote=${PUSH_REMOTE:-origin}
   local -A digests=()
   [ -n "$prefix" ] || die "IMAGE_PREFIX is not set (ghcr.io/<owner>)" 2
@@ -112,8 +115,19 @@ main() {
   elif [ -n "$previous" ] && ! version_gt "$version" "${previous#v}"; then
     die "$version is not above the newest release $previous: $BUMP_HINT" 2
   fi
+  # The notes start at the release before this one; only the newest release is marked latest.
+  start=$previous latest_flag=--latest
   if [ "$release" = released ]; then
-    log "$vtag is already the release of this commit: only latest moves"
+    if out=$("$gh" release view "$vtag" --json tagName 2>&1 >/dev/null); then
+      log "$vtag is already the release of this commit: only latest moves"
+    elif [[ ${out,,} == *"not found"* ]]; then
+      release=missing
+      start=$(newest_release_tag "$version")
+      [ "$previous" = "$vtag" ] || latest_flag=--latest=false
+      log "$vtag is already the tag of this commit, but its GitHub release is missing: latest moves and the release is created (notes since ${start:-the first commit})"
+    else
+      die "cannot ask GitHub whether the release $vtag exists: $out"
+    fi
   else
     log "release $vtag: images tagged $version, annotated tag $vtag, GitHub release $vtag (notes since ${previous:-the first commit})"
   fi
@@ -133,11 +147,11 @@ main() {
     git push --quiet --force "$remote" refs/tags/latest
   fi
   log "latest is $tag"
-  if [ "$release" = new ]; then
+  if [ "$release" != released ]; then
     local -a notes=(--generate-notes)
-    [ -z "$previous" ] || notes+=(--notes-start-tag "$previous")
-    "$gh" release create "$vtag" --verify-tag --title "$vtag" --latest "${notes[@]}" >&2 ||
-      die "$vtag and latest are pushed and the images tagged, but the GitHub release was not created; create it by hand: gh release create $vtag --verify-tag --title $vtag --latest ${notes[*]}"
+    [ -z "$start" ] || notes+=(--notes-start-tag "$start")
+    "$gh" release create "$vtag" --verify-tag --title "$vtag" "$latest_flag" "${notes[@]}" >&2 ||
+      die "$vtag and latest are pushed and the images tagged, but the GitHub release was not created; promote this commit again, or create it by hand: gh release create $vtag --verify-tag --title $vtag $latest_flag ${notes[*]}"
     log "released $vtag"
   fi
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -146,6 +160,8 @@ main() {
       printf '### latest is `%s`, version `%s`\n\n' "$tag" "$version"
       if [ "$release" = new ]; then
         printf 'Released `%s`: the git tag, the image tags `%s` and the GitHub release.\n\n' "$vtag" "$version"
+      elif [ "$release" = missing ]; then
+        printf '`%s` was already the tag of this commit; its missing GitHub release was created.\n\n' "$vtag"
       else
         printf '`%s` was already the release of this commit.\n\n' "$vtag"
       fi

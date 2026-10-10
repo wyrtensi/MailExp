@@ -104,7 +104,8 @@ A per-file map: `docs/architecture/codebase-file-map.md`.
   when they do not). The owner then runs `promote.yml` on that commit: besides `latest`, it creates
   the annotated tag `v<x.y.z>`, tags the four images `<x.y.z>` (same digest as `sha-<12>`, nothing
   is rebuilt) and makes the GitHub Release `v<x.y.z>` with generated notes. Promoting an already
-  released commit (rollback) only moves `latest`; a version tag on another commit or a version not
+  released commit (rollback) only moves `latest` (and creates its GitHub Release if a failed run
+  left the tag without one); a version tag on another commit or a version not
   above the newest release is refused.
 - Never create, move or push `v*` tags by hand and never `git push --tags`. Fetch the `upstream`
   (MailFlow) remote without tags: its `v*` tags collide with ours
