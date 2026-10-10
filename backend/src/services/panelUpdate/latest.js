@@ -3,11 +3,16 @@
 //
 // The git tag `latest` in the repository is force-moved by the manual promote workflow. The backend
 // reads it from GitHub's API anonymously (host-pinned URLs, no user input in them, via safeFetch),
-// then asks GitHub to compare the running build (BUILD_SHA) with it. The answer is cached for 6 h,
+// then asks GitHub to compare the running build (BUILD_SHA) with it; the comparison alone decides
+// whether an update is offered. The release version (x.y.z) of both builds is only for display:
+// the running one is APP_VERSION, the promoted one is the version in backend/package.json at that
+// commit (GitHub's contents API, remembered per commit). The answer is cached for 6 h,
 // a failure is retried no sooner than 15 min (the last good answer is kept meanwhile), a rate limit
 // is waited out until its reset, and an admin can force a refresh at most once a minute.
-// UPDATE_CHECK_DISABLED turns it off, as for the release banner (services/updateCheck.js).
+// UPDATE_CHECK_DISABLED turns it off; the sidebar's notice (/api/update, updateNotice) is this
+// same status.
 import { safeFetch } from '../safeFetch.js';
+import { APP_VERSION, isRelease } from '../appVersion.js';
 
 const TTL_MS = 6 * 60 * 60 * 1000;
 const FAIL_BACKOFF_MS = 15 * 60 * 1000;
@@ -37,11 +42,12 @@ class CheckError extends Error {
   }
 }
 
-export function createLatestCheck({ fetch = safeFetch, env = process.env, now = () => Date.now() } = {}) {
+export function createLatestCheck({ fetch = safeFetch, env = process.env, now = () => Date.now(), appVersion = APP_VERSION } = {}) {
   const repo = String(env.UPDATE_CHECK_REPO || 'wyrtensi/MailExpert').replace(/[^\w./-]/g, '');
   const api = `https://api.github.com/repos/${repo}`;
   const disabled = isDisabled(env);
-  const current = currentOf(env);
+  const current = { ...currentOf(env), release: isRelease(appVersion) ? appVersion : null };
+  const releases = new Map(); // commit -> its x.y.z, or null when it has none
 
   let cache = null;          // { latest, compare } of the last good check
   let checkError = null;     // 'rate_limited' | 'unavailable' | null, of the last check
@@ -96,13 +102,37 @@ export function createLatestCheck({ fetch = safeFetch, env = process.env, now = 
     return { status: data.status, aheadBy, url: `https://github.com/${repo}/compare/${range}` };
   }
 
+  // The version in backend/package.json at <sha>, null when unknown. A commit's file never changes,
+  // so an answer (a version, or none at all) is kept; a failed request is asked again next time.
+  async function releaseAt(sha) {
+    if (releases.has(sha)) return releases.get(sha);
+    let data;
+    try {
+      data = await get(`/contents/backend/package.json?ref=${sha}`);
+    } catch {
+      return null;
+    }
+    let release;
+    try {
+      const text = data?.encoding === 'base64' ? Buffer.from(String(data.content ?? ''), 'base64').toString('utf8') : '';
+      const version = text ? JSON.parse(text)?.version : null;
+      release = isRelease(version) ? version : null;
+    } catch {
+      release = null;
+    }
+    releases.set(sha, release);
+    return release;
+  }
+
   async function refresh() {
     const start = now();
     nextCheck = start + TTL_MS; // reserve the window first
     try {
       const sha = await latestCommit();
-      const latest = sha ? { version: versionOf(sha), sha, checkedAt: new Date(start).toISOString() } : null;
       const compare = sha ? await compareWith(sha) : EMPTY_COMPARE;
+      const latest = sha
+        ? { version: versionOf(sha), sha, release: await releaseAt(sha), checkedAt: new Date(start).toISOString() }
+        : null;
       cache = { latest, compare };
       checkError = null;
     } catch (err) {
@@ -138,6 +168,18 @@ export function createLatestCheck({ fetch = safeFetch, env = process.env, now = 
   }
 
   return { getStatus };
+}
+
+// What the sidebar's "update available" notice needs (/api/update): the running and the offered
+// release (sha-<12> when a build has none) and whether the card offers an update.
+export function updateNotice(status) {
+  const label = (v) => (v ? v.release ?? v.version ?? null : null);
+  return {
+    current: label(status.current),
+    latest: label(status.latest),
+    updateAvailable: !!status.updateAvailable,
+    disabled: !!status.disabled,
+  };
 }
 
 let defaultCheck = null;

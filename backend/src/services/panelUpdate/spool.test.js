@@ -8,7 +8,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 import { mkdtemp, mkdir, open, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSpool, isBusy, spoolDirFromEnv } from './spool.js';
+import { createSpool, isBusy, normalizeResult, spoolDirFromEnv } from './spool.js';
 
 const ID1 = '11111111-1111-4111-8111-111111111111';
 const ID2 = '22222222-2222-4222-8222-222222222222';
@@ -28,7 +28,7 @@ afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
 
 const result = (over = {}) => ({
   id: ID1, action: 'update', target: 'sha-0123456789ab', state: 'updating', terminal: false,
-  message: 'Updating', from: 'sha-aaaaaaaaaaaa',
+  message: 'Updating', from: 'sha-aaaaaaaaaaaa', fromRelease: '1.0.0', targetRelease: '1.0.1',
   receivedAt: '2026-10-05T11:50:00.000Z', updatedAt: '2026-10-05T11:59:00.000Z',
   startedAt: '2026-10-05T11:51:00.000Z', finishedAt: null, exitCode: null,
   preflight: { ok: true, problems: [], warnings: ['w'], next: [], info: ['i'], pendingMigrations: [], migrationsApplied: 12 },
@@ -45,6 +45,16 @@ try {
   try { await symlink(join(probe, 'a'), join(probe, 'b')); } catch { canSymlink = false; }
   await rm(probe, { recursive: true, force: true });
 } catch { canSymlink = false; }
+
+describe('result releases', () => {
+  it('passes on x.y.z releases of both commits, anything else as null', () => {
+    expect(normalizeResult(result(), ID1)).toMatchObject({ fromRelease: '1.0.0', targetRelease: '1.0.1' });
+    for (const bad of [undefined, null, 'v1.0.1', '1.0', '1.0.1-rc.1', 101, '1.0.1; echo']) {
+      expect(normalizeResult(result({ fromRelease: bad, targetRelease: bad }), ID1))
+        .toMatchObject({ fromRelease: null, targetRelease: null });
+    }
+  });
+});
 
 describe('spool directory', () => {
   it('comes from UPDATE_SPOOL_DIR', () => {

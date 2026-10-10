@@ -9,7 +9,6 @@
 // itself but not identifiable or cross-referenceable between reports.
 
 import crypto from 'crypto';
-import { readFileSync } from 'fs';
 import { query } from './db.js';
 import { redisClient } from './redis.js';
 import { loadAiConfig } from './aiProvider.js';
@@ -17,9 +16,9 @@ import { getEnabledPlugins } from '../plugins/activation.js';
 import { getWarningsRaw, getConnectionStats, getSyncSignalsRaw } from './diagnosticsRing.js';
 import { getPerformanceSnapshot } from './performanceMetrics.js';
 import { getImapSnapshot } from './imapMetrics.js';
+import { APP_VERSION } from './appVersion.js';
 
-const packageMeta = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'));
-const BACKEND_VERSION = (process.env.APP_VERSION || packageMeta.version || '0.0.0').replace(/^v[.]?/, '');
+const BACKEND_VERSION = APP_VERSION;
 
 // Salted, truncated hash. Same (id, salt) -> same ref within one report; a
 // different salt (i.e. a different report) -> a different ref. Not reversible.

@@ -55,15 +55,15 @@ const NODE = {
 };
 
 const status = (over = {}) => ({
-  current: { sha: CUR, version: 'sha-aaaaaaaaaaaa' },
-  latest: { version: TARGET, sha: LATEST, checkedAt: '2026-10-05T11:00:00.000Z' },
+  current: { sha: CUR, version: 'sha-aaaaaaaaaaaa', release: '1.0.0' },
+  latest: { version: TARGET, sha: LATEST, release: '1.0.1', checkedAt: '2026-10-05T11:00:00.000Z' },
   compare: { status: 'ahead', aheadBy: 3, url: `https://github.com/wyrtensi/MailExpert/compare/${CUR}...${LATEST}` },
   updateAvailable: true, disabled: false, checkError: null,
   ...over,
 });
 
 const result = (over = {}) => ({
-  id: RID, action: 'update', target: TARGET, state: 'succeeded', terminal: true, message: 'Done', from: 'sha-aaaaaaaaaaaa',
+  id: RID, action: 'update', target: TARGET, state: 'succeeded', terminal: true, message: 'Done', from: 'sha-aaaaaaaaaaaa', fromRelease: '1.0.0', targetRelease: '1.0.1',
   receivedAt: '2026-10-05T11:50:00.000Z', updatedAt: '2026-10-05T11:59:00.000Z', startedAt: '2026-10-05T11:51:00.000Z',
   finishedAt: '2026-10-05T11:59:00.000Z', exitCode: 0, preflight: null, autoRollback: false, next: [], log: [],
   logFile: '/opt/mailexpert/state/updater/x.log', journal: 'journalctl -u mailexpert-updater.service',

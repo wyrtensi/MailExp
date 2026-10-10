@@ -2,7 +2,6 @@ import express from 'express';
 import session from 'express-session';
 import cors from 'cors';
 import { createServer } from 'http';
-import { readFileSync } from 'fs';
 import { WebSocketServer } from 'ws';
 import { RedisStore } from 'connect-redis';
 import './loadEnv.js';
@@ -65,7 +64,8 @@ import { reloadAuthSettings } from './services/authLimiter.js';
 import { closeUserSockets, setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
 import { loadSyncSettings } from './services/syncSettings.js';
-import { getUpdateStatus } from './services/updateCheck.js';
+import { APP_VERSION } from './services/appVersion.js';
+import { getLatestStatus, updateNotice } from './services/panelUpdate/latest.js';
 import { startUpdateAuditReconciler } from './services/panelUpdate/reconcile.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
@@ -74,15 +74,6 @@ import { startAccessSync } from './services/accessSync/index.js';
 import { registerAccessSyncJobKind } from './services/accessSync/actions.js';
 import { identityGate } from './middleware/identityGate.js';
 import { providerThreadIndexState } from './services/threading/providerThreadIndex.js';
-
-const packageMeta = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
-let buildMeta = {};
-try {
-  buildMeta = JSON.parse(readFileSync(new URL('../build-meta.json', import.meta.url), 'utf-8'));
-} catch {
-  // Local dev runs may not have build metadata yet.
-}
-const APP_VERSION = (process.env.APP_VERSION || buildMeta.version || packageMeta.version).replace(/^v[.]?/, '');
 
 const app = express();
 // Trust the reverse proxies in front of the backend so req.secure reflects HTTPS correctly
@@ -244,10 +235,11 @@ app.use('/api/diagnostics', diagnosticsRoutes);
 
 app.use('/api/health', healthRoutes);
 app.get('/api/version', (_req, res) => res.json({ version: APP_VERSION, sha: process.env.BUILD_SHA || 'dev' }));
-// Server-side update check (#261). Cached in updateCheck.js so repeated hits never
-// re-query GitHub; the browser only talks to MailExpert. Never throws into the response.
+// "Update available" notice (#261) for the sidebar: the same cached check of the promoted `latest`
+// as Administration -> Panel update (services/panelUpdate/latest.js), so the two never disagree;
+// the browser only talks to MailExpert. Never throws into the response.
 app.get('/api/update', async (_req, res) => {
-  try { res.json(await getUpdateStatus(APP_VERSION)); }
+  try { res.json(updateNotice(await getLatestStatus())); }
   catch { res.json({ current: APP_VERSION, latest: null, updateAvailable: false, disabled: false }); }
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createLatestCheck } from './latest.js';
+import { createLatestCheck, updateNotice } from './latest.js';
 
 const CUR = 'a'.repeat(40);
 const LATEST = '0123456789abcdef0123456789abcdef01234567';
@@ -20,11 +20,14 @@ function github(routes) {
 
 const commitRef = { ref: 'refs/tags/latest', object: { type: 'commit', sha: LATEST } };
 const compareOf = (status, aheadBy) => json({ status, ahead_by: aheadBy, behind_by: 0, commits: [] });
+const packageAt = (version) => json({
+  type: 'file', encoding: 'base64', content: Buffer.from(JSON.stringify({ name: 'mailexpert-backend', version })).toString('base64'),
+});
 
 function setup({ routes, env = {}, start = 1_000_000 } = {}) {
   let t = start;
   const fetch = github(routes);
-  const check = createLatestCheck({ fetch, env: { BUILD_SHA: CUR, ...env }, now: () => t });
+  const check = createLatestCheck({ fetch, env: { BUILD_SHA: CUR, ...env }, now: () => t, appVersion: '1.0.0' });
   return { fetch, check, advance: (ms) => { t += ms; }, at: () => t };
 }
 
@@ -33,13 +36,14 @@ describe('latest check', () => {
     const { fetch, check } = setup({ routes: {
       '/git/ref/tags/latest': json(commitRef),
       [`/compare/${CUR}...${LATEST}`]: compareOf('ahead', 3),
+      '/contents/backend/package.json': packageAt('1.0.1'),
     } });
 
     const s = await check.getStatus();
 
     expect(s).toEqual({
-      current: { sha: CUR, version: 'sha-aaaaaaaaaaaa' },
-      latest: { version: 'sha-0123456789ab', sha: LATEST, checkedAt: new Date(1_000_000).toISOString() },
+      current: { sha: CUR, version: 'sha-aaaaaaaaaaaa', release: '1.0.0' },
+      latest: { version: 'sha-0123456789ab', sha: LATEST, release: '1.0.1', checkedAt: new Date(1_000_000).toISOString() },
       compare: { status: 'ahead', aheadBy: 3, url: `https://github.com/wyrtensi/MailExpert/compare/${CUR}...${LATEST}` },
       updateAvailable: true,
       disabled: false,
@@ -51,6 +55,58 @@ describe('latest check', () => {
     expect(opts.headers.Authorization).toBeUndefined();
     expect(opts.signal).toBeInstanceOf(AbortSignal);
     expect(fetch.mock.calls[1][0]).toBe(`${API}/compare/${CUR}...${LATEST}?per_page=1`);
+    expect(fetch.mock.calls[2][0]).toBe(`${API}/contents/backend/package.json?ref=${LATEST}`);
+  });
+
+  it('a commit without a release version, or one GitHub cannot read, is offered by its sha alone', async () => {
+    for (const contents of [json({}, 404), packageAt('3.3'), json({ encoding: 'base64', content: '!!' }), json({}, 502)]) {
+      const { check } = setup({ routes: {
+        '/git/ref/tags/latest': json(commitRef),
+        [`/compare/${CUR}...${LATEST}`]: compareOf('ahead', 1),
+        '/contents/backend/package.json': contents,
+      } });
+      const s = await check.getStatus();
+      expect(s.latest).toMatchObject({ version: 'sha-0123456789ab', release: null });
+      expect(s.checkError).toBeNull();
+      expect(s.updateAvailable).toBe(true);
+    }
+  });
+
+  it('reads a commit\'s release once, and again only after a failed read', async () => {
+    let contents = json({}, 502);
+    const { fetch, check, advance } = setup({ routes: {
+      '/git/ref/tags/latest': () => json(commitRef),
+      [`/compare/${CUR}...${LATEST}`]: () => compareOf('ahead', 3),
+      '/contents/backend/package.json': () => contents,
+    } });
+    expect((await check.getStatus()).latest.release).toBeNull();
+    contents = packageAt('1.0.1');
+    advance(6 * 3600_000);
+    expect((await check.getStatus()).latest.release).toBe('1.0.1');
+    advance(6 * 3600_000);
+    expect((await check.getStatus()).latest.release).toBe('1.0.1');
+    expect(fetch.mock.calls.filter(([url]) => url.includes('/contents/'))).toHaveLength(2);
+  });
+
+  it('the running release is APP_VERSION when it is x.y.z', async () => {
+    const fetch = github({});
+    for (const [appVersion, release] of [['1.2.3', '1.2.3'], ['dev', null], ['', null]]) {
+      const check = createLatestCheck({ fetch, env: { BUILD_SHA: CUR }, now: () => 0, appVersion });
+      expect((await check.getStatus()).current).toEqual({ sha: CUR, version: 'sha-aaaaaaaaaaaa', release });
+    }
+  });
+
+  it('updateNotice: the releases, else the shas, and the card\'s verdict', () => {
+    const status = {
+      current: { sha: CUR, version: 'sha-aaaaaaaaaaaa', release: '1.0.0' },
+      latest: { sha: LATEST, version: 'sha-0123456789ab', release: '1.0.1' },
+      compare: { status: 'ahead', aheadBy: 1, url: null }, updateAvailable: true, disabled: false, checkError: null,
+    };
+    expect(updateNotice(status)).toEqual({ current: '1.0.0', latest: '1.0.1', updateAvailable: true, disabled: false });
+    expect(updateNotice({ ...status, latest: { ...status.latest, release: null }, updateAvailable: false }))
+      .toEqual({ current: '1.0.0', latest: 'sha-0123456789ab', updateAvailable: false, disabled: false });
+    expect(updateNotice({ ...status, latest: null, updateAvailable: false, disabled: true }))
+      .toEqual({ current: '1.0.0', latest: null, updateAvailable: false, disabled: true });
   });
 
   it('dereferences an annotated tag', async () => {
@@ -111,17 +167,17 @@ describe('latest check', () => {
   it('a dev build has no current version and is never compared', async () => {
     const { fetch, check } = setup({ env: { BUILD_SHA: 'dev' }, routes: { '/git/ref/tags/latest': json(commitRef) } });
     const s = await check.getStatus();
-    expect(s.current).toEqual({ sha: null, version: null });
+    expect(s.current).toEqual({ sha: null, version: null, release: '1.0.0' });
     expect(s.latest.version).toBe('sha-0123456789ab');
     expect(s.compare).toEqual({ status: null, aheadBy: null, url: null });
     expect(s.updateAvailable).toBe(false);
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(2); // the tag and the release at it, no compare
   });
 
   it('a missing BUILD_SHA counts as a dev build', async () => {
     const fetch = github({ '/git/ref/tags/latest': json(commitRef) });
-    const check = createLatestCheck({ fetch, env: {}, now: () => 0 });
-    expect((await check.getStatus()).current).toEqual({ sha: null, version: null });
+    const check = createLatestCheck({ fetch, env: {}, now: () => 0, appVersion: '1.0.0' });
+    expect((await check.getStatus()).current).toEqual({ sha: null, version: null, release: '1.0.0' });
   });
 
   it('no promoted tag yet means no latest and no error', async () => {
@@ -149,10 +205,10 @@ describe('latest check', () => {
     await check.getStatus();
     advance(6 * 3600_000 - 1);
     await check.getStatus();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
     advance(1);
     await check.getStatus();
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(5); // the release of the same commit is not read again
   });
 
   it('shares one request between concurrent callers', async () => {
@@ -162,7 +218,7 @@ describe('latest check', () => {
     } });
     const [a, b] = await Promise.all([check.getStatus(), check.getStatus()]);
     expect(a.latest).toEqual(b.latest);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it('keeps the last good result on failure and retries after 15 minutes', async () => {
@@ -220,7 +276,7 @@ describe('latest check', () => {
     advance(30 * 60_000);
     const ok = await check.getStatus();
     expect(ok.checkError).toBeNull();
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
   });
 
   it('bounds a far-off rate limit reset to the 6 hour TTL', async () => {
@@ -245,22 +301,22 @@ describe('latest check', () => {
       [`/compare/${CUR}...${LATEST}`]: () => compareOf('ahead', 3),
     } });
     await check.getStatus();
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
     await check.getStatus({ refresh: true });
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(5);
     advance(59_999);
     await check.getStatus({ refresh: true });
-    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenCalledTimes(5);
     advance(1);
     await check.getStatus({ refresh: true });
-    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(fetch).toHaveBeenCalledTimes(7);
   });
 
   it('UPDATE_CHECK_DISABLED turns the check off', async () => {
     const { fetch, check } = setup({ env: { UPDATE_CHECK_DISABLED: 'true' }, routes: {} });
     const s = await check.getStatus({ refresh: true });
     expect(s).toEqual({
-      current: { sha: CUR, version: 'sha-aaaaaaaaaaaa' },
+      current: { sha: CUR, version: 'sha-aaaaaaaaaaaa', release: '1.0.0' },
       latest: null,
       compare: { status: null, aheadBy: null, url: null },
       updateAvailable: false,
