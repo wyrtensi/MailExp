@@ -103,3 +103,20 @@ copy_tree() {
   [ "$status" -eq 1 ]
   [[ $output == *"(none)"*"frontend/packages/package.json"* ]]
 }
+
+@test "without jq: current, set and bump say so; next does not need it" {
+  copy_tree
+  local tool bin=$BATS_TEST_TMPDIR/nojq
+  mkdir -p "$bin"
+  for tool in dirname sed head mktemp cat rm; do ln -s "$(command -v "$tool")" "$bin/$tool"; done
+  local bash_bin
+  bash_bin=$(command -v bash)
+  for cmd in current "set 1.2.3" bump; do
+    # shellcheck disable=SC2086 # the subcommand and its argument
+    PATH=$bin run "$bash_bin" "$SCRIPT" $cmd
+    [ "$status" -ne 0 ]
+    [[ $output == *"jq not found"* ]]
+  done
+  PATH=$bin run "$bash_bin" "$SCRIPT" next 1.0.99
+  [ "$output" = 1.1.0 ]
+}

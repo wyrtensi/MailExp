@@ -4,7 +4,7 @@ import { bindSessionUser, loadUserById, resolveVerifiedUser } from '../services/
 
 // Reachable without a signed-in user in google mode.
 const PUBLIC_PATHS = new Set([
-  '/api/health', '/api/health/ready', '/api/version', '/api/update', '/api/auth/config', '/api/auth/logout',
+  '/api/health', '/api/health/ready', '/api/version', '/api/auth/config', '/api/auth/logout',
   '/oauth/login/google', '/oauth/login/google/callback',
 ]);
 

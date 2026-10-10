@@ -142,7 +142,11 @@ main() {
   git tag -f latest "$full" >/dev/null
   if [ "$release" = new ]; then
     git tag -a "$vtag" -m "MailExpert $version" "$full"
-    git push --quiet --atomic "$remote" +refs/tags/latest "refs/tags/$vtag"
+    if ! git push --quiet --atomic "$remote" +refs/tags/latest "refs/tags/$vtag"; then
+      # A local tag left behind would make a rerun here take the commit for released.
+      git tag -d "$vtag" >/dev/null
+      die "pushing latest and $vtag to $remote failed (git's error is above): nothing was pushed and the local $vtag is removed; the images are tagged already, promote this commit again"
+    fi
   else
     git push --quiet --force "$remote" refs/tags/latest
   fi

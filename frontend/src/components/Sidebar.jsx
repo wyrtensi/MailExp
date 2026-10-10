@@ -648,10 +648,11 @@ export default function Sidebar() {
     });
   }, [accountsReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Update-available check (#261): a newer GitHub release than the running version. Reads the
-  // cached server-side status; the browser never contacts GitHub. Silent on any failure. Only
-  // administrators update the panel, so only they are asked and shown it; the item opens
-  // Administration -> "Panel update", which installs the promoted build.
+  // Update-available notice (#261): /api/update (administrators only) answers from the same
+  // server-side check as Administration -> "Panel update": the running commit compared with the
+  // promoted `latest`, named by its release. The browser never contacts GitHub; silent on any
+  // failure. Only administrators update the panel, so only they ask and see it; the item opens
+  // "Panel update", which installs the promoted build.
   const isAdminUser = !!user?.isAdmin;
   const [updateInfo, setUpdateInfo] = useState(null);
   useEffect(() => {

@@ -65,7 +65,7 @@ import { closeUserSockets, setupWebSocket } from './services/websocket.js';
 import { ImapManager } from './services/imapManager.js';
 import { loadSyncSettings } from './services/syncSettings.js';
 import { APP_VERSION } from './services/appVersion.js';
-import { getLatestStatus, updateNotice } from './services/panelUpdate/latest.js';
+import updateNoticeRoutes from './routes/updateNotice.js';
 import { startUpdateAuditReconciler } from './services/panelUpdate/reconcile.js';
 import { recordHttp } from './services/performanceMetrics.js';
 import { defaultEmptyBody } from './middleware/defaultEmptyBody.js';
@@ -235,13 +235,7 @@ app.use('/api/diagnostics', diagnosticsRoutes);
 
 app.use('/api/health', healthRoutes);
 app.get('/api/version', (_req, res) => res.json({ version: APP_VERSION, sha: process.env.BUILD_SHA || 'dev' }));
-// "Update available" notice (#261) for the sidebar: the same cached check of the promoted `latest`
-// as Administration -> Panel update (services/panelUpdate/latest.js), so the two never disagree;
-// the browser only talks to MailExpert. Never throws into the response.
-app.get('/api/update', async (_req, res) => {
-  try { res.json(updateNotice(await getLatestStatus())); }
-  catch { res.json({ current: APP_VERSION, latest: null, updateAvailable: false, disabled: false }); }
-});
+app.use('/api/update', updateNoticeRoutes);
 
 // Catch unhandled errors thrown (or rejected) inside async route handlers.
 // Express 5 forwards a rejected async handler here natively.

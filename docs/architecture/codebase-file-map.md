@@ -95,6 +95,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/senderFavicons.js` | Прокси и кеш доменных иконок отправителя |
 | `routes/todoist.js` | Todoist integration |
 | `routes/adminUpdate.js` | `/api/admin/update` (администратор, монтируется в `routes/admin.js`): какая сборка `latest`, предпроверка, запрос обновления в спул хоста, ход и итог ([deployment-system.md, раздел 9](deployment-system.md)) |
+| `routes/updateNotice.js` | `/api/update` (администратор): пункт «Доступно обновление» в боковой панели — `updateNotice` той же проверки `latest`, что у карточки |
 | `routes/mailNodeTenant.js` | `/api/mail-node/tenant/*` (администратор): тенант Microsoft — состояние, кнопки ставят задания очереди (проверка, опрос, антиспам, шаги домена, hold, Internal Relay, выпуск из карантина) |
 | `routes/mailNodeAgent.js` | служба узла: `/api/mail-node/agent*` (администратор) — состояние и отчёт узла, токен (выпуск и перевыпуск с показом один раз, отзыв), задания (`backup`); `/api/node-agent/*` — сама служба по bearer-токену, без сессии (смонтировано до сессии и проверки CSRF): long poll `next`, ход задания, отчёт `status` |
 | `routes/mailNodeOutages.js` | `/api/mail-node/outages*`: простои узла и письма, задержанные или потерянные в EOP; письма ящиков видят все, управление простоями — администратор |

@@ -29,6 +29,11 @@ die() {
   exit "${2:-1}"
 }
 
+# require_jq: jq reads and writes the package files.
+require_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq not found: install jq to read and write the package versions"
+}
+
 release_root() {
   if [ -n "${RELEASE_ROOT:-}" ]; then
     printf '%s\n' "$RELEASE_ROOT"
@@ -72,6 +77,7 @@ next_version() {
 # file_versions <root>: "<version or empty>|<file>" per place the version is kept.
 file_versions() {
   local root=$1 f
+  require_jq
   for f in "${JSON_FILES[@]}"; do
     printf '%s|%s\n' "$(jq -r '.version // ""' "$root/$f")" "$f"
   done
@@ -105,6 +111,7 @@ current_version() {
 set_version() {
   local version=${1:-} root f tmp
   is_version "$version" || die "not an x.y.z version: '$version'" 2
+  require_jq
   root=$(release_root)
   for f in "${JSON_FILES[@]}" "${LOCK_FILES[@]}"; do
     [ -f "$root/$f" ] || die "missing $root/$f"
@@ -122,13 +129,16 @@ set_version() {
     jq --arg v "$version" '.version = $v | .packages[""].version = $v' "$root/$f" >"$tmp"
     cat "$tmp" >"$root/$f"
   done
-  sed -i "s/^\([[:space:]]*versionName \)\"[^\"]*\"/\1\"$version\"/" "$root/$GRADLE_FILE"
+  # Through the temporary file, not sed -i (GNU and BSD sed differ); cat keeps the file's mode.
+  sed "s/^\([[:space:]]*versionName \)\"[^\"]*\"/\1\"$version\"/" "$root/$GRADLE_FILE" >"$tmp"
+  cat "$tmp" >"$root/$GRADLE_FILE"
   current_version >/dev/null || die "the files disagree after writing $version"
   printf '%s\n' "$version"
 }
 
 main() {
   local cmd=${1:-} current
+  case $cmd in current | set | bump) require_jq ;; esac
   case $cmd in
     next) next_version "${2:-}" ;;
     current) current_version ;;

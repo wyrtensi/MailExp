@@ -177,6 +177,30 @@ STUB_EOF
   ! grep -q '^release create' "$GH_LOG"
 }
 
+@test "a failed push after the images were tagged removes the local release tag; a rerun completes" {
+  setup_repo
+  # The remote refuses every push while the flag is there.
+  printf '#!/bin/sh\n[ ! -e "%s" ] || exit 1\n' "$R/refuse" >"$R/hooks/pre-receive"
+  chmod +x "$R/hooks/pre-receive"
+  : >"$R/refuse"
+  cd "$W"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ $output == *"pushing latest and v1.0.1 to origin failed"*"the local v1.0.1 is removed"* ]]
+  [ "$(grep -c '^tag .* 1\.0\.1$' "$CRANE_LOG")" -eq 4 ]
+  run git -C "$W" rev-parse --verify --quiet refs/tags/v1.0.1
+  [ "$status" -ne 0 ]
+  run git -C "$R" rev-parse --verify --quiet refs/tags/v1.0.1
+  [ "$status" -ne 0 ]
+  [ ! -e "$GH_LOG" ]
+  rm "$R/refuse"
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$R" rev-parse 'refs/tags/v1.0.1^{commit}')" = "$TWO" ]
+  [ "$(git -C "$R" rev-parse refs/tags/latest)" = "$TWO" ]
+  [ "$(cat "$GH_LOG")" = "release create v1.0.1 --verify-tag --title v1.0.1 --latest --generate-notes" ]
+}
+
 @test "a rerun after a failed GitHub release creates it" {
   setup_repo
   cd "$W"

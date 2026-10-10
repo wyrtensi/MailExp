@@ -1,6 +1,6 @@
-// Render tests for the "update available" item of the sidebar's user menu (/api/update, a newer
-// GitHub release than the running version): administrators only, and it opens Administration ->
-// "Panel update" instead of the releases page.
+// Render tests for the "update available" item of the sidebar's user menu (/api/update: the same
+// check as Administration -> "Panel update", the running commit against the promoted `latest`):
+// administrators only, named by the release, and it opens "Panel update".
 //
 // The harness mirrors Sidebar.accounts.render.test.js: node --test cannot parse JSX, so the loader
 // hook transforms .jsx with sucrase, and react-i18next is stubbed.
