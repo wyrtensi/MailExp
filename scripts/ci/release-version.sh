@@ -7,6 +7,7 @@
 #   release-version.sh current        the version all files agree on; fails listing them otherwise
 #   release-version.sh set <x.y.z>    write <x.y.z> into every file
 #   release-version.sh bump           set to `next current`: the chore(release) PR's change
+#   release-version.sh files          the files that carry the version, one per line
 #
 # Environment: RELEASE_ROOT (the repository root; default: this script's checkout). jq is needed.
 set -euo pipefail
@@ -17,6 +18,11 @@ JSON_FILES=(backend/package.json frontend/package.json frontend/packages/package
 LOCK_FILES=(backend/package-lock.json frontend/package-lock.json)
 GRADLE_FILE=frontend/packages/android/app/build.gradle
 PATCH_MAX=99
+
+# version_files: the files that carry the version, relative to the root.
+version_files() {
+  printf '%s\n' "${JSON_FILES[@]}" "${LOCK_FILES[@]}" "$GRADLE_FILE"
+}
 
 die() {
   printf '[release-version] error: %s\n' "$1" >&2
@@ -126,12 +132,13 @@ main() {
   case $cmd in
     next) next_version "${2:-}" ;;
     current) current_version ;;
+    files) version_files ;;
     set) set_version "${2:-}" ;;
     bump)
       current=$(current_version) || die "fix the versions first: release-version.sh set <x.y.z>"
       set_version "$(next_version "$current")"
       ;;
-    *) die "usage: release-version.sh next <x.y.z> | current | set <x.y.z> | bump" 2 ;;
+    *) die "usage: release-version.sh next <x.y.z> | current | set <x.y.z> | bump | files" 2 ;;
   esac
 }
 
