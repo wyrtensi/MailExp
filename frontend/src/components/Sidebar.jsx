@@ -647,16 +647,22 @@ export default function Sidebar() {
     });
   }, [accountsReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Update-available check (#261). Reads the cached server-side status; the browser
-  // never contacts GitHub. Silent on any failure.
+  // Update-available check (#261): a newer GitHub release than the running version. Reads the
+  // cached server-side status; the browser never contacts GitHub. Silent on any failure. Only
+  // administrators update the panel, so only they are asked and shown it; the item opens
+  // Administration -> "Panel update", which installs the promoted build.
+  const isAdminUser = !!user?.isAdmin;
   const [updateInfo, setUpdateInfo] = useState(null);
   useEffect(() => {
+    if (!isAdminUser) { setUpdateInfo(null); return undefined; }
     let cancelled = false;
     api.get('/update')
       .then(d => { if (!cancelled && d) setUpdateInfo(d); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, []);
+  }, [isAdminUser]);
+  const showUpdate = isAdminUser && !!updateInfo?.updateAvailable;
+  const openPanelUpdate = () => { setAdminTab('panel-update'); setShowAdmin(true); };
 
   // Clears this user's mailbox state and follows the SSO end-session URL when there is one (#310).
   const handleLogout = () => signOut({ setUser });
@@ -2137,9 +2143,9 @@ export default function Sidebar() {
           </div>
 
           {/* Update available (#261) */}
-          {updateInfo?.updateAvailable && (
+          {showUpdate && (
             <div
-              onClick={() => { setMobileSidebarOpen(false); window.open(updateInfo.url, '_blank', 'noopener'); }}
+              onClick={() => { setMobileSidebarOpen(false); openPanelUpdate(); }}
               style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', cursor: 'pointer', WebkitTapHighlightColor: 'transparent' }}
               onTouchStart={e => e.currentTarget.style.background = 'var(--bg-tertiary)'}
               onTouchEnd={e => e.currentTarget.style.background = ''}
@@ -2352,12 +2358,12 @@ export default function Sidebar() {
             </button>
           </div>
           <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0' }} />
-          {updateInfo?.updateAvailable && (
+          {showUpdate && (
             <>
               <CtxMenuItem
                 icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>}
                 label={t('sidebar.updateAvailable', { version: updateInfo.latest })}
-                onClick={() => { setUserMenuOpen(false); window.open(updateInfo.url, '_blank', 'noopener'); }}
+                onClick={() => { setUserMenuOpen(false); openPanelUpdate(); }}
               />
               <div style={{ height: 1, background: 'var(--border-subtle)', margin: '2px 0' }} />
             </>
