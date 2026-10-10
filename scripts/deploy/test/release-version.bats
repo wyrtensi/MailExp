@@ -16,7 +16,9 @@ copy_tree() {
   for f in backend/package.json backend/package-lock.json frontend/package.json \
     frontend/package-lock.json frontend/packages/package.json frontend/packages/android/app/build.gradle; do
     mkdir -p "$T/$(dirname "$f")"
-    cp "$REPO_DIR/$f" "$T/$f"
+    # LF as in a Linux checkout: jq writes LF, so a CRLF copy (a Windows checkout) would differ
+    # on every line.
+    tr -d '\r' <"$REPO_DIR/$f" >"$T/$f"
   done
   export RELEASE_ROOT=$T
 }
