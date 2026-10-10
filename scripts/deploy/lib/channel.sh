@@ -4,6 +4,23 @@
 # runs the mutable tag: `latest` is turned into the commit's sha-<12> before anything else. Needs
 # common.sh and app.sh (APP_DIR, CFG_IMAGE_PREFIX).
 
+# release_of <sha-XXXXXXXXXXXX>: the release (x.y.z, backend/package.json) of that commit of the
+# checkout; nothing when it has none or the commit is not fetched. For display only: what is
+# installed and compared is always the sha-<12>.
+release_of() {
+  local version
+  version=$(git -C "$APP_DIR" show "${1#sha-}:backend/package.json" 2>/dev/null | jq -r '.version // empty' 2>/dev/null) || version=''
+  if [[ $version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then printf '%s\n' "$version"; fi
+  return 0
+}
+
+# version_label <sha-XXXXXXXXXXXX>: "1.0.1 (sha-XXXXXXXXXXXX)", or the sha alone without a release.
+version_label() {
+  local release
+  release=$(release_of "$1")
+  if [ -n "$release" ]; then printf '%s (%s)\n' "$release" "$1"; else printf '%s\n' "$1"; fi
+}
+
 # fetch_latest_tag: brings the tag `latest` of origin into the checkout. A plain `git fetch` never
 # moves a tag that is already there, hence the forced refspec.
 fetch_latest_tag() {

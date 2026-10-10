@@ -94,6 +94,8 @@ lines_into() {
 collect_versions() {
   local head='' sha='' dirty=0
   FACT[version]=$CFG_VERSION
+  FACT[release]=''
+  if [ -n "$CFG_VERSION" ]; then FACT[release]=$(release_of "$CFG_VERSION"); fi
   FACT[install_id]=$CFG_INSTALL_ID
   if head=$(git -C "$APP_DIR" rev-parse --verify --quiet HEAD 2>/dev/null); then
     FACT[checkout]=sha-${head:0:12}
@@ -311,6 +313,7 @@ collect_target() {
     return 0
   fi
   FACT[target_commit]=1
+  FACT[target_release]=$(release_of "$target")
   if [ "$target" = "$CFG_VERSION" ]; then info "target: the panel is already at $target"; fi
   if is_standby; then problem "target: standby server: update.sh refuses it; install.sh --version sets its version"; fi
 
@@ -399,8 +402,8 @@ resolve_target_channel() {
 report_text() {
   local line key pending
   printf 'MailExpert panel at %s\n' "$OPT_PREFIX"
-  for key in version install_id checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
-    last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_commit; do
+  for key in version release install_id checkout running ready tenant_worker edge_services edge_image cf_access cf_access_team updater backup_configured \
+    last_backup_at last_dump_bytes free_kb migrations_applied spam_rule channel target target_release target_commit; do
     [ -n "${FACT[$key]+set}" ] || continue
     printf '  %-20s %s\n' "$key" "${FACT[$key]:--}"
   done
@@ -436,7 +439,7 @@ report_json() {
     'def num: if . == null or . == "" then null else tonumber end;
      def flag: . == "1";
      $ARGS.named as $f
-     | {prefix: $prefix, version: $f.version, install_id: (if ($f.install_id // "") == "" then null else $f.install_id end), checkout: ($f.checkout // null),
+     | {prefix: $prefix, version: $f.version, release: (if ($f.release // "") == "" then null else $f.release end), install_id: (if ($f.install_id // "") == "" then null else $f.install_id end), checkout: ($f.checkout // null),
       checkout_dirty: ($f.checkout_dirty | flag), running: (if ($f.running // "") == "" then null else $f.running end),
       ready: ($f.ready | flag), standby: ($f.standby | flag), tenant_worker: ($f.tenant_worker | flag),
       edge_services: (($f.edge_services // "") | split(",") | map(select(. != ""))),
@@ -452,7 +455,8 @@ report_json() {
       target: (if $f.target == null then
           (if $f.channel == null then null else {version: null, channel: $f.channel, commit_found: false} end)
         else
-        {version: $f.target, channel: ($f.channel // null), commit_found: ($f.target_commit | flag), images: $images,
+        {version: $f.target, release: (if ($f.target_release // "") == "" then null else $f.target_release end),
+         channel: ($f.channel // null), commit_found: ($f.target_commit | flag), images: $images,
          pending_migrations: (if $schema_read then $pending else null end),
          unknown_migrations: (if $schema_read then $unknown else null end)} end),
       problems: $problems, warnings: $warnings, next: $next, info: $info}'

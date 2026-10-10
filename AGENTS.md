@@ -90,6 +90,27 @@ A per-file map: `docs/architecture/codebase-file-map.md`.
   stand first (`mailcow_update_if_pinned`, docs/operations/mail-node.md section 7a), then change
   both lines in one commit.
 
+## Versions and releases
+
+- One version for every shipped package: `backend`, `frontend`, `frontend/packages` (with both
+  lockfiles) and the Android `versionName`. It is what the panel shows (`/api/version`, About).
+  Servers still run the `sha-<12>` images and the `latest` channel works as before.
+- The scheme (owner's decision): the first release is `1.0.0`; each release is the next patch,
+  `1.0.1` ... `1.0.99`, then the minor goes up with patch `0` (`1.1.0` ... `1.1.99`, `1.2.0`).
+  A bigger step (a minor before `.99`, a major) only on the owner's explicit request
+  (`scripts/ci/release-version.sh set <x.y.z>`).
+- A release starts with a separate PR `chore(release): x.y.z` that only bumps the version:
+  `scripts/ci/release-version.sh bump` (`current` checks that all files agree; a bats test fails
+  when they do not). The owner then runs `promote.yml` on that commit: besides `latest`, it creates
+  the annotated tag `v<x.y.z>`, tags the four images `<x.y.z>` (same digest as `sha-<12>`, nothing
+  is rebuilt) and makes the GitHub Release `v<x.y.z>` with generated notes. Promoting an already
+  released commit (rollback) only moves `latest` (and creates its GitHub Release if a failed run
+  left the tag without one); a version tag on another commit or a version not
+  above the newest release is refused.
+- Never create, move or push `v*` tags by hand and never `git push --tags`. Fetch the `upstream`
+  (MailFlow) remote without tags: its `v*` tags collide with ours
+  (`git config remote.upstream.tagOpt --no-tags`).
+
 ## How to verify a change
 
 | Area | Commands |

@@ -9,7 +9,7 @@
 
 - Основа: upstream `maathimself/mailflow`, commit `543a049cd085306af095a5e244a26722544432af`.
 - Форк: `wyrtensi/MailExpert`.
-- Версия исходного приложения: 3.3.0.
+- Версия upstream на момент форка: 3.3.0 (свою нумерацию MailExpert ведёт с 1.0.0, AGENTS.md, «Versions and releases»).
 - Проанализировано: 1012 tracked-файлов.
 - Текстовые исходники и конфигурация: 452 файла, около 132 500 строк и 5,88 млн символов.
 - 474 из 1012 файлов — шрифты WOFF2; 57 — PNG. Они увеличивают размер репозитория, но почти не влияют на сложность сопровождения.
@@ -50,7 +50,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `docker-compose.yml` | Локальный HTTP/HTTPS stack | Backend, frontend, PostgreSQL и Redis на одном сервере; `TRUST_PROXY=1` |
 | `docker-compose.https.yml` | Профиль с публичным TLS (Caddy, Let's Encrypt) для сборки из исходников | Прод ставится через `deploy/compose.prod.yml` и `deploy/edge/` (раздел «Развёртывание и CI») |
 | `Caddyfile` | TLS/reverse proxy профиля `https` | Краевой Caddy прода — `deploy/edge/Caddyfile.tmpl` |
-| `.github/workflows/*` | `ci.yml` (тесты, shellcheck, bats, e2e установки, образы `sha-<12>`), `promote.yml` (канал `latest`), `publish.yml` (semver-образы по тегам `v*`), `publish-apps.yml` (нативные приложения, вручную) | Подробно — раздел «Развёртывание и CI» |
+| `.github/workflows/*` | `ci.yml` (тесты, shellcheck, bats, e2e установки, образы `sha-<12>`), `promote.yml` (канал `latest` и выпуск `v<x.y.z>`), `publish-apps.yml` (нативные приложения, вручную) | Подробно — раздел «Развёртывание и CI» |
 | `LICENSE` | AGPL-3.0 | Изменения сетевого сервиса должны быть доступны пользователям сервиса |
 | `CONTRIBUTING.md` | Правила разработки MailExpert | Внешние PR не принимаются, пока не определены условия участия |
 | `ROADMAP.md` | Roadmap MailExpert (Now / Next / Later) | Детали и критерии приёмки — в плане `docs/superpowers/plans` |
@@ -95,6 +95,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 | `routes/senderFavicons.js` | Прокси и кеш доменных иконок отправителя |
 | `routes/todoist.js` | Todoist integration |
 | `routes/adminUpdate.js` | `/api/admin/update` (администратор, монтируется в `routes/admin.js`): какая сборка `latest`, предпроверка, запрос обновления в спул хоста, ход и итог ([deployment-system.md, раздел 9](deployment-system.md)) |
+| `routes/updateNotice.js` | `/api/update` (администратор): пункт «Доступно обновление» в боковой панели — `updateNotice` той же проверки `latest`, что у карточки |
 | `routes/mailNodeTenant.js` | `/api/mail-node/tenant/*` (администратор): тенант Microsoft — состояние, кнопки ставят задания очереди (проверка, опрос, антиспам, шаги домена, hold, Internal Relay, выпуск из карантина) |
 | `routes/mailNodeAgent.js` | служба узла: `/api/mail-node/agent*` (администратор) — состояние и отчёт узла, токен (выпуск и перевыпуск с показом один раз, отзыв), задания (`backup`); `/api/node-agent/*` — сама служба по bearer-токену, без сессии (смонтировано до сессии и проверки CSRF): long poll `next`, ход задания, отчёт `status` |
 | `routes/mailNodeOutages.js` | `/api/mail-node/outages*`: простои узла и письма, задержанные или потерянные в EOP; письма ящиков видят все, управление простоями — администратор |
@@ -122,7 +123,7 @@ Frontend не ходит к Gmail напрямую. Он обращается к
 - Отправка и очередь: `jobQueue.js` — общая устойчивая очередь заданий (таблица `jobs`, миграция 0087; [job-queue.md](job-queue.md)); `sendQueue.js` — отмена отправки и «Отправить позже» поверх неё (задание `send_message`, письмо в `outgoing_messages`, `delivered_unrecorded`); `sendDelivery.js` — передача письма серверу и последствия (журнал `message.sent`, контакты, копия в «Отправленных»); `mailSendTransport.js` — одна точка отправки: Gmail через API с запасным SMTP, остальные через SMTP; `gmailApiSender.js` — низкоуровневая отправка Gmail API.
 - Доставка: `deliveryStatus.js` — что стало с отправленным письмом по получателям (миграция 0084); `deliveryReport.js` — разбор вернувшихся отбивок (DSN) и отметка исходного письма; `mailNode/deliveryCodes.js` — общий список кодов доставки.
 - Перемещения и удаление: `moveQueue.js` — «сначала база», MOVE на сервере из очереди `message_moves` (0075); `expungeClaims.js` — заявки на окончательное удаление (0077).
-- Ящики: `accountHealth.js` — код состояния подключения для боковой панели; `accountReceived.js` — время последнего входящего письма (сортировка ящиков, 0085); `updateCheck.js` — старая проверка релизов GitHub для баннера `/api/update`, не путать с обновлением панели.
+- Ящики: `accountHealth.js` — код состояния подключения для боковой панели; `accountReceived.js` — время последнего входящего письма (сортировка ящиков, 0085); `appVersion.js` — версия панели `APP_VERSION` (x.y.z) для `/api/version`, отчёта диагностики и карточки «Обновление панели».
 - `threadingDiagnostics.js` (по образцу `senderHistory.js`) — диагностика одного письма для `GET /api/mail/messages/:id/threading`: заголовки цепочки, номер Gmail, причина из `threading_reason`, режим ящика и группировка остальных писем той же цепочки по папкам через `thread_key`, без новой миграции.
 
 ### Безопасность и инфраструктура backend
@@ -291,9 +292,11 @@ Google OAuth — не plugin уровня UI: он является credential p
 - `.github/workflows/ci.yml` — push и PR в `main`: backend, frontend, shellcheck, bats, фейковый EOP,
   tenant-worker, e2e установки; джоба `images` публикует `sha-<12>` четырёх образов только с `main`.
 - `.github/workflows/promote.yml` и `scripts/ci/promote-latest.sh` — ручное продвижение коммита `main`
-  в канал `latest`: проверка образов, тег `latest` на тех же digest, затем git-тег `latest`.
-- `publish.yml` — semver-образы backend и frontend по тегам `v*` (тег `latest` не ставит);
-  `publish-apps.yml` — нативные приложения, вручную.
+  в канал `latest` и выпуск его версии: проверка образов и версии, теги `<x.y.z>` и `latest` на тех же
+  digest, git-теги `latest` и `v<x.y.z>`, GitHub Release.
+- `scripts/ci/release-version.sh` — общая версия пакетов: `next`, `current`, `set`, `bump` (PR
+  `chore(release)`).
+- `publish-apps.yml` — нативные приложения, вручную.
 
 ### Тесты скриптов (`scripts/deploy/test/`)
 

@@ -2303,7 +2303,7 @@ export async function demoRequest(method, path, body = {}) {
 
   if (verb === 'POST' && pathname === '/diagnostics/report') {
     return {
-      versions: { backend: '3.3.0-demo', gitSha: 'demo' },
+      versions: { backend: '1.0.0-demo', gitSha: 'demo' },
       server: { uptimeSeconds: 3600, dbOk: true, redisOk: true },
       accounts: ACCOUNT_FIXTURES.slice(0, 5).map(a => ({ id: a.id, protocol: a.protocol, enabled: a.enabled, health: a.health })),
       folders: [],
@@ -2888,8 +2888,8 @@ export async function demoRequest(method, path, body = {}) {
   // without an update mechanism and refuses to start anything.
   if (verb === 'GET' && pathname === '/admin/update') {
     return {
-      current: { sha: 'd'.repeat(40), version: 'sha-dddddddddddd' },
-      latest: { version: 'sha-dddddddddddd', sha: 'd'.repeat(40), checkedAt: new Date().toISOString() },
+      current: { sha: 'd'.repeat(40), version: 'sha-dddddddddddd', release: '1.0.0' },
+      latest: { version: 'sha-dddddddddddd', sha: 'd'.repeat(40), release: '1.0.0', checkedAt: new Date().toISOString() },
       compare: { status: 'identical', aheadBy: 0, url: null },
       updateAvailable: false,
       disabled: false,
@@ -2906,7 +2906,7 @@ export async function demoRequest(method, path, body = {}) {
   if (verb === 'POST' && (pathname === '/admin/update' || pathname === '/admin/update/check')) {
     throw demoError('Updating the panel is not available in demo mode');
   }
-  if (verb === 'GET' && pathname === '/version') return { version: '3.3.0-demo', sha: 'demo' };
+  if (verb === 'GET' && pathname === '/version') return { version: '1.0.0-demo', sha: 'demo' };
   if ((verb === 'POST' && pathname === '/oauth/microsoft/device')
     || (verb === 'GET' && pathname === '/oauth/microsoft/device/poll')) {
     return { disabled: true, configured: false };

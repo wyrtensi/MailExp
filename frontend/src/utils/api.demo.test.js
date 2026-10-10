@@ -38,7 +38,7 @@ test('demo direct API helpers resolve locally without calling fetch', async () =
 
 test('demo shell metadata routes return safe local shapes', async () => {
   assert.deepEqual(await demoRequest('GET', '/update'), { updateAvailable: false });
-  assert.deepEqual(await demoRequest('GET', '/version'), { version: '3.3.0-demo', sha: 'demo' });
+  assert.deepEqual(await demoRequest('GET', '/version'), { version: '1.0.0-demo', sha: 'demo' });
 });
 
 test('production direct API helpers retain their existing network contracts', async () => {

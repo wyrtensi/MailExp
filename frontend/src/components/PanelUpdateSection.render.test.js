@@ -268,6 +268,26 @@ describe('the panel update section', () => {
     assert.equal(get(root, '[data-rollback]').getAttribute('data-rollback'), 'manual');
   });
 
+  test('shows each build as its release and its sha, the request still names the sha', async () => {
+    answers['GET /api/admin/update'] = state({
+      check: READY,
+      current: { sha: 'a'.repeat(40), version: A, release: '1.0.0' },
+      latest: { version: B, sha: 'b'.repeat(40), release: '1.0.1', checkedAt: ago(60000) },
+      run: { ...RUN, state: 'succeeded', terminal: true, finishedAt: ago(1000), fromRelease: '1.0.0', targetRelease: '1.0.1' },
+    });
+    answers['POST /api/admin/update'] = { status: 202, id: 'u7' };
+    const root = await mount();
+    assert.equal(text(root, '[data-current-version]'), `1.0.0 (${A})`);
+    assert.equal(text(root, '[data-latest-version]'), `1.0.1 (${B})`);
+    assert.match(text(root, '[data-run-from-to]'), new RegExp(`1\\.0\\.0 \\(${A}\\) to 1\\.0\\.1 \\(${B}\\)`));
+    await click(get(root, '[data-panel-update-button]'));
+    const dialog = dom.window.document.querySelector('[role="dialog"]');
+    assert.match(dialog.textContent, new RegExp(`Update the panel to 1\\.0\\.1 \\(${B}\\)\\?`));
+    assert.match(dialog.textContent, new RegExp(`Now running: 1\\.0\\.0 \\(${A}\\)`));
+    await click(dialog.querySelector('[data-confirm-button]'));
+    assert.deepEqual(posts().map((c) => [c.path, c.body]), [['/api/admin/update', { target: B, confirm: B }]]);
+  });
+
   test('"Update" confirms first, states the consequences, then sends target and confirm', async () => {
     answers['GET /api/admin/update'] = state({ check: READY });
     answers['POST /api/admin/update'] = { status: 202, id: 'u7' };

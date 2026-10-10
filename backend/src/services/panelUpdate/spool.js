@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readdir, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { isRelease } from '../appVersion.js';
 
 export const TARGET_RE = /^sha-[0-9a-f]{12}$/;
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -102,6 +103,9 @@ export function normalizeResult(raw, id) {
     terminal: TERMINAL_STATES.has(raw.state),
     message: textOrNull(raw.message) ?? '',
     from: versionOrNull(raw.from),
+    // The x.y.z of both commits (backend/package.json there), for display only.
+    fromRelease: isRelease(raw.fromRelease) ? raw.fromRelease : null,
+    targetRelease: isRelease(raw.targetRelease) ? raw.targetRelease : null,
     receivedAt: isoOrNull(raw.receivedAt),
     updatedAt: isoOrNull(raw.updatedAt),
     startedAt: isoOrNull(raw.startedAt),

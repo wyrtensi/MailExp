@@ -1,4 +1,5 @@
 {
   "private": true,
-  "name": "mailexpert-native-packages"
+  "name": "mailexpert-native-packages",
+  "version": "1.0.0"
 }

@@ -833,7 +833,7 @@
     "emptied": "Folder emptied",
     "backToAccounts": "Back to accounts",
     "pinned": "Pinned",
-    "updateAvailable": "Update available: v{{version}}",
+    "updateAvailable": "Update available: {{version}}",
     "pendingDeletion": "Deleted on {{date}}",
     "tenantPending": "Waiting for the tenant: mail to it is rejected for now",
     "unreadTitle": "Unread messages",

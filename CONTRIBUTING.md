@@ -12,6 +12,9 @@ The rest of this document describes how changes are made inside the project.
 1. Create a branch from `main`: `feat/…`, `fix/…`, `refactor/…`, `docs/…`, `chore/…`, or `sync/upstream-YYYY-MM-DD` for upstream ports.
 2. Keep one fix or feature per branch; no unrelated cleanup in the same pull request.
 3. Open a pull request against `main`. It is merged only when CI is green.
+4. A release is its own pull request `chore(release): x.y.z` that only bumps the version with
+   `scripts/ci/release-version.sh bump`; the owner promotes it, which creates the tag `v<x.y.z>`
+   and the GitHub release (see "Versions and releases" in [AGENTS.md](AGENTS.md)).
 
 ## Commit messages
 
@@ -54,6 +57,7 @@ CI runs the same steps on Node.js 24 together with `npm audit --omit=dev --audit
 
 ## Porting changes from upstream MailFlow
 
+- Fetch upstream without its tags (`git config remote.upstream.tagOpt --no-tags`): MailFlow's `v*` tags collide with MailExpert's release tags.
 - Cherry-pick with `git cherry-pick -x` so the original author and upstream commit stay recorded.
 - Resolve conflicts in favour of MailExpert names: containers, storage keys, `mailexpert:` window events.
 - Do not port changes MailExpert already implements differently (for example Google OAuth); record the decision in [docs/architecture/upstream-pr-assessment.md](docs/architecture/upstream-pr-assessment.md).

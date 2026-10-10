@@ -14,10 +14,10 @@ import { fileURLToPath } from 'node:url';
 const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 // Requests where the product name is part of the protocol, not a courtesy:
-//   updateCheck.js    — our own GitHub releases; the GitHub API refuses requests without a UA.
 //   openaiCodexAuth.js — the ChatGPT/Codex login identifies the client app it was registered as.
-//   panelUpdate/latest.js — our own GitHub `latest` tag and compare, same reason as updateCheck.js.
-const ALLOWED = new Set(['services/updateCheck.js', 'services/openaiCodexAuth.js', 'services/panelUpdate/latest.js']);
+//   panelUpdate/latest.js — our own GitHub `latest` tag, compare and package.json; the GitHub API
+//                          refuses requests without a UA.
+const ALLOWED = new Set(['services/openaiCodexAuth.js', 'services/panelUpdate/latest.js']);
 
 function sourceFiles(dir) {
   return readdirSync(dir).flatMap((name) => {

@@ -2,9 +2,12 @@ name: Promote to latest
 
 # The owner's decision that a build is ready for production: it becomes the channel `latest` that
 # panels offer under "Администрирование -> Обновление панели" and that `update.sh latest` installs
-# (docs/architecture/deployment-system.md, section 9). Manual only, nothing is rebuilt: the images
-# CI published as sha-<12> get the tag `latest` (same digest) and the git tag `latest` moves to the
-# commit. Servers keep running sha-<12>.
+# (docs/architecture/deployment-system.md, sections 5 and 9), and its version is released. Manual
+# only, nothing is rebuilt: the images CI published as sha-<12> get the tags `latest` and, for a
+# new version, <x.y.z> (same digest); the git tag `latest` moves to the commit, the annotated tag
+# v<x.y.z> is created and the GitHub release v<x.y.z> is made with generated notes. A commit whose
+# version is already released (re-promotion, rollback) only moves `latest`. Servers keep running
+# sha-<12>. The version comes from a chore(release) PR (scripts/ci/release-version.sh bump).
 #
 # No tag ruleset on `latest`: this is a personal repository, where GitHub rejects the GitHub Actions
 # bypass actor (422), and a ruleset without it would block this workflow. Only the owner moves the
@@ -18,7 +21,7 @@ on:
         required: false
         default: ""
       dry_run:
-        description: "Only check that the images exist"
+        description: "Only check the images and the version, change nothing"
         type: boolean
         default: false
 
@@ -66,6 +69,9 @@ jobs:
           INPUT_SHA: ${{ inputs.sha }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           ACTOR: ${{ github.actor }}
+          # gh release create. A release made with GITHUB_TOKEN starts no `on: release` workflow.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"

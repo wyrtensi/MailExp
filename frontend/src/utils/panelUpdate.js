@@ -228,6 +228,26 @@ export function shortVersion(version) {
   return typeof version === 'string' && version ? version : null;
 }
 
+const RELEASE_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const releaseOrNull = (release) => (typeof release === 'string' && RELEASE_RE.test(release) ? release : null);
+
+// A build as people read it: its release and its sha-<12> ("1.0.1 (sha-0123456789ab)"), either
+// alone when the other is unknown, null when both are.
+export function versionLabel(version, release) {
+  const sha = shortVersion(version);
+  const rel = releaseOrNull(release);
+  if (rel && sha) return `${rel} (${sha})`;
+  return rel ?? sha;
+}
+
+// The offered build in the sidebar's notice (/api/update answers its release, or its sha-<12>
+// when it has none): "v1.0.1", "sha-0123456789ab", null when there is nothing to name.
+export function noticeVersion(latest) {
+  const rel = releaseOrNull(latest);
+  if (rel) return `v${rel}`;
+  return typeof latest === 'string' && latest ? latest : null;
+}
+
 // A list of host messages as plain strings, anything else dropped.
 export function textList(list) {
   return Array.isArray(list) ? list.filter((item) => typeof item === 'string' && item.trim() !== '') : [];

@@ -2,8 +2,8 @@
 //
 // The backend never updates anything itself: it learns the promoted `latest` build from GitHub
 // (services/panelUpdate/latest.js), drops a request into the update spool for the host's updater
-// (services/panelUpdate/spool.js) and reports the result files the updater writes back. The old
-// semver banner (/api/update, services/updateCheck.js) is a separate thing and stays as it is.
+// (services/panelUpdate/spool.js) and reports the result files the updater writes back. The
+// sidebar's notice (/api/update) is the same status (updateNotice) and points administrators here.
 import { Router } from 'express';
 import { query as dbQuery } from '../services/db.js';
 import { recordAudit as dbRecordAudit } from '../services/auditLog.js';

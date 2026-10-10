@@ -273,8 +273,11 @@ exit "${STUB_INSTALL:-0}"
 STUB_EOF
   OLD=$(commit "$P/app" one)
   printf 'x\n' >"$P/app/README"
+  # Releases: OLD has none, NEW is 1.0.0, MIG 1.0.1.
+  printf '{\n  "version": "1.0.0"\n}\n' >"$P/app/backend/package.json"
   NEW=$(commit "$P/app" two)
   printf 'select 2;\n' >"$P/app/backend/migrations/0002_b.sql"
+  printf '{\n  "version": "1.0.1"\n}\n' >"$P/app/backend/package.json"
   MIG=$(commit "$P/app" three)
   git -C "$P/app" checkout -q -b side "$OLD"
   printf 'y\n' >"$P/app/SIDE"
@@ -320,6 +323,9 @@ result() { jq -r "$2" "$RES/$1.json"; }
   [ "$(result "$ID1" .state)" = ready ]
   [ "$(result "$ID1" .terminal)" = true ]
   [ "$(result "$ID1" .from)" = "sha-${NEW:0:12}" ]
+  [ "$(result "$ID1" .fromRelease)" = 1.0.0 ]
+  [ "$(result "$ID1" .targetRelease)" = 1.0.1 ]
+  [ "$(result "$ID1" .message)" = "ready to update to 1.0.1 (sha-${MIG:0:12})" ]
   [ "$(result "$ID1" '.preflight.pendingMigrations | join(",")')" = 0002_b ]
   [ "$(result "$ID1" .preflight.migrationsApplied)" = 1 ]
   [ "$(stat -c %a "$RES/$ID1.json")" = 644 ]
@@ -498,6 +504,10 @@ id_n() { printf 'bbbbbbbb-bbbb-4bbb-8bbb-%012d' "$1"; }
   [ "$(cat "$UPDATE_LOG")" = "sha-${MIG:0:12} --prefix $P" ]
   [ "$(result "$ID1" .state)" = succeeded ]
   [ "$(result "$ID1" .exitCode)" = 0 ]
+  [ "$(result "$ID1" .message)" = "updated to 1.0.1 (sha-${MIG:0:12})" ]
+  [ "$(result "$ID1" .fromRelease)" = 1.0.0 ]
+  [ "$(result "$ID1" .targetRelease)" = 1.0.1 ]
+  [[ $stderr == *"update $ID1: 1.0.0 (sha-${NEW:0:12}) -> 1.0.1 (sha-${MIG:0:12})"* ]]
   [ "$(result "$ID1" .autoRollback)" = false ]
   [ "$(result "$ID1" '.next | join("|")')" = "mail node: its host scripts changed" ]
   [ "$(result "$ID1" '.log | map(select(startswith("[mailexpert] backup"))) | length')" = 1 ]
@@ -714,6 +724,26 @@ hold_updater_lock() {
   source "$DEPLOY_DIR/lib/channel.sh"
   [ "$(manifest_digests <<<'{"Descriptor":{"digest":"sha256:a"}}')" = sha256:a ]
   [ "$(manifest_digests <<<'[{"Descriptor":{"digest":"sha256:b"}},{"Descriptor":{"digest":"sha256:a"}}]')" = sha256:a,sha256:b ]
+}
+
+@test "release_of and version_label: the x.y.z of a commit's backend/package.json, else the sha alone" {
+  APP_DIR=$BATS_TEST_TMPDIR/app
+  git init -q -b main "$APP_DIR"
+  mkdir -p "$APP_DIR/backend"
+  printf 'x\n' >"$APP_DIR/README"
+  NONE=$(commit "$APP_DIR" none)
+  printf '{"version": "1.2.3"}\n' >"$APP_DIR/backend/package.json"
+  REL=$(commit "$APP_DIR" release)
+  printf '{"version": "3.3"}\n' >"$APP_DIR/backend/package.json"
+  BAD=$(commit "$APP_DIR" bad)
+  # shellcheck source=/dev/null
+  source "$DEPLOY_DIR/lib/channel.sh"
+  [ "$(release_of "sha-${REL:0:12}")" = 1.2.3 ]
+  [ -z "$(release_of "sha-${NONE:0:12}")" ]
+  [ -z "$(release_of "sha-${BAD:0:12}")" ]
+  [ -z "$(release_of sha-000000000000)" ]
+  [ "$(version_label "sha-${REL:0:12}")" = "1.2.3 (sha-${REL:0:12})" ]
+  [ "$(version_label "sha-${BAD:0:12}")" = "sha-${BAD:0:12}" ]
 }
 
 @test "status.sh --target latest resolves the tag; without one it is a problem" {

@@ -1,6 +1,6 @@
 {
   "name": "mailexpert-backend",
-  "version": "3.3.0",
+  "version": "1.0.0",
   "type": "module",
   "bin": {
     "mailexpert": "src/cli/mailexpert.js"
