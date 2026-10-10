@@ -252,6 +252,8 @@ STUB_EOF
   printf 'select 2;\n' >"$P/app/backend/migrations/0002_b.sql"
   mkdir -p "$P/app/scripts/deploy/mail-node"
   printf '#!/bin/sh\n' >"$P/app/scripts/deploy/mail-node/setup.sh"
+  # NEW is the release 1.0.1; OLD predates release versions.
+  printf '{\n  "name": "mailexpert-backend",\n  "version": "1.0.1"\n}\n' >"$P/app/backend/package.json"
   NEW=$(commit "$P/app" two)
   git -C "$P/app" checkout -q --detach "$OLD"
   git -C "$P/app" remote add origin "$P/app"
@@ -363,6 +365,24 @@ cf_install() {
   [ "$(jq -r '.migrations_applied' <<<"$output")" = 1 ]
   grep -q "manifest inspect ghcr.io/wyrtensi/mailexpert-frontend:sha-${NEW:0:12}" "$DOCKER_LOG"
   ! grep -q "tenant-worker:sha-" "$DOCKER_LOG"
+}
+
+@test "--target: the release of each commit next to its sha, null without one" {
+  stub_install
+  run bash "$SCRIPT" --prefix "$P" --target "sha-${NEW:0:12}" --json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.version' <<<"$output")" = "sha-${OLD:0:12}" ]
+  [ "$(jq -r '.release' <<<"$output")" = null ]
+  [ "$(jq -r '.target.version' <<<"$output")" = "sha-${NEW:0:12}" ]
+  [ "$(jq -r '.target.release' <<<"$output")" = 1.0.1 ]
+  run bash "$SCRIPT" --prefix "$P" --target "sha-${NEW:0:12}"
+  [[ $output == *"target_release       1.0.1"* ]]
+  printf '%s\n' "VERSION=sha-${NEW:0:12}" SIGNIN=direct DIRECT_HOST=panel.example.com LOCAL_AUTH=1 EDGE=0 \
+    PROJECT=me-test HTTP_PORT=18090 SYSTEM=0 "REPO_URL=$P/app" >"$P/install.conf"
+  git -C "$P/app" checkout -q --detach "$NEW"
+  export STUB_TAG=sha-${NEW:0:12} STUB_SHA=$NEW
+  run bash "$SCRIPT" --prefix "$P"
+  [[ $output == *"release              1.0.1"* ]]
 }
 
 @test "--target: a changed migration file the database already applied is not called a new migration" {
@@ -526,6 +546,7 @@ STUB_EOF
   [[ $(sed -n 2p "$LOCK_LOG") =~ ^fd=[0-9]+$ ]]
   [ "$(cat "$P/backups/pre-update-sha-${OLD:0:12}.dump")" = PGDMP ]
   [[ $output != *"the backup before the update failed"* ]]
+  [[ $output == *"updating sha-${OLD:0:12} -> 1.0.1 (sha-${NEW:0:12})"* ]]
   # Past the backup: the switch began (this checkout has no installer, so it does not become ready).
   [ "$status" -eq 1 ]
 }

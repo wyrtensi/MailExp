@@ -199,6 +199,12 @@ read_staged() {
   fi
 }
 
+# record_releases <id> <target>: the releases of the running and the target commit into the result
+# (display only), once check_target has fetched the target.
+record_releases() {
+  set_result "$1" "fromRelease=$(json_or_null "$(release_of "$CFG_VERSION")")" "targetRelease=$(json_or_null "$(release_of "$2")")"
+}
+
 # check_target <target>: empty when the panel may move to <target>, otherwise the reason. Fetches
 # origin and the tag latest first.
 check_target() {
@@ -249,10 +255,11 @@ do_check() {
     "logFile=$(json_str "$logfile")" "journal=$(json_str "journalctl -u $(unit_name updater service)")"
   reason=$(check_target "$target")
   if [ -n "$reason" ]; then refuse "$id" check "$target" "$reason"; return 0; fi
+  record_releases "$id" "$target"
   preflight "$id" "$target" "$logfile"
   verdict=$VERDICT
   case $verdict in
-    ready) message="ready to update to $target" ;;
+    ready) message="ready to update to $(version_label "$target")" ;;
     blocked) message="status.sh found problems that block an update to $target" ;;
     *) message="status.sh failed; see $logfile" ;;
   esac
@@ -291,6 +298,7 @@ do_update() {
     "logFile=$(json_str "$logfile")" "journal=$(json_str "journalctl -u $(unit_name updater service)")"
   reason=$(check_target "$target")
   if [ -n "$reason" ]; then refuse "$id" update "$target" "$reason"; return 0; fi
+  record_releases "$id" "$target"
   preflight "$id" "$target" "$logfile"
   verdict=$VERDICT
   if [ "$verdict" != ready ]; then
@@ -302,15 +310,15 @@ do_update() {
   if auto_rollback_allowed "$PREFLIGHT"; then auto=true; fi
   # Counted the same way before and after (as update.sh does), right before the switch.
   before=$(migration_count 2>/dev/null | tr -d '[:space:]') || before=''
-  log "update $id: $from -> $target"
+  log "update $id: $(version_label "$from") -> $(version_label "$target")"
   set_result "$id" "state=\"updating\"" "startedAt=$(json_str "$(now)")" "autoRollback=$auto" \
-    "message=$(json_str "updating $from -> $target")"
+    "message=$(json_str "updating $(version_label "$from") -> $(version_label "$target")")"
   run_logged "$id" "$logfile" bash "$SCRIPT_DIR/update.sh" "$target" --prefix "$OPT_PREFIX" || code=$?
   next=$(log_next <"$logfile" | jq -Rcs 'split("\n") | map(select(. != ""))')
   case $code in
     0)
       set_result "$id" "state=\"succeeded\"" "exitCode=0" "next=$next" "finishedAt=$(json_str "$(now)")" \
-        "message=$(json_str "updated to $target")"
+        "message=$(json_str "updated to $(version_label "$target")")"
       rm -f "$STATE_DIR/rolled-back-version"
       write_updater_status "$target"
       return 0

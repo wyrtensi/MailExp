@@ -191,11 +191,11 @@ main() {
   load_install "$prefix"
   if [ "$target" = latest ]; then
     target=$(resolve_latest) || die "cannot resolve the channel latest; name the version (sha-<12>)" 2
-    log "latest is $target"
+    log "latest is $(version_label "$target")"
   fi
   old=$CFG_VERSION
   if [ "$target" = "$old" ]; then
-    log "already at $target"
+    log "already at $(version_label "$target")"
     return 0
   fi
   if is_standby; then die "standby server: the panel does not run here; install.sh --version sets its version" 2; fi
@@ -248,7 +248,7 @@ main() {
     env_set "$EDGE_ENV" EDGE_IMAGE ''
     log "the Caddy image changes: $edge_image replaces ${edge_previous:-the unpinned image} (kept in $STATE_DIR/edge-image.previous)"
   fi
-  log "updating $old -> $target"
+  log "updating $(version_label "$old") -> $(version_label "$target")"
   SWITCHED=1
   if ! run_install "$target"; then
     send_ping "$url" fail "the update to $target did not become ready"
@@ -267,7 +267,7 @@ main() {
   fi
   check_index_warning "$since"
   send_ping "$url" success "updated to $target"
-  log "updated to $target; the pre-update dump is $dump"
+  log "updated to $(version_label "$target"); the pre-update dump is $dump"
   if [ -n "$edge_image" ]; then
     print_update_notes "$old_head" "${target#sha-}" "$before" "$old" "$dump" "$edge_previous"
   else
